@@ -321,6 +321,19 @@ RETIRED_DEFAULT_INCLUDE_PATTERNS: dict[str, tuple[frozenset[str], ...]] = {
     "gstack": (frozenset(_GSTACK_INCLUDE_PATTERNS_1_11_6),),
 }
 
+# Previous default `include_dirs` lists per source, each compared as a set.
+# `core._migrate_config_core` replaces a list only when the include migration
+# fires for that source and its `include_dirs` equals one of these; any other
+# list stays the owner's choice.
+RETIRED_DEFAULT_INCLUDE_DIRS: dict[str, tuple[frozenset[str], ...]] = {
+    "gstack-extend": (frozenset({"projects"}),),
+}
+
+_GSTACK_EXTEND_INCLUDE_PATTERNS: list[str] = [
+    "projects/**",
+    "analytics/stage-runs/*.jsonl",
+]
+
 DEFAULT_SOURCES: list[dict[str, Any]] = [
     {"name": "claude", "path": DEFAULT_CLAUDE_DIR, "type": "claude"},
     {
@@ -404,17 +417,23 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
     },
     {
         # Sibling of the gstack source for gstack-extend's persistent state.
-        # `projects/` is the forward-compat slot for any per-project state
-        # gstack-extend skills want to survive across Macs (mirrors gstack's
-        # `~/.gstack/projects/<slug>/checkpoints/` shape). Today gstack-extend
-        # only writes per-machine bookkeeping at `~/.gstack-extend/` root
-        # (`config`, `just-upgraded-from`, `update-snoozed`) — those stay
-        # excluded by construction since walk_generic_source only walks
-        # listed include_dirs / include_files.
+        # `projects/` is the per-project state slot (mirrors gstack's
+        # `~/.gstack/projects/<slug>/` shape). `analytics/stage-runs/*.jsonl`
+        # is gstack-extend's per-host run history (one file per machine,
+        # named by `host_id` or the short nodename, created 0600 by
+        # gstack-extend v0.71.0+), read by gstack-extend's own reader, which
+        # joins the historical `analytics/stage-runs.jsonl` and the sorted
+        # `stage-runs/*.jsonl`; the historical file stays local because every
+        # machine has its own file at that same name (docs/invariants/sync.md
+        # "gstack-extend run history (Track 113A)"). Per-machine root
+        # bookkeeping (`config`, `just-upgraded-from`, `update-snoozed`,
+        # `projects.json`) and the rest of `analytics/` (`skill-usage.jsonl`,
+        # `workflow-metrics/`) stay local.
         "name": "gstack-extend",
         "path": "~/.gstack-extend",
         "type": "generic",
-        "include_dirs": ["projects"],
+        "include_dirs": ["projects", "analytics/stage-runs"],
+        "include_patterns": [*_GSTACK_EXTEND_INCLUDE_PATTERNS],
         "include_files": [],
         "exclude_patterns": [],
     },

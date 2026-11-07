@@ -611,13 +611,33 @@ class TestDefaultSources:
     def test_gstack_extend_source_present(self):
         assert any(s["name"] == "gstack-extend" and s["type"] == "generic" for s in DEFAULT_SOURCES)
 
-    def test_gstack_extend_include_dirs_scoped_to_projects(self):
-        """`projects/` is the forward-compat slot for gstack-extend per-project state.
-        Excluding the rest of `~/.gstack-extend/` by construction keeps per-machine
-        bookkeeping (`config`, `just-upgraded-from`, `update-snoozed`) out of sync."""
+    def test_gstack_extend_syncs_projects_and_per_host_run_history(self):
+        """`projects/` is the per-project state slot, and `analytics/stage-runs/*.jsonl`
+        is gstack-extend's per-host run history; root bookkeeping and the rest
+        of `analytics/` (`stage-runs.jsonl`, `skill-usage.jsonl`, `workflow-metrics/`)
+        stay local."""
         ext = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack-extend")
-        assert ext["include_dirs"] == ["projects"]
+        assert ext["include_dirs"] == ["projects", "analytics/stage-runs"]
         assert ext["include_files"] == []
+        assert ext["include_patterns"] == ["projects/**", "analytics/stage-runs/*.jsonl"]
+        assert ext["exclude_patterns"] == []
+
+    def test_gstack_extend_include_patterns_are_not_aliased(self):
+        from mind_meld.config import _GSTACK_EXTEND_INCLUDE_PATTERNS, get_default_source
+
+        ext = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack-extend")
+        assert ext["include_patterns"] is not _GSTACK_EXTEND_INCLUDE_PATTERNS
+        copied = get_default_source("gstack-extend")
+        assert copied is not None
+        assert copied["include_patterns"] is not ext["include_patterns"]
+        assert copied["include_dirs"] is not ext["include_dirs"]
+
+    def test_retired_default_include_dirs_pins_old_gstack_extend_default(self):
+        from mind_meld.config import RETIRED_DEFAULT_INCLUDE_DIRS
+
+        assert RETIRED_DEFAULT_INCLUDE_DIRS == {
+            "gstack-extend": (frozenset({"projects"}),),
+        }
 
     def test_codex_source_syncs_only_durable_customization(self):
         codex = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")

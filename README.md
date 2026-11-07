@@ -1018,7 +1018,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or cannot be hashed, is preserved |
 | `mm sources` | List configured sync sources |
 | `mm log` | Query local `~/.config/mind-meld/state.db` history (legacy JSONL before import). Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed\|deleted}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
-| `mm migrate-config` | Append any missing recommended `exclude_patterns`, and set `include_patterns` to the current default when that key is absent or still a previous default list. An edited list, even an empty one, stays. Idempotent; `--dry-run` to preview, `--yes` to skip the prompt |
+| `mm migrate-config` | Append any missing recommended `exclude_patterns`, and set `include_patterns` to the current default when that key is absent or still a previous default list. That update also adds `analytics/stage-runs` to an old-default `gstack-extend` entry's `include_dirs` ([details](#syncing-gstack-extend)). An edited list, even an empty one, stays. Idempotent; `--dry-run` to preview, `--yes` to skip the prompt |
 | `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Runs repository discovery to completion first (30 s budget), so it reads every discovered repository's local email. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff); needs a terminal. Run it on each conflict copy that exists when you upgrade; they do not clear by themselves. Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
@@ -1360,9 +1360,19 @@ matching `include_patterns` entry or the allowlist leaves it local; run
 
 ### Syncing gstack-extend
 
-If `~/.gstack-extend/` is detected during `mm init`, it is automatically added as a sync source. It has no `include_patterns` allowlist: the walker is scoped to `projects/` only, and per-machine bookkeeping at the root (`config`, `just-upgraded-from`, `update-snoozed`) is excluded by construction. A directory holding a regular, non-symlink `Local State` file is still skipped. Files that gstack-extend skills (pair-review, test-plan, full-review) persist under `~/.gstack-extend/projects/<slug>/` sync through this source, so cross-machine resume keeps working as the gstack-extend feature surface grows.
+If `~/.gstack-extend/` is detected during `mm init`, it is automatically added as a sync source. A directory holding a regular, non-symlink `Local State` file is still skipped. Files that gstack-extend skills (pair-review, test-plan, full-review) persist under `~/.gstack-extend/projects/<slug>/` and per-host run history under `~/.gstack-extend/analytics/stage-runs/*.jsonl` sync through this source, so cross-machine resume and fleet stage-run history work across machines.
 
-Existing installs see this as a `New source available: gstack-extend` hint on next `mm status`. Opt in with `mm enable-source gstack-extend` or dismiss with `mm disable-source gstack-extend` — same shape as every other source toggle.
+**Defaults out of the box:**
+
+- `include_dirs`: `projects/`, `analytics/stage-runs/`
+- `include_patterns`: `projects/**`, `analytics/stage-runs/*.jsonl` (regular `.jsonl` files directly in `stage-runs/`, including `<host>.legacy.jsonl` from gstack-extend's no-clobber move of the historical file)
+- Stays local: root bookkeeping (`config`, `just-upgraded-from`, `update-snoozed`, `projects.json`, `telemetry/`) and the rest of `analytics/` — including the historical single-file `analytics/stage-runs.jsonl`, which every machine wrote under the same filename before gstack-extend v0.71.0 and which gstack-extend's reader already joins locally with `stage-runs/*.jsonl`, plus `skill-usage.jsonl` and `workflow-metrics/`. Details: [the sync invariants](docs/invariants/sync.md#gstack-extend-run-history-track-113a).
+
+Existing installs whose explicit `gstack-extend` `[[sync.sources]]` entry still has `include_dirs = ["projects"]` and no `include_patterns` key pick up the new `analytics/stage-runs` directory and allowlist with `mm migrate-config`, then `mm push`. Preview first with `mm migrate-config --dry-run`.
+
+Customized `include_dirs` lists are kept. If `include_patterns` is absent, accepting migration adds the default allowlist: other configured paths outside it stop syncing, while local files are kept. To retain custom paths or publish run history from a customized entry, ensure both its `include_dirs`/`include_files` and its `include_patterns` cover the files you want. A present `gstack-extend` `include_patterns` list, even `[]`, is left unchanged and does not trigger the directory addition.
+
+Installs where `gstack-extend` is not yet configured see a `New source available: gstack-extend` hint on next `mm status`: opt in with `mm enable-source gstack-extend` or dismiss with `mm disable-source gstack-extend`.
 
 ## Disabling sources per machine
 

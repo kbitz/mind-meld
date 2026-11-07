@@ -44,6 +44,16 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/core.py|tests/test_gstack_extend_analytics.py] Test gap: unrecognized migration directory shapes
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The new retired-directory migration guard has coverage for default and custom string lists, but not absent, scalar or mixed-type `include_dirs` values.
+- **Hypothesis (untested):** Extend the migration fixture to prove these shapes stay unchanged while the absent allowlist is added; re-verify the config contract first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/core.py:_migrate_config_core`
+- **Evidence:** Static coverage audit at `4582a61`; config source validation does not reject these shapes. No failure reproduced; targeted checks passed.
+- **Context:** `/review-and-prep`, branch `mmm/ec2ff4e3`, 2026-11-07. Revisit when a Track next changes these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-07 (Cursor removed, history scrub before 2.0, Future cleanup)

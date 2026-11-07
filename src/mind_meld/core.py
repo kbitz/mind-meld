@@ -2872,6 +2872,23 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
             console.print(DRY_RUN_COMPLETE_LOCK_FREE)
         return False
 
+    source_by_name = {
+        s["name"]: s for s in sources if isinstance(s, dict) and isinstance(s.get("name"), str)
+    }
+    include_dirs_new: dict[str, list[str]] = {}
+    for name, _patterns, _replaced in include_diffs:
+        src_entry = source_by_name.get(name, {})
+        current_dirs = src_entry.get("include_dirs")
+        retired_dirs = _config_module.RETIRED_DEFAULT_INCLUDE_DIRS.get(name, ())
+        default_src = get_default_source(name)
+        if (
+            default_src is not None
+            and isinstance(current_dirs, list)
+            and all(isinstance(d, str) for d in current_dirs)
+            and frozenset(current_dirs) in retired_dirs
+        ):
+            include_dirs_new[name] = list(default_src["include_dirs"])
+
     if diffs:
         explanation = "These globs stop per-machine caches and generated output from syncing"
         if any(name == "gstack" for name, _missing, _current in diffs):
@@ -2889,16 +2906,26 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
             for p in missing:
                 console.print(f"    [green]+ {p}[/green]")
     if include_diffs:
-        console.print(
-            "\nThe include_patterns allowlist syncs only context with a cross-machine "
-            "reader (checkpoints, plans, learnings/decisions ledgers, handoffs); per-run "
-            "output (review-prep trees, loop state, gate diffs) stays on this Mac. "
-            "Factory manager files, evidence ledgers, pair-review resume copies and "
-            "non-document files in artifact directories stay local too. "
-            "Pushing publishes the smaller set with no tombstones, and every Mac keeps "
-            "its local files. Deleting the key later brings this prompt back; editing "
-            "the list (even to empty) is respected as your choice."
-        )
+        if any(name == "gstack" for name, _p, _r in include_diffs):
+            console.print(
+                "\nThe include_patterns allowlist syncs only context with a cross-machine "
+                "reader (checkpoints, plans, learnings/decisions ledgers, handoffs); per-run "
+                "output (review-prep trees, loop state, gate diffs) stays on this Mac. "
+                "Factory manager files, evidence ledgers, pair-review resume copies and "
+                "non-document files in artifact directories stay local too. "
+                "Pushing publishes the smaller set with no tombstones, and every Mac keeps "
+                "its local files. Deleting the key later brings this prompt back; editing "
+                "the list (even to empty) is respected as your choice."
+            )
+        if any(name == "gstack-extend" for name, _p, _r in include_diffs):
+            console.print(
+                "\nFor gstack-extend: each machine's run history "
+                "(analytics/stage-runs/*.jsonl, one file per machine) is allowed; "
+                "the historical analytics/stage-runs.jsonl and the rest of analytics/ "
+                "stay on this machine. Publishing still requires matching include_dirs "
+                "or include_files. Other configured paths outside this allowlist stop "
+                "syncing; local files are kept. Edit include_patterns to retain custom paths."
+            )
         console.print("\n[bold]Recommended include_patterns updates:[/bold]")
         for name, patterns, replaced in include_diffs:
             if replaced is None:
@@ -2914,6 +2941,11 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
                 console.print(f"    [red]- {p}[/red]")
             for p in shown_added:
                 console.print(f"    [green]+ {p}[/green]")
+            if name in include_dirs_new:
+                existing_dirs = set(source_by_name.get(name, {}).get("include_dirs") or [])
+                for d in include_dirs_new[name]:
+                    if d not in existing_dirs:
+                        console.print(f"    [green]+ include_dirs: {d}[/green]")
     if retired:
         console.print("\n[bold]Retired sources:[/bold]")
         for rname in retired:
@@ -2950,6 +2982,8 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
                     merged["exclude_patterns"] = current + diff_map[src["name"]]
                 if src.get("name") in include_map_new:
                     merged["include_patterns"] = include_map_new[src["name"]]
+                    if src["name"] in include_dirs_new:
+                        merged["include_dirs"] = list(include_dirs_new[src["name"]])
                 new_sources.append(merged)
             else:
                 new_sources.append(src)
