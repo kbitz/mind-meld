@@ -548,7 +548,14 @@ def nested_repo_skip_prefixes(
         )
         scan_dirs = [base / name for name in dirs]
         if source_type == "grok":
-            scan_dirs.extend(grok_memory_scan_dirs(base, strict=strict, source_name=source_name))
+            scan_dirs.extend(
+                grok_memory_scan_dirs(
+                    base,
+                    strict=strict,
+                    source_name=source_name,
+                    exclude_patterns=source_config.get("exclude_patterns"),
+                )
+            )
         include_files = source_config.get("include_files") or [] if source_type == "generic" else []
         for name in include_files:
             path = base / name
@@ -1924,7 +1931,7 @@ def _record_file(
     If the second read is also transient, a caller-supplied ``holds`` records
     the file and the scan goes on (returns None); without one it raises.
     """
-    rel = rel_path if rel_path is not None else _rel_or_name(path, base)
+    rel = rel_path if rel_path is not None else str(path.relative_to(base))
 
     if not skip_exclude_check and _is_excluded(
         rel, exclude_patterns, skip_prefixes, include_patterns
@@ -2235,8 +2242,13 @@ def grok_memory_scan_dirs(
     strict: bool = False,
     source_name: str | None = None,
     on_skip: Any = None,
+    exclude_patterns: list[str] | None = None,
 ) -> list[Path]:
     """Return existing non-symlink ``topics`` directories in ``memory-v2``."""
+    # fnmatch's * spans slashes, so both documented patterns exclude the
+    # entire subtree. Narrower patterns still require complete discovery.
+    if any(pattern in ("memory-v2/*", "memory-v2/**") for pattern in exclude_patterns or []):
+        return []
     mem_root = base / GROK_MEMORY_ROOT
     mem_st = _lstat_or_none(
         mem_root, strict=strict, source_name=source_name, rel_path=GROK_MEMORY_ROOT
@@ -2441,7 +2453,11 @@ def walk_grok_source(
         )
 
     for scan_dir in grok_memory_scan_dirs(
-        base, strict=strict, source_name=source_name, on_skip=on_skip
+        base,
+        strict=strict,
+        source_name=source_name,
+        on_skip=on_skip,
+        exclude_patterns=extra,
     ):
         found = _collect_regular_files_scandir(
             scan_dir,

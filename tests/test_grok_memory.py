@@ -34,7 +34,6 @@ MEMORY_KB = 1024
 DEV_A = "aaaaaaaa"
 DEV_B = "bbbbbbbb"
 NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
-NOW_US = int(NOW.timestamp() * 1_000_000)
 
 
 def _sha(data: bytes) -> str:
@@ -915,6 +914,54 @@ class TestGrokPullBoundaryAllowlist:
 
 
 class TestGrokMemoryExcludePatternsOptOut:
+    @pytest.mark.parametrize("pattern", ["memory-v2/*", "memory-v2/**"])
+    def test_whole_memory_opt_out_publishes_skills_with_unreadable_workspaces(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str
+    ) -> None:
+        env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
+        dev_a = env.devices[DEV_A]
+        skill_rel = "skills/my-skill/SKILL.md"
+        topic_rel = "memory-v2/workspaces/project/topics/conventions.md"
+        for rel in (skill_rel, topic_rel):
+            path = dev_a.grok / rel
+            path.parent.mkdir(parents=True)
+            path.write_text(f"{rel}\n")
+        dev_a.cfg["sync"]["sources"][0]["exclude_patterns"] = [pattern]
+        workspaces = dev_a.grok / "memory-v2/workspaces"
+        original_scandir = os.scandir
+
+        def unreadable_workspaces(path):
+            if path == workspaces or path == str(workspaces):
+                raise PermissionError("workspace memory is unreadable")
+            return original_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", unreadable_workspaces)
+        env.push(DEV_A)
+
+        fetched = core._fetch_remote_manifest(env.backend, DEV_A, PASSPHRASE, MEMORY_KB)
+        assert fetched.is_ok
+        assert set(fetched.manifest["sources"]["grok"]["files"]) == {skill_rel}
+        assert fetched.manifest.get("tombstones", {}) == {}
+
+    def test_narrow_memory_exclusion_still_publishes_other_topics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
+        dev_a = env.devices[DEV_A]
+        kept = "memory-v2/global/topics/shared.md"
+        excluded = "memory-v2/global/topics/private.md"
+        for rel in (kept, excluded):
+            path = dev_a.grok / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{rel}\n")
+        dev_a.cfg["sync"]["sources"][0]["exclude_patterns"] = ["memory-v2/global/topics/private*"]
+
+        env.push(DEV_A)
+
+        fetched = core._fetch_remote_manifest(env.backend, DEV_A, PASSPHRASE, MEMORY_KB)
+        assert fetched.is_ok
+        assert set(fetched.manifest["sources"]["grok"]["files"]) == {kept}
+
     def test_exclude_patterns_memory_v2_wildcard_skips_push_and_pull_without_tombstones(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

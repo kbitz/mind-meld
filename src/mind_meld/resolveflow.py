@@ -110,7 +110,11 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
             candidate = base_path / sub
             if candidate.is_dir() and not candidate.is_symlink():
                 dirs.append(candidate)
-        dirs.extend(manifest.grok_memory_scan_dirs(base_path))
+        dirs.extend(
+            manifest.grok_memory_scan_dirs(
+                base_path, exclude_patterns=src_cfg.get("exclude_patterns")
+            )
+        )
         return dirs
     if src_type == "muse":
         dirs = []
@@ -359,8 +363,8 @@ def _find_conflict_files(
                     continue
                 if not is_regular:
                     continue
-                canonical_pre = manifest._canonical_for_conflict(conflict_path)
                 if src_cfg.get("type") == "grok":
+                    canonical_pre = manifest._canonical_for_conflict(conflict_path)
                     if canonical_pre is None or not canonical_pre.is_relative_to(base_path):
                         continue
                     rel_canonical = canonical_pre.relative_to(base_path).as_posix()

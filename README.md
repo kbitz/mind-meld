@@ -40,8 +40,9 @@ manifest. Older mm versions may receive topic files and valid deletions, but do
 not publish topics. Use `mm devices` to find older machines and run `mm update`
 there. If populated stores have different bytes at the same topic path, pull
 keeps the local file and writes a conflict copy; use `mm conflicts` and
-`mm resolve`. To keep customizations and usage capture while leaving memory
-local, add `"memory-v2/*"` to the `grok` source's `exclude_patterns`; to stop
+`mm resolve` before starting the next Grok session. To keep customizations and
+usage capture while leaving memory local, add `"memory-v2/*"` to the `grok`
+source's `exclude_patterns`; to stop
 Grok sync and usage capture, run `mm disable-source grok`. See
 [Grok Build](#grok-build) for the scope, configuration and handoff walkthrough.
 
@@ -765,16 +766,8 @@ How Grok memory sync works:
 - **Workspace scope names.** Grok Build 1.0.77 gives clones and linked worktrees with the same network `origin` an opaque scope name, such as `mind-meld-ac6e5bf3`; mm preserves that name. Global memory and these matching repository scopes reach the corresponding Grok memory on other machines. Repositories without `origin` (`device_local=1`) and non-repository folders use path-dependent names. Their files transfer as inert copies where Grok computes a different name; mm does not map them into the receiving machine's active scope. This is an owner-accepted limitation, not cross-machine parity for those folders.
 - **Topics only.** All `observations/` files, including pending `_inbox/` captures, stay local: mm neither publishes them nor applies peer files or deletion records for them. Grok 1.0.77 did not consolidate a transferred session capture in an initialized receiving store, so observations must become topics on the sending machine before handoff. The [live check](docs/designs/host-parity.md#track-111a-review-follow-up-grok-1077-2026-11-06) records that limitation.
 - **Topic changes and deletions.** Changes to `topics/**/*.md` sync through the existing encrypted file pipeline. Removing a previously published topic propagates a hashed deletion record; a peer with the same last-synced bytes keeps a plaintext recovery copy for at least 30 days in a `0700` folder under `~/.config/mind-meld/deleted/`. See [Recovering a deleted file](#recovering-a-deleted-file). Topics become model context on every receiving machine, with the same trust implications as synced skills.
-- **First-sync collisions.** If two machines already have different files at the same `memory-v2/.../topics/<name>.md` path before their first sync, `mm pull` keeps your local file and writes a `.sync-conflict-*` copy; review and merge them with `mm conflicts` and `mm resolve`.
-- **Opting out of memory sync only.** To keep syncing Grok `skills/`, `commands/`, `rules/` and usage capture while keeping `memory-v2/` local on a machine, add `"memory-v2/*"` to `exclude_patterns` on the `grok` source in `~/.config/mind-meld/config.toml`:
-
-  ```toml
-  [[sync.sources]]
-  name = "grok"
-  path = "~/.grok"
-  type = "grok"
-  exclude_patterns = ["skills/gstack*", "skills/browse", "skills/gstack", "memory-v2/*"]
-  ```
+- **Topic conflicts.** A first-sync collision or concurrent edits at the same `memory-v2/.../topics/<name>.md` path can leave your local file alongside a `.sync-conflict-*` copy of the peer's version. The conflict copy is still Markdown inside `topics/`, so Grok may treat both unresolved versions as context. Run `mm conflicts` and `mm resolve` to review and resolve them before starting the next Grok session.
+- **Opting out of memory sync only.** To keep syncing Grok `skills/`, `commands/`, `rules/` and usage capture while keeping `memory-v2/` local on a machine, edit the **existing** `grok` `[[sync.sources]]` entry in `~/.config/mind-meld/config.toml`. Append `"memory-v2/*"` to its `exclude_patterns` array, preserving every current exclusion. Do not add a second source block or replace the array with only the memory pattern.
 
 ### Muse
 
@@ -1644,7 +1637,7 @@ Check these points:
 2. **The fact became a topic before push.** In the sender's Grok session run `/flush`, then `/dream`; wait for consolidation, then run `mm push` in its shell. Grok also Dreams automatically with enough observations, but pending captures do not sync. All `observations/`, `MEMORY.md`, SQLite files and `archive/` stay local.
 3. **Pull before starting the next Grok session.** Wait for shared-folder delivery, run `mm pull`, then start Grok in the corresponding repository. Check `mm status` for whether the peer's latest push was applied.
 4. **Workspace scope name matches.** Compare the opaque folder names under `memory-v2/workspaces/` on both machines. Grok Build 1.0.77 used `mind-meld-ac6e5bf3` for clones and linked worktrees with the same network `origin`, including HTTPS and SCP spellings. mm copies these names unchanged. No-origin repositories and non-repository folders can compute different names across homes; their received copies remain inert. Use global topics for notes that must be available independently of repository identity.
-5. **Conflicts, deletions and older versions.** Run `mm conflicts` and `mm resolve` for topic conflict copies. A peer's topic deletion keeps a copy in `~/.config/mind-meld/deleted/`; restore it on the deleting machine as [the recovery runbook](#recovering-a-deleted-file) describes, then push there. `mm devices` identifies older machines that can receive topics but do not publish them; run `mm update` there.
+5. **Conflicts, deletions and older versions.** Run `mm conflicts` and `mm resolve` for topic conflict copies before starting the next Grok session. A peer's topic deletion keeps a copy in `~/.config/mind-meld/deleted/`; restore it on the deleting machine as [the recovery runbook](#recovering-a-deleted-file) describes, then push there. `mm devices` identifies older machines that can receive topics but do not publish them; run `mm update` there.
 
 ### Another mm operation is running
 
