@@ -46,6 +46,18 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap record pass — 2026-11-06 (Track 95A to Future)
+
+Run by `/project-spec` and `/roadmap` from manager Ephesus 9's brief on Karl's 2026-11-06 decision about Track 95A, the opt-in `mmm` source for factory handover (factory item 83c9d3b4). Shown the plan's costs, the owner decided: "hm, don't love that -- let's future this card and move on to the next one". No code was written. Verification baseline: `da9620d` (v1.12.18). docs/SPEC.md now says mm does not carry `~/.mmm/` and the factory moves with mmm-factory's own tool; its "Factory handover" constraint moved to Non-goals with a revisit trigger, keeping the `factory-handover` anchor. Group 95 is removed from the plan; Track 93A drops Track 95A from `_blocked-by:` and is next, then 96A. **Inbox empty: 0 drained. 1 leftover plan item: 0 placed, 1 deferred, 0 killed, 0 discharged.** Authored-false rate: 0 / (0 + 0), no placements.
+
+| Item | Disposition |
+|---|---|
+| Track 95A: Add an opt-in mmm source for factory handover | defer (owner, 2026-11-06): card text, cost evidence (ledgers of 9.8, 3.5 and 2.0 MB re-uploaded whole on each change; about 1,087 files and 91 MB on the first push) and the plan's main findings (backup-first framing; `practices.md` and `settings.toml`; autopull on a move target) kept in Future; revisit when the owner asks again for an off-machine backup or handover of the factory home, or mmm-factory's own move tool cannot carry the factory between hosts |
+
+**Future:** 1 entry added (39 → 40); 5 older entries still lack a revisit trigger, and the trigger migration was not run. The "Test gap: reconfigure reenrolls disabled Grok" entry still says Track 95A touches `sourceflow.py`; its text is kept as written, and its `_touches:` trigger is unaffected.
+
+**Version:** documentation-only change; no bump.
+
 ### Roadmap record pass — 2026-11-06 (Group 111 shipped)
 
 Run by `/project-spec` and `/roadmap` from manager Ephesus 9's brief on Karl's 2026-11-06 decisions. Verification baseline: `065e9cb` (v1.12.18). Tracks 111B (v1.12.17, PR #276) and 111A (v1.12.18, PR #277) were recorded as shipped against their PRs' completion matrices, 111A against its scope as amended by the owner; Group 111 is retired. docs/SPEC.md records the two owner decisions from 111A's live checks (topics only; no-origin and non-repository scopes arrive elsewhere as inert copies). **1 inbox item drained: 0 placed, 1 deferred, 0 killed, 0 discharged.** One Future entry was discharged by Track 111B. Authored-false rate, counting the Future discharge: 1 / (0 + 1) = 100%.
