@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -322,6 +323,52 @@ class TestGrokMemoryWalkerFixture:
             "memory-v2/workspaces/proj/topics/subrepo"
         ]
 
+    @pytest.mark.parametrize("strict", [True, False], ids=["strict", "permissive"])
+    @pytest.mark.parametrize("failure", ["enumeration", "scope-stat", "scope-vanished"])
+    def test_workspace_discovery_failure_refuses_strict_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strict: bool, failure: str
+    ) -> None:
+        home = tmp_path / ".grok"
+        global_topic = home / "memory-v2/global/topics/known.md"
+        global_topic.parent.mkdir(parents=True)
+        global_topic.write_text("known global memory\n")
+        workspaces = home / "memory-v2/workspaces"
+        workspace_topic = workspaces / "unreadable/topics/hidden.md"
+        workspace_topic.parent.mkdir(parents=True)
+        workspace_topic.write_text("must not become a complete snapshot\n")
+        original_scandir = os.scandir
+
+        def unreadable_stat(*, follow_symlinks):
+            assert follow_symlinks is False
+            if failure == "scope-vanished":
+                raise FileNotFoundError("scope vanished")
+            raise PermissionError("scope metadata unavailable")
+
+        def interrupted_scandir(path):
+            if path == workspaces or path == str(workspaces):
+                if failure == "enumeration":
+                    raise PermissionError("workspace inventory unavailable")
+                entry = SimpleNamespace(
+                    name="unreadable", path=str(workspaces / "unreadable"), stat=unreadable_stat
+                )
+                return nullcontext(iter([entry]))
+            return original_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", interrupted_scandir)
+        src = {"name": "grok", "type": "grok", "path": str(home)}
+        if strict:
+            problem = {
+                "enumeration": "could not be enumerated",
+                "scope-stat": "could not be read",
+                "scope-vanished": "disappeared while being read",
+            }[failure]
+            with pytest.raises(errors.SnapshotError, match=problem):
+                manifest.walk_grok_source(src, strict=True)
+        else:
+            assert set(manifest.walk_grok_source(src, strict=False)) == {
+                "memory-v2/global/topics/known.md"
+            }
+
     def test_vanished_workspace_scope_mid_walk_raises_snapshot_error_when_strict(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -601,6 +648,97 @@ class TestGrokInboxDreamOrderings:
         env.pull(DEV_B)
         assert not b.exists()
 
+    def test_concurrent_dreams_preserve_both_topic_amendments(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
+        dev_a, dev_b = env.devices[DEV_A], env.devices[DEV_B]
+        topic_rel = "memory-v2/workspaces/proj/topics/shared.md"
+        inbox_rel = "memory-v2/workspaces/proj/observations/_inbox/obs.md"
+        for rel, content in ((topic_rel, "original topic\n"), (inbox_rel, "pending fact\n")):
+            path = dev_a.grok / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        env.push(DEV_A)
+        env.pull(DEV_B)
+        env.push(DEV_B)
+        env.pull(DEV_A)
+
+        # Simulate independent Dream outputs from the shared base, not real Grok runs.
+        versions = {DEV_A: b"topic amended by A\n", DEV_B: b"topic amended by B\n"}
+        for did, dev in ((DEV_A, dev_a), (DEV_B, dev_b)):
+            (dev.grok / topic_rel).write_bytes(versions[did])
+            os.utime(dev.grok / topic_rel, (NOW.timestamp(), NOW.timestamp()))
+            (dev.grok / inbox_rel).unlink()
+            env.push(did)
+
+        for did, dev in ((DEV_A, dev_a), (DEV_B, dev_b)):
+            result = env.pull(did)
+            assert result.total_conflicted == 1
+            canonical = dev.grok / topic_rel
+            assert canonical.read_bytes() == versions[did]
+            copies = list(canonical.parent.glob("shared.sync-conflict-*.md"))
+            assert len(copies) == 1
+            assert {canonical.read_bytes(), copies[0].read_bytes()} == set(versions.values())
+            assert not (dev.grok / inbox_rel).exists()
+
+    def test_old_receiver_applies_memory_but_redownloads_consumed_inbox(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
+        dev_a, dev_b = env.devices[DEV_A], env.devices[DEV_B]
+        original_scan_roots = manifest.scan_roots
+
+        def old_scan_roots(src):
+            return (
+                ["skills", "commands", "rules"]
+                if src.get("type") == "grok"
+                else original_scan_roots(src)
+            )
+
+        # B's earlier publication has no memory scan root. This models the old
+        # receiver's anchor decisions, not execution of an old mm binary.
+        skill = dev_b.grok / "skills/local/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("local skill\n")
+        with monkeypatch.context() as older:
+            older.setattr(manifest, "scan_roots", old_scan_roots)
+            env.push(DEV_B)
+
+        topic_rel = "memory-v2/global/topics/shared.md"
+        consumed_rel = "memory-v2/global/observations/_inbox/consumed.md"
+        deleted_rel = "memory-v2/global/observations/_inbox/deleted.md"
+        for rel in (topic_rel, consumed_rel, deleted_rel):
+            path = dev_a.grok / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"payload {rel}\n")
+        env.push(DEV_A)
+        with monkeypatch.context() as older:
+            older.setattr(manifest, "scan_roots", old_scan_roots)
+            first = env.pull(DEV_B)
+            assert first.total_applied == 3
+            for rel in (topic_rel, consumed_rel, deleted_rel):
+                assert (dev_b.grok / rel).read_bytes() == (dev_a.grok / rel).read_bytes()
+            assert not (dev_b.grok / "memory-v2" / manifest.ANCHOR_NAME).exists()
+            (dev_b.grok / consumed_rel).unlink()
+            repeat = env.pull(DEV_B)
+            assert repeat.total_applied == 1
+            assert (dev_b.grok / consumed_rel).read_bytes() == (
+                dev_a.grok / consumed_rel
+            ).read_bytes()
+
+        (dev_a.grok / deleted_rel).unlink()
+        env.push(DEV_A)
+        with monkeypatch.context() as older:
+            older.setattr(manifest, "scan_roots", old_scan_roots)
+            removal = env.pull(DEV_B)
+            assert removal.total_deleted == 1
+            assert not (dev_b.grok / deleted_rel).exists()
+            copies = list(dev_b.deleted_copies.rglob("deleted.md"))
+            assert len(copies) == 1
+            assert copies[0].read_text() == f"payload {deleted_rel}\n"
+            assert not (dev_b.grok / "memory-v2" / manifest.ANCHOR_NAME).exists()
+
     def test_e2e_dream_orderings_and_mixed_version_peer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -705,38 +843,35 @@ class TestGrokPullBoundaryAllowlist:
         dev_b.cfg["sync"]["sources"][0]["exclude_patterns"] = user_excludes
         config.save_config(dev_b.cfg, dev_b.cfg_path)
 
-        # Seed local files on B at forbidden paths AND record ledger bases for DEV_A
-        # so an unfiltered active hashed tombstone from DEV_A would delete them!
+        # All deletion targets start with matching bytes and a base from A.
         forbidden_payloads = {
             "memory-v2/global/memory_state.sqlite": b"local-sqlite",
             "memory-v2/global/MEMORY.md": b"local-index\n",
             "memory-v2/workspaces/p/archive/o.md": b"local-archive\n",
-            "auth.json": b"local-auth-token",
+            "auth.json": b"local-auth-fixture",
             "config.toml": b"local-config\n",
             "hooks/h.sh": b"#!/bin/sh\necho safe\n",
             "sessions/x/updates.jsonl": b"{}\n",
         }
+        allowed_deleted = "memory-v2/global/topics/removed.md"
+        deletion_payloads = {**forbidden_payloads, allowed_deleted: b"allowed removal\n"}
         env.activate(DEV_B)
         ledger, _ = core.load_ledger([DEV_A])
-        for rel, data in forbidden_payloads.items():
+        for rel, data in deletion_payloads.items():
             target = dev_b.grok / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
-            digest = _sha(data)
-            ledger.settle(DEV_A, "grok", rel, digest)
+            ledger.settle(DEV_A, "grok", rel, _sha(data))
         core.commit_ledger(ledger)
+        active_time = datetime.now(timezone.utc).isoformat()
 
-        # Peer A manifest injects both `files` entries (with different bytes) AND active
-        # hashed tombstones for forbidden paths, alongside a legitimate skill and topic.
         legit_skill = "skills/good/SKILL.md"
         legit_topic = "memory-v2/global/topics/good.md"
         injected_files: dict[str, dict] = {}
-        injected_tombstones: dict[str, dict] = {}
-
         for rel, payload in [
             (legit_skill, b"good skill\n"),
             (legit_topic, b"good topic\n"),
-            *[(k, b"malicious-overwrite") for k in forbidden_payloads],
+            *[(k, b"forbidden-overwrite") for k in forbidden_payloads],
         ]:
             digest = _sha(payload)
             env.backend.put(
@@ -746,28 +881,29 @@ class TestGrokPullBoundaryAllowlist:
             injected_files[rel] = {
                 "sha256": digest,
                 "size": len(payload),
-                "mtime": NOW.isoformat(),
+                "mtime": active_time,
             }
 
-        for rel, local_bytes in forbidden_payloads.items():
-            injected_tombstones[f"grok:{rel}"] = {
-                "deleted_at": NOW.isoformat(),
-                "deleted_by": DEV_A,
+        injected_tombstones = {
+            f"grok:{rel}": {
+                "deleted_at": active_time,
+                "device_id": DEV_A,
                 "sha256": _sha(local_bytes),
             }
-
+            for rel, local_bytes in deletion_payloads.items()
+        }
         peer_manifest = {
             "version": 2,
             "device_id": DEV_A,
             "device_name": "Mac A",
-            "timestamp": NOW.isoformat(),
+            "timestamp": active_time,
             "sources": {
                 "grok": {
                     "base_path": str(env.devices[DEV_A].grok),
                     "files": injected_files,
                 }
             },
-            "tombstones": injected_tombstones,
+            "tombstones": {},
         }
         env.backend.put(
             manifest_key(DEV_A),
@@ -776,18 +912,19 @@ class TestGrokPullBoundaryAllowlist:
             ),
         )
 
-        # 1) Pull applies only legitimate entries and leaves forbidden local files untouched.
+        # File injection and deletion are separate publications: a peer file entry
+        # must not accidentally disqualify the tombstone under test.
         res = env.pull(DEV_B)
         assert res.total_applied == 2
         assert (dev_b.grok / legit_skill).read_bytes() == b"good skill\n"
         assert (dev_b.grok / legit_topic).read_bytes() == b"good topic\n"
-        for rel, expected_bytes in forbidden_payloads.items():
-            assert (dev_b.grok / rel).read_bytes() == expected_bytes, f"corrupted or deleted {rel}"
+        for rel, expected_bytes in deletion_payloads.items():
+            assert (dev_b.grok / rel).read_bytes() == expected_bytes
+        ledger, _ = core.load_ledger([DEV_A])
+        for rel, expected_bytes in deletion_payloads.items():
+            assert ledger.base(DEV_A, "grok", rel) == _sha(expected_bytes)
 
-        # 2) Push B so B's remote manifest matches B's allowlisted local state, then check
-        # `mm diff --from DEV_A` and `mm status`: zero phantom pending changes for forbidden paths.
-        # Next, test a peer manifest that has ONLY the forbidden files (plus already-synced legit).
-        peer_manifest_only_forbidden_tombstones = {
+        deletion_manifest = {
             **peer_manifest,
             "sources": {
                 "grok": {
@@ -795,31 +932,47 @@ class TestGrokPullBoundaryAllowlist:
                     "files": {
                         legit_skill: injected_files[legit_skill],
                         legit_topic: injected_files[legit_topic],
-                        **{k: injected_files[k] for k in forbidden_payloads},
                     },
                 }
             },
-            "tombstones": {},
+            "tombstones": injected_tombstones,
         }
         env.backend.put(
             manifest_key(DEV_A),
             core.encode_manifest(
-                peer_manifest_only_forbidden_tombstones,
-                wire_names=False,
-                passphrase=PASSPHRASE,
-                memory_kb=MEMORY_KB,
+                deletion_manifest, wire_names=False, passphrase=PASSPHRASE, memory_kb=MEMORY_KB
             ),
         )
-        # Also test tombstone-only peer manifest by verifying _filter_excluded_paths drops both.
+        removed = env.pull(DEV_B)
+        assert removed.total_deleted == 1  # Positive control: this publication can delete.
+        assert removed.total_failed == 0
+        assert not (dev_b.grok / allowed_deleted).exists()
+        copies = list(dev_b.deleted_copies.rglob("removed.md"))
+        assert len(copies) == 1
+        assert copies[0].read_bytes() == deletion_payloads[allowed_deleted]
+        for rel, expected_bytes in forbidden_payloads.items():
+            assert (dev_b.grok / rel).read_bytes() == expected_bytes, f"deleted {rel}"
+
+        # Direct filter proof covers files and tombstones in the same manifest;
+        # integrated deletion above keeps every deletion target absent from files.
         filtered = core._filter_excluded_paths(
-            peer_manifest,
+            {**peer_manifest, "tombstones": injected_tombstones},
             exclude_map={},
             skip_prefixes={},
             include_map={},
         )
         assert set(filtered["sources"]["grok"]["files"]) == {legit_skill, legit_topic}
-        assert filtered["tombstones"] == {}
+        assert filtered["tombstones"] == {
+            f"grok:{allowed_deleted}": injected_tombstones[f"grok:{allowed_deleted}"]
+        }
 
+        # Include forbidden file entries again for diff/status boundary coverage.
+        env.backend.put(
+            manifest_key(DEV_A),
+            core.encode_manifest(
+                peer_manifest, wire_names=False, passphrase=PASSPHRASE, memory_kb=MEMORY_KB
+            ),
+        )
         runner = CliRunner()
         env.activate(DEV_B)
         diff_res = runner.invoke(cli.app, ["diff", "--from", DEV_A])

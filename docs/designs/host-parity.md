@@ -181,6 +181,38 @@ Verified in an isolated scratch `GROK_HOME` (`~/scratch/grok-111a/h1`, deleted a
 - **(h) Dream consolidation and hard-link check:** Every file written by Grok had `st_nlink == 1`. Running `/dream` consolidated pending inbox notes into `topics/<slug>.md`, updated `MEMORY.md`, and moved the consolidated file from `observations/_inbox/` into `archive/dream_<id>/` (version-1 inbox notes are scanned directly from `observations/_inbox/` on disk; version-2 `__t...__n` captures are tracked alongside `capture_observation_files` in `memory_state.sqlite`). Placing an already-archived file back into `observations/_inbox/` and running a second `/dream` printed `Nothing to consolidate.` (`consolidation_archives` deduplicates it so topic facts are not duplicated) and left the re-created file in `observations/_inbox/` — confirming the need for the inbox held rule in `pullplan.py`.
 - **(i) Anchor and unmapped workspace tolerance:** `memory-v2/.mind-meld-anchor` (`0600`) and an unmapped `memory-v2/workspaces/unmapped-deadbeef/topics/unmapped.md` remained untouched across all 15 invocations with no errors or warnings.
 
+#### Track 111A review follow-up (Grok 1.0.77, 2026-11-06)
+
+The original check above does **not** establish adoption of transferred session
+captures. Review repeated the missing warm-store case with synthetic data in two
+fresh scratch `HOME`/`GROK_HOME` pairs outside `/tmp`, using the same fixture
+repository and `origin`. No personal memory, session or credential content was
+read or copied; Grok alone used its existing login. The receiver was initialized
+before transfer, and its `index.sqlite` and `memory_state.sqlite` files existed
+(their contents were not opened).
+
+The sender generated one `schema_version: 2` observation through a normal turn
+and `/flush`. Review copied only that observation Markdown, byte-for-byte, into
+the receiver's matching `mind-meld-ac6e5bf3/observations/_inbox/` directory. The
+file's SHA-256 on both sides was
+`5c5296c7d5270faf83db47fbbb7e6eaa9157f6eb28f7581b9cfe5e13e4f786fd`.
+The receiver's `/dream` exited 0 with `Nothing to consolidate.`, created no
+topic, and left the transferred observation unchanged in its inbox. As a positive
+control, the sender's `/dream` exited 0 with `Dream merged 1 observation into 1
+topic.`, wrote the synthetic fact into a topic and emptied its inbox. This proves
+that copying ordinary session-capture Markdown alone does not satisfy the
+approved cross-machine Dream-adoption requirement on this version. The Track
+remains blocked at its live adoption gate; database sync or another adoption
+mechanism is not authorized by this result.
+
+This follow-up used five invocations, bringing Task 1 to 22 of its 24-call cap
+(15 original, two no-origin identity checks, five adoption checks). All owned
+scratch homes and the fixture repository were removed afterwards. Separately,
+the no-origin checks confirmed path-dependent scopes, and the owner accepted
+inert no-origin/non-repository copies as a reduced scope. That identity decision
+does not waive the transferred-observation adoption gate. The original Branch A
+label above applies only to the observed matching origin-derived scopes.
+
 ### Plan C — Grok `retro-fleet` skill discovery (measured, not linked)
 
 **Not a sync source. Not an `AgentRow`.** Grok 1.0.5 already loads
