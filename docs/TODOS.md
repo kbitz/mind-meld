@@ -54,6 +54,33 @@ here by hand, use the H3 form.
 - **Context:** `/review-and-prep`, branch `mmm/ec2ff4e3`, 2026-11-07. Revisit when a Track next changes these files.
 - **Effort:** ? (user triages in /roadmap)
 
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|src/mind_meld/sourceflow.py] Cursor leftovers after Track 114A: dead `enable-source cursor` hint and a no-op `disable-source cursor --force`
+- **Description:** After Track 114A, retro-fleet's "No agent-log reader contributed on any machine" note (`aggregator.py` near line 3889) still suggests `mm enable-source cursor`, which now exits 1 as an unknown source, and never names `grok`. `mm disable-source cursor --force` prints "Disabled source 'cursor' on this device." while a true `[retro] cursor_host_usage` keeps the Cursor git-root prober running (`events._enabled_root_probers` ignores `disabled_sources`).
+- **Hypothesis (untested):** Track 116A deletes the prober and the key's last reader, which makes the `--force` case harmless; change the aggregator note to `(or grok, muse, or agy)`, matching `config.usage_capture_remedy("no-reader")`. Re-verify against current code first.
+- **Upstream severity:** INFORMATIONAL (aggregator note); CRITICAL by /review's FIXABLE rule, adversarial-rated Low and non-blocking (`--force`)
+- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3889`; `src/mind_meld/sourceflow.py:_validate_source_name`
+- **Evidence:** Red Team and native adversarial review of Track 114A at `fcb972d`. README's Upgrading note now tells the owner to delete the key. Deferred because the plan fences off `skills/retro_fleet/` and the CLI change goes beyond the card.
+- **Context:** `/review-and-prep`, branch `mmm/f6e65ebe`, 2026-11-07. Revisit in Track 116A, which touches `aggregator.py` and removes the prober.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=docs/ROADMAP.md|src/mind_meld/events_tail.py|src/mind_meld/attemptlog.py] Track 115A card lists the push cursor's hold and coverage warnings as Cursor symbols
+- **Description:** Track 115A's done-when removes "the Cursor hold and coverage degradations" and its source note names `_CURSOR_HOLD_DEGRADATION` and `_CURSOR_COVERAGE_DEGRADATION`. Those are the git push cursor's data-at-risk warnings ("retro cursor held at last complete capture"), not Cursor the product (`events_tail.py` near lines 268-275 and 1516-1521, `attemptlog.py` near lines 374-375). Following the card literally would silence them, against AGENTS.md's rule never to quiet-gate data-at-risk warnings.
+- **Hypothesis (untested):** /roadmap drops these two names from Track 115A's card; re-verify the symbols first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `docs/ROADMAP.md` Track 115A
+- **Evidence:** Native adversarial review of Track 114A at `4c47a11`; the Track 114A plan's Risks section flagged the same claim.
+- **Context:** `/review-and-prep`, branch `mmm/f6e65ebe`, 2026-11-07. Revisit before planning Track 115A.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=README.md|docs/invariants/events-retro.md] Cursor-removal doc nits for Track 115A
+- **Description:** README's Track 114A Upgrading note says each machine's next `mm push` publishes a usage snapshot without Cursor. A machine whose only consented host reader was Cursor now has readiness `no-reader` and publishes no new snapshot, so its last Cursor snapshot keeps counting in `retro-fleet` until it leaves the window. `docs/invariants/events-retro.md`'s Cursor usage paragraph lists what stays until Track 115A but omits `events_tail._HOST_DISPLAY_NAMES["cursor"]`.
+- **Hypothesis (untested):** Qualify the README sentence for reader-less machines, and add the label entry to the paragraph, when Track 115A rewrites both.
+- **Upstream severity:** CRITICAL by /review's FIXABLE rule; adversarial-rated Low, non-blocking
+- **Found in:** `README.md` Upgrading (Track 114A note); `docs/invariants/events-retro.md` Cursor usage paragraph
+- **Evidence:** Native adversarial review of Track 114A, cycle 3, at `aa4e6f2` (`cli.py` `_capture_attended_usage` no-reader path, `suppress_host_capture`).
+- **Context:** `/review-and-prep`, branch `mmm/f6e65ebe`, 2026-11-07. Recorded as notes to avoid a fourth review cycle for doc wording. Revisit in Track 115A.
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-07 (Cursor removed, history scrub before 2.0, Future cleanup)
