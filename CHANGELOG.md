@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.20] - 2026-11-07
+
+Documentation adds a Syncthing fleet cutover runbook and clarifies rehearsal isolation, cutover checks, and inherited XDG discovery.
+
+### Added
+
+- Documentation includes a Syncthing fleet cutover runbook.
+
+### Changed
+
+- Documentation clarifies inherited XDG discovery during rehearsal.
+- Documentation tightens rehearsal isolation and cutover checks.
+
 ## [1.12.19] - 2026-11-07
 
 Documentation and examples use generic machine names.

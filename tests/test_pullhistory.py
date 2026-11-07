@@ -639,7 +639,7 @@ def test_documented_history_recipes_execute(monkeypatch):
         exec(compile(block, str(doc), "exec"), namespace)
     assert len(pullhistory.read_records()) == 2
 
-    # 75A's committed row survives a separate maintenance failure.
+    # The last recipe's committed row survives a separate maintenance failure.
     def broken(*args, **kwargs):
         raise OSError("maintenance failed")
 

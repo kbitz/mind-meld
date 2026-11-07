@@ -11,7 +11,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, secretstorage (Linux), 
 
 ## Key Principles
 - No API server. The CLI reads and writes a shared folder through the local filesystem.
-- Single local-folder storage backend. New init defaults to `~/Sync/mind-meld`; existing configured paths, including iCloud Drive, remain unchanged.
+- Single local-folder storage backend: the root of a shared Syncthing folder (`~/Sync/mind-meld` by default). mm never moves a configured path; iCloud Drive is the pre-cutover path only.
 - **End-to-end encryption is mandatory.** All synced manifests, artifacts, and allowlisted context are encrypted client-side with AES-256-GCM before touching storage. No plaintext sync data may reach storage.
 - **Scoped sync.** Built-in sources are allowlisted. Session databases, credentials, and whole-file settings that may contain credentials stay local.
 - **Truth-based manifests.** Complete snapshots of local state propagate deletions automatically; there is no separate prune step.

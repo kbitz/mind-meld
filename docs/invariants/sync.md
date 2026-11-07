@@ -328,8 +328,7 @@ manifest recovery combined with a home rename or a folder gaining a remote can l
 one deletion record under the old spelling; a hand-edited `.git/config`
 with two spellings of `origin` can read differently from git; `mm diff` lists a renamed project's files
 as `+ push` where `mm status` reports only the rename; `mm status` and `mm diag`
-read each peer's whole manifest with no time bound, so an iCloud placeholder can
-delay them; 14 of the 17 no-remote folders measured were dead paths;
+read each peer's whole manifest with no time bound; 14 of the 17 no-remote folders measured were dead paths;
 `autoMemoryDirectory` is unsupported.
 
 **What those limits became when tombstones began to delete (Track 91A).** A record
@@ -825,7 +824,7 @@ a publication signal from the primitive (see "Residual windows" below).
 normal return confirms those platform-reported local flushes. `_fsync_fd`
 prefers Darwin `F_FULLFSYNC`, falls back to `os.fsync` on ENOTSUP/EINVAL/EOPNOTSUPP,
 and uses `os.fsync` directly elsewhere. Real I/O errors propagate. This is no
-physical power-loss, iCloud upload or peer-delivery certification. Readback
+physical power-loss or peer-delivery certification. Readback
 establishes visible state only; a later flush does not retroactively establish
 the failed operation's guarantee. `fsync_dir` alone does not flush file contents.
 
@@ -1491,9 +1490,11 @@ hints for sources they're already syncing. Pinned by
 `mm status` surfaces two breadcrumbs: "Disabled sources (this device): X, Y"
 when the disabled list is non-empty, and "New source available: X" (one-shot
 via `seen_sources.compute_new_sources`) when DEFAULT_SOURCES grows on upgrade
-and the user hasn't yet enabled or disabled the new name. `mm sources` shows
-all configured sources (not just resolved) with an Enabled column; disabled
-rows render dimmed.
+and the user hasn't yet enabled or disabled the new name. `mm sources` lists
+resolved sources with `[sync].disabled_sources` bypassed
+(`core._resolve_all_configured_sources`): disabled rows appear dimmed with `N`
+in `Enabled`, while a source whose path is missing on disk does not appear
+(except mm's default `mm-events` root before creation).
 
 The `_prompt_source_toggle(source, *, current_state)` helper (extracted from
 `_prompt_sources` in v0.10.0) is the single source of truth for the per-source
@@ -1502,17 +1503,16 @@ Y/N prompt copy + default rule. `_prompt_sources` (init) and
 behavior is preserved, except that Grok and Muse always default to N (see above).
 
 **`has_explicit_sources` gates on key presence, not list truthiness (Track 61A
-pre-landing review).** `enable_source`'s `currently_active` check and
-`reconfigure_sources`'s equivalent both need to tell an explicitly-emptied
-`sync.sources: []` apart from an absent key — the two are indistinguishable
-under bare `not explicit_sources` (list truthiness), which reads an empty list
-as "no explicit sources configured" and falls back to defaulting every prompt
-from `default_names`. `enable_source` already computed
-`has_explicit_sources = "sources" in sync` for this; `reconfigure_sources`
-still used the bare-truthiness form, so a user who explicitly cleared
-`sync.sources` had every `DEFAULT_SOURCES` prompt silently default back to Y
-on the next `mm reconfigure-sources` run. Fixed by giving `reconfigure_sources`
-the same key-presence test. A new `sync.sources` consumer should use it too.
+pre-landing review).** `enable_source` and `reconfigure_sources` both compute
+`has_explicit_sources = "sources" in sync` (`sourceflow.py`), which tells an
+explicit `sync.sources = []` apart from an absent key. In `enable_source`, it
+decides whether enabling `grok`, `muse` or `agy` first writes the resolved
+legacy source set into `sync.sources`, whether a default source must be
+appended to an explicit list, and whether the already-enabled no-op fires. In
+`reconfigure_sources`, it decides each prompt's `currently_active` default
+(Track 61A fixed `reconfigure_sources`, which had used list truthiness `not
+explicit_sources` and defaulted every `DEFAULT_SOURCES` prompt back to Y after
+a user explicitly cleared `sync.sources`). A new `sync.sources` consumer should use it too.
 
 ## `walk_generic_source` filesystem-identity dedup (load-bearing, v0.10.1)
 Mirror of `_find_conflict_files`'s dedup at the manifest-walk layer. When `include_files` overlaps `include_dirs`, the same on-disk file lands in `collected_paths` twice. Pre-v0.10.1, the second pass got hashed and overwrote the first manifest entry — wasted CPU on identical bytes. On case-insensitive volumes (APFS default) with case-mismatched config, two distinct rel-keys could be created for one inode — a real correctness bug producing phantom add/delete fleet churn.

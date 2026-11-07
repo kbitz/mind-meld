@@ -386,7 +386,7 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   - [Store-v2 design](archive/store-v2.md): superseded as the 2.0 design on
     2026-10-19. Evidence: the "Why a new store" hazard table (the Syncthing
     problems the 1.x store must handle), §7 portable paths, §10 Syncthing
-    folder options and §11 Linux.
+    folder options, §11 Linux and §13 cutover.
   - [Conflict policies](archive/conflict-policies.md): the 2.1 policies and
     2.2 resolver designed on store-v2's version vectors; superseded
     2026-10-19 with that design.

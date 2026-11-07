@@ -28,6 +28,17 @@ def test_version_installed_package_returns_pyproject_version():
     assert mind_meld.__version__ == pyproject["project"]["version"]
 
 
+def test_version_file_matches_pyproject():
+    """The root VERSION file must match pyproject.toml's project.version."""
+    import tomllib
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    with open(repo_root / "pyproject.toml", "rb") as f:
+        version = tomllib.load(f)["project"]["version"]
+    assert (repo_root / "VERSION").read_text(encoding="utf-8") == version + "\n"
+
+
 def test_version_missing_package_returns_dev_sentinel():
     """When importlib.metadata raises PackageNotFoundError (fresh clone
     without `pip install -e .`), fall back to '0.0.0+dev' so imports

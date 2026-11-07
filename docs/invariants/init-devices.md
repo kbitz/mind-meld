@@ -21,7 +21,7 @@ Init's body lives in `initflow.py` (Track 88A); `cli.py:init` is the Typer shell
 
 Plain `mm init` is the join. A `missing` fetch (absent folder, bookkeeping only, blobs or manifests without a header, mid-delivery) exits 1 and creates no folder, config, device entry, keyring item, key header or `.stignore`; the message mentions `--new-fleet` only when `--new-fleet` would accept the folder. There is no override: the typed `BRICK` confirm is gone. A present header is verified (`_verify_join`), then the device is registered, config saved, and `initflow.init` returns the verified passphrase; `cli.init` hands it to `cli._attended_pull`, so a stale or unreadable keyring entry cannot fail the join's own pull. `initflow` never imports `pullflow`. A failed pull keeps config and device and ends with pull's one-line remedy. `--new-fleet` returns `None` and does not pull. `_init_storage_guard` asks only when the machine already has a device entry. A closed or non-terminal stdin ends in the `mm init needs a terminal` error (`cli.init`), not `Aborted.`.
 
-A crypto session on a folder with no header (`core._init_crypto_session`) says to wait for the folder to finish syncing, to restore the file from another machine if it never arrives, and never to reinitialize. It names neither Syncthing nor iCloud (Macs stay on iCloud until cutover), includes the storage path, and does not contain `mm init`, so `_sync_failure` ends with `Run: mm diag`. The corrupt-header messages use the same wording.
+A crypto session on a folder with no header (`core._init_crypto_session`) says to wait for the folder to finish syncing, to restore the file from another machine if it never arrives, and never to reinitialize. It names no sync tool, includes the storage path, and does not contain `mm init`, so `_sync_failure` ends with `Run: mm diag`. The corrupt-header messages use the same wording.
 
 
 ---
@@ -31,7 +31,7 @@ A crypto session on a folder with no header (`core._init_crypto_session`) says t
 
 If `save_config` raises (disk full, permissions), a best-effort `backend.delete(device_key(device_id))` cleanup runs before the original exception propagates — keeps orphans from accumulating in storage when normal save failures hit. Cleanup-failure surfaces a `mm: warning:` stderr breadcrumb but does NOT mask the original save error (visible-failure contract). The `device_key(device_id)` storage key is precomputed BEFORE `register_device` so the cleanup-warning f-string can't itself raise from `device_key`'s validation and mask the real cause (codex adversarial 2026-04-25).
 
-**Known limit: a save failure can follow publication.** `save_config` writes through `atomic_write_bytes(fsync=True)`, whose parent-directory flush runs after `os.replace`. That flush can raise with config.toml already naming the new `device_id`, and the handler above cannot tell it from a pre-publication failure, so it still deletes the registration. Reproduced and tracked, not repaired: see [sync.md "Atomic write publication failures"](sync.md#atomic-write-publication-failures) and the roadmap card "Preserve coherent state after config publication failures" (Track 71A in [ROADMAP.md](../ROADMAP.md), drained from the TODOS entry "Init deletes device registration after a published config save fails"). Whether a later push's `_ensure_device_registered` self-heal fully recovers is unqualified. Preserve the pre-publication cleanup when repairing.
+**Known limit: a save failure can follow publication.** `save_config` writes through `atomic_write_bytes(fsync=True)`, whose parent-directory flush runs after `os.replace`. That flush can raise with config.toml already naming the new `device_id`, and the handler above cannot tell it from a pre-publication failure, so it still deletes the registration. Reproduced, not repaired; its repair card ("Preserve coherent state after config publication failures", drained from the TODOS entry "Init deletes device registration after a published config save fails") was killed on 2026-10-15: see [sync.md "Atomic write publication failures"](sync.md#atomic-write-publication-failures). Whether a later push's `_ensure_device_registered` self-heal fully recovers is unqualified. Preserve the pre-publication cleanup when repairing.
 
 `_ensure_device_registered(backend, device_id, device_name, *, dry_run)` runs at the top of `_push_core` BEFORE any push work. If `devices/<my_id>.json` is absent, it recreates it via `register_device`. Two scenarios converge: future v0.9.4+ SIGKILL crash mid-init (cosmetic) AND retroactive fix for pre-v0.9.4 victims of the v0.8.15..v0.9.3 inverted half-state — those users had been pushing manifests under an ID no peer recognized, silently. First push after upgrading to v0.9.4 self-heals. Gated on `not dry_run` (codex review: `mm push --dry-run` must not mutate storage). Register failures emit a `mm: warning:` stderr breadcrumb before re-raising — load-bearing for autopush, whose generic `except Exception` would otherwise swallow the failure and silently no-op every push.
 
@@ -122,7 +122,7 @@ configured scheme (`member.schemes[member.scheme]`): default
 `service=mind-meld`, `username=passphrase`; KeePassXC scheme
 `Title=mind-meld`, `UserName=passphrase`. Writers must keep storing under
 that scheme — `store_passphrase_in_keyring` does so through keyring today.
-Track 80A's Linux passphrase flow must keep this contract or update the
+A future Linux passphrase flow must keep this contract or update the
 reader with it; the README's `secret-tool store` recovery command writes the
 same attributes (plus keyring's `application` attribute).
 
@@ -195,7 +195,8 @@ manifest copy whose first byte is 0x03 is readable (`crypto.decrypt_manifest`),
 blobs and `mm-crypto-init` keep treating 0x03 as a newer format. `mm-crypto-init`
 is never written for it; see [Storage-format gates](auto-upgrade.md#storage-format-gates).
 
-iCloud does not order arrival. A format-changing MAJOR must write its new
+The folder's sync tool does not guarantee arrival order (`order = alphabetic`
+in Syncthing only reduces waiting). A format-changing MAJOR must write its new
 crypto-init **before** new-format manifests/blobs, and refuse on the newer side
 while any registered peer runs below 1.0.0 (0.14.x lacks this gate). A manifest
 or blob may still arrive first: pull skips an unreadable peer manifest with a

@@ -395,5 +395,5 @@ near-miss). So do resolveflow's promotion links and migration/resolution
 renames, which **overwrite** canonical files, and conflictmtime's mtime-only
 `os.utime`; the P3 TODO's revisit covers them too. The os.devnull output open is a process sink, not account state.
 New implementation-time finds belong here and in the reviewed census, not in
-the writer scope. Track 75A and later writers must adopt the call convention;
-82A deletes the temporary LocalBackend rows when that backend retires.
+the writer scope. Later writers must adopt the call convention; the
+`LocalBackend` rows stay, because 2.0 keeps the local-folder backend.

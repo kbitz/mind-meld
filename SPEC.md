@@ -33,23 +33,20 @@ Every piece of documentation targets one of two audiences:
 
 ## Architecture
 
-Single local-folder storage backend. New init defaults to `~/Sync/mind-meld`; existing configured paths, including iCloud Drive, remain unchanged. Encrypted blobs are written to that folder, and the folder's sync tool moves them between machines. The CLI supports multiple sync sources (e.g. `~/.claude` and `~/.gstack`) via configurable `[[sync.sources]]` in config.toml.
+Single local-folder storage backend at the root of a shared Syncthing folder (`~/Sync/mind-meld` by default; mm never moves an existing configured path, and iCloud Drive is the pre-cutover path only). Encrypted blobs and manifests are written to that folder on disk, and Syncthing replicates them between each machine's `~/Sync/mind-meld/`. The CLI supports multiple sync sources (e.g. `~/.claude` and `~/.gstack`) via configurable `[[sync.sources]]` in config.toml.
 
 ```
-┌─────────────┐         encrypted blobs    ┌──────────────────┐
-│  Machine A  │ ────────written to disk────►│  ~/Library/      │
-│  (CLI)      │                             │  Mobile Documents│
-└─────────────┘                             │  /com~apple~     │
-                                            │  CloudDocs/      │
-      ▲                                     │  mind-meld/        │
-      │                                     └──────────────────┘
-      │                                            │
-      │                                     iCloud Drive sync
-      │                                            │
-┌─────────────┐                                    │
-│  Machine B  │  ◄─────────────────────────────────┘
-│  (CLI)      │    (folder already synced by iCloud)
-└─────────────┘
+┌─────────────┐      encrypted blobs       ┌───────────────────────┐
+│  Machine A  │ ─────written to disk──────►│  ~/Sync/mind-meld/    │
+│  (CLI)      │◄─────read from disk────────│  (Machine A replica)  │
+└─────────────┘                            └───────────▲───────────┘
+                                                       │
+                                                Syncthing sync
+                                                       │
+┌─────────────┐                            ┌───────────▼───────────┐
+│  Machine B  │ ─────written to disk──────►│  ~/Sync/mind-meld/    │
+│  (CLI)      │◄─────read from disk────────│  (Machine B replica)  │
+└─────────────┘                            └───────────────────────┘
 ```
 
 ### Module Architecture
@@ -86,7 +83,7 @@ Track 16A (v0.12.21) cut six modules out of `cli.py`. The load-bearing rule that
 
 ### No API Server
 
-claude-sync.com runs an API that brokers auth, generates presigned URLs, and stores manifests. We skip all of that. The CLI writes encrypted blobs to a local folder. A new init defaults to `~/Sync/mind-meld`; an existing configured path, including iCloud Drive, stays as it is. Manifests live alongside the data.
+claude-sync.com runs an API that brokers auth, generates presigned URLs, and stores manifests. We skip all of that. The CLI reads and writes encrypted blobs in the shared Syncthing folder on the local filesystem (`~/Sync/mind-meld` by default; existing configured paths are never moved automatically, and iCloud Drive is the pre-cutover path only). Manifests live alongside the data.
 
 ---
 
@@ -95,7 +92,10 @@ claude-sync.com runs an API that brokers auth, generates presigned URLs, and sto
 ### Storage Layout
 
 ```
-{storage_root}/                            # configured folder; new init defaults to ~/Sync/mind-meld
+{storage_root}/                            # Syncthing folder root (default ~/Sync/mind-meld)
+├── mm-crypto-init                         # fleet key-derivation header: version, argon2_memory_kb, root_salt, keycheck_blob
+├── .stignore                              # written by mm init --new-fleet: (?d)tmp*.tmp (local per machine, not synced by Syncthing)
+├── .stfolder/                             # Syncthing's folder marker (bookkeeping)
 ├── devices/
 │   ├── {device_id}.json                   # device metadata (unencrypted)
 │   └── ...
@@ -110,7 +110,7 @@ claude-sync.com runs an API that brokers auth, generates presigned URLs, and sto
     └── ...
 ```
 
-Default `storage_root` for new init: `~/Sync/mind-meld/`. Existing configured paths remain unchanged.
+`storage_root` is the Syncthing folder root (`~/Sync/mind-meld/` by default; mm never moves an existing configured path).
 
 ### Device Config (`~/.config/mind-meld/config.toml`)
 
@@ -529,9 +529,9 @@ The reapers and the tmp sweep live in `retention.py`; the `@app.command()` shell
 
 ### `mm sources`
 
-1. Read `[[sync.sources]]` from config.toml.
-2. For each source, display: name, type, path, and whether the path exists.
-3. For `generic` sources, also show `include_dirs` and `include_files`.
+1. Load `config.toml` read-only (`core._get_config(read_only=True)`).
+2. Resolve configured sources as push would, but bypass `[sync].disabled_sources` (`core._resolve_all_configured_sources`, calling `config.get_sources` with `disabled_sources` cleared). Path-availability filtering in `resolve_sources` still applies, so a source whose path is missing on disk is not listed, except mm's own default `mm-events` root (`MM_INTERNAL_SOURCE_NAMES` when `_preview_mm_events_bootstrap` reports `would_create`), which is listed as an empty walk before its directory exists.
+3. Print one `Configured Sources` table with columns `Name`, `Path`, `Type`, `Enabled` (`N` and row dimmed when the name is in `disabled_sources`, `Y` otherwise), `Files` (files kept after the source's `exclude_patterns` and `include_patterns`), and `Excluded` (how many files those per-source patterns removed after global junk exclusions, or `—` when the source has neither `exclude_patterns` nor `include_patterns`). It does not print `include_dirs`, `include_files`, or a path-exists column.
 
 ---
 

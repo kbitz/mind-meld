@@ -158,7 +158,7 @@ jobs:
 
   secret-service-live:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # Track 73A: the only real-D-Bus evidence before the 2.0 soak. Runs
+    # Track 73A: CI's only real-D-Bus evidence. Runs
     # tests/test_secret_service_live.py against a real gnome-keyring in
     # an Arch container (the supported Linux flavor). The test fails —
     # never skips — when its tools are missing under the live flag.
