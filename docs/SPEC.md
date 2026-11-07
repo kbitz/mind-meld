@@ -38,7 +38,16 @@ policy are unchanged. Amended again 2026-11-06 by `/project-spec` to defer
 the opt-in `mmm` source (owner: "hm, don't love that -- let's future this
 card and move on to the next one"): mm does not carry `~/.mmm/`, and the
 factory moves with mmm-factory's own tool; target, outcomes and release
-policy are unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
+policy are unchanged. Amended 2026-11-07 by `/project-spec` with two owner
+decisions. Cursor support is removed completely (owner: "cursor -- removed
+totally, don't worry about old usage, as if we never supported"): Cursor
+leaves Purpose, the table, O7 and the gaps and non-goals that existed only
+for it, and Grok models run through Cursor no longer reach the Grok row. The
+owner's machine hostnames must be removed from the repository's git history
+before 2.0.0 and before the repository is public again (owner: "that scrub
+is required before we go public again and hit 2.0 fyi"), which adds a
+condition to the 2.0.0 release line. Audience, target and the other outcomes
+are unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -51,7 +60,7 @@ several machines:
    start on another and `mm pull`, and it is all there.
 2. **Usage reporting.** `retro-fleet` reports what the agents did across every
    machine as one fleet: tokens, cost, active days and commits from Claude
-   Code, Codex, Grok Build, Cursor, Muse and Antigravity.
+   Code, Codex, Grok Build, Muse and Antigravity.
 
 A command either succeeds, in one line, or says what broke and how to fix it.
 
@@ -67,30 +76,29 @@ Syncthing.
 | Claude Code | Project memory and `todos/` under `~/.claude` (CLAUDE.md, agents and commands stay in git) | Tokens, cost, sessions and skills from local session logs |
 | Codex | `skills/`, `plugins/`, `AGENTS.md` | Tokens and cost from session rollouts, archived ones included |
 | Grok Build | `skills/`, `commands/` and `rules/` under `~/.grok`, and its memory topics (each scope's `topics/` Markdown, global and per repository), after `mm enable-source grok`; pending observations stay on the machine that captured them | Tokens and cost from local session records, runs through Paseo (ACP) included, in the Grok row |
-| Cursor | Nothing: no user-authored tree exists, and Cursor reads `~/.claude/skills` | Runs from Conductor and the enrolled `cursor-agent` CLI, counted under each model's family (Grok, Claude, GPT) |
 | Muse | `memory/`, after `mm enable-source muse` | Tokens and cost, as its own `muse` family |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config` | Tokens and cost from conversation steps, as its own `agy` family |
 | gstack, gstack-extend | Project state, analytics and retros; generator output and machine-local files (factory manager files, evidence ledgers, browser profiles, pair-review resume copies) excluded | — |
 | mmm-factory | Nothing: `~/.mmm/` stays local, and the factory moves between hosts with mmm-factory's own tool ([factory handover](#factory-handover)) | — (factory workers' tokens count under their host's row) |
 | mm | Its activity log, which `retro-fleet` reads | Git commits per machine |
 
-Intentional gaps: Cursor runs through an ACP front-end such as Paseo report
-no usage (no source exists); Codex memory does not sync until cross-model
-memory (O9, after 2.0); session transcripts and credentials never sync. Grok
+Intentional gaps: Codex memory does not sync until cross-model memory (O9,
+after 2.0); session transcripts and credentials never sync. Grok
 Build's `config.toml`, credentials, hooks and plugins stay local, as Claude
 Code's and Codex's whole-file settings do; its generated memory index
 (`MEMORY.md`) and memory databases are rebuilt on each machine and never sync.
-Grok Build reads `~/.claude/skills`, so mm keeps no Grok skill link. Grok
-models used through Cursor and through Grok Build both appear in the Grok row;
-the two are read from separate local records and never overlap.
+Grok Build reads `~/.claude/skills`, so mm keeps no Grok skill link. The
+Grok row counts Grok Build's own runs only.
 
 ## Audience and target
 - Current users: the owner only. Observed 2026-10-19: three registered Macs
   (one inactive since 2026-08-11). The owner stated on 2026-10-31 that they
   have two Arch-based (Omarchy) Linux machines, which wait for 2.0 to join.
-- Audience ceiling: potentially-public. The repository is MIT and forkable and
-  the README stays readable by a newcomer, but no alpha group or public stage
-  is planned.
+- Audience ceiling: potentially-public. The code is MIT and the README stays
+  readable by a newcomer, but no alpha group or public stage is planned. The
+  owner made the repository private on 2026-11-06; it becomes public again
+  only after the git history no longer contains the owner's machine
+  hostnames (see Constraints).
 - Selected target: MVP-1, the owner's fleet of macOS and Arch-based Linux
   machines syncing over Syncthing, with complete usage reporting and quiet,
   honest output.
@@ -181,9 +189,8 @@ manual step.
 ### O7: Fleet usage reporting is complete and accurate
 1. `retro-fleet` reports tokens, cost, active days, machines and top model
    for each agent family (Claude, Codex, Grok, Muse and Antigravity), summed
-   across the fleet from Claude Code, Codex, Grok Build, Cursor, Muse and
-   Antigravity. Cursor's and Grok Build's runs count under their model's
-   family.
+   across the fleet from Claude Code, Codex, Grok Build, Muse and
+   Antigravity. Grok Build's runs count under their model's family.
 2. Every attended push captures this machine's usage and git activity within
    one total time budget. Work left unfinished resumes on later pushes, so
    capture is complete again within three attended pushes without a recovery
@@ -264,6 +271,13 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   Code no planned change touches stays where it is; there is no one-shot
   rewrite. While working and reviewing, run only the tests whose recorded
   coverage reaches the changed code; the full suite runs in CI before merge.
+- The owner's machine hostnames, or fragments of them, never appear in the
+  repository: files name machines by role (2026-11-06). Before 2.0.0, and
+  before the repository is made public again, the git history is rewritten
+  so no commit, tag or reachable ref contains them (owner, 2026-11-07). The
+  rewrite force-pushes the protected `main`, so it runs only on the owner's
+  explicit go at that time; the owner gives that go and runs or approves
+  the force-push.
 - A bootstrap script installs Python, pipx, mm and the Syncthing package on
   macOS and Arch-based Linux, stops with instructions if Homebrew is missing
   on macOS, and ships before 2.0.0.
@@ -317,8 +331,9 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   planned card and its findings wait in [Future](roadmap-future.md).
 - Concurrent factory managers on two Macs, and moving in-flight factory
   work. Revisit when mmm-factory supports concurrent managers.
-- Usage for Cursor run through ACP front-ends such as Paseo. Revisit when
-  `cursor-agent`'s ACP mode exposes usage.
+- Cursor: mm neither syncs nor reports it (owner, 2026-11-07: "removed
+  totally"). Usage older releases already published is left as it is, with
+  no migration. Revisit when the owner decides to bring Cursor back.
 - Qualification ceremonies for shipped features: the self-update
   qualification (S13), Track 70A's two-Mac acceptance and the separate O6
   acceptance record were dropped on 2026-10-19. A feature in daily use counts
@@ -333,9 +348,10 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   2.0, **cross-model memory** (O9 criteria 1, 2 and 4; owner, 2026-10-29).
 - Stage versions: MVP-1 on iCloud (macOS) = 1.0.0, achieved. MVP-1 on
   Syncthing (macOS and Linux) = **2.0.0**: O1 to O4 accepted on the
-  owner's own observation after the cutover runbook, with O6 to O8 holding and
-  the bootstrap script shipped. MAJOR because the transport changes and every
-  machine must upgrade before cutover.
+  owner's own observation after the cutover runbook, with O6 to O8 holding,
+  the bootstrap script shipped and the owner's machine hostnames removed
+  from the repository's git history (owner, 2026-11-07). MAJOR because the
+  transport changes and every machine must upgrade before cutover.
 - Strict SemVer: not used. The 1.x compatibility contract that applied it
   from 1.0.0 is retired as of 2026-10-19. Strict SemVer would start at
   public-beta, which is not planned.
@@ -368,7 +384,7 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
     its storage-format gates.
   - [Host parity](designs/host-parity.md): usage-family rationale and the
     Grok Build parity notes of 2026-11-05. This spec's table owns host
-    scope.
+    scope; the design's Cursor material is historical as of 2026-11-07.
   - [Multi-source sync](designs/sync-gstack-context.md): shipped design still
     cited by invariants.
   - [Cross-model memory](designs/cross-model-memory.md): O9's design and
