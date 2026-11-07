@@ -374,7 +374,6 @@ SYNCED_SUBDIRS = ["memory", "todos"]
 # Inspected 2026-08-17 against Grok 1.0.4 user-guide + live ~/.grok.
 GROK_SYNCED_SUBDIRS = ["skills", "commands", "rules"]
 GROK_MEMORY_ROOT = "memory-v2"
-GROK_MEMORY_SCOPE_SUBDIRS = ("topics", "observations/_inbox")
 # Generated host links are per-machine routing, matching Codex/OpenCode.
 #
 # Deliberately does NOT mirror v0.12.51's additions to the Codex/OpenCode
