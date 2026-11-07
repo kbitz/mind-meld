@@ -30,7 +30,11 @@ the other models"): the revisit trigger of its 2026-10-19 removal is met,
 because the owner now runs Grok Build directly, through Paseo, on the same
 subscription as Cursor. Grok Build joins the sync and usage host lists in
 Purpose, the table, O1.2 and O7; target, stages and release policy are
-unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
+unchanged. Amended 2026-11-06 by `/project-spec` with two owner decisions
+from Track 111A's live checks on Grok Build 1.0.77: only Grok memory topics
+sync, and a repository with no `origin` or a folder that is not a repository
+reaches other machines only as an inert copy. Target, outcomes and release
+policy are unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -60,7 +64,7 @@ Syncthing.
 |---|---|---|
 | Claude Code | Project memory and `todos/` under `~/.claude` (CLAUDE.md, agents and commands stay in git) | Tokens, cost, sessions and skills from local session logs |
 | Codex | `skills/`, `plugins/`, `AGENTS.md` | Tokens and cost from session rollouts, archived ones included |
-| Grok Build | `skills/`, `commands/` and `rules/` under `~/.grok`, and its memory (each scope's `topics/` and pending observations, global and per repository), after `mm enable-source grok` | Tokens and cost from local session records, runs through Paseo (ACP) included, in the Grok row |
+| Grok Build | `skills/`, `commands/` and `rules/` under `~/.grok`, and its memory topics (each scope's `topics/` Markdown, global and per repository), after `mm enable-source grok`; pending observations stay on the machine that captured them | Tokens and cost from local session records, runs through Paseo (ACP) included, in the Grok row |
 | Cursor | Nothing: no user-authored tree exists, and Cursor reads `~/.claude/skills` | Runs from Conductor and the enrolled `cursor-agent` CLI, counted under each model's family (Grok, Claude, GPT) |
 | Muse | `memory/`, after `mm enable-source muse` | Tokens and cost, as its own `muse` family |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config` | Tokens and cost from conversation steps, as its own `agy` family |
@@ -123,7 +127,11 @@ holds the same synced files.
    the same project on macOS and on Linux, wherever each machine keeps its
    checkout. A project without one lands by its home-relative path when it
    sits under the home folder. Grok Build's per-repository memory follows
-   the same rule.
+   Grok's own scope names, which Grok derives from the git remote, so a
+   repository with a network `origin` lands in the same memory on every
+   machine; a repository without one, or a folder that is not a
+   repository, arrives elsewhere only as an inert copy (an accepted
+   limitation; see Known limits).
 3. A file another program is writing during a push keeps its previously
    published version and goes out with a later push; it never stops the rest
    of the push.
@@ -277,10 +285,17 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   run; re-joining a machine restored from backup or cloned; removing a dead
   machine from the fleet.
 - Known limits: a project outside the home folder with no network git
-  `origin` stays machine-specific. mm does not detect a restored or cloned
-  machine, which can republish stale files until it is re-joined. Content blob
-  names are content hashes: they show whether two machines hold identical
-  bytes, not the bytes. iCloud Drive is not supported after cutover.
+  `origin` stays machine-specific. Grok Build memory for a repository with
+  no `origin`, or for a folder that is not a repository, reaches other
+  machines only as an inert copy that Grok there does not use, because Grok
+  names those scopes from the checkout path (owner, 2026-11-06). Grok's
+  pending observations stay on the machine that captured them until a Dream
+  folds them into topics: before switching machines, run `/flush` and then
+  `/dream` in Grok, then `mm push`, and run `mm pull` before starting Grok on
+  the other machine (owner, 2026-11-06). mm does not detect a restored or
+  cloned machine, which can republish stale files until it is re-joined.
+  Content blob names are content hashes: they show whether two machines hold
+  identical bytes, not the bytes. iCloud Drive is not supported after cutover.
 
 ## Non-goals and later work
 - Windows and non-Arch Linux distributions. Revisit when such a machine needs

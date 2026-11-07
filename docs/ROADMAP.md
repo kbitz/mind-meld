@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Cursor, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Standalone Grok Build support, removed in v1.11.8, returns at parity with Claude Code and Codex by the owner's 2026-11-05 decision: its pricing, scoped source and consent, and usage reader shipped (Tracks 109B, 109A and 110A), and its memory sync (Track 111A) shares Group 111 with the pricing-override fix (Track 111B). Groups 82–91, 94, 97 and 101 (resumable capture, affected-test selection, the status, Codex, pull, init and source-command moves, one capture budget, Syncthing-tolerant reads, explicit fleet creation and join, machine-local gstack files, shared Claude project memory, recapture's own walk budget, fast-forward pulls and propagated deletions, an honest remedy for unreadable host records and a fair attended usage sweep) shipped in v1.11.9–v1.12.5, and Tracks 102A to 106A (the Codex warm-read memo, discovery from every agent, published identities, finished discovery and the named Cursor ACP gap) in v1.12.6–v1.12.10, Tracks 108A, 98A and 92A (the memory index tidy, the bootstrap script and Syncthing state in status) in v1.12.11–v1.12.13, and Tracks 109B, 109A and 110A (Grok 4.7 pricing, the restored grok source and its consent, and Grok Build usage) in v1.12.14–v1.12.16; all live in shipped history. Grok models used through Cursor stay in the Grok row beside Grok Build's. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); Group 96 qualifies it after the cutover.
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Cursor, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Standalone Grok Build support, removed in v1.11.8, returned at parity with Claude Code and Codex by the owner's 2026-11-05 decision: its pricing, scoped source and consent, usage reader, pricing-override fix and memory-topic sync shipped (Tracks 109B, 109A, 110A, 111B and 111A). Groups 82–91, 94, 97 and 101 (resumable capture, affected-test selection, the status, Codex, pull, init and source-command moves, one capture budget, Syncthing-tolerant reads, explicit fleet creation and join, machine-local gstack files, shared Claude project memory, recapture's own walk budget, fast-forward pulls and propagated deletions, an honest remedy for unreadable host records and a fair attended usage sweep) shipped in v1.11.9–v1.12.5, and Tracks 102A to 106A (the Codex warm-read memo, discovery from every agent, published identities, finished discovery and the named Cursor ACP gap) in v1.12.6–v1.12.10, Tracks 108A, 98A and 92A (the memory index tidy, the bootstrap script and Syncthing state in status) in v1.12.11–v1.12.13, Tracks 109B, 109A and 110A (Grok 4.7 pricing, the restored grok source and its consent, and Grok Build usage) in v1.12.14–v1.12.16, and Tracks 111B and 111A (Grok pricing overrides across aliases and Grok Build memory topics) in v1.12.17–v1.12.18; all live in shipped history. Grok models used through Cursor stay in the Grok row beside Grok Build's. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); Group 96 qualifies it after the cutover.
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -21,60 +21,20 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 
 ## In Progress
 
-None declared (2026-11-05). Tracks 109B (v1.12.14), 109A (v1.12.15) and 110A (v1.12.16) shipped and are recorded in shipped history.
+None declared (2026-11-06). Tracks 111B (v1.12.17) and 111A (v1.12.18) shipped and are recorded in shipped history; Group 111 is retired.
 
 ## Current Plan
 
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110_
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111_
 
 ### Phase 5: mm 2.0 on Syncthing
 
 **End-state:** The owner's Macs and two Linux machines sync over one Syncthing folder that carries the 1.x store, with fast-forward pulls, propagated deletions, every consented host's usage read within the attended budget, Grok Build at parity with Claude Code and Codex, a memory index that no longer resurrects deleted pointers, Syncthing state in status, a bootstrap script and a cutover runbook; the factory can hand over between Macs; docs/SPEC.md O1 to O4 are accepted on the owner's own observation after following the runbook, and released as 2.0.0.
-**Groups:** 111, 95, 93
-
-#### Group 111: Grok pricing overrides ∥ Grok Build memory
-
-_Depends on: none_
-
-**This group delivers:** Local pricing overrides reach every Grok alias without dropping the long-context floor, and Grok Build's global and per-repository memory is the same on every machine.
-
-##### Track 111B: Apply local pricing overrides to every Grok alias and keep the long-context floor
-_2 tasks . ~140 LOC . medium risk . 5 files_
-**Outcome:** When the owner's pricing cache carries an override for a Grok card, every model id that aliases or normalizes to that card is priced with it in `retro-fleet`, and a Grok row with in-window tokens still shows its `≥` floor and the long-context cause detail while the override is active.
-**Supports:** MVP-1, docs/SPEC.md "What mm syncs and reports" Grok Build row (usage and cost at parity) and O7 (fleet usage reporting).
-**Done when:** an override for a card applies to every id that aliases or normalizes to it (for `grok-4.7`: the flat effort ids and `grok-4.7-build`; for `grok-4.7-fast`: the effort ids' `-fast` variants; `grok-4.6-build` through `grok-4.6`) under the same date gate as the exact id; an override never removes the long-context floor or the cause detail (`resolve_long_context_prices` no longer returns None because an override is active, and `_long_context_cause` still names the model); tests pin both with a temporary pricing cache (`MM_PRICING_CACHE_PATH`), never the owner's real cache; `docs/invariants/events-retro.md` drops "no active local override" from the cause's rule and describes the alias reach; `./bin/check --affected` passes.
-_touches: src/mind_meld/token_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_token_usage.py, tests/test_retro_usage_presentation.py, docs/invariants/events-retro.md_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
-
-_Start: after the factory's Linux move (Karl, 2026-11-05, "1, then take care of docs pr and then pause for our Linux migration")._
-
-_Source: Future entry "Local pricing overrides miss Grok aliases and drop the long-context floor" (docs/TODOS.md `[review]` P2, Red Team and native adversarial reviews of Track 109B on PR #271 at `a05eb20`, deferred in PR #274), promoted by Karl on 2026-11-05 (option 1: merge #274 as is and card the fix in the next docs PR). Evidence, live on installed mm 1.12.13 on this Mac, 2026-11-05: `~/.config/mind-meld/pricing-cache.json` holds 8 cards dated 2026-11-04 from a /retro-fleet whole-table refresh, including `grok-4.7`; `_cached_prices` looks overrides up by exact id, so an override for `grok-4.7` does not reach the ids that alias to its card, and an active override makes `resolve_long_context_prices` return None so `_long_context_cause` gives no detail; the skill's next refresh is due about 2026-11-12. Re-checked at a032dcd: `token_usage._cached_prices` reads `models.get(model)` by exact id, `resolve_long_context_prices` returns None when `_cached_prices(model)` is not None, and `aggregator._long_context_cause` skips a model whose long card is None._
-
-- **Alias-aware overrides and the kept floor** -- _src/mind_meld/token_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_token_usage.py, tests/test_retro_usage_presentation.py, ~120 lines._ (M)
-- **Invariant update** -- _docs/invariants/events-retro.md, ~20 lines._ (S)
-
-##### Track 111A: Sync Grok Build memory between machines
-_4 tasks . ~320 LOC . high risk . 10 files_
-**Outcome:** With the grok source enabled, what Grok Build remembers on one machine (its global memory and each repository's memory) is there on the owner's other machines after push and pull, in the same repository's memory wherever each machine keeps its checkout, while Grok's generated index and databases stay local.
-**Supports:** MVP-1, docs/SPEC.md "What mm syncs and reports" Grok Build row (memory) and O1.2 (per-repository memory lands in the same project on macOS and Linux).
-**Done when:** the first task establishes from Grok Build's documentation and a live check in a temporary `GROK_HOME` (never the owner's real store), with the version and date recorded in `docs/designs/host-parity.md`, how `memory-v2/workspaces/<project>-<hash>/` is named, and whether two checkouts of one repository at different paths, or on two machines, get the same name; if names match across machines the scopes sync under their own names, and if not, workspace memory is published under the repository's identity as Claude project memory is (git remote, else home-relative path) and mapped back to the local workspace directory, and if neither is possible the Track stops and asks the owner instead of shipping global memory alone; the walker adds, for `memory-v2/global/` and each workspace scope, only `topics/` and `observations/_inbox/` Markdown, never `MEMORY.md`, SQLite files, the search index or `archive/`; a peer's new observation reaches the other machine's inbox and a deletion propagates, so a Dream on the active machine archives it everywhere; tests pin the allowlist against a fixture store and the workspace mapping with two checkout paths; the recorded test gap below is closed in `tests/test_manifest.py`; `docs/invariants/sync.md` and README describe Grok memory sync and that Grok keeps memory off by default; `./bin/check --affected` passes.
-_touches: src/mind_meld/config.py, src/mind_meld/manifest.py, src/mind_meld/projectid.py, src/mind_meld/pullflow.py, tests/test_grok_memory.py (new), tests/test_manifest.py, tests/test_projectid.py, docs/invariants/sync.md, docs/designs/host-parity.md, README.md_
-_blocked-by: Track 110A_
-_out: 95A_
-_read-first: docs/invariants/README.md, docs/invariants/sync.md, docs/designs/host-parity.md_
-_session: fresh · effort: high · verify: ./bin/check --affected_
-
-_Source: Karl, 2026-11-05, "go, it needs to bring grok to parity w/ the other models": Claude Code memory syncs, so Grok Build memory does (docs/SPEC.md table and O1.2 as amended 2026-11-05). Evidence: Grok Build 1.0.70's `docs/user-guide/13-memory.md` (memory lives in `~/.grok/memory-v2/global/` and `workspaces/<project>-<hash>/`, each with `topics/`, `observations/_inbox/`, a generated `MEMORY.md` and Grok's own SQLite and index files; "Clones and worktrees of the same repository share one workspace scope"; memory is off by default); this Mac holds a populated `memory-v2/` with per-worktree workspace names such as `mmm-05c9f851-98fbfdda` beside `mmm-factory-cd72c70b`. A quick check of SHA-256 over the checkout path, remote URL and root commit did not reproduce the 8-hex `<hash>` for `mmm-factory` or `mind-meld`, so the naming is unknown. Re-checked at 027840b: Claude project memory is mapped by `projectid.py` since 1.12.0._
-
-- **Workspace naming check** -- _docs/designs/host-parity.md, ~30 lines._ (S)
-- **Memory walker and workspace mapping** -- _src/mind_meld/config.py, src/mind_meld/manifest.py, src/mind_meld/projectid.py, src/mind_meld/pullflow.py, tests/test_grok_memory.py, tests/test_manifest.py, tests/test_projectid.py, ~240 lines._ (M)
-- **Test gap: unreadable Grok source root** -- re-verify first, then assert that a failing stat of the Grok source root makes the strict snapshot refuse and the permissive walk return nothing (the existing strict scandir test covers a different boundary). _tests/test_manifest.py, ~20 lines._ (S)
-- **Docs** -- _docs/invariants/sync.md, README.md, ~30 lines._ (S)
+**Groups:** 95, 93
 
 #### Group 95: Factory handover
 
-_Depends on: Group 111_
+_Depends on: none_
 
 **This group delivers:** An opt-in `mmm` source carries mmm-factory's durable state between Macs.
 
@@ -149,8 +109,7 @@ document order; document order is priority, not gating.
 Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
-- Group 111 ← {}
-- Group 95 ← {111}
+- Group 95 ← {}
 - Group 93 ← {95}
 - Group 96 ← {93}
 ```
@@ -158,9 +117,6 @@ Adjacency from gstack-extend's roadmap-pack output on the candidate:
 Track detail per group:
 
 ```
-Group 111: Grok pricing overrides ∥ Grok Build memory
-  +-- Track 111B .......... ~M . 2 tasks
-  +-- Track 111A .......... ~L . 4 tasks
 Group 95: Factory handover
   +-- Track 95A ........... ~L . 2 tasks
 Group 93: Cutover runbook
@@ -169,9 +125,9 @@ Group 96: Cross-model memory qualification
   +-- Track 96A ........... ~M . 1 task
 ```
 
-**Total: 4 groups . 5 tracks remaining.**
+**Total: 3 groups . 3 tracks remaining.**
 
-On 2026-11-05 the owner restored Grok Build at parity with Claude Code and Codex ("go, it needs to bring grok to parity w/ the other models"). The same day Track 109B priced Grok 4.7 (v1.12.14), Track 109A restored the scoped `grok` source and its consent (v1.12.15) and Track 110A read Grok Build usage into `retro-fleet` (v1.12.16); Track 111B, the local pricing-override fix Karl promoted from Future on 2026-11-05, leads the plan and starts after the factory's Linux move; it shares no files with Track 111A, Grok Build memory sync, so the packer puts both in Group 111, and 111A's `_blocked-by: Track 110A` is satisfied. Track 111A keeps its ID because docs/TODOS.md cites it. Track 107A (the Cursor account usage reader) was killed on 2026-11-05: after the account moved to the X unified subscription around 2026-10-21, Cursor exposes per-request usage only through the account's billing export, and the owner chose local-only capture for consistency with the other providers ("A, but we don't need the separate line"); it reopens when Cursor's ACP sends per-call usage, and docs/SPEC.md's non-goal for Cursor via ACP front-ends carries that trigger. Track 95A waits on Track 111A (both edit `config.py`); Tracks 111A, 95A and 93A all edit `README.md` and run in that order, so the cutover runbook (93A) can cover factory handover and Grok. Track IDs 93A, 95A and 96A keep the meaning they had before the 2026-11-05 regeneration, because `docs/invariants/sync.md` and other documents cite them, which is why Group numbers do not follow execution order.
+On 2026-11-06 Tracks 111B (Grok pricing overrides across aliases, v1.12.17) and 111A (Grok Build memory topics, v1.12.18) shipped, completing Grok Build's return at parity, and Group 111 is retired. Track 111A shipped with two owner scope decisions from its live checks on Grok Build 1.0.77, now recorded in docs/SPEC.md: only memory topics sync, so observations become topics on the sending machine (`/flush`, `/dream`, `mm push`) before handoff; and a repository with no `origin`, or a folder that is not a repository, reaches other machines only as an inert copy. Track 95A (the opt-in mmm source for factory handover) is next; its `_blocked-by:` prerequisites have all shipped. Tracks 95A and 93A both edit `README.md` and run in that order, so the cutover runbook (93A) can cover factory handover and Grok, and 96A follows the cutover. Track IDs 93A, 95A and 96A keep the meaning they had before the 2026-11-05 regeneration, because `docs/invariants/sync.md` and other documents cite them, which is why Group numbers do not follow execution order.
 
 The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to O4 on their own observation on one Mac and both Linux machines after following Group 93's runbook, with O6 to O8 holding, the bootstrap script shipped and a `retro-fleet` run showing complete capture from every active machine (O7.4), recorded in PROGRESS.md `## Acceptance`. Problems are fixed as they appear. Cross-model memory (O9) is qualified after the cutover by Group 96; its implementation waits in Future until that qualification passes.
 
@@ -179,7 +135,7 @@ The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to
 
 ## Future
 
-Deferred: docs/roadmap-future.md (38 items)
+Deferred: docs/roadmap-future.md (39 items)
 
 ## Shipped
 
