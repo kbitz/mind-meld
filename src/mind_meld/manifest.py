@@ -2292,7 +2292,16 @@ def grok_memory_scan_dirs(
             try:
                 with os.scandir(workspaces_dir) as iterator:
                     ws_entries = list(iterator)
-            except FileNotFoundError:
+            except FileNotFoundError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=f"{GROK_MEMORY_ROOT}/workspaces",
+                            problem="disappeared while being read",
+                            next_action="Wait for the writer to finish, then run mm push.",
+                        )
+                    ) from e
                 ws_entries = []
             except OSError as e:
                 if strict:

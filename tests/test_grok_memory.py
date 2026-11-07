@@ -302,7 +302,9 @@ class TestGrokMemoryWalkerFixture:
         ]
 
     @pytest.mark.parametrize("strict", [True, False], ids=["strict", "permissive"])
-    @pytest.mark.parametrize("failure", ["enumeration", "scope-stat", "scope-vanished"])
+    @pytest.mark.parametrize(
+        "failure", ["enumeration", "scope-stat", "scope-vanished", "workspaces-vanished"]
+    )
     def test_workspace_discovery_failure_refuses_strict_snapshot(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strict: bool, failure: str
     ) -> None:
@@ -326,6 +328,10 @@ class TestGrokMemoryWalkerFixture:
             if path == workspaces or path == str(workspaces):
                 if failure == "enumeration":
                     raise PermissionError("workspace inventory unavailable")
+                if failure == "workspaces-vanished":
+                    # Discovery stat succeeded; the inventory disappears before enumeration.
+                    workspaces.rename(home / "moved-workspaces")
+                    return original_scandir(path)
                 entry = SimpleNamespace(
                     name="unreadable", path=str(workspaces / "unreadable"), stat=unreadable_stat
                 )
@@ -339,6 +345,7 @@ class TestGrokMemoryWalkerFixture:
                 "enumeration": "could not be enumerated",
                 "scope-stat": "could not be read",
                 "scope-vanished": "disappeared while being read",
+                "workspaces-vanished": "disappeared while being read",
             }[failure]
             with pytest.raises(errors.SnapshotError, match=problem):
                 manifest.walk_grok_source(src, strict=True)
