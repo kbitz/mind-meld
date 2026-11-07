@@ -85,7 +85,8 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
     when the claude source only syncs memory/ and todos/).
 
     - claude type: projects/<any>/memory, projects/<any>/todos
-    - grok type: skills, commands, rules at the source root
+    - grok type: skills, commands, rules at the source root, plus memory-v2
+      topics/ in global and each workspace
     - muse type: memory at the source root
     - generic type: include_dirs (relative to source root)
     """
@@ -109,6 +110,8 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
             candidate = base_path / sub
             if candidate.is_dir() and not candidate.is_symlink():
                 dirs.append(candidate)
+        # Conflict discovery intentionally includes excluded trees.
+        dirs.extend(manifest.grok_memory_scan_dirs(base_path))
         return dirs
     if src_type == "muse":
         dirs = []
@@ -357,6 +360,15 @@ def _find_conflict_files(
                     continue
                 if not is_regular:
                     continue
+                if src_cfg.get("type") == "grok":
+                    canonical_pre = manifest._canonical_for_conflict(conflict_path)
+                    if canonical_pre is None or not canonical_pre.is_relative_to(base_path):
+                        continue
+                    rel_canonical = canonical_pre.relative_to(base_path).as_posix()
+                    if rel_canonical.startswith(
+                        manifest.GROK_MEMORY_ROOT + "/"
+                    ) and not manifest.grok_memory_path_allowed(rel_canonical):
+                        continue
                 conflict_path = _maybe_migrate(conflict_path)
                 canonical = manifest._canonical_for_conflict(conflict_path)
                 _try_add(

@@ -1093,6 +1093,10 @@ class TestWalkGrokSource:
         (home / "sessions" / "encoded" / "chat_history.jsonl").write_text("prompt\n")
         (home / "memory-v2" / "global" / "topics").mkdir(parents=True)
         (home / "memory-v2" / "global" / "topics" / "a.md").write_text("topic\n")
+        (home / "memory-v2" / "global" / "MEMORY.md").write_text("index\n")
+        (home / "memory-v2" / "global" / "memory_state.sqlite").write_bytes(b"sqlite")
+        (home / "memory-v2" / "workspaces" / "w" / "archive").mkdir(parents=True)
+        (home / "memory-v2" / "workspaces" / "w" / "archive" / "old.md").write_text("archived\n")
         (home / "plugins" / "p").mkdir(parents=True)
         (home / "plugins" / "p" / "plugin.json").write_text("{}\n")
         (home / "hooks").mkdir()
@@ -1131,8 +1135,11 @@ class TestWalkGrokSource:
             "skills/my-review/SKILL.md",
             "commands/ship.md",
             "rules/house.md",
+            "memory-v2/global/topics/a.md",
         }
-        assert "memory-v2/global/topics/a.md" not in files
+        assert "memory-v2/global/MEMORY.md" not in files
+        assert "memory-v2/global/memory_state.sqlite" not in files
+        assert "memory-v2/workspaces/w/archive/old.md" not in files
         assert "plugins/p/plugin.json" not in files
         assert "hooks/h.sh" not in files
 
@@ -1213,6 +1220,37 @@ class TestWalkGrokSource:
         home.mkdir()
         files = walk_grok_source({"path": str(home), "type": "grok"})
         assert files == {}
+
+    def test_root_stat_error_strict_raises_snapshot_error_and_non_strict_returns_empty(
+        self, tmp_path, monkeypatch
+    ):
+        import errno
+        import os
+
+        from mind_meld.errors import SnapshotError
+
+        home = tmp_path / ".grok"
+        (home / "skills" / "my-review").mkdir(parents=True)
+        (home / "skills" / "my-review" / "SKILL.md").write_text("mine\n")
+        resolved_home = home.resolve()
+        real_stat = os.stat
+
+        def patched_stat(p, *args, **kwargs):
+            try:
+                is_home = Path(p) == resolved_home
+            except TypeError:
+                is_home = False
+            if is_home:
+                raise PermissionError(errno.EACCES, "Permission denied", str(home))
+            return real_stat(p, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", patched_stat)
+        with pytest.raises(SnapshotError, match="could not be read"):
+            walk_grok_source(
+                {"name": "grok", "path": str(home), "type": "grok"},
+                strict=True,
+            )
+        assert walk_grok_source({"name": "grok", "path": str(home), "type": "grok"}) == {}
 
 
 class TestBuildManifestV2:
@@ -4085,7 +4123,7 @@ class TestScanRootsAnchors91A:
         "src,expected",
         [
             ({"type": "claude"}, ["projects"]),
-            ({"type": "grok"}, ["skills", "commands", "rules"]),
+            ({"type": "grok"}, ["skills", "commands", "rules", "memory-v2"]),
             ({"type": "muse"}, ["memory"]),
             ({"type": "generic", "include_dirs": ["projects", "skills/"]}, ["projects", "skills"]),
             ({"type": "generic", "include_dirs": ["a", "a", ".", ""]}, ["a", ""]),

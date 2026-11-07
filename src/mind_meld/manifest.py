@@ -105,7 +105,7 @@ def is_conflict_filename(name: str) -> bool:
     `mm conflicts`/`mm gc --conflicts` to avoid false-positives on user
     files that happen to contain `.sync-conflict-` in their name.
     """
-    if not name:
+    if not name or CONFLICT_INFIX not in name:
         return False
     return fnmatch.fnmatch(name, CONFLICT_PATTERN) or fnmatch.fnmatch(name, CONFLICT_PATTERN_V0)
 
@@ -270,15 +270,15 @@ def _canonical_for_conflict(conflict_path: Path) -> Path | None:
 def scan_roots(src: dict) -> list[str]:
     """The folders a source's walker lists, relative to its base ("" is the base itself).
 
-    Claude lists ``projects``; Grok lists ``skills``, ``commands`` and ``rules``;
-    Muse lists ``memory``; a generic source lists each ``include_dirs`` entry,
-    and its base when it names ``include_files``.
+    Claude lists ``projects``; Grok lists ``skills``, ``commands``, ``rules`` and
+    ``memory-v2``; Muse lists ``memory``; a generic source lists each ``include_dirs``
+    entry, and its base when it names ``include_files``.
     """
     kind = src.get("type")
     if kind == "claude":
         return ["projects"]
     if kind == "grok":
-        return list(GROK_SYNCED_SUBDIRS)
+        return [*GROK_SYNCED_SUBDIRS, GROK_MEMORY_ROOT]
     if kind == "muse":
         return ["memory"]
     roots: list[str] = []
@@ -373,6 +373,7 @@ SYNCED_SUBDIRS = ["memory", "todos"]
 # config edit cannot widen the walk to sessions/ or auth.json.
 # Inspected 2026-08-17 against Grok 1.0.4 user-guide + live ~/.grok.
 GROK_SYNCED_SUBDIRS = ["skills", "commands", "rules"]
+GROK_MEMORY_ROOT = "memory-v2"
 # Generated host links are per-machine routing, matching Codex/OpenCode.
 #
 # Deliberately does NOT mirror v0.12.51's additions to the Codex/OpenCode
@@ -546,6 +547,15 @@ def nested_repo_skip_prefixes(
             else source_config.get("include_dirs") or []
         )
         scan_dirs = [base / name for name in dirs]
+        if source_type == "grok":
+            scan_dirs.extend(
+                grok_memory_scan_dirs(
+                    base,
+                    strict=strict,
+                    source_name=source_name,
+                    exclude_patterns=source_config.get("exclude_patterns"),
+                )
+            )
         include_files = source_config.get("include_files") or [] if source_type == "generic" else []
         for name in include_files:
             path = base / name
@@ -1022,10 +1032,7 @@ def _collect_marker_files(
             return None
 
     def walk(directory: Path, *, discovered: bool) -> None:
-        try:
-            rel_dir = directory.relative_to(base).as_posix() if directory != base else ""
-        except ValueError:
-            rel_dir = directory.name
+        rel_dir = _rel_or_name(directory, base) if directory != base else ""
         if rel_dir and _dir_is_policy_skipped(rel_dir, None):
             return
         if directory != base and _directory_is_git_repo(
@@ -1176,9 +1183,26 @@ def matches_include_patterns(rel_path: str, include_patterns: list[str] | tuple[
     return combined is not None and combined.match(rel_path) is not None
 
 
+@functools.lru_cache(maxsize=32)
+def _compile_fnmatch_patterns(patterns: tuple[str, ...]) -> re.Pattern[str] | None:
+    if not patterns:
+        return None
+    bodies = "|".join(fnmatch.translate(p) for p in patterns)
+    return re.compile(bodies)
+
+
+@functools.lru_cache(maxsize=4)
+def _compile_excluded_rules(
+    excluded: tuple[str, ...],
+) -> tuple[frozenset[str], re.Pattern[str] | None]:
+    dirs = frozenset(p.rstrip("/") for p in excluded if p.endswith("/"))
+    files = tuple(p for p in excluded if not p.endswith("/"))
+    return dirs, _compile_fnmatch_patterns(files)
+
+
 def _is_excluded(
     rel_path: str,
-    exclude_patterns: list[str] | None = None,
+    exclude_patterns: list[str] | tuple[str, ...] | None = None,
     skip_prefixes: list[str] | None = None,
     include_patterns: list[str] | None = None,
 ) -> bool:
@@ -1204,20 +1228,15 @@ def _is_excluded(
         return True
     if _under_skip_prefix(rel_path, skip_prefixes):
         return True
-    for pattern in EXCLUDED:
-        # Directory patterns (ending with /)
-        if pattern.endswith("/"):
-            dir_name = pattern.rstrip("/")
-            if dir_name in parts:
-                return True
-        # File patterns
-        else:
-            if fnmatch.fnmatch(filename, pattern):
-                return True
+    excl_dirs, excl_file_re = _compile_excluded_rules(tuple(EXCLUDED))
+    if excl_dirs and any(part in excl_dirs for part in parts):
+        return True
+    if excl_file_re is not None and excl_file_re.match(filename) is not None:
+        return True
     if exclude_patterns:
-        for pattern in exclude_patterns:
-            if fnmatch.fnmatch(rel_path, pattern):
-                return True
+        pat_re = _compile_fnmatch_patterns(tuple(exclude_patterns))
+        if pat_re is not None and pat_re.match(rel_path) is not None:
+            return True
     if include_patterns and not matches_include_patterns(rel_path, include_patterns):
         return True
     return False
@@ -1266,11 +1285,31 @@ class FileRevision:
     data: bytes | None = None
 
 
-def _rel_or_name(path: Path, base: Path) -> str:
+_DEFAULT_PATH_LSTAT = Path.lstat
+_DEFAULT_PATH_STAT = Path.stat
+
+
+def _fast_rel_posix(path: Path, base: Path) -> str | None:
+    base_str = str(base)
+    path_str = str(path)
+    if path_str == base_str:
+        return "."
+    prefix = base_str if base_str.endswith("/") else base_str + "/"
+    if path_str.startswith(prefix):
+        rel = path_str[len(prefix) :]
+        if rel and "//" not in rel and "\\" not in rel:
+            parts = rel.split("/")
+            if "." not in parts and ".." not in parts:
+                return rel
     try:
         return path.relative_to(base).as_posix()
     except ValueError:
-        return path.name
+        return None
+
+
+def _rel_or_name(path: Path, base: Path) -> str:
+    rel = _fast_rel_posix(path, base)
+    return rel if rel is not None else path.name
 
 
 def _mtime_iso_from_stat(st: os.stat_result) -> str:
@@ -1302,17 +1341,17 @@ def path_has_descendant_symlink(
     A symlinked source root is allowed. An unavailable probe refuses in
     strict mode instead of becoming an intentional omission.
     """
-    try:
-        relative = path.relative_to(base)
-    except ValueError:
+    rel = _fast_rel_posix(path, base)
+    if rel is None or rel == ".":
         # Not a descendant of this source root. Confinement/escape checks
         # belong to the caller; this helper only names descendant links.
         return False
-    component = base
-    for part in relative.parts:
-        component /= part
+    use_os_lstat = Path.lstat is _DEFAULT_PATH_LSTAT
+    comp_str = str(base).rstrip("/")
+    for part in rel.split("/"):
+        comp_str = f"{comp_str}/{part}" if comp_str else f"/{part}"
         try:
-            st = component.lstat()
+            st = os.lstat(comp_str) if use_os_lstat else Path(comp_str).lstat()
         except FileNotFoundError:
             return False
         except OSError as e:
@@ -1342,17 +1381,21 @@ def _assert_revision_privacy(
     source_name: str | None,
     source_type: str | None,
 ) -> None:
-    if base is not None and path_has_descendant_symlink(
-        path, base, strict=True, source_name=source_name
-    ):
-        raise SnapshotError(
-            snapshot_refusal(
-                source=source_name,
-                rel_path=_rel_or_name(path, base),
-                problem="is no longer a confined regular file",
-                next_action=("Remove the descendant symlink or hard link, then run mm push."),
-            )
+    if base is not None:
+        probe_target = (
+            path.parent if Path.lstat is _DEFAULT_PATH_LSTAT and stat.S_ISREG(st.st_mode) else path
         )
+        if probe_target != base and path_has_descendant_symlink(
+            probe_target, base, strict=True, source_name=source_name
+        ):
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    rel_path=_rel_or_name(path, base),
+                    problem="is no longer a confined regular file",
+                    next_action=("Remove the descendant symlink or hard link, then run mm push."),
+                )
+            )
     if source_type in ("grok", "muse") and st.st_nlink > 1:
         raise SnapshotError(
             snapshot_refusal(
@@ -1372,6 +1415,8 @@ def read_file_revision(
     source_name: str | None = None,
     source_type: str | None = None,
     base: Path | None = None,
+    rel_path: str | None = None,
+    pre_stat: os.stat_result | None = None,
 ) -> FileRevision:
     """Read one regular-file revision from a single no-follow descriptor.
 
@@ -1386,7 +1431,12 @@ def read_file_revision(
     other refusal stays a plain ``SnapshotError``. Callers decide per raise
     site by exception type, never by message text.
     """
-    rel = _rel_or_name(path, base) if base is not None else path.name
+    rel = (
+        rel_path
+        if rel_path is not None
+        else (_rel_or_name(path, base) if base is not None else path.name)
+    )
+    use_os_lstat = Path.lstat is _DEFAULT_PATH_LSTAT
 
     def _refuse(
         problem: str,
@@ -1410,17 +1460,20 @@ def read_file_revision(
             raise err from exc
         raise err
 
-    try:
-        pre_path_st = path.lstat()
-    except FileNotFoundError as e:
-        _refuse(
-            "disappeared while being read",
-            "Wait for the writer to finish, then run mm push.",
-            e,
-            transient="vanished",
-        )
-    except OSError as e:
-        _refuse("could not be read", "Restore read access, then run mm push.", e)
+    if pre_stat is not None and use_os_lstat:
+        pre_path_st = pre_stat
+    else:
+        try:
+            pre_path_st = os.lstat(path) if use_os_lstat else path.lstat()
+        except FileNotFoundError as e:
+            _refuse(
+                "disappeared while being read",
+                "Wait for the writer to finish, then run mm push.",
+                e,
+                transient="vanished",
+            )
+        except OSError as e:
+            _refuse("could not be read", "Restore read access, then run mm push.", e)
 
     if stat.S_ISLNK(pre_path_st.st_mode):
         _refuse(
@@ -1455,10 +1508,18 @@ def read_file_revision(
                 "is no longer a confined regular file",
                 "Restore the regular file, then run mm push.",
             )
-        _assert_revision_privacy(
-            path, base, pre_fd_st, source_name=source_name, source_type=source_type
+        same_pre_inode = (pre_fd_st.st_dev, pre_fd_st.st_ino) == (
+            pre_path_st.st_dev,
+            pre_path_st.st_ino,
         )
-        if (pre_fd_st.st_dev, pre_fd_st.st_ino) != (pre_path_st.st_dev, pre_path_st.st_ino):
+        _assert_revision_privacy(
+            path,
+            base,
+            pre_fd_st,
+            source_name=source_name,
+            source_type=source_type,
+        )
+        if not same_pre_inode:
             _refuse(
                 "changed while being read",
                 "Wait for the writer to finish, then run mm push.",
@@ -1492,7 +1553,7 @@ def read_file_revision(
             remaining -= len(chunk)
         try:
             post_fd_st = os.fstat(fd)
-            post_path_st = path.lstat()
+            post_path_st = os.lstat(path) if use_os_lstat else path.lstat()
         except FileNotFoundError as e:
             _refuse(
                 "disappeared while being read",
@@ -1508,10 +1569,18 @@ def read_file_revision(
                 "is no longer a confined regular file",
                 "Restore the regular file, then run mm push.",
             )
-        _assert_revision_privacy(
-            path, base, post_fd_st, source_name=source_name, source_type=source_type
+        same_post_inode = (post_path_st.st_dev, post_path_st.st_ino) == (
+            post_fd_st.st_dev,
+            post_fd_st.st_ino,
         )
-        if (post_path_st.st_dev, post_path_st.st_ino) != (post_fd_st.st_dev, post_fd_st.st_ino):
+        _assert_revision_privacy(
+            path,
+            base,
+            post_fd_st,
+            source_name=source_name,
+            source_type=source_type,
+        )
+        if not same_post_inode:
             _assert_revision_privacy(
                 path, base, post_path_st, source_name=source_name, source_type=source_type
             )
@@ -1637,10 +1706,7 @@ def _collect_regular_files_scandir(
         return collected
 
     def walk(directory: Path, *, discovered: bool) -> None:
-        try:
-            rel_dir = directory.relative_to(base).as_posix() if directory != base else ""
-        except ValueError:
-            rel_dir = directory.name
+        rel_dir = _rel_or_name(directory, base) if directory != base else ""
         if rel_dir and _dir_is_policy_skipped(rel_dir, skip_prefixes):
             return
         if directory != base and _directory_is_git_repo(
@@ -1713,7 +1779,7 @@ def _collect_regular_files_scandir(
                 collected.append(child)
 
     walk(start, discovered=False)
-    collected.sort(key=lambda p: str(p.relative_to(base)) if p.is_relative_to(base) else str(p))
+    collected.sort(key=lambda p: _rel_or_name(p, base))
     return collected
 
 
@@ -1760,14 +1826,17 @@ def _stat_collected_file(
     only with ``holds`` (excluded paths are skipped silently: they never sync).
     Any other ``OSError``, or a repeated vanish without ``holds``, refuses.
     """
+    use_os = Path.lstat is _DEFAULT_PATH_LSTAT and Path.stat is _DEFAULT_PATH_STAT
     try:
+        if use_os:
+            return os.lstat(path) if strict else os.stat(path)
         return path.lstat() if strict else path.stat()
     except OSError as e:
         if not strict:
             return None
         if isinstance(e, FileNotFoundError):
             try:
-                return path.lstat()
+                return os.lstat(path) if use_os else path.lstat()
             except FileNotFoundError as again:
                 rel = _rel_or_name(path, base)
                 if _is_excluded(rel, exclude_patterns, skip_prefixes, include_patterns):
@@ -1839,6 +1908,9 @@ def _record_file(
     source_type: str | None = None,
     diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
     holds: SourceHolds | None = None,
+    rel_path: str | None = None,
+    pre_stat: os.stat_result | None = None,
+    skip_exclude_check: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
     """Apply the per-file walker pipeline to `path` under `base`.
 
@@ -1859,9 +1931,11 @@ def _record_file(
     If the second read is also transient, a caller-supplied ``holds`` records
     the file and the scan goes on (returns None); without one it raises.
     """
-    rel = str(path.relative_to(base))
+    rel = rel_path if rel_path is not None else str(path.relative_to(base))
 
-    if _is_excluded(rel, exclude_patterns, skip_prefixes, include_patterns):
+    if not skip_exclude_check and _is_excluded(
+        rel, exclude_patterns, skip_prefixes, include_patterns
+    ):
         return None
 
     if strict:
@@ -1872,9 +1946,14 @@ def _record_file(
             "source_type": source_type,
             "base": base,
         }
+        if rel_path is not None:
+            read_args["rel_path"] = rel
         try:
             try:
-                revision = read_file_revision(path, **read_args)
+                if pre_stat is not None:
+                    revision = read_file_revision(path, pre_stat=pre_stat, **read_args)
+                else:
+                    revision = read_file_revision(path, **read_args)
             except SnapshotChanged:
                 # Read 2: a verified revision of its own, not required to equal
                 # read 1. Non-transient failures and a stable oversize here take
@@ -1896,12 +1975,15 @@ def _record_file(
             "mtime": revision.mtime_iso,
         }
 
-    try:
-        file_stat = path.stat()
-    except PermissionError:
-        if on_skip:
-            on_skip(rel, "permission denied")
-        return None
+    if pre_stat is not None and Path.stat is _DEFAULT_PATH_STAT:
+        file_stat = pre_stat
+    else:
+        try:
+            file_stat = os.stat(path) if Path.stat is _DEFAULT_PATH_STAT else path.stat()
+        except PermissionError:
+            if on_skip:
+                on_skip(rel, "permission denied")
+            return None
 
     if file_stat.st_size > max_file_size:
         if on_skip:
@@ -2099,6 +2181,223 @@ def walk_claude_source(
     return files
 
 
+def grok_memory_path_allowed(rel_path: str) -> bool:
+    """Return True iff ``rel_path`` is an allowlisted Grok Build memory Markdown path.
+
+    Accepts only ``.md`` files (lowercase extension, non-empty stem) under
+    ``memory-v2/global/topics/**`` and
+    ``memory-v2/workspaces/<scope>/topics/**``, where no component
+    below ``memory-v2/`` starts with ``.`` and ``_is_excluded(rel_path)`` is False.
+    """
+    if not isinstance(rel_path, str) or not rel_path:
+        return False
+    if "\\" in rel_path or rel_path.startswith("/") or rel_path.endswith("/"):
+        return False
+    parts = rel_path.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return False
+    if parts[0] != GROK_MEMORY_ROOT:
+        return False
+    if any(p.startswith(".") for p in parts[1:]):
+        return False
+    if len(parts) >= 3 and parts[1] == "global":
+        rest = parts[2:]
+    elif len(parts) >= 4 and parts[1] == "workspaces":
+        rest = parts[3:]
+    else:
+        return False
+    if len(rest) >= 2 and rest[0] == "topics":
+        filename = rest[-1]
+    else:
+        return False
+    if len(filename) <= 3 or not filename.endswith(".md"):
+        return False
+    return not _is_excluded(rel_path, GROK_EXCLUDE_PATTERNS)
+
+
+def grok_path_allowed(rel_path: str) -> bool:
+    """Return True iff ``rel_path`` is in the Grok source's sync allowlist.
+
+    Covers both the customization subtrees (``skills/``, ``commands/``, ``rules/``)
+    and the memory allowlist under ``memory-v2/``. Shared by the walker and the
+    consumer-boundary filter.
+    """
+    if not isinstance(rel_path, str) or not rel_path:
+        return False
+    if "\\" in rel_path or rel_path.startswith("/") or rel_path.endswith("/"):
+        return False
+    parts = rel_path.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return False
+    if parts[0] == GROK_MEMORY_ROOT:
+        return grok_memory_path_allowed(rel_path)
+    if parts[0] in GROK_SYNCED_SUBDIRS and len(parts) >= 2:
+        return not _is_excluded(rel_path, GROK_EXCLUDE_PATTERNS)
+    return False
+
+
+def grok_memory_scan_dirs(
+    base: Path,
+    *,
+    strict: bool = False,
+    source_name: str | None = None,
+    on_skip: Any = None,
+    exclude_patterns: list[str] | None = None,
+) -> list[Path]:
+    """Return existing non-symlink ``topics`` directories in ``memory-v2``."""
+    # fnmatch's * spans slashes, so both documented patterns exclude the
+    # entire subtree. Narrower patterns still require complete discovery.
+    if any(pattern in ("memory-v2/*", "memory-v2/**") for pattern in exclude_patterns or []):
+        return []
+    mem_root = base / GROK_MEMORY_ROOT
+    mem_st = _lstat_or_none(
+        mem_root, strict=strict, source_name=source_name, rel_path=GROK_MEMORY_ROOT
+    )
+    if mem_st is None:
+        return []
+    if stat.S_ISLNK(mem_st.st_mode):
+        if on_skip:
+            on_skip(str(mem_root), "symlink")
+        return []
+    if not stat.S_ISDIR(mem_st.st_mode):
+        return []
+
+    scope_dirs: list[tuple[Path, bool]] = []
+    global_dir = mem_root / "global"
+    global_st = _lstat_or_none(
+        global_dir,
+        strict=strict,
+        source_name=source_name,
+        rel_path=f"{GROK_MEMORY_ROOT}/global",
+    )
+    if global_st is not None:
+        if stat.S_ISLNK(global_st.st_mode):
+            if on_skip:
+                on_skip(str(global_dir), "symlink")
+        elif stat.S_ISDIR(global_st.st_mode):
+            scope_dirs.append((global_dir, False))
+
+    workspaces_dir = mem_root / "workspaces"
+    workspaces_st = _lstat_or_none(
+        workspaces_dir,
+        strict=strict,
+        source_name=source_name,
+        rel_path=f"{GROK_MEMORY_ROOT}/workspaces",
+    )
+    if workspaces_st is not None:
+        if stat.S_ISLNK(workspaces_st.st_mode):
+            if on_skip:
+                on_skip(str(workspaces_dir), "symlink")
+        elif stat.S_ISDIR(workspaces_st.st_mode):
+            try:
+                with os.scandir(workspaces_dir) as iterator:
+                    ws_entries = list(iterator)
+            except FileNotFoundError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=f"{GROK_MEMORY_ROOT}/workspaces",
+                            problem="disappeared while being read",
+                            next_action="Wait for the writer to finish, then run mm push.",
+                        )
+                    ) from e
+                ws_entries = []
+            except OSError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=f"{GROK_MEMORY_ROOT}/workspaces",
+                            problem="could not be enumerated",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
+                ws_entries = []
+            ws_entries.sort(key=lambda entry: entry.name)
+            for entry in ws_entries:
+                if entry.name.startswith("."):
+                    continue
+                ws_path = Path(entry.path)
+                ws_rel = f"{GROK_MEMORY_ROOT}/workspaces/{entry.name}"
+                try:
+                    ws_st = entry.stat(follow_symlinks=False)
+                except FileNotFoundError as e:
+                    if strict:
+                        raise SnapshotError(
+                            snapshot_refusal(
+                                source=source_name,
+                                rel_path=ws_rel,
+                                problem="disappeared while being read",
+                                next_action="Wait for the writer to finish, then run mm push.",
+                            )
+                        ) from e
+                    continue
+                except OSError as e:
+                    if strict:
+                        raise SnapshotError(
+                            snapshot_refusal(
+                                source=source_name,
+                                rel_path=ws_rel,
+                                problem="could not be read",
+                                cause=os_error_cause(e),
+                                next_action="Restore read access, then run mm push.",
+                            )
+                        ) from e
+                    continue
+                if stat.S_ISLNK(ws_st.st_mode):
+                    if on_skip:
+                        on_skip(str(ws_path), "symlink")
+                    continue
+                if stat.S_ISDIR(ws_st.st_mode):
+                    scope_dirs.append((ws_path, True))
+
+    def _check_scope_still_present(scope_dir: Path, discovered: bool) -> None:
+        if not (discovered and strict):
+            return
+        try:
+            scope_dir.lstat()
+        except FileNotFoundError as e:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    rel_path=_rel_or_name(scope_dir, base),
+                    problem="disappeared while being read",
+                    next_action="Wait for the writer to finish, then run mm push.",
+                )
+            ) from e
+        except OSError as e:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    rel_path=_rel_or_name(scope_dir, base),
+                    problem="could not be read",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
+
+    scan_dirs: list[Path] = []
+    for scope_dir, discovered in scope_dirs:
+        topics_dir = scope_dir / "topics"
+        topics_st = _lstat_or_none(
+            topics_dir,
+            strict=strict,
+            source_name=source_name,
+            rel_path=_rel_or_name(topics_dir, base),
+        )
+        if topics_st is None:
+            _check_scope_still_present(scope_dir, discovered)
+        elif stat.S_ISLNK(topics_st.st_mode):
+            if on_skip:
+                on_skip(str(topics_dir), "symlink")
+        elif stat.S_ISDIR(topics_st.st_mode):
+            scan_dirs.append(topics_dir)
+
+    return scan_dirs
+
+
 def walk_grok_source(
     source_config: dict[str, Any],
     max_file_size: int = 52_428_800,
@@ -2110,8 +2409,11 @@ def walk_grok_source(
     """Walk a Grok home and build the files dict.
 
     Scans only the hardcoded customization dirs at the source root
-    (``GROK_SYNCED_SUBDIRS``). Sessions, credentials, vendor trees, and
-    ``config.toml`` are never entered. Missing dirs are a no-op.
+    (``GROK_SYNCED_SUBDIRS``) plus the memory allowlist under ``memory-v2/``
+    (``topics/`` in ``global`` and each workspace).
+    Sessions, credentials, vendor trees, ``config.toml``, ``MEMORY.md``,
+    SQLite databases, ``observations/``, and ``archive/`` are never synced.
+    Missing dirs are a no-op.
     """
     source_name = source_config.get("name")
     base = Path(source_config["path"]).expanduser().resolve()
@@ -2159,11 +2461,41 @@ def walk_grok_source(
             )
         )
 
-    collected_paths.sort(
-        key=lambda p: str(p.relative_to(base)) if p.is_relative_to(base) else str(p)
-    )
+    for scan_dir in grok_memory_scan_dirs(
+        base,
+        strict=strict,
+        source_name=source_name,
+        on_skip=on_skip,
+        exclude_patterns=extra,
+    ):
+        found = _collect_regular_files_scandir(
+            scan_dir,
+            base,
+            strict=strict,
+            source_name=source_name,
+            on_skip=on_skip,
+            holds=holds,
+        )
+        if strict and not found:
+            try:
+                scan_dir.lstat()
+            except FileNotFoundError as e:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(scan_dir, base),
+                        problem="disappeared while being read",
+                        next_action="Wait for the writer to finish, then run mm push.",
+                    )
+                ) from e
+        collected_paths.extend(found)
+
+    collected_with_rel = [(_rel_or_name(p, base), p) for p in collected_paths]
+    collected_with_rel.sort(key=lambda item: item[0])
     seen: set[tuple[int, int]] = set()
-    for path in collected_paths:
+    for rel, path in collected_with_rel:
+        if not grok_path_allowed(rel):
+            continue
         if path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
             if on_skip:
                 on_skip(str(path), "symlink")
@@ -2204,6 +2536,9 @@ def walk_grok_source(
             source_name=source_name,
             source_type="grok",
             holds=holds,
+            rel_path=rel,
+            pre_stat=st,
+            skip_exclude_check=not extra,
         ):
             rel, info = result
             files[rel] = info

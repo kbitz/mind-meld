@@ -143,6 +143,8 @@ Shipped allowlist:
 | `skills/` | Documented user skill tree; same shape as Codex | Generated host links and every nested symlink are excluded |
 | `commands/` | Documented user slash-command tree | Only this tree is walked |
 | `rules/` | Home-level `*.md` rules (`$GROK_HOME/rules/`) | Only this tree is walked |
+| `memory-v2/global/topics/` | Global curated topic `*.md` files (Track 111A, topics-only amendment) | Only singly-linked lowercase `*.md` files with no dot-segment below `memory-v2/` |
+| `memory-v2/workspaces/<scope>/topics/` | Per-workspace curated topic `*.md` files (Track 111A, topics-only amendment) | Only non-symlink `<scope>` directories; `MEMORY.md`, `index.sqlite*`, `memory_state.sqlite*`, `archive/`, and `.retired-stores/` stay local |
 
 Still excluded pending a separate review:
 
@@ -153,7 +155,9 @@ Still excluded pending a separate review:
 Never include: `sessions/`, `auth.json`, `mcp_credentials.json`,
 `config.toml`, `trusted_folders.toml`, `logs/`, `memtrace/`,
 `worktrees/`, `marketplace-cache/`, `active_sessions.json`,
-`last-copy.txt`, `bin/`, `bundled/`, `vendor/`.
+`last-copy.txt`, `bin/`, `bundled/`, `vendor/`, and inside `memory-v2/`:
+`MEMORY.md`, `index.sqlite*`, `memory_state.sqlite*`, `archive/`,
+all `observations/` files, including `observations/_inbox/`, and `.retired-stores/`.
 
 Repo-level `.grok/` and `AGENTS.md` stay git-tracked, the same way
 Claude's project `CLAUDE.md` is not an mm source.
@@ -161,6 +165,86 @@ Claude's project `CLAUDE.md` is not an mm source.
 The ship gate was a written allowlist in `DEFAULT_SOURCES`, a hardcoded
 walker, and tests proving that `sessions/`, `auth.json`, `config.toml`, and a
 nested `skills/<link> → sessions/` upload zero files.
+
+#### Track 111A Live Check (`grok 1.0.77`, 2026-11-06, 15 headless invocations)
+
+Historical probe record from before the topics-only decision below. The measured
+outputs remain evidence; the later checks and owner amendments replace its
+original scope and adoption conclusions.
+
+Verified in an isolated scratch `GROK_HOME` (`~/scratch/grok-111a/h1`, deleted after the check) with `GROK_MEMORY=1` and `GROK_AUTH_PATH="$HOME/.grok/auth.json"`:
+
+- **(a) & (a2) Repository workspace naming (`Branch A`):** Two clones of `mind-meld` (`origin = https://github.com/kbitz/mind-meld`) at `repos/clone1/mind-meld` and `repos/other/path/mind-meld`, a clone with a renamed checkout directory (`repos/mind-meld-renamed`), a repository with the same `origin` URL and a different root commit (`repos/diff-root/mind-meld`), and a clone using the SCP remote form (`git@github.com:kbitz/mind-meld.git`) all resolved to `memory-v2/workspaces/mind-meld-ac6e5bf3/` (matching `memory_v2_server_store.repo_key = 'kbitz/mind-meld'` and the owner's `~/.grok/memory-v2/workspaces/mind-meld-ac6e5bf3/`). A clone with the same root commit and a different `origin` (`https://github.com/example/other-repo.git`) resolved to `other-repo-921e1414`.
+- **(b) Linked git worktrees:** A `git worktree add` checkout (`repos/wt-checkout`) of clone 1 resolved to the same `mind-meld-ac6e5bf3` workspace scope.
+- **(c) Cross-`HOME` portability:** Running with `HOME` pointed at a separate scratch directory (`fakehome/Documents/Dev/Personal/mind-meld`, `origin = https://github.com/kbitz/mind-meld`) resolved to the same `mind-meld-ac6e5bf3` workspace scope.
+- **(d) No-origin git repository and non-repository folder:** A git repository with no `origin` remote (`repos/no-origin-repo`) set `meta.device_local = '1'` and hashed its canonical path (`no-origin-repo-c5609387` under `/home/kb/...`, `no-origin-repo-6afae551` under `fakehome/...`); a plain directory (`repos/plain-dir`) resolved to `plain-dir-a1142273`.
+- **(e) Observation capture, filenames, modes, and staging files:** After a session turn followed by `grok --resume <sessionId> -p "/flush"`, Grok wrote one observation file per extracted observation at `observations/_inbox/01a1b2fa-2e16-7681-9696-703c57c0e141__t000001-000001__n000.md` (`schema_version: 2`, mode `0600`, `st_nlink == 1`, YAML frontmatter with `session_id`, `from_turn`, `through_turn`, `job_id`, `observation_ordinal`, `observation_count`). Manual/tool notes in `observations/_inbox/` use `schema_version: 1` (`note_kind`, `origin`, `created_at`). Every temporary file observed during turn capture, `/flush`, and `/dream` used a leading-dot `.tmp<6alnum>` name (e.g., `.tmp8lqqbW`, `.tmpRibr4Y`), which `mm`'s dot-segment and `.md`-suffix rules reject without extra patterns.
+- **(f) Cold-start adoption:** Seeding `workspaces/mind-meld-ac6e5bf3/topics/seed.md` in a fresh `GROK_HOME` with no `MEMORY.md`, `index.sqlite`, or `memory_state.sqlite` caused Grok on first launch to create `MEMORY.md` (`0600`), `index.sqlite` (`0644`), and `memory_state.sqlite` (`0644`) and list `- **Seed Conventions** (\`topics/seed.md\`)` in `MEMORY.md`.
+- **(f2) Warm-store adoption:** Writing `topics/seed2.md` and updating `topics/seed.md` via temp file + `os.replace` + `os.utime` to an `mtime` 1 hour older than `MEMORY.md` caused Grok on the next session launch in clone 2 to reconcile `MEMORY.md` to list both `seed.md` and `seed2.md` and recall the updated `VIOLET-9921-UPDATED` and `COBALT-4410-NEW` values without `/dream` or deleting `MEMORY.md`/`index.sqlite`.
+- **(g) Folder modes:** Grok accepted `0755` (`umask`-default) scope and `topics/`/`observations/_inbox/` directories and created its own `global/`, `workspaces/<scope>/`, `topics/`, `observations/`, `observations/_inbox/`, and `archive/` directories with mode `0755`. No `pullflow.py` directory-mode change is required.
+- **(h) Dream consolidation and hard-link check:** Every file written by Grok had `st_nlink == 1`. Running `/dream` consolidated pending inbox notes into `topics/<slug>.md`, updated `MEMORY.md`, and moved the consolidated file from `observations/_inbox/` into `archive/dream_<id>/` (version-1 inbox notes are scanned directly from `observations/_inbox/` on disk; version-2 `__t...__n` captures are tracked alongside `capture_observation_files` in `memory_state.sqlite`). Placing an already-archived file back into `observations/_inbox/` and running a second `/dream` printed `Nothing to consolidate.` (`consolidation_archives` deduplicates it so topic facts are not duplicated) and left the re-created file in `observations/_inbox/` — this motivated the original inbox held rule, which the topics-only amendment below removes.
+- **(i) Anchor and unmapped workspace tolerance:** `memory-v2/.mind-meld-anchor` (`0600`) and an unmapped `memory-v2/workspaces/unmapped-deadbeef/topics/unmapped.md` remained untouched across all 15 invocations with no errors or warnings.
+
+#### Track 111A review follow-up (Grok 1.0.77, 2026-11-06)
+
+The original check above does **not** establish adoption of transferred session
+captures. Review repeated the missing warm-store case with synthetic data in two
+fresh scratch `HOME`/`GROK_HOME` pairs outside `/tmp`, using the same fixture
+repository and `origin`. No personal memory, session or credential content was
+read or copied; Grok alone used its existing login. The receiver was initialized
+before transfer, and its `index.sqlite` and `memory_state.sqlite` files existed
+(their contents were not opened).
+
+The sender generated one `schema_version: 2` observation through a normal turn
+and `/flush`. Review copied only that observation Markdown, byte-for-byte, into
+the receiver's matching `mind-meld-ac6e5bf3/observations/_inbox/` directory. The
+file's SHA-256 on both sides was
+`5c5296c7d5270faf83db47fbbb7e6eaa9157f6eb28f7581b9cfe5e13e4f786fd`.
+The receiver's `/dream` exited 0 with `Nothing to consolidate.`, created no
+topic, and left the transferred observation unchanged in its inbox. As a positive
+control, the sender's `/dream` exited 0 with `Dream merged 1 observation into 1
+topic.`, wrote the synthetic fact into a topic and emptied its inbox. This proves
+that copying ordinary session-capture Markdown alone does not satisfy the
+approved cross-machine Dream-adoption requirement on this version. Review
+stopped at the original live adoption gate. Database sync or another adoption
+mechanism was not authorized by this result; the owner subsequently
+removed observation sync from scope, as recorded below.
+
+This follow-up used five invocations, bringing Task 1 to 22 of its 24-call cap
+(15 original, two no-origin identity checks, five adoption checks). All owned
+scratch homes and the fixture repository were removed afterwards. Separately,
+the no-origin checks confirmed path-dependent scopes, and the owner accepted
+inert no-origin/non-repository copies as a reduced scope. That identity decision
+alone did not waive the transferred-observation adoption gate. The original Branch A
+label above applies only to the observed matching origin-derived scopes.
+
+#### Track 111A owner amendment: topics-only sync (2026-11-06)
+
+After the failed adoption check, Karl explicitly approved reducing criteria 3
+and 4 to topic Markdown only: `memory-v2/global/topics/**/*.md` and
+`memory-v2/workspaces/<scope>/topics/**/*.md`. All `observations/**` files,
+including pending `_inbox/` captures, stay local. They are excluded from both
+publication and the consumer allowlist, including deletion tombstones. The
+all-Grok-path pull allowlist remains in force, and the inbox-specific held
+rule is removed. Topic changes, deletions with recovery copies, conflict
+preservation and encryption retain the existing sync contracts.
+
+This is a scope reduction, not evidence that transferred observations work.
+It supersedes the original observation-adoption requirement and resolves that
+scope gate without another Grok probe. The prior identity limitation remains:
+global topics and matching origin-derived scopes are active on receiving
+machines; no-origin and non-repository scopes transfer as inert copies when
+Grok computes a different name. No identity codec or database sync was added.
+
+The handoff is `/flush`, then `/dream` in the sending Grok session, then
+`mm push` in its shell; run `mm pull` on the receiving machine before starting
+its next Grok session. Grok also Dreams automatically when enough observations
+accumulate. Anything still only in the sender's observations remains local
+until Dream consolidates it into a topic and a later push publishes that topic.
+The run count remains 22 of 24; the amendment required no further identity or
+adoption probes. Existing `memory-v2/.mind-meld-anchor` metadata is rewritten
+on each publishing push, including under a `memory-v2/*` content opt-out;
+the anchor itself never syncs or creates a missing memory root.
 
 ### Plan C — Grok `retro-fleet` skill discovery (measured, not linked)
 
@@ -310,7 +394,9 @@ The owner, 2026-11-05: "go, it needs to bring grok to parity w/ the other
 models". Grok Build now runs through Paseo's `grok` provider (ACP) on the same
 subscription as Cursor, which meets the revisit trigger of the 2026-10-19
 removal. Each row of docs/SPEC.md's table, compared with Claude Code and
-Codex, on Grok Build 1.0.70 (this Mac, 2026-11-05):
+Codex, on Grok Build 1.0.70 (this Mac, 2026-11-05). This historical table
+records the original requested parity; Track 111A's topics-only and identity
+limitations above supersede its memory row:
 
 | Row | Claude Code / Codex | Grok Build |
 |---|---|---|

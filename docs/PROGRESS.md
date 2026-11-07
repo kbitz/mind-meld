@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.18 | 2026-11-06 | mm syncs Grok Build memory between machines for consolidated topics. |
 | 1.12.17 | 2026-11-06 | mm applies Grok pricing overrides across aliases and keeps their floor prices. |
 | 1.12.16 | 2026-11-05 | mm captures Grok Build usage when you consent, and a usage scan honors its deadline and cache boundaries. |
 | 1.12.15 | 2026-11-05 | mm restores opt-in sync of Grok customizations, and that sync runs only after you consent. |

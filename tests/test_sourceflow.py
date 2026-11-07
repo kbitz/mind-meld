@@ -27,8 +27,11 @@ runner = CliRunner()
 
 DETAIL_LINES = {
     "grok": [
-        "Syncs ~/.grok skills/, commands/, and rules/ only. "
-        "Sessions, memory, settings, credentials, plugins and hooks are not synced.",
+        "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics. "
+        "Observations, sessions, SQLite indexes, MEMORY.md, settings, credentials, "
+        "plugins and hooks are not synced.",
+        "Grok keeps memory off by default; turn it on on each machine with "
+        "[memory] enabled = true in ~/.grok/config.toml (or GROK_MEMORY=1).",
         "Run 'mm disable-source grok' to turn this off.",
     ],
     "muse": [
@@ -149,7 +152,10 @@ def test_opt_in_source_enable_then_disable(cfg, name):
 
     again = runner.invoke(app, ["enable-source", name])
     assert again.exit_code == 0, again.output
-    assert _lines(again.stdout) == [f"Source '{name}' is already enabled."]
+    expected_again = [f"Source '{name}' is already enabled."]
+    if name == "grok":
+        expected_again.extend(DETAIL_LINES["grok"][:2])
+    assert _lines(again.stdout) == expected_again
 
     off = runner.invoke(app, ["disable-source", name])
     assert off.exit_code == 0, off.output

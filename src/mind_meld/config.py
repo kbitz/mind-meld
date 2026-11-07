@@ -670,19 +670,32 @@ def _validate_sources(sources: Any) -> None:
         name = src["name"]
         if src["type"] == "grok" and name != "grok":
             raise ConfigError(
-                "config: type 'grok' is reserved for source name 'grok' so only its "
-                "hardcoded skills/commands/rules allowlist is walked."
+                f"config: [[sync.sources]] entry '{name}' field 'type': "
+                "type 'grok' is reserved for source name 'grok' so only its "
+                "hardcoded allowlist (skills/, commands/, rules/, and memory-v2/ "
+                "topics) is walked. "
+                "Change type to 'generic' or rename the entry to 'grok' in config.toml, "
+                "then re-run 'mm status'."
             )
         if name == "grok":
             if src["type"] != "grok":
                 raise ConfigError(
-                    "config: source 'grok' must use type 'grok' so only its "
-                    "hardcoded skills/commands/rules allowlist is walked."
+                    "config: [[sync.sources]] entry 'grok' field 'type': "
+                    "source 'grok' must use type 'grok' so only its "
+                    "hardcoded allowlist (skills/, commands/, rules/, and memory-v2/ "
+                    "topics) is walked. "
+                    "Set type = 'grok' on the 'grok' [[sync.sources]] entry in config.toml, "
+                    "then re-run 'mm status'."
                 )
             if "include_dirs" in src or "include_files" in src:
+                bad_field = "include_dirs" if "include_dirs" in src else "include_files"
                 raise ConfigError(
-                    "config: source 'grok' does not support include_dirs or include_files; "
-                    "it syncs skills/, commands/, and rules/ only."
+                    f"config: [[sync.sources]] entry 'grok' field '{bad_field}': "
+                    "source 'grok' does not support include_dirs or include_files; "
+                    "it syncs skills/, commands/, rules/, and memory-v2/ "
+                    "topics only. "
+                    "Remove include_dirs and include_files from the 'grok' [[sync.sources]] "
+                    "entry in config.toml, then re-run 'mm status'."
                 )
         if src["type"] == "muse" and name != "muse":
             raise ConfigError(
