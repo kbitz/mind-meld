@@ -27,10 +27,17 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 **Cursor CLI wrapper, hook and usage consent removed (Track 114A):** `mm cursor-agent`,
 `mm capture-cursor-usage`, and the `cursor` source alias for `mm enable-source` /
 `mm disable-source` are removed, and `mm push`, `mm status` and `mm diag` no longer
-select or report the Cursor usage reader. On any machine where `mm enable-source cursor`
-was run earlier, delete the `stop` hook entry whose command is `mm capture-cursor-usage`
-from `~/.cursor/hooks.json`. A leftover `[retro] cursor_host_usage` key in
-`~/.config/mind-meld/config.toml` is ignored by usage capture and can be deleted.
+select or report the Cursor usage reader. Scripts and aliases that ran
+`mm cursor-agent ...` must call `cursor-agent ...` directly; the old command now exits 2
+without starting Cursor. On any machine where `mm enable-source cursor` was run earlier,
+delete the `stop` hook entry whose command is `mm capture-cursor-usage` from
+`~/.cursor/hooks.json` and keep your other hooks; until you do, Cursor runs that missing
+command after every turn. Usage already published stays as it is. Usage capture ignores a
+leftover `[retro] cursor_host_usage` key in `~/.config/mind-meld/config.toml`, but while
+it is `true`, git-root discovery still reads Cursor's session metadata
+(`~/.cursor/acp-sessions`) and Conductor's Cursor store, including its `index.db`, until a
+later release removes that prober. Delete the key to stop it: `mm disable-source cursor`
+no longer changes it, even with `--force`.
 
 **Grok Build `memory-v2/` sync (Track 111A):** on machines where the `grok` source is
 already enabled, the first `mm push` after upgrading publishes existing topic
@@ -2210,7 +2217,7 @@ with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-sour
 
 <a id="cursor-sqlite-stores"></a>
 
-Cursor usage capture and Conductor SQLite store reading are removed in Track 114A; see [Upgrading](#upgrading).
+Cursor usage capture, including the Conductor SQLite usage reader, is removed in Track 114A. Until a later release removes it, git-root discovery still opens Conductor's Cursor store while a leftover `[retro] cursor_host_usage = true` is set; see [Upgrading](#upgrading).
 
 Restore an unavailable custom mm-events folder before retrying. Enabling Codex
 sync now authorizes reading its local rollouts on **every attended push**, including

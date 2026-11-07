@@ -850,7 +850,7 @@ The census and fatal-check list are
 walker never opens `sessions/`; the usage reader is a separate consented walk
 of `session.jsonl` only. Muse gets no `AgentRow` (it discovers `~/.claude/skills`).
 
-**Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A; unhooked in Track 114A, deleted in Track 115A).** Track 114A removed the Cursor CLI wrapper and hook commands, the `cursor` source alias in `sourceflow.py`, the `[retro] cursor_host_usage` validation/helper in `config.py`, and all Cursor selection and reporting in `events_tail.py` and `statusflow.py`. The `host_usage.py` reader functions and `aggregator._cursor_acp_gap_notes` remain until Track 115A deletes them.
+**Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A; unhooked in Track 114A, deleted in Track 115A).** Track 114A removed the Cursor CLI wrapper and hook commands, the `cursor` source alias in `sourceflow.py`, the `[retro] cursor_host_usage` validation/helper in `config.py`, and all Cursor selection and reporting in `events_tail.py` and `statusflow.py`. The `host_usage.py` reader, spool and hook-editor functions remain, unreachable, until Track 115A deletes them; `aggregator._cursor_acp_gap_notes` remains until Track 116A.
 
 The private authoritative history
 holds hashed generation IDs and counters; the local capture's UTC date owns
@@ -4160,7 +4160,9 @@ adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-rea
    `cache_state`, `last_reason`, `last_reason_since`, `model_count`, `models`,
    and `spec.ready_key`. Codex, Muse, Antigravity and Grok Build also expose
    `files_cached` and `files_on_disk` (Grok Build adds `usage_less_skipped`); Cursor instead exposes `runs_cached` and store counters
-   because its inventory is retained history. `warm_host_cache_inline`
+   because its inventory is retained history; since Track 114A `mm status` and
+   `mm diag` no longer call `cursor_usage_diag` or report these keys, and Track
+   115A deletes it. `warm_host_cache_inline`
    raises `ValueError` naming `host_registry.py` and this section anchor when
    given an unknown reader name.
 8. **Call-time owner resolution (monkeypatch contract).**
