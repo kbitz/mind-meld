@@ -668,7 +668,7 @@ repository by common Git directory, unchanged.
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Grok Build / Cursor (Conductor + enrolled CLI) / Muse / Antigravity readers as one additive
+The tail publishes the local Codex / Grok Build / Muse / Antigravity readers (Track 114A stopped selecting Cursor's) as one additive
 `host-usage-snapshot` row. `hosts/codex.py` and `hosts/grok.py` own the Codex and Grok Build readers;
 `host_usage` owns the shared reader kit, other readers and model-family
 classification, and `host_registry` owns diagnostic and warm dispatch.
@@ -877,7 +877,9 @@ outlive the missing store; only `unsupported`/`malformed` survive it
 (`_CURSOR_STORE_BLOCKERS`). Before history is authoritative, the prior reason
 still stands.
 
-Hook and wrapper completions never touch the history lock. They append one
+Hook and wrapper completions (none arrive since Track 114A removed both commands;
+`record_cursor_usage` keeps this contract, unreachable, until Track 115A) never
+touch the history lock. They append one
 sanitized row (hashed generation ID, UTC day, model, counters, partial) to the
 private `cursor-standalone-spool.jsonl` with `fsutil.append_rotatable_jsonl`,
 which writes only after its flock confirms the path still names the locked
@@ -2058,7 +2060,7 @@ A no-op autopush may overwrite that breadcrumb with `success` without
 reading either host; a persisted blocker remains visible in status and diag.
 Attended push refreshes consented host usage even with no user-content changes;
 no-op autopush still performs no host reads. See README "Host usage capture (Codex,
-Grok, Cursor and Muse)" for remedies and the three existing deferred-work TODOs.
+Grok Build, Muse and Antigravity)" for remedies and the three existing deferred-work TODOs.
 
 **`degraded_sources` is additive.** No `EVENTS_SCHEMA_VERSION` bump:
 `_accept_host_usage_snapshot` does no key-set check and `_tie_break_key`
