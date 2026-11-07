@@ -44,6 +44,26 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/host_usage.py|tests/test_agy_usage.py] Test gap: retained SQLite diagnostic code filtering
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Antigravity still filters optional SQLite error codes, but its surviving tests assert causes without checking allowed, malformed or overlong code values. The retired Cursor suite covered this shared filter.
+- **Hypothesis (untested):** Extend an existing Antigravity diagnostic test to check accepted and rejected code values after cache reload; re-verify the contract first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/host_usage.py:_sqlite_error_name`, `_ReadFailure.detail`, `_agy_reason_detail`
+- **Evidence:** Coverage audit at `5d344ac` traced the retained filter and surviving tests; no failure was reproduced.
+- **Context:** `/review-and-prep`, branch `mmm/b5023320`, before PR creation, 2026-11-07. Revisit when a Track next changes these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/attemptlog.py|tests/test_attemptlog.py] Test gap: retired Cursor attended-attempt upgrade
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Generic invalid-reader validation and no-reader record tests cover individual pieces, but no direct test starts with a well-formed old Cursor attempt, observes the corrupt-record message, and verifies its replacement by an attended push.
+- **Hypothesis (untested):** Extend the malformed-record table and an existing isolated attended-push fixture to exercise the documented upgrade chain; re-verify it first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/attemptlog.py:_valid`, `read`, `render`
+- **Evidence:** Coverage audit at `5d344ac` traced validation, rendering and attended writes; no failure was reproduced.
+- **Context:** `/review-and-prep`, branch `mmm/b5023320`, before PR creation, 2026-11-07. Revisit when a Track next changes these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/core.py|tests/test_gstack_extend_analytics.py] Test gap: unrecognized migration directory shapes
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** The new retired-directory migration guard has coverage for default and custom string lists, but not absent, scalar or mixed-type `include_dirs` values.
