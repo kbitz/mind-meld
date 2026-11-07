@@ -1207,6 +1207,11 @@ reader, which joins the historical `analytics/stage-runs.jsonl` and the sorted
   `core._migrate_config_core` also updates `include_dirs` to
   `["projects", "analytics/stage-runs"]` in the same `patch_config_on_disk` write. Any
   other `include_dirs` list (edited or extended) is respected as the owner's choice.
+  The new allowlist still narrows those custom entries: paths outside it stop syncing,
+  with no tombstones or local deletions. Publication also requires a matching
+  `include_dirs` or `include_files` entry; the preview explains both limits. A present
+  `gstack-extend` `include_patterns` list, even `[]`, is left unchanged and does not
+  trigger this directory update.
 - **Anchors, permissions and host collisions.** Adding `analytics/stage-runs` to
   `include_dirs` makes it a scan root (`manifest.scan_roots`), so publishing pushes
   write `.mind-meld-anchor` there; gstack-extend's `*.jsonl` reader glob ignores it.
