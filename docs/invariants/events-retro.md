@@ -515,7 +515,7 @@ with later probers so a cold corpus cannot starve them. Duplicate roots use the
 first matching prober in canonical order, regardless of resume order. A provider runs under the
 consent its usage reader uses: its enabled sync source (`codex`, `muse`, `agy`; an
 implicit config adds `codex` when `~/.codex` exists, as `get_sources` does), or for
-Cursor `[retro] cursor_host_usage = true` (`mm_config.cursor_host_usage_enabled`). A
+Cursor `[retro] cursor_host_usage = true` (read directly in `events._enabled_root_probers` until Track 116A). A
 tool runs when its record exists (`rootprobes.installed`): `~/.paseo/projects/projects.json`,
 `~/.mmm/items/`. gstack has no prober (census: `repo-mode.json`, `timeline.jsonl` and
 `learnings.jsonl` carry no directory).
@@ -668,7 +668,7 @@ repository by common Git directory, unchanged.
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Grok Build / Cursor (Conductor + enrolled CLI) / Muse / Antigravity readers as one additive
+The tail publishes the local Codex / Grok Build / Muse / Antigravity readers (Track 114A stopped selecting Cursor's) as one additive
 `host-usage-snapshot` row. `hosts/codex.py` and `hosts/grok.py` own the Codex and Grok Build readers;
 `host_usage` owns the shared reader kit, other readers and model-family
 classification, and `host_registry` owns diagnostic and warm dispatch.
@@ -724,12 +724,11 @@ that distinction backwards silently under-reports the fleet.
 Grok, Muse and Antigravity to their source names. Grok selection uses the separate
 `grok_consented` verdict from `config.grok_usage_consented`, which also supports
 usage-only consent; Codex, Muse and Antigravity require their source enabled.
-Cursor's entry is `None`; its separate `cursor_consented` flag authorizes usage
-reading, as described below. The live set is
-`events.ACTIVE_HOST_READERS`. `HOST_USAGE_TOKEN_SOURCES` is the live writer
-tuple (same names, same order). Unknown inbound names (retired `opencode`
+Track 114A unhooked Cursor from `HOST_READER_SOURCE_GATE` and `_default_host_readers`
+ahead of Track 115A's reader deletion (`ACTIVE_HOST_READERS` and `HOST_USAGE_TOKEN_SOURCES`
+drop `"cursor"` in Track 115A). Unknown inbound names (retired `opencode`
 or a future reader) are retained by the aggregator, not listed here.
-`_default_host_readers(sources, cursor_consented=..., grok_consented=...)` returns only those.
+`_default_host_readers(sources, *, grok_consented=...)` returns only those.
 A user who declined the `codex` source does not get `~/.codex/sessions`
 (or the archive, `~/.codex/archived_sessions`) parsed — matching
 `_enabled_claude_paths`. Antigravity is a scoped sync source (`type: "generic"`,
@@ -851,95 +850,9 @@ The census and fatal-check list are
 walker never opens `sessions/`; the usage reader is a separate consented walk
 of `session.jsonl` only. Muse gets no `AgentRow` (it discovers `~/.claude/skills`).
 
-**Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A).** Only
-`~/Library/Application Support/com.conductor.app/cursor-sdk-store/*/runs.ndjson`
-and each `[0-9a-f]{16}` workspace's `index.db` (see Conductor SQLite stores below)
-are read from Conductor. The native standalone CLI has no historical billing
-ledger. Standalone capture now records future completions through the enrolled
-`stop` hook or the `mm cursor-agent --print` wrapper. No sync source or
-skill-link row is added. `[retro] cursor_host_usage = true` is the sole consent;
-`HOST_READER_SOURCE_GATE["cursor"] = None` cannot be satisfied by any source.
-Every capture caller passes that bit. `mm enable-source cursor` and
-`mm disable-source cursor` are usage-only aliases and install/remove only mm's
-exact completion-hook entry, preserving unrelated hooks and settings. Existing
-custom file sources named `cursor` take precedence and keep their file toggles;
-merely resolving such a source still grants no usage permission.
+**Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A; unhooked in Track 114A, deleted in Track 115A).** Track 114A removed the Cursor CLI wrapper and hook commands, the `cursor` source alias in `sourceflow.py`, the `[retro] cursor_host_usage` validation/helper in `config.py`, and all Cursor selection and reporting in `events_tail.py` and `statusflow.py`. The `host_usage.py` reader, spool and hook-editor functions remain, unreachable, until Track 115A deletes them, as do the `cursor` entries in `ACTIVE_HOST_READERS`, `HOST_USAGE_TOKEN_SOURCES`, `WARMABLE_HOST_READERS` and `host_registry.HOST_READER_DIAGS` and the `reader == "cursor"` branches in `events_tail.py`, `statusflow._host_usage_blocker` and `host_registry`; `aggregator._cursor_acp_gap_notes` remains until Track 116A.
 
-**Standalone Cursor capture.** The measured CLI is
-**2026.09.26-dd393fe**. Interactive `stop` payloads carry inclusive counters;
-normalize with `_normalize_inclusive_usage` exactly once. Headless result
-`usage` has already been normalized by Cursor and is disjoint, so never subtract
-its cache counters again. A plain native `--print` run does not emit a stop
-hook in this census. The wrapper forwards JSON/stream-JSON unchanged, renders
-text from the final result and retains the exit code. It uses
-the explicit or locally selected model, and retains no transcript content or
-CLI config. The last `--model` and the last `--output-format` before `--` win, as
-in Cursor's parser; otherwise the CLI config's current `model`
-is used, with `selectedModel` parameters applied only while it names the same
-model (it can lag a switch). A print run whose model cannot be resolved is kept
-as the unpriced `cursor-unknown` (host family `other`) rather than dropped.
-Ambiguous bare Grok model IDs (explicit `--model grok-4.7` or a current model
-without a fast parameter) are recorded as the unpriced
-`grok-4.7-unspecified`; known flat CLI aliases identify standard versus Fast
-and normalize to `grok-4.7` or `grok-4.7-fast`, each priced on its own card.
-The wrapper reads argv verbatim (`_RawArgsCommand`): Click drops a literal
-`--`, and losing it would turn prompt
-text into live Cursor options. Without consent, or outside print mode, it is a
-pure passthrough with no output rewriting. It relays SIGTERM/SIGHUP to the
-child, and SIGINT too unless it runs in the terminal's foreground process
-group (where Ctrl-C already reaches the child, so relaying would deliver it
-twice). After any stdout write failure (closed pipe, hung-up tty, full disk,
-a non-blocking pipe that fills) it points fd 1 at /dev/null and keeps draining,
-so Python's exit-time flush cannot replace the child's status with 120. Signal
-exits map to 128+N. Usage is queued after the child exits, once the result
-line is final and default signal handling is back. Text mode renders
-a string `result` (lone surrogates replaced) and forwards any other result line
-raw. A successful run with no result line warns that usage was not recorded.
-`MM_CURSOR_AGENT_ACTIVE` in the child environment makes a `cursor-agent` shim
-that points back at mm fail fast instead of recursing.
-
-**ACP sessions are uncaptured (measured 2026-10-06, cursor-agent
-2026.10.01-e373342; re-measured 2026-11-03 on 2026.10.22-27dcf5f with the same
-result).** `cursor-agent acp`, Paseo's Cursor runtime, fires no
-lifecycle hook (`sessionStart`, `stop`, `sessionEnd`), though tool hooks still
-run. Its ACP messages carry no usage or token fields. Its session stores
-(`~/.cursor/acp-sessions/<id>/store.db`, the same `blobs`/`meta` schema as
-`~/.cursor/chats/`) hold the model, per-turn request IDs, millisecond
-timestamps and a context-window gauge. They hold no billed input, output,
-cache-read or cache-write counters. CLI stores lack them too; CLI tokens come
-only from the `stop` payload or the `mm cursor-agent` wrapper's result line. Do
-not sweep the stores to estimate usage. The gauge is a snapshot of the current
-context, not billing: a turn re-sends the context once per model request, cache
-reads are not split out, and reasoning output never enters the context, so a
-number derived from it can be off by multiples. Do not add a wrapper or ACP
-proxy either, because ACP sends no usage to intercept. If cursor-agent starts
-firing a `stop` payload under ACP with `status: completed`, `generation_id`,
-`model` and all four inclusive counters, the existing hook captures these
-sessions unchanged. Re-check after each cursor-agent upgrade.
-
-The 2026.10.22 re-check (Track 103A) added: a project-level `.cursor/hooks.json`
-is not loaded under ACP at all (not even a `postToolUse` probe fired), so the
-user-level `~/.cursor/hooks.json` is the only valid venue, and there only tool
-hooks fire. The `session/prompt` result carries only `stopReason`; no
-`usage_update` update is sent. No credential-free local source was found for
-billed ACP tokens. The inspected Paseo plugin maps `plan_usage` to an account
-percentage, not tokens; the ai-tracking database schema holds line attribution.
-Cursor's public Admin API docs describe per-event tokens using a team API key,
-but do not establish inclusive/disjoint semantics or a per-event deduplication
-ID. Dashboard usage-event CSV exports are another candidate. Neither account
-route was exercised: individual-plan access, ACP coverage, counter semantics
-and deduplication against existing capture remain unverified. Those routes need
-a separate owner-decided card; mm currently reads none of these sources. The gap is named in
-`mm status` (a clause on the Cursor line) and in `retro-fleet` (an
-`agent_coverage` health note, emitted by `_cursor_acp_gap_notes` when any
-accepted snapshot consulted `cursor`). The note is a separate helper from
-`_agent_coverage_notes` because it is not a refresh problem and carries no
-attended-producer remedy.
-
-Both capture paths (hook and wrapper) require the existing consent bit. The
-hidden hook command reads bounded stdin, returns `{}` and exits zero on
-malformed input or capture failure so it never controls Cursor's agent loop.
-Warnings contain no payload details. The same private authoritative history
+The private authoritative history
 holds hashed generation IDs and counters; the local capture's UTC date owns
 standalone runs. Duplicate callbacks keep the original completion day and
 replace counters, rather than adding again, whether they fold in one read or
@@ -964,7 +877,9 @@ outlive the missing store; only `unsupported`/`malformed` survive it
 (`_CURSOR_STORE_BLOCKERS`). Before history is authoritative, the prior reason
 still stands.
 
-Hook and wrapper completions never touch the history lock. They append one
+Hook and wrapper completions (none arrive since Track 114A removed both commands;
+`record_cursor_usage` keeps this contract, unreachable, until Track 115A) never
+touch the history lock. They append one
 sanitized row (hashed generation ID, UTC day, model, counters, partial) to the
 private `cursor-standalone-spool.jsonl` with `fsutil.append_rotatable_jsonl`,
 which writes only after its flock confirms the path still names the locked
@@ -981,25 +896,18 @@ batch with no valid row is retired at once (including on the early
 from a newer spool version refuses as `unsupported` and keeps the batch for
 the upgraded mm; like any spool read failure it is persisted through
 `_carry_reason`, so status shows the upgrade remedy. The spool is capped at `CURSOR_SPOOL_MAX_BYTES` (16 MiB). Folded rows make
-history authoritative (`complete_once`) when no blocker is outstanding. Diag
-reports `pending_completions` read-only. A corrupt history refuses as before
+history authoritative (`complete_once`) when no blocker is outstanding.
+`cursor_usage_diag` computes `pending_completions` read-only, but since Track 114A
+`mm diag` no longer calls it. A corrupt history refuses as before
 and leaves the queue in place.
 
-`mm enable-source cursor` installs the hook before granting consent, so a
-failed install grants nothing. `mm disable-source cursor` revokes consent first
-and then removes the hook best-effort: a symlinked, unsupported or malformed
-hooks.json warns instead of blocking revocation (the leftover entry records
-nothing without consent). Re-running enable reports a repaired hook. Hook
-enrollment uses the shared durable JSON primitive (compact rewrite, sibling
-`.lock`, symlinks refused, not replaced). `configure_cursor_hook` refuses the
+`configure_cursor_hook` refuses the
 real `~/.cursor/hooks.json` under pytest, derived from the account database
 rather than HOME, comparing resolved, case-folded paths. A symlinked hooks.json
 is refused with a message naming the entry to add where the file is managed.
 `cursor_hook_state` reads without a lock: bounded, non-blocking, regular files
 only (a FIFO or over-deep JSON is `malformed`, never a hang or a traceback);
-the writer's atomic replace makes old-or-new reads coherent. Status adds the
-enable-source hint only for `missing` and names any other non-installed state;
-diag prints the hook state. A requestId that names a different retained run
+the writer's atomic replace makes old-or-new reads coherent. A requestId that names a different retained run
 than an earlier scan recorded refuses as `malformed`, like a conflict within
 one scan.
 
@@ -1021,8 +929,9 @@ A known unreadable store disappearing preserves its blocker rather than
 becoming source absence; previously captured runs survive a missing store.
 
 Conductor counters are disjoint and must satisfy input + output + cacheRead + cacheWrite
-== totalTokens. No inclusive normalization applies to them (stop-hook counters
-are inclusive; see Standalone Cursor capture above). reasoningTokens must be
+== totalTokens. No inclusive normalization applies to them (the unreachable
+stop-hook path's counters are inclusive and were normalized once on intake; Track
+114A removed its callers and that paragraph). reasoningTokens must be
 between zero and outputTokens and is not added again. Each whole turn belongs
 to **endedAt's UTC date** in the legacy ledger, or to its terminal stamp in
 SQLite (`finished_at`, `cancelled_at`, `expired_at`; an `ERROR` run uses
@@ -1178,21 +1087,8 @@ empty read set (all unread), an unreadable or lock-failed snapshot or an unlista
 root is unknown. A running push does not make the count unknown: writers lock the
 sibling `.lock`, so the unlocked snapshot is the last committed state.
 `unsupported_sqlite_stores` is `{count, causes}` over the recorded drift.
-Status appends "not yet read" and "use a layout this mm cannot read ... Run
-`mm update`" clauses to the existing Cursor usage narrative, and a store-detail
-clause (and the diag `store detail:` line) rendered in `statusflow.py` from
-`last_reason_detail` through `safety` follows the shared blocker line;
-these SQLite-specific clauses do not alter `events_tail._host_skip_phrase` or
-push output. The closed catalog
-covers every reader-wide cause in `CURSOR_SQLITE_READER_CAUSES` or marks it
-explicitly clause-less (`hot_journal`, `identity_changed`: transient), and never
-advises deleting retained history or the spool. The shared "mm update" phrase
-also applies to reader-wide unsupported formats, except on status and plain-text
-diag when the cached check is current (notice text below); store-scoped SQLite drift
-does not set that blocker.
-Retirement: on the next Conductor store change the adapter is retired by default
-(status reverts to "not counted"), unless Conductor Cursor runs fall on three or
-more distinct days of the prior thirty fleet-wide, when the user decides.
+Track 114A removed the Cursor rows and store-detail clauses from `statusflow.py`
+(`status` and `diag`); Track 115A deletes the remaining `cursor_usage_diag` helpers.
 
 The private `cursor-host-tokens.json` is **authoritative history after pruning**,
 not a disposable parse cache. It uses shared `host_usage.CACHE_VERSION` and
@@ -1227,15 +1123,11 @@ inspect an immutable old-or-new data inode without creating a lock or store.
 Existing Codex/Grok forensic caches retain their original write protocol.
 
 `HOST_READER_DIAGS` dispatches each reader to its own diagnostic and readiness
-predicate, including status, recapture's reminder and diag JSON. Cursor's cache
-inventory reports retained runs, not files still present in Conductor. Status
-names **Cursor (Conductor + enrolled CLI)** and its own standing blocker. Diag
-also reports the read-only completion-hook enrollment state. No Grok cache state
-may supply Cursor's upgrade/reminder decision. Consent, registration and this
-dispatch land together. The token-source tuples append cursor after codex/grok;
-this is MINOR under the 1.x compatibility contract, not a new host family.
-(Superseded by Track 110A: the retired Grok reader's slot is restored, so the tuples
-read `("codex", "grok", "cursor", "muse", "agy")`. See the Grok Build section below.)
+predicate, including status, recapture's reminder and diag JSON. Track 114A omits
+`"cursor"` from `statusflow.py` (`status` and `diag`), and Track 115A removes the
+`cursor` entry from `HOST_READER_DIAGS`, `ACTIVE_HOST_READERS` and
+`HOST_USAGE_TOKEN_SOURCES`. (Track 110A restored the Grok reader's slot; see the
+Grok Build section below.)
 
 **First-success carve-out (Track 21A) — retired from sweep policy in Track 31A.**
 The latch's premise was already false (`complete_once` arms on an empty
@@ -2169,7 +2061,7 @@ A no-op autopush may overwrite that breadcrumb with `success` without
 reading either host; a persisted blocker remains visible in status and diag.
 Attended push refreshes consented host usage even with no user-content changes;
 no-op autopush still performs no host reads. See README "Host usage capture (Codex,
-Grok, Cursor and Muse)" for remedies and the three existing deferred-work TODOs.
+Grok Build, Muse and Antigravity)" for remedies and the three existing deferred-work TODOs.
 
 **`degraded_sources` is additive.** No `EVENTS_SCHEMA_VERSION` bump:
 `_accept_host_usage_snapshot` does no key-set check and `_tie_break_key`
@@ -4205,11 +4097,11 @@ Cursor and Antigravity remain in place until their own adapter work. Grok Build'
 adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-reader-track-110a)).
 
 1. **Consent gate and closed default (`events_tail.HOST_READER_SOURCE_GATE`, `_default_host_readers`).**
-   Every reader in `events.ACTIVE_HOST_READERS` has an entry in
-   `HOST_READER_SOURCE_GATE`. For source-gated readers, an absent gating source
-   in resolved sources makes `_default_host_readers(sources)` omit the reader.
-   Cursor's gate entry is `None`: it has no sync source and is selected only
-   when the separate `cursor_consented` flag is true. Grok Build is selected only
+   Every live reader in `events_tail.HOST_READER_SOURCE_GATE` (all of
+   `events.ACTIVE_HOST_READERS` except `"cursor"`, which Track 114A unhooked ahead
+   of Track 115A) has an entry in `HOST_READER_SOURCE_GATE`. For source-gated
+   readers, an absent gating source in resolved sources makes
+   `_default_host_readers(sources)` omit the reader. Grok Build is selected only
    when `grok_consented` (`config.grok_usage_consented`) is true; its gate entry
    `"grok"` names the source its stop remedy disables, and every
    `_default_host_readers` call site passes the same verdict. For readers that
@@ -4272,7 +4164,9 @@ adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-rea
    `cache_state`, `last_reason`, `last_reason_since`, `model_count`, `models`,
    and `spec.ready_key`. Codex, Muse, Antigravity and Grok Build also expose
    `files_cached` and `files_on_disk` (Grok Build adds `usage_less_skipped`); Cursor instead exposes `runs_cached` and store counters
-   because its inventory is retained history. `warm_host_cache_inline`
+   because its inventory is retained history; since Track 114A `mm status` and
+   `mm diag` no longer call `cursor_usage_diag` or report these keys, and Track
+   115A deletes it. `warm_host_cache_inline`
    raises `ValueError` naming `host_registry.py` and this section anchor when
    given an unknown reader name.
 8. **Call-time owner resolution (monkeypatch contract).**

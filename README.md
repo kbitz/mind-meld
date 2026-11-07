@@ -24,6 +24,24 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Cursor CLI wrapper, hook and usage consent removed (Track 114A):** `mm cursor-agent`,
+`mm capture-cursor-usage`, and the `cursor` source alias for `mm enable-source` /
+`mm disable-source` are removed, and `mm push`, `mm status` and `mm diag` no longer
+select or report the Cursor usage reader. Scripts and aliases that ran
+`mm cursor-agent ...` must call `cursor-agent ...` directly; the old command now exits 2
+without starting Cursor. On any machine where `mm enable-source cursor` was run earlier,
+delete the `stop` hook entry whose command is `mm capture-cursor-usage` from
+`~/.cursor/hooks.json` and keep your other hooks; until you do, Cursor runs that missing
+command after every turn. Published Cursor rows are not migrated, but each machine's
+next `mm push` publishes a usage snapshot without Cursor, and `retro-fleet` counts only
+each machine's latest snapshot, so that machine's earlier Cursor usage stops counting.
+Usage capture ignores a
+leftover `[retro] cursor_host_usage` key in `~/.config/mind-meld/config.toml`, but while
+it is `true`, git-root discovery still reads Cursor's session metadata
+(`~/.cursor/acp-sessions`) and Conductor's Cursor store, including its `index.db`, until a
+later release removes that prober. Delete the key to stop it: `mm disable-source cursor`
+no longer changes it, even with `--force`.
+
 **Grok Build `memory-v2/` sync (Track 111A):** on machines where the `grok` source is
 already enabled, the first `mm push` after upgrading publishes existing topic
 Markdown under `~/.grok/memory-v2/global/topics/**/*.md` and
@@ -528,11 +546,6 @@ Behavioral exit tests live in
 table lists the applicable codes per command. Exit 0 from content sync does
 not prove host usage was captured or published.
 
-`mm cursor-agent` passes through Cursor's exit status (signal exits map to
-128+N; SIGTERM/SIGHUP sent to the wrapper are relayed to Cursor).
-Usage-recording failures warn without changing that status. The completion-hook
-command always exits 0 so it cannot stop the agent loop.
-
 ## Quick Start
 
 The storage path is the root of a Syncthing folder shared by every machine (`~/Sync/mind-meld` by default). A fleet still on iCloud Drive moves to Syncthing with the [cutover runbook](#moving-the-fleet-from-icloud-drive-to-syncthing-cutover-runbook); iCloud Drive is not supported after cutover ([docs/SPEC.md](docs/SPEC.md)). One block per role:
@@ -882,7 +895,7 @@ and publication lines in `mm status` provide that evidence. For a blocker, see
 
 `mm enable-source grok` syncs `~/.grok` `skills/`, `commands/`, `rules/`, and `memory-v2/` topic Markdown files (`memory-v2/global/topics/**/*.md` and `memory-v2/workspaces/*/topics/**/*.md`), and records consent for Grok usage capture (`grok_usage_consented`). Sessions, SQLite indexes (`index.sqlite`, `memory_state.sqlite` and `-shm`/`-wal`), `MEMORY.md`, `archive/`, all `observations/` files (including `_inbox/`), `.retired-stores/`, `config.toml`, `auth.json`, `trusted_folders.toml`, `plugins/`, `hooks/`, and logs stay local and are never synced. Grok is never enabled automatically, even when `~/.grok/skills/`, `commands/`, `rules/`, or `memory-v2/` exists; `mm init` asks with a default of N, and `mm reconfigure-sources` defaults to N unless an explicit Grok source is already enabled. `mm enable-source grok` clears `"grok"` from `disabled_sources` on machines that ran `mm migrate-config` after v1.11.8. Grok Build reads `~/.claude/skills`, so mm keeps no separate Grok skill link. Run `mm disable-source grok` to turn it off.
 
-Consent also lets `mm push` read completed turn token totals from `~/.grok/sessions/*/*/usage.json` and nothing else: it never opens `updates.jsonl`, `chat_history.jsonl` or any other session file, so usage capture does not publish prompts or responses. The same consent is the config verdict `[retro] grok_host_usage = true`; `mm disable-source grok` stops the reading, and an unconsented `~/.grok` is never opened. Runs that Paseo makes through Grok Build (ACP) are counted. A session without a `usage.json` (Paseo leaves some with only a one- or two-line `updates.jsonl`) counts as zero and costs one `lstat`. Usage capture publishes only the existing encrypted aggregate: family, model, UTC day and token counters, never cost ticks, paths or session ids. Separately, memory sync transfers topic Markdown, which can contain facts extracted from conversations and provenance retained in the topic; these files are encrypted before reaching shared storage. Pending observations stay local. In the fleet retro, Grok Build tokens join the `Grok` row next to Cursor's Grok runs and are priced from the Grok 4.7 rates. Grok Build does not document `usage.json` as a stable contract, so a format change makes this reader alone fail closed: `mm status` and `mm diag` name the broken record format with the fix (`mm update`, or `mm disable-source grok` to stop retrying), `mm push` still exits 0, and the other readers keep publishing. Unknown extra fields in `usage.json` are ignored.
+Consent also lets `mm push` read completed turn token totals from `~/.grok/sessions/*/*/usage.json` and nothing else: it never opens `updates.jsonl`, `chat_history.jsonl` or any other session file, so usage capture does not publish prompts or responses. The same consent is the config verdict `[retro] grok_host_usage = true`; `mm disable-source grok` stops the reading, and an unconsented `~/.grok` is never opened. Runs that Paseo makes through Grok Build (ACP) are counted. A session without a `usage.json` (Paseo leaves some with only a one- or two-line `updates.jsonl`) counts as zero and costs one `lstat`. Usage capture publishes only the existing encrypted aggregate: family, model, UTC day and token counters, never cost ticks, paths or session ids. Separately, memory sync transfers topic Markdown, which can contain facts extracted from conversations and provenance retained in the topic; these files are encrypted before reaching shared storage. Pending observations stay local. In the fleet retro, Grok Build tokens join the `Grok` row and are priced from the Grok 4.7 rates. Grok Build does not document `usage.json` as a stable contract, so a format change makes this reader alone fail closed: `mm status` and `mm diag` name the broken record format with the fix (`mm update`, or `mm disable-source grok` to stop retrying), `mm push` still exits 0, and the other readers keep publishing. Unknown extra fields in `usage.json` are ignored.
 
 #### Grok memory across machines
 
@@ -1009,7 +1022,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Open with a scoped verdict comparing local context with this device's last push, then show Syncthing state, each peer's last push and applied state, the latest auto or attended run per verb, and current diagnostics. Peer pushes overdue by more than 24 h warn in every mode. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
-| `mm diag` | Dump non-secret crypto, sync, Syncthing, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`, with `grok` beside `codex`, `cursor`, `muse` and `agy`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
+| `mm diag` | Dump non-secret crypto, sync, Syncthing, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`, with `grok` beside `codex`, `muse` and `agy`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
@@ -1487,7 +1500,7 @@ publish a usable capture.
 | Grok   |   1.0B |   11 |        1 |     ≥$546 | grok-4.6-build (830.8M) |
 ```
 
-Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `grok` / `agy` / `cursor` / `muse`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
+Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `grok` / `agy` / `muse`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
 
 Days are a set union across machines and can only understate. Token sums can double-count a migrated home directory carrying two device ids with overlapping ledger history. mm flags identical host-ledger day counters as possible overlap through health code `duplicate_ledger`; matching totals alone are not proof, so inspect the machines before retiring one. This detector covers host ledgers, including their Claude models; it does not establish that Claude Code session histories are disjoint. Before v1.1 this hazard was handled by refusing to sum host tokens at all, while summing Claude's under the identical risk.
 
@@ -2177,7 +2190,7 @@ claim to repair historical attribution.
 
 <a id="host-usage-capture"></a>
 
-### Host usage capture (Codex, Grok Build, Cursor, Muse and Antigravity)
+### Host usage capture (Codex, Grok Build, Muse and Antigravity)
 
 Every attended `mm push` refreshes and publishes consented host usage, including
 when user files are already in sync. This requires **mm v0.14.17+ on the producing
@@ -2205,162 +2218,9 @@ storage backend; it does not prove delivery to another Mac.
 Capture requires enabled, available `mm-events` and consented readers. Enable
 with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok` / `mm enable-source muse` / `mm enable-source agy`.
 
-Cursor uses local usage consent. Enable capture with:
-
-```sh
-mm enable-source cursor
-mm push
-mm status
-```
-
-This sets the following key in `~/.config/mind-meld/config.toml` and installs
-one `stop` hook in `~/.cursor/hooks.json`, preserving other hooks and settings:
-
-```toml
-[retro]
-cursor_host_usage = true
-```
-
-What is counted: Conductor runs, from both its legacy `runs.ndjson` and (since
-Conductor 0.90.1) its SQLite `index.db`; interactive `cursor-agent` runs through
-the completion hook; and `mm cursor-agent --print` runs through the wrapper. Not
-counted: a native `cursor-agent --print` run, which fires no hook, and Paseo's
-Cursor sessions (ACP), which send no usage.
-
-Conductor capture has been supported since mm v1.2.0. The config bit alone
-continues to enable that reader; standalone interactive capture also needs the
-hook installed by `mm enable-source cursor`; `mm status` says so when the hook
-is missing. Run the command again to repair a missing hook.
-`mm disable-source cursor` stops usage reading and removes mm's hook; if
-hooks.json cannot be edited it warns, and the leftover entry records nothing. An explicitly configured custom file source named `cursor` retains
-its existing file-source toggle behavior instead of using this usage alias.
-
-Run `mm push` and inspect `mm status`; `mm diag --json` includes
-`host_usage.cursor` with its own blocker, retained-run count, last complete
-read, `hook_state`, `pending_completions`, `unread_sqlite_stores` (Conductor
-workspace stores never read by an SQLite-capable mm), `unsupported_sqlite_stores`
-(`{count, causes}`: stores whose layout this mm cannot read) and
-`last_reason_detail` (`{cause, store, file?, code?}`, the closed cause behind a
-standing blocker). There is no built-in Cursor customization or memory sync source.
-Run files remain local; only aggregate
-usage crosses the encrypted sync boundary.
-
-Standalone interactive `cursor-agent` runs are recorded by the completion hook.
-For print-mode runs, use the wrapper with the same Cursor arguments:
-
-```sh
-mm cursor-agent --print --model grok-4.7-low "Your prompt"
-mm cursor-agent --print --output-format stream-json --model grok-4.7-low "Your prompt"
-```
-
-The wrapper forwards JSON/stream-JSON output unchanged and renders text from the
-final result when the run completes. Arguments after `--` stay positional.
-Without usage consent it runs Cursor unchanged. It preserves Cursor's exit status and records only
-completed result metadata; responses, prompts, email addresses, paths and
-credentials are discarded. Native `cursor-agent --print` does not fire the
-completion hook in the measured CLI and therefore still needs the wrapper.
-Cursor's native chat history has no billing ledger: sessions completed before
-enrollment cannot be backfilled from context-window counts.
-
-Cursor sessions run through ACP (`cursor-agent acp`, which Paseo uses) are not
-counted. `mm status` names this gap when Cursor capture is enabled;
-`mm retro-fleet` names it when an accepted snapshot consulted Cursor. Re-checked on
-cursor-agent 2026.10.22: the ACP front-end still fires no `sessionStart`, `stop`
-or `sessionEnd` hook (tool hooks do fire), its `session/prompt` result carries
-only a `stopReason`, and its session stores under `~/.cursor/acp-sessions/` hold
-the model and a context-window gauge but no billed token counters, so mm has
-nothing to read locally. Cursor's public docs describe per-event tokens through
-its credentialed team Admin API; dashboard usage-event CSV exports are another
-candidate. Neither account route was exercised. Individual-plan access, counter
-semantics and deduplication remain unverified, for a separate owner-decided card;
-mm currently reads neither route. Interactive and wrapped print sessions are
-unaffected.
-
-Conductor runs are counted on their terminal UTC day (`endedAt` in the legacy
-ledger; `finished_at`, `cancelled_at` or `expired_at` in SQLite, and `updated_at`
-for an errored run); standalone completions use the local capture's UTC day. Repeated callbacks replace the same generation,
-and Conductor request IDs deduplicate overlapping captures. mm retains captured runs
-for 90 days even after Conductor prunes them, using private durable
-`cursor-host-tokens.json`; runs pruned before the first capture cannot be recovered.
-Standalone completions wait in private `cursor-standalone-spool.jsonl` until
-the next `mm push` folds them in; `mm diag` shows how many are pending.
-Do not delete either file to troubleshoot a slow read: each may hold the only copy.
-Repeated short reads need not converge on a rewritten ledger; attended warming
-or a larger configured read budget may be necessary.
-
 <a id="cursor-sqlite-stores"></a>
 
-**Conductor SQLite stores (Conductor 0.90.1+).** Conductor keeps one store per
-workspace at `~/Library/Application Support/com.conductor.app/cursor-sdk-store/<id>`,
-where `<id>` is the first 16 hex digits of `sha256(workspace path)`. mm opens only
-each store's `index.db`, read-only, and selects run identity, status, model, the
-terminal timestamp and the token counters; it never reads prompts, results or
-events, and never writes, checkpoints or copies a store file. In the steady
-states it creates and removes nothing there and leaves `index.db` and `-wal`
-byte-identical; SQLite may still advance the modification time of the `-shm`
-wal-index, as for any reader of a WAL database. A crash or a close race can
-leave SQLite-valid `-wal`/`-shm` files that Conductor recovers on its next open.
-Each run is counted once. If the legacy ledger and SQLite both have it, a row
-with token counters beats a placeholder, and SQLite wins when they tie. A run
-mm has retained stays counted even if Conductor later prunes it or reports it
-without counters. Totals can rise after you update: mm now also counts backfilled and
-migrated runs and counter-bearing cancelled, errored or expired runs.
-
-Older mm versions (before v1.7.0) cannot read these stores and may discard the local metadata
-that protects retained SQLite counters from stale JSONL copies. Keep every active
-`mm` entrypoint, including autopush, on the upgraded build. If `mm status` says a store is "not
-yet read", or a Cursor row is missing runs from a Conductor 0.90.1+ Mac, update
-that Mac and confirm the version fleet-wide:
-
-```sh
-mm update
-mm --version
-mm devices
-```
-
-Then verify on the producing Mac. A cleared notice alone is not proof:
-
-```sh
-mm push
-mm status | grep -i cursor
-mm retro-fleet 1d
-```
-
-Expect no "not yet read" clause, a completed Cursor scan, and today's tokens in
-the Cursor row. The status clauses mean:
-
-- **"not yet read"**: this mm has not read the store yet; `mm push` attempts to read it.
-- **"use a layout this mm cannot read"**: Conductor's schema drifted. Those runs
-  contribute nothing, other stores and standalone captures still publish, and
-  history already retained is kept. This is "unsupported by this installed mm":
-  `mm update` may help. If you are current, the schema changed again; report
-  `mm diag --json` `host_usage.cursor` (`unsupported_sqlite_stores`).
-  "Support retired" is different: mm drops the SQLite adapter when Conductor's
-  store changes again and no update helps. Cursor's dashboard can export per-event
-  usage as a CSV by hand (a community-reported feature,
-  [not verified by mm](https://forum.cursor.com/t/dashboard-export-usage-events-csv-no-longer-exports-cost/167193)).
-- **A standing blocker with a store detail** (`malformed` or `io_error` named after
-  a Conductor workspace store): one store mm cannot read pauses **all** Cursor
-  usage on that Mac until it reads cleanly. If it persists, stop Cursor usage
-  reading with `mm disable-source cursor` or `[retro] cursor_host_usage = false`.
-  Never delete `cursor-host-tokens.json` or the spool to clear it.
-- **`deadline`**: the read ran out of budget. After two attended pushes still at
-  `deadline`, report `mm diag --json` `host_usage.cursor`. The budgets are
-  `[retro] capture_budget_ms` (250 to 60,000 ms, attended total),
-  `host_usage_autopush_budget_ms` (100 to 5,000 ms) and
-  `host_usage_interactive_budget_ms` (250 to 5,000 ms).
-
-Standard Grok 4.7 uses Cursor's 2026-11-05 list rates ($2 input / $0.50 cache
-read / $6 output per million tokens; 2x above 256k input per request), with an
-unknown per-request long-context tier making the cost a `≥` floor. This is
-list-rate equivalent, not Cursor Ultra subscription spend. Fast tokens use the
-`grok-4.7-fast` pseudo-id card at 2x standard ($4 / $1 / $12) and 3x standard
-in long context ($6 / $1.50 / $18), and flat effort/Fast ids
-(`grok-4.7-(low|medium|high|xhigh)(-fast)`) alias onto `grok-4.7` and
-`grok-4.7-fast`, so Fast-only and mixed rows both render a `≥` floor that
-includes Fast cost. Cache-write price is unpublished. Sources:
-[Cursor pricing](https://cursor.com/docs/models-and-pricing) and
-[Grok 4.7](https://cursor.com/docs/models/grok-4-7).
+Cursor usage capture, including the Conductor SQLite usage reader, is removed in Track 114A. Until a later release removes it, git-root discovery still opens Conductor's Cursor store while a leftover `[retro] cursor_host_usage = true` is set; see [Upgrading](#upgrading).
 
 Restore an unavailable custom mm-events folder before retrying. Enabling Codex
 sync now authorizes reading its local rollouts on **every attended push**, including
@@ -2825,7 +2685,7 @@ If you remove `~/.local/share/mind-meld` while keeping `~/.config/mind-meld` and
 
 The link loop below is written to survive the state you are actually in: it needs no `mm` on `PATH`, no config, and no valid config, so it works whether you run it before or after `pipx uninstall`.
 
-If you enabled Cursor usage capture, neither step below touches mm's `stop` hook in `~/.cursor/hooks.json`. Run `mm disable-source cursor` first, or afterwards delete the hook entry whose command is `mm capture-cursor-usage`.
+If an earlier release enabled Cursor usage capture on this machine, delete the `stop` hook entry whose command is `mm capture-cursor-usage` from `~/.cursor/hooks.json`.
 
 ```bash
 pipx uninstall mind-meld

@@ -958,9 +958,7 @@ def test_command_set_is_unchanged_by_the_decomposition() -> None:
     assert names == {
         "autopull",
         "autopush",
-        "capture-cursor-usage",
         "conflicts",
-        "cursor-agent",
         "devices",
         "diag",
         "diff",
@@ -1218,9 +1216,6 @@ STATUSFLOW_DEFINITIONS = frozenset(
     """
     _BREADCRUMB_STALE_AFTER_HOURS
     _BROKEN_DIAG_STATUS_TO_INSTALL
-    _CURSOR_DETAIL_NO_CLAUSE
-    _CURSOR_DISABLE
-    _CURSOR_ROW_CAUSES
     _DIAG_CAPTURE_CLAMP
     _DIAG_MODELS_SHOWN
     _DISCOVERY_REJECT_REASONS
@@ -1229,8 +1224,6 @@ STATUSFLOW_DEFINITIONS = frozenset(
     _collect_diag_state
     _collect_discovery_diag
     _collect_git_capture_diag
-    _cursor_store_detail_clause
-    _cursor_unsupported_clause
     _diag_models_line
     _fresh_discovery_label
     _host_complete_read_line
@@ -1238,7 +1231,6 @@ STATUSFLOW_DEFINITIONS = frozenset(
     _host_read_budgets
     _host_read_sweep_line
     _host_usage_blocker
-    _host_usage_module
     _print_host_publication
     _print_retro_capture_status
     _read_autorun_breadcrumbs
@@ -1247,7 +1239,6 @@ STATUSFLOW_DEFINITIONS = frozenset(
     _reader_capture_readiness
     _render_broken_skill_status
     _sanitize_recorded_capture
-    _sqlite_version
     _status_notices
     _status_verdict
     _usage_capture_needs_upgrade
@@ -1305,7 +1296,6 @@ SOURCEFLOW_DEFINITIONS = frozenset(
     """
     _known_source_names
     _record_seen
-    _toggle_cursor_usage
     _validate_source_name
     disable_source
     enable_source
@@ -1493,7 +1483,7 @@ def test_status_core_single_ownership_and_qualified_calls():
         )
         assert _unqualified_owner_calls(source, module) == []
     assert len(CORE_DEFINITIONS) == 35 + len(PULL_CORE_DEFINITIONS)
-    assert len(STATUSFLOW_DEFINITIONS) == 38
+    assert len(STATUSFLOW_DEFINITIONS) == 31
     assert len(PULLFLOW_DEFINITIONS) == 48
 
 
@@ -1522,7 +1512,7 @@ def test_sourceflow_single_ownership_and_qualified_calls():
             f"{module}: expected owner inventory {expected}"
         )
         assert _unqualified_owner_calls(source, module) == []
-    assert len(SOURCEFLOW_DEFINITIONS) == 8
+    assert len(SOURCEFLOW_DEFINITIONS) == 7
 
 
 def test_pull_test_consumers_use_qualified_owner_names():
@@ -1634,11 +1624,9 @@ def test_init_bindings_have_one_owner():
 
 
 def test_source_bindings_have_one_owner():
-    from mind_meld import cli, consoles, safety, sourceflow
+    from mind_meld import cli, consoles, sourceflow
 
     assert sourceflow.console is consoles.console
-    assert sourceflow.stderr_console is consoles.stderr_console
-    assert sourceflow.safe_str is safety.safe_str
     # The helpers moved, and cli no longer reads the imports only they used.
     for name in (SOURCEFLOW_DEFINITIONS - SOURCE_SHELLS) | {
         "difflib",

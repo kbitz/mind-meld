@@ -2,20 +2,20 @@
 
 `mm sources` lists the configured sources and how many files each keeps.
 `mm enable-source` and `mm disable-source` toggle one source on this device
-(`[sync].disabled_sources`), validate the name against the known set, and give
-`cursor` its usage-only alias path. `mm reconfigure-sources` re-runs the picker
-over every known source and commits the answers in one config patch.
+(`[sync].disabled_sources`) and validate the name against the known set.
+`mm reconfigure-sources` re-runs the picker over every known source and commits
+the answers in one config patch.
 
 Raise surface for direct callers:
 - returns None on every success path, including the already-enabled and
   already-disabled no-ops.
 - typer.Exit(1): a core._error refusal (config problem, unknown or retired
-  source name, a Cursor hook that cannot be installed), or a reconfigure abort
-  (Ctrl-C or typer.Abort mid-prompt) with nothing written.
+  source name), or a reconfigure abort (Ctrl-C or typer.Abort mid-prompt) with
+  nothing written.
 - anything else propagates uncaught. A failed config write prints no success
   line and records nothing as seen.
 A nonzero exit does not prove nothing changed: the steps around the config write
-can fail too (`_record_seen` after it, the Cursor hook before it).
+can fail too (`_record_seen` after it).
 The `@app.command()` shells and the `--help` text stay in cli.py; this module
 never imports cli.
 """
@@ -37,11 +37,10 @@ from mind_meld.config import (
     get_sources,
     patch_config_on_disk,
 )
-from mind_meld.consoles import console, stderr_console
-from mind_meld.errors import ConfigError, StorageError
+from mind_meld.consoles import console
+from mind_meld.errors import ConfigError
 from mind_meld.manifest import _is_excluded as _manifest_is_excluded
 from mind_meld.manifest import walk_source
-from mind_meld.safety import safe_str
 
 
 def sources() -> None:
@@ -103,11 +102,11 @@ def sources() -> None:
 
 
 def _known_source_names(config: dict) -> list[str]:
-    """Sorted union of file sources and usage-only toggle names.
+    """Sorted union of configured and default sync source names.
 
     The validation surface for `mm enable-source` / `mm disable-source`.
-    A name is "known" if the user configures its file source, mm ships a default
-    for it, or it has a usage-only consent alias. --force accepts unknown names.
+    A name is "known" if the user configures its file source or mm ships a
+    default for it. --force accepts unknown names.
     """
     explicit = [
         s["name"]
@@ -115,7 +114,7 @@ def _known_source_names(config: dict) -> list[str]:
         if s.get("name") not in _config_module.RETIRED_SOURCE_NAMES
     ]
     defaults = [s["name"] for s in DEFAULT_SOURCES]
-    return sorted(set(explicit) | set(defaults) | set(_config_module.HOST_USAGE_ONLY_CONSENT))
+    return sorted(set(explicit) | set(defaults))
 
 
 def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
@@ -149,64 +148,6 @@ def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
     )
 
 
-def _toggle_cursor_usage(name: str, config: dict, *, enabled: bool) -> bool:
-    """Handle the cursor usage alias without changing file-source selection.
-
-    An explicit custom source takes precedence over the alias so its existing
-    enable/disable behavior remains available and does not grant usage consent.
-    Enable installs the hook before granting consent; disable revokes consent
-    before touching hooks.json, so a hook file mm cannot edit never blocks
-    revocation (the leftover hook records nothing without consent).
-    """
-    key = _config_module.HOST_USAGE_ONLY_CONSENT.get(name)
-    if name != "cursor" or key is None:
-        return False
-    if any(s["name"] == name for s in config.get("sync", {}).get("sources", []) or []):
-        return False
-    from mind_meld import host_usage
-
-    hook_errors = (OSError, ValueError, RuntimeError, StorageError)
-    already = config.get("retro", {}).get(key) is enabled
-    hook_changed = False
-    if enabled:
-        try:
-            hook_changed = host_usage.configure_cursor_hook(enabled=True)
-        except hook_errors as exc:
-            core._error("Could not install Cursor's completion hook: " + safe_str(str(exc)))
-    if not already:
-        patch_config_on_disk({"retro": {key: enabled}})
-    if not enabled:
-        try:
-            hook_changed = host_usage.configure_cursor_hook(enabled=False)
-        except hook_errors as exc:
-            stderr_console.print(
-                "[yellow]mm: warning:[/yellow] Cursor usage capture is disabled, but mm's "
-                f"completion hook could not be removed from {host_usage.CURSOR_HOOK_CONFIG_PATH}: "
-                + safe_str(str(exc))
-                + f". It records nothing while capture is disabled; remove its "
-                f"'{host_usage.CURSOR_HOOK_COMMAND}' stop entry to clean up."
-            )
-    state = "enabled" if enabled else "disabled"
-    if already:
-        repaired = ""
-        if hook_changed:
-            repaired = "; reinstalled its hook" if enabled else "; removed its hook"
-        console.print(f"[dim]Cursor usage capture is already {state}{repaired}.[/dim]")
-        return True
-    verb = "Enabled" if enabled else "Disabled"
-    console.print(f"[green]{verb} Cursor usage capture on this device.[/green]")
-    if enabled:
-        console.print(
-            "[dim]Standalone interactive sessions use the completion hook. "
-            "For --print runs, use 'mm cursor-agent' to record stdout usage. "
-            "Only usage aggregates are synced.[/dim]"
-        )
-        console.print("[dim]Run 'mm push' to refresh usage, then 'mm status' to verify.[/dim]")
-    opposite = "disable" if enabled else "enable"
-    console.print(f"[dim]Run 'mm {opposite}-source cursor' to change this setting.[/dim]")
-    return True
-
-
 def _record_seen(names: list[str]) -> None:
     """Mark `names` as acknowledged in the seen_sources tracker.
 
@@ -225,8 +166,6 @@ def _record_seen(names: list[str]) -> None:
 def disable_source(name: str, *, force: bool = False) -> None:
     """Disable a sync source on this device only."""
     config = core._get_config(read_only=False)
-    if _toggle_cursor_usage(name, config, enabled=False):
-        return
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:
@@ -263,8 +202,6 @@ def _print_grok_enable_notes() -> None:
 def enable_source(name: str, *, force: bool = False) -> None:
     """Enable a sync source on this device."""
     config = core._get_config(read_only=False)
-    if _toggle_cursor_usage(name, config, enabled=True):
-        return
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:

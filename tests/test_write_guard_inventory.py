@@ -294,13 +294,6 @@ REVIEWED = {
             ),
         ],
     ),
-    "cli.py:cursor_agent.emit": (
-        "residual",
-        "os.devnull output sink, not an account-state file",
-        [
-            "os.open(os.devnull, os.O_WRONLY)",
-        ],
-    ),
     "core.py:_migrate_config_core": (
         "residual",
         "migration breadcrumb cleanup; raw unlink outside frozen inventory",

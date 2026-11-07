@@ -1005,8 +1005,9 @@ def _enabled_root_probers(config: dict, enabled_sources: set[str]) -> list[rootp
     """Host-record probers that may run, in registry order.
 
     A provider runs under the consent its usage reader already uses: its
-    enabled sync source (codex, muse, agy) or, for Cursor, the usage-only
-    consent bit. A tool runs when its record exists.
+    enabled sync source (codex, muse, agy) or, for Cursor until Track 116A,
+    the legacy ``[retro] cursor_host_usage`` key. A tool runs when its record
+    exists.
     """
     home = rootprobes._discovery_home()
     selected: list[rootprobes.RootProber] = []
@@ -1014,7 +1015,10 @@ def _enabled_root_probers(config: dict, enabled_sources: set[str]) -> list[rootp
         if prober.kind == "tool":
             allowed = rootprobes.installed(prober, home)
         elif prober.name == "cursor":
-            allowed = mm_config.cursor_host_usage_enabled(config)
+            # Track 114A removed cursor_host_usage_enabled; Track 116A removes
+            # this prober and this last reader of the legacy key.
+            retro = config.get("retro")
+            allowed = isinstance(retro, dict) and retro.get("cursor_host_usage") is True
         else:
             allowed = prober.name in enabled_sources
         if allowed:

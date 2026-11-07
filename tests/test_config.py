@@ -2646,28 +2646,35 @@ def test_capture_budget_is_autopush_ceiling_when_set():
     assert "must not exceed retro.capture_budget_ms (300)" in str(err.value)
 
 
-class TestCursorHostConsent67A:
-    @pytest.mark.parametrize("value", ["true", 1, 0, None, [], {}])
-    def test_non_boolean_rejected(self, value):
-        with pytest.raises(ConfigError, match="cursor_host_usage must be a boolean"):
-            _validate(
-                {
-                    "device": {"id": "abc", "name": "Mac"},
-                    "storage": {"path": "/tmp"},
-                    "retro": {"cursor_host_usage": value},
-                }
-            )
+class TestCursorHostConsentRemoved114A:
+    @pytest.mark.parametrize("value", [True, "true", 1, [], {}])
+    def test_legacy_cursor_host_usage_key_accepted(self, value):
+        _validate(
+            {
+                "device": {"id": "abc", "name": "Mac"},
+                "storage": {"path": "/tmp"},
+                "retro": {"cursor_host_usage": value},
+            }
+        )
 
-    def test_default_off_and_usage_only_remedy(self):
+    def test_load_config_tolerates_legacy_key_and_drops_cursor_consent_helpers(self, tmp_path):
         from mind_meld import config
 
-        assert not config.cursor_host_usage_enabled({})
-        assert not config.cursor_host_usage_enabled({"retro": {"cursor_host_usage": False}})
-        assert config.cursor_host_usage_enabled({"retro": {"cursor_host_usage": True}})
+        cfg_file = tmp_path / "config.toml"
+        cfg_file.write_text(
+            '[device]\nid = "abc"\nname = "Mac"\n\n'
+            f'[storage]\npath = "{tmp_path}"\n\n'
+            "[retro]\ncursor_host_usage = true\n"
+        )
+        loaded = config.load_config(cfg_file)
+        assert loaded["retro"]["cursor_host_usage"] is True
+        assert not hasattr(config, "cursor_host_usage_enabled")
+        assert not hasattr(config, "HOST_USAGE_ONLY_CONSENT")
         assert "cursor" not in {s["name"] for s in DEFAULT_SOURCES}
-        text = config.usage_capture_remedy("no-reader", reader="cursor")
-        assert "[retro] cursor_host_usage = true" in text
-        assert "enable-source cursor" in text
+        assert "cursor" not in config.usage_capture_remedy("no-reader").lower()
+        assert (
+            config.host_usage_consent_remedy("grok", enabled=False) == "Run mm disable-source grok."
+        )
 
 
 class TestGrokSourceAndConsent109A:

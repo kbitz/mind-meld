@@ -89,8 +89,6 @@ def cfg(tmp_path, monkeypatch):
     # width-only pin when TERM=dumb and wraps at 80 columns.
     monkeypatch.setattr(sourceflow.console, "_width", 240)
     monkeypatch.setattr(sourceflow.console, "_height", 50)
-    monkeypatch.setattr(sourceflow.stderr_console, "_width", 240)
-    monkeypatch.setattr(sourceflow.stderr_console, "_height", 50)
     return config_path
 
 

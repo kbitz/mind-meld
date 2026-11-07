@@ -484,7 +484,7 @@ def test_unsupported_remedy_ignores_current_cache_when_checks_disabled(tmp_path,
 
 
 def test_newest_release_remedy_names_all_unsupported_readers(tmp_path, monkeypatch):
-    # Value: protects=multiple unsupported readers and Cursor retain their own stop remedies;
+    # Value: protects=multiple unsupported readers retain their own stop remedies;
     # fails_when=plural output loses a reader or one blocker keeps the obsolete update remedy;
     # why_new=the newest-release integration test has one unsupported Muse reader; seam=none;
     # no_claim=live host formats or fleet acceptance (reader diagnostics are stubbed).
@@ -495,9 +495,6 @@ def test_newest_release_remedy_names_all_unsupported_readers(tmp_path, monkeypat
     _setup(tmp_path, monkeypatch)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     _enable_capture_sources(tmp_path, readers=("codex", "muse", "agy"))
-    cfg = load_config()
-    cfg.setdefault("retro", {})["cursor_host_usage"] = True
-    save_config(cfg)
     monkeypatch.setattr(upgrade, "__version__", "9.0.0")
     monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
     upgrade.CACHE_PATH.write_text(
@@ -516,12 +513,11 @@ def test_newest_release_remedy_names_all_unsupported_readers(tmp_path, monkeypat
         assert result.exit_code == 0, result.output
         flat = " ".join(result.output.split())
         assert (
-            "Codex and Cursor and Muse and Antigravity usage not captured: "
+            "Codex and Muse and Antigravity usage not captured: "
             "this mm can't read their current record formats, and no newer mm can yet."
         ) in flat
         for reader, label in (
             ("codex", "Codex"),
-            ("cursor", "Cursor"),
             ("muse", "Muse"),
             ("agy", "Antigravity"),
         ):
@@ -530,7 +526,6 @@ def test_newest_release_remedy_names_all_unsupported_readers(tmp_path, monkeypat
                 f"{label} usage not captured: this mm can't read {label}'s current record format"
             ) in flat
             assert f"mm disable-source {reader}" in flat
-        assert "[retro] cursor_host_usage = false in config.toml" in flat
         assert "mm update" not in flat
         assert "mm push" not in flat
 
@@ -2048,212 +2043,14 @@ def test_diag_last_complete_read_future_and_invalid_dates(tmp_path, monkeypatch,
     assert "forged" not in plain
 
 
-@pytest.mark.parametrize("scan", ["success", "blocker"])
-def test_cursor_acp_sentence_reaches_status_with_a_scan_or_a_blocker(tmp_path, monkeypatch, scan):
-    _setup(tmp_path, monkeypatch)
-    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-    _enable_capture_sources(tmp_path, readers=())
-    cfg = load_config()
-    cfg.setdefault("retro", {})["cursor_host_usage"] = True
-    save_config(cfg)
-    monkeypatch.setattr(
-        host_usage,
-        "cursor_usage_diag",
-        lambda: {
-            "cache_state": "ok",
-            "complete_once": scan == "success",
-            "last_reason": "unsupported" if scan == "blocker" else None,
-            "hook_state": "installed",
-            "runs_cached": 1,
-        },
-    )
-    status = " ".join(runner.invoke(app, ["status"]).output.split())
-    assert "Cursor runs through ACP front-ends such as Paseo are not counted" in status
-    assert ("a prior scan completed successfully" in status) is (scan == "success")
-    assert ("cursor unsupported" in status) is (scan == "blocker")
-
-
-@pytest.mark.parametrize("hook_state", ["installed", "missing", "malformed"])
-def test_cursor_hook_state_reaches_status_and_diag(tmp_path, monkeypatch, hook_state):
-    _setup(tmp_path, monkeypatch)
-    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-    _enable_capture_sources(tmp_path, readers=())
-    cfg = load_config()
-    cfg.setdefault("retro", {})["cursor_host_usage"] = True
-    save_config(cfg)
-    monkeypatch.setattr(host_usage, "cursor_hook_state", lambda: hook_state)
-    status = " ".join(runner.invoke(app, ["status"]).output.split())
-    diag = " ".join(runner.invoke(app, ["diag"]).output.split())
-    hint = "not captured until mm enable-source cursor installs the completion hook"
-    assert (hint in status) is (hook_state == "missing")
-    assert ("completion hook file is malformed" in status) is (hook_state == "malformed")
-    assert "Cursor runs through ACP front-ends such as Paseo are not counted" in status
-    assert f"completion hook: {hook_state}" in diag
-    assert "outside coverage" not in diag
-
-
-def _assert_no_reader_wide_upgrade(text):
-    """Store-scoped Cursor drift never prints the reader-wide unsupported remedy.
-
-    The store clause itself says `mm update`, so the guard matches the
-    reader-wide sentences rather than the bare command.
-    """
-    flat = " ".join(text.split())
-    assert "unsupported record format" not in flat
-    assert "wrote a record this version cannot read" not in flat
-
-
-@pytest.mark.parametrize("scenario", ["never_read", "read", "unreadable_cache"])
-def test_unread_conductor_sqlite_stores_reach_status_and_diag(tmp_path, monkeypatch, scenario):
-    _setup(tmp_path, monkeypatch)
-    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-    _enable_capture_sources(tmp_path, readers=())
-    cfg = load_config()
-    cfg.setdefault("retro", {})["cursor_host_usage"] = True
-    save_config(cfg)
-    stores = ("0123456789abcdef", "fedcba9876543210")
-    for store in stores:
-        (host_usage.CURSOR_STORE_PATH / store).mkdir(parents=True)
-        (host_usage.CURSOR_STORE_PATH / store / "index.db").touch()  # status/diag never open it
-    host_usage.CURSOR_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if scenario == "read":
-        host_usage.CURSOR_CACHE_PATH.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "runs": {},
-                    "complete_once": True,
-                    "sqlite_read": {"stores": dict.fromkeys(stores, "read")},
-                }
-            )
-        )
-    elif scenario == "unreadable_cache":
-        host_usage.CURSOR_CACHE_PATH.write_text("not json")
-    status = " ".join(runner.invoke(app, ["status"]).output.split())
-    diag = " ".join(runner.invoke(app, ["diag"]).output.split())
-    notice = "2 Conductor workspace store(s) not yet read; mm push attempts to read them"
-    assert (notice in status) is (scenario == "never_read")
-    expected = {"never_read": "2", "read": "0", "unreadable_cache": "unknown"}[scenario]
-    assert f"Conductor workspace stores not yet read: {expected}" in diag
-    assert "newer Conductor stores" not in status + diag
-    _assert_no_reader_wide_upgrade(status + diag)
-    # Value: protects=status and diag omit the unreadable-layout notice when no
-    # store is drifted; fails_when=a zero count still tells the user to run mm
-    # update; why_new=the unread notice test never forbids the layout sentence;
-    # seam=none
-    assert "use a layout this mm cannot read" not in status + diag
-
-
-def test_cursor_sqlite_drift_and_failure_clauses_come_from_a_real_pass(tmp_path, monkeypatch):
-    from mind_meld import errors
-    from tests.test_cursor_sqlite import RUNS_DDL, fin, make_store
-
-    _setup(tmp_path, monkeypatch)
-    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-    _enable_capture_sources(tmp_path, readers=())
-    cfg = load_config()
-    cfg.setdefault("retro", {})["cursor_host_usage"] = True
-    save_config(cfg)
-    root = host_usage.CURSOR_STORE_PATH
-    pre_alter = RUNS_DDL.replace(" usage_ref TEXT,", "")
-    make_store(root, "1111111111111111", [fin("run-a")], ddl=pre_alter)
-    assert host_usage.read_cursor_usage(root, consented=True).complete
-
-    def shown(command):
-        return " ".join(runner.invoke(app, command).output.split())
-
-    status, diag = shown(["status"]), shown(["diag"])
-    drift = "1 Conductor workspace store(s) use a layout this mm cannot read"
-    assert (
-        f"{drift} (missing_required_column); their runs are not counted. Run `mm update`" in status
-    )
-    assert errors.CURSOR_SQLITE_URL in status and "not yet read" not in status
-    assert "Conductor workspace stores not yet read: 0" in diag and drift in diag
-    state = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["cursor"]
-    assert state["unsupported_sqlite_stores"] == {"count": 1, "causes": ["missing_required_column"]}
-    assert state["last_reason"] is None and state["last_reason_detail"] is None
-    _assert_no_reader_wide_upgrade(status + diag)  # drift never prints another reader's remedy
-
-    broken = root / "2222222222222222"
-    broken.mkdir()
-    (broken / "index.db").write_bytes(b"this is not a database" * 100)
-    assert host_usage.read_cursor_usage(root, consented=True).reason == "malformed"
-    status, diag = shown(["status"]), shown(["diag"])
-    store = "2222222222222222"
-    assert "Conductor workspace store" in status and f"{store} holds a row mm cannot read" in status
-    assert "(corrupt_database)" in status and "mm disable-source cursor" in status
-    assert "SQLite " in status and errors.CURSOR_SQLITE_URL in status
-    assert "store detail: Conductor workspace store" in diag and store in diag
-    state = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["cursor"]
-    assert state["last_reason"] == "malformed"
-    assert state["last_reason_detail"] == {"cause": "corrupt_database", "store": store}
-    _assert_no_reader_wide_upgrade(status + diag)
-
-
-def test_schema_unreadable_notice_names_the_linked_sqlite_version(tmp_path, monkeypatch):
-    # Value: protects=status and diag name this Python's SQLite version only when
-    # unsupported drift includes schema_unreadable; fails_when=the version suffix is
-    # dropped or attached to every drift cause; why_new=the layout notice test uses
-    # missing_required_column and stops before the suffix; seam=none
-    import sqlite3
-
-    from mind_meld import errors
-    from tests.test_cursor_sqlite import RUNS_DDL, fin, make_store
-
-    _setup(tmp_path, monkeypatch)
-    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-    _enable_capture_sources(tmp_path, readers=())
-    cfg = load_config()
-    cfg.setdefault("retro", {})["cursor_host_usage"] = True
-    save_config(cfg)
-    root = host_usage.CURSOR_STORE_PATH
-    drifted = "1111111111111111"
-    pre_alter = RUNS_DDL.replace(" usage_ref TEXT,", "")
-    make_store(root, drifted, [fin("run-a")], ddl=pre_alter)
-    assert host_usage.read_cursor_usage(root, consented=True).complete
-
-    def shown(command):
-        return " ".join(runner.invoke(app, command).output.split())
-
-    status, diag = shown(["status"]), shown(["diag"])
-    assert "(missing_required_column)" in status and "(missing_required_column)" in diag
-    assert "links SQLite" not in status and "links SQLite" not in diag
-
-    store_dir = root / drifted
-    for child in store_dir.iterdir():
-        child.unlink()
-    store_dir.rmdir()
-
-    def break_schema(conn):
-        conn.execute("PRAGMA writable_schema=ON")
-        conn.execute("UPDATE sqlite_master SET sql='CREATE TABLE runs (' WHERE name='runs'")
-
-    broken = "2222222222222222"
-    make_store(root, broken, setup=break_schema)
-    assert host_usage.read_cursor_usage(root, consented=True).complete
-    status, diag = shown(["status"]), shown(["diag"])
-    version = f"links SQLite {sqlite3.sqlite_version}"
-    assert "(schema_unreadable)" in status and version in status
-    assert errors.CURSOR_SQLITE_URL in status
-    assert "(schema_unreadable)" in diag and version in diag
-    assert "missing_required_column" not in status + diag
-    _assert_no_reader_wide_upgrade(status + diag)
-    state = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["cursor"]
-    assert state["unsupported_sqlite_stores"] == {"count": 1, "causes": ["schema_unreadable"]}
-    assert state["unread_sqlite_stores"] == 0
-    assert state["last_reason"] is None and state["last_reason_detail"] is None
-
-
-@pytest.mark.parametrize("reader", ["codex", "cursor", "muse"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader):
     from mind_meld import cli, events
 
     _setup(tmp_path, monkeypatch)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-    _enable_capture_sources(tmp_path, readers=() if reader == "cursor" else (reader,))
+    _enable_capture_sources(tmp_path, readers=(reader,))
     cfg = load_config()
-    cfg.setdefault("retro", {})["cursor_host_usage"] = reader == "cursor"
-    save_config(cfg)
     assert tuple(host_registry.HOST_READER_DIAGS) == events.ACTIVE_HOST_READERS
     for name, spec in host_registry.HOST_READER_DIAGS.items():
         monkeypatch.setattr(
@@ -2288,10 +2085,6 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
         result = runner.invoke(app, [command])
         assert result.exit_code == 0, result.output
         assert "mm update" in " ".join(result.output.split())
-    if reader == "cursor":
-        assert "Cursor (Conductor + enrolled CLI)" in result.output
-        assert "cursor_host_usage = false" in " ".join(result.output.split())
-        assert "disable-source cursor" in result.output
     with monkeypatch.context() as ready:
         ready.setattr(
             reader_spec.owner,
@@ -2309,24 +2102,37 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
         assert lines == []
 
 
-def test_cursor_diag_is_read_only_and_exposes_own_cache(cursor_store, tmp_path, monkeypatch):
+def test_legacy_cursor_consent_omits_cursor_from_status_diag_and_recapture(tmp_path, monkeypatch):
+    from mind_meld import cli
+
     _setup(tmp_path, monkeypatch)
-    assert host_usage.read_cursor_usage(consented=True).complete
-    cache = host_usage.CURSOR_CACHE_PATH
-    before = (cache.read_bytes(), cache.stat().st_mtime_ns)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("diag opened the Cursor host ledger")
-
-    monkeypatch.setattr(host_usage, "_read_cursor_file", forbidden)
-    result = runner.invoke(app, ["diag", "--json"])
-    assert result.exit_code == 0, result.output
-    state = json.loads(result.stdout)["host_usage"]["cursor"]
-    assert state["runs_cached"] == 3
-    assert state["complete_once"] is True
-    assert state["consented"] is False
-    assert state["models"] == ["grok-4.7"]
-    assert (cache.read_bytes(), cache.stat().st_mtime_ns) == before
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=())
+    cfg = load_config()
+    cfg.setdefault("retro", {})["cursor_host_usage"] = True
+    save_config(cfg)
+    monkeypatch.setattr(
+        host_usage,
+        "cursor_usage_diag",
+        lambda *_a, **_kw: pytest.fail("cursor_usage_diag must not be called"),
+    )
+    monkeypatch.setattr(
+        host_usage,
+        "cursor_hook_state",
+        lambda *_a, **_kw: pytest.fail("cursor_hook_state must not be called"),
+    )
+    for command in (["status"], ["diag"]):
+        res = runner.invoke(app, command)
+        assert res.exit_code == 0, res.output
+        assert "Cursor" not in res.output
+    json_res = runner.invoke(app, ["diag", "--json"])
+    assert json_res.exit_code == 0, json_res.output
+    payload = json.loads(json_res.stdout)
+    assert "cursor" not in payload["host_usage"]
+    lines = []
+    monkeypatch.setattr(cli.console, "print", lambda *args, **kw: lines.append(args))
+    cli._notice_recapture_host_usage(cfg, cfg["sync"]["sources"])
+    assert lines == []
 
 
 def test_diag_never_walks_an_unconsented_muse_tree(tmp_path, monkeypatch):
