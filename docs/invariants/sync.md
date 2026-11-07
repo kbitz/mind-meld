@@ -1175,6 +1175,47 @@ rotates out first; conflict history is unaffected. Migrate and push every
 active Mac before the next attended pull on any of them (README "Syncing
 gstack").
 
+### gstack-extend run history (Track 113A)
+
+The default `gstack-extend` source (`~/.gstack-extend`, `config.DEFAULT_SOURCES`) lists
+`include_dirs = ["projects", "analytics/stage-runs"]` and
+`include_patterns = ["projects/**", "analytics/stage-runs/*.jsonl"]`
+(`config._GSTACK_EXTEND_INCLUDE_PATTERNS`). Only regular `.jsonl` files directly in
+`analytics/stage-runs/` (such as `mac-a.jsonl` and `linux-a.jsonl`) publish and apply:
+`*` in `matches_include_patterns` never crosses `/`, so nested folders stay out, and
+`walk_generic_source` never follows a symlink, including a symlinked `analytics/` or
+`analytics/stage-runs/`. The cross-machine reader is gstack-extend's own telemetry
+reader, which joins the historical `analytics/stage-runs.jsonl` and the sorted
+`analytics/stage-runs/*.jsonl`.
+
+- **Why the historical file and the rest of `analytics/` stay local.** Before
+  gstack-extend v0.71.0, every machine wrote its own run rows to the same filename
+  `analytics/stage-runs.jsonl`; syncing it would make different machines' histories
+  collide at one path, and from v0.71.0 gstack-extend never writes that file again.
+  `analytics/skill-usage.jsonl`, `analytics/workflow-metrics/` and every other file
+  under `analytics/` stay local as well, and `_filter_excluded_paths` with
+  `_build_include_map` strips any excluded `analytics/` shape from peer and prior
+  manifests at the consumer boundary. gstack-extend's documented no-clobber move of the
+  historical file to `analytics/stage-runs/<host>.legacy.jsonl` (for example
+  `mac-a.legacy.jsonl`) produces a direct `.jsonl` child of `stage-runs/` that syncs
+  like any other per-host file; moving historical rows is gstack-extend's job, not mm's.
+- **Migration.** An explicit `[[sync.sources]]` entry for `gstack-extend` with no
+  `include_patterns` key is offered the default allowlist by
+  `_compute_recommended_includes_diff` (existing absent-key rule). When that migration
+  fires and the entry's `include_dirs` equals as a set a previous default frozen in
+  `config.RETIRED_DEFAULT_INCLUDE_DIRS` (`{"gstack-extend": (frozenset({"projects"}),)}`),
+  `core._migrate_config_core` also updates `include_dirs` to
+  `["projects", "analytics/stage-runs"]` in the same `patch_config_on_disk` write. Any
+  other `include_dirs` list (edited or extended) is respected as the owner's choice.
+- **Anchors, permissions and host collisions.** Adding `analytics/stage-runs` to
+  `include_dirs` makes it a scan root (`manifest.scan_roots`), so publishing pushes
+  write `.mind-meld-anchor` there; gstack-extend's `*.jsonl` reader glob ignores it.
+  Peers' pulled copies are written with the process umask like every synced file, not
+  gstack-extend's local `0600` creation mode. Two machines that write the same host
+  filename share one `stage-runs/<host>.jsonl` file, which then goes through the
+  ordinary `.jsonl` set-union merge on pull; setting gstack-extend's `host_id` gives
+  each machine its own file.
+
 ## Nested git checkouts are frozen, never published
 
 Every source walker prunes a directory with a regular `.git` file or `.git`

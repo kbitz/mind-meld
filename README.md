@@ -1360,9 +1360,15 @@ matching `include_patterns` entry or the allowlist leaves it local; run
 
 ### Syncing gstack-extend
 
-If `~/.gstack-extend/` is detected during `mm init`, it is automatically added as a sync source. It has no `include_patterns` allowlist: the walker is scoped to `projects/` only, and per-machine bookkeeping at the root (`config`, `just-upgraded-from`, `update-snoozed`) is excluded by construction. A directory holding a regular, non-symlink `Local State` file is still skipped. Files that gstack-extend skills (pair-review, test-plan, full-review) persist under `~/.gstack-extend/projects/<slug>/` sync through this source, so cross-machine resume keeps working as the gstack-extend feature surface grows.
+If `~/.gstack-extend/` is detected during `mm init`, it is automatically added as a sync source. A directory holding a regular, non-symlink `Local State` file is still skipped. Files that gstack-extend skills (pair-review, test-plan, full-review) persist under `~/.gstack-extend/projects/<slug>/` and per-host run history under `~/.gstack-extend/analytics/stage-runs/*.jsonl` sync through this source, so cross-machine resume and fleet stage-run history work across machines.
 
-Existing installs see this as a `New source available: gstack-extend` hint on next `mm status`. Opt in with `mm enable-source gstack-extend` or dismiss with `mm disable-source gstack-extend` — same shape as every other source toggle.
+**Defaults out of the box:**
+
+- `include_dirs`: `projects/`, `analytics/stage-runs/`
+- `include_patterns`: `projects/**`, `analytics/stage-runs/*.jsonl` (regular `.jsonl` files directly in `stage-runs/`, including `<host>.legacy.jsonl` from gstack-extend's no-clobber move of the historical file)
+- Stays local: root bookkeeping (`config`, `just-upgraded-from`, `update-snoozed`, `projects.json`, `telemetry/`) and the rest of `analytics/` — including the historical single-file `analytics/stage-runs.jsonl`, which every machine wrote under the same filename before gstack-extend v0.71.0 and which gstack-extend's reader already joins locally with `stage-runs/*.jsonl`, plus `skill-usage.jsonl` and `workflow-metrics/`. Details: [the sync invariants](docs/invariants/sync.md#gstack-extend-run-history-track-113a).
+
+Existing installs with an explicit `[[sync.sources]]` config pick up the new `analytics/stage-runs` directory and `include_patterns` allowlist by running `mm migrate-config` and then `mm push`. Installs where `gstack-extend` is not yet configured see a `New source available: gstack-extend` hint on next `mm status` — opt in with `mm enable-source gstack-extend` or dismiss with `mm disable-source gstack-extend`.
 
 ## Disabling sources per machine
 
