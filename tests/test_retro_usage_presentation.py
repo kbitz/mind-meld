@@ -403,7 +403,9 @@ def cursor_capture_view(cursor_store, mode):
         if len(records) > 1:
             records[0]["endedAt"] = records[1]["endedAt"]
     paths[0].write_text("".join(json.dumps(r) + "\n" for r in records))
-    readers = events_tail._default_host_readers([], cursor_consented=True)
+    readers = (
+        ("cursor", lambda *, deadline: hu.read_cursor_usage(deadline=deadline, consented=True)),
+    )
     if mode == "usage-ref-only":
 
         def codex(*, deadline):

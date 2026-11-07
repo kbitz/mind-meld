@@ -110,15 +110,18 @@ class TestReaderOrchestration:
     def _enabled(self, *names: str) -> list[dict]:
         return [{"name": n, "path": f"/tmp/{n}", "type": "generic"} for n in names]
 
+    def _active_readers_114a(self) -> list[str]:
+        # Track 114A unhooks cursor from capture; Track 115A deletes it from ACTIVE_HOST_READERS.
+        return [r for r in _mm_events.ACTIVE_HOST_READERS if r != "cursor"]
+
     def test_default_readers_are_the_active_built_ins_in_fixed_order(self):
         assert [
             name
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
-                cursor_consented=True,
                 grok_consented=True,
             )
-        ] == list(_mm_events.ACTIVE_HOST_READERS)
+        ] == self._active_readers_114a()
 
     def test_readers_are_gated_on_the_user_enabling_that_source(self):
         """A host's local store is only read when the user enabled that host as
@@ -175,12 +178,11 @@ class TestReaderOrchestration:
         no consent check at all. Strict equality against the live reader set
         is the consent guarantee. Relaxing this to a subset would let a
         future reader run with no gate entry."""
-        assert set(events_tail.HOST_READER_SOURCE_GATE) == set(_mm_events.ACTIVE_HOST_READERS)
+        assert set(events_tail.HOST_READER_SOURCE_GATE) == set(self._active_readers_114a())
         invoked = [
             name
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*events_tail.HOST_READER_SOURCE_GATE),
-                cursor_consented=True,
                 grok_consented=True,
             )
         ]
@@ -191,12 +193,7 @@ class TestReaderOrchestration:
         can actually invoke. A key with no reader is a consent check of
         nothing."""
         enabled = self._enabled(*events_tail.HOST_READER_SOURCE_GATE)
-        names = [
-            n
-            for n, _ in events_tail._default_host_readers(
-                enabled, cursor_consented=True, grok_consented=True
-            )
-        ]
+        names = [n for n, _ in events_tail._default_host_readers(enabled, grok_consented=True)]
         assert set(names) == set(events_tail.HOST_READER_SOURCE_GATE)
 
     def test_active_readers_are_a_subset_of_the_wire_vocabulary(self):
@@ -221,7 +218,6 @@ class TestReaderOrchestration:
         capture = events_tail._capture_host_usage(
             events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
-                cursor_consented=True,
             ),
             deadline=1_000.0,
             now=lambda: 0.0,
@@ -390,10 +386,9 @@ class TestReaderOrchestration:
             name
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
-                cursor_consented=True,
                 grok_consented=True,
             )
-        ] == list(_mm_events.ACTIVE_HOST_READERS)
+        ] == self._active_readers_114a()
 
     def test_warmable_readers_are_a_subset_of_active_readers(self):
         """A name that is not a live reader cannot be warmed.
@@ -2574,26 +2569,17 @@ def test_deadline_wording_follows_whether_the_caller_could_warm(
         assert "can warm cold readers" not in text
 
 
-def test_cursor_gate_none_requires_own_consent(monkeypatch):
+def test_cursor_is_absent_from_host_reader_gate_and_default_readers():
+    import inspect
+
     source = [{"name": "cursor", "path": "/unused", "type": "generic"}]
-    assert events_tail.HOST_READER_SOURCE_GATE["cursor"] is None
+    assert "cursor" not in events_tail.HOST_READER_SOURCE_GATE
     assert events_tail._default_host_readers(source) == ()
-    seen = []
-
-    def read(*, deadline, consented):
-        seen.append(consented)
-        return _complete()
-
-    monkeypatch.setattr(_mm_host_usage, "read_cursor_usage", read)
-    readers = events_tail._default_host_readers([], cursor_consented=True)
-    assert [n for n, _ in readers] == ["cursor"]
-    readers[0][1](deadline=1000)
-    assert seen == [True]
-    assert "cursor" in events_tail.WARMABLE_HOST_READERS
+    assert "cursor_consented" not in inspect.signature(events_tail._default_host_readers).parameters
 
 
 @pytest.mark.parametrize("entry", ["tail", "backfill", "attended"])
-def test_cursor_consent_reaches_every_capture_caller(tmp_path, monkeypatch, entry):
+def test_legacy_cursor_consent_selects_no_reader_in_capture_callers(tmp_path, monkeypatch, entry):
     from mind_meld import cli
 
     root = tmp_path / "events_root"
@@ -2608,7 +2594,7 @@ def test_cursor_consent_reaches_every_capture_caller(tmp_path, monkeypatch, entr
     }
     seen = []
 
-    def read(*, deadline, consented):
+    def read(*, deadline, consented=False):
         seen.append(consented)
         return _complete()
 
@@ -2619,10 +2605,10 @@ def test_cursor_consent_reaches_every_capture_caller(tmp_path, monkeypatch, entr
         events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=True)
     else:
         events_tail._run_events_backfill(config, sources, "dev-a")
-    assert seen == [True]
-    row = next(r for r in _rows(root) if r["type"] == "host-usage-snapshot")
-    assert row["token_sources"] == ["cursor"]
-    assert row["empty_sources"] == ["cursor"]
+    assert seen == []
+    for row in _rows(root):
+        assert "cursor" not in row.get("token_sources", [])
+        assert "cursor" not in row.get("empty_sources", [])
 
 
 def test_leaf_diagnostic_scopes_restore_default_after_failure(capsys):

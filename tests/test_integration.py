@@ -6153,94 +6153,6 @@ def test_later_autopush_supersedes_attended_reader_coverage(capture61, tmp_path,
     assert "mm push" in " ".join(runner.invoke(app, ["status"]).output.split())
 
 
-def test_standalone_cursor_completion_reaches_encrypted_retro_snapshot(capture61):
-    from mind_meld.skills.retro_fleet import aggregator
-
-    enabled = runner.invoke(app, ["enable-source", "cursor"])
-    assert enabled.exit_code == 0, enabled.output
-    payload = {
-        "hook_event_name": "stop",
-        "status": "completed",
-        "generation_id": "standalone-generation",
-        "model": "grok-4.7-low",
-        "input_tokens": 17_534,
-        "cache_read_tokens": 1_152,
-        "cache_write_tokens": 0,
-        "output_tokens": 147,
-        "text": "PRIVATE RESPONSE",
-    }
-    captured = runner.invoke(app, ["capture-cursor-usage"], input=json.dumps(payload))
-    assert captured.exit_code == 0, captured.output
-    pushed = runner.invoke(app, ["push"])
-    assert pushed.exit_code == 0, pushed.output
-    publication = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
-    assert publication["readers"]["cursor"] == "contributed"
-    dayfile = capture61["dayfile"]
-    manifest = load_manifest(
-        decrypt(capture61["backend"].get(storage_keys.manifest_key("dev-a")), PASSPHRASE, MEMORY_KB)
-    )
-    entry = manifest["sources"]["mm-events"]["files"]["events/" + dayfile.name]
-    encrypted = capture61["backend"].get(storage_keys.blob_key("dev-a", entry["sha256"]))
-    assert b"PRIVATE RESPONSE" not in encrypted
-    clear = decrypt(encrypted, PASSPHRASE, MEMORY_KB)
-    assert b"PRIVATE RESPONSE" not in clear
-    rows = [json.loads(line) for line in clear.splitlines()]
-    row = [row for row in rows if row["type"] == "host-usage-snapshot"][-1]
-    accepted = aggregator._accept_host_usage_snapshot(row)
-    assert not isinstance(accepted, aggregator.HostReject)
-    day = datetime.now(timezone.utc).date().isoformat()
-    assert "cursor" in accepted.consulted
-    assert accepted.lifetime_by_family["grok"][day]["input"] == 16_382
-    assert accepted.tokens_by_day[day]["by_model"]["grok-4.7"]["cache_read"] == 1_152
-
-
-def test_conductor_sqlite_run_reaches_encrypted_retro_snapshot(capture61):
-    """A Conductor 0.90.1 run read from index.db publishes as aggregate counters only."""
-    from mind_meld.skills.retro_fleet import aggregator
-    from tests.test_cursor_sqlite import fin, make_store, usage
-
-    enabled = runner.invoke(app, ["enable-source", "cursor"])
-    assert enabled.exit_code == 0, enabled.output
-    finished = datetime.now(timezone.utc) - timedelta(minutes=2)
-    stamp = finished.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    row = fin(
-        "run-PRIVATE-RUN-ID",
-        at=stamp,
-        request_id="PRIVATE-REQUEST-ID",
-        usage_json=usage(inp=40_000, out=1_000, read=9_000, reasoning=2 * 250),
-        result="PRIVATE RESULT",
-    )
-    make_store(_mm_host_usage.CURSOR_STORE_PATH, "0123456789abcdef", [row])
-    pushed = runner.invoke(app, ["push"])
-    assert pushed.exit_code == 0, pushed.output
-    state = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["cursor"]
-    assert state["unread_sqlite_stores"] == 0
-    assert state["unsupported_sqlite_stores"] == {"count": 0, "causes": []}
-    assert state["last_reason"] is None and state["last_reason_detail"] is None
-    publication = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
-    assert publication["readers"]["cursor"] == "contributed"
-    manifest = load_manifest(
-        decrypt(capture61["backend"].get(storage_keys.manifest_key("dev-a")), PASSPHRASE, MEMORY_KB)
-    )
-    entry = manifest["sources"]["mm-events"]["files"]["events/" + capture61["dayfile"].name]
-    encrypted = capture61["backend"].get(storage_keys.blob_key("dev-a", entry["sha256"]))
-    clear = decrypt(encrypted, PASSPHRASE, MEMORY_KB)
-    for canary in (b"PRIVATE", b"run-PRIVATE-RUN-ID"):
-        assert canary not in encrypted and canary not in clear
-    rows = [json.loads(line) for line in clear.splitlines()]
-    snapshot = [r for r in rows if r["type"] == "host-usage-snapshot"][-1]
-    accepted = aggregator._accept_host_usage_snapshot(snapshot)
-    assert not isinstance(accepted, aggregator.HostReject)
-    day = finished.date().isoformat()
-    assert "cursor" in accepted.consulted
-    assert accepted.lifetime_by_family["grok"][day]["input"] == 40_000
-    assert accepted.tokens_by_day[day]["by_model"]["grok-4.7"]["output"] == 1_000
-    # A second push leaves the totals unchanged: each run is counted exactly once.
-    assert runner.invoke(app, ["push"]).exit_code == 0
-    again = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["cursor"]
-    assert again["runs_cached"] == state["runs_cached"] == 1
-
-
 @pytest.mark.parametrize("absent", [False, True])
 def test_partial_and_absent_capture_reports_own_outcome(capture61, monkeypatch, absent):
     from mind_meld.skills.retro_fleet import aggregator
@@ -10093,8 +10005,6 @@ COMMAND_INTENTS62 = {
         "autopull",
         "autopush",
         "update",
-        "capture-cursor-usage",
-        "cursor-agent",
     )
 } | {
     name: ("inspection", None)

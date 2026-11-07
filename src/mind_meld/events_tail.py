@@ -316,7 +316,6 @@ HOST_READER_SOURCE_GATE: dict[str, str | None] = {
     # ``config.grok_usage_consented`` verdict, passed as ``grok_consented``; this
     # entry names the source its stop remedy disables.
     "grok": "grok",
-    **dict.fromkeys(mm_config.HOST_USAGE_ONLY_CONSENT),
 }
 """Which enabled sync source each reader's consent derives from.
 
@@ -530,14 +529,12 @@ def _decide_token_walk_policy(
 def _default_host_readers(
     sources: list[dict],
     *,
-    cursor_consented: bool = False,
     grok_consented: bool = False,
 ) -> tuple[tuple[str, HostReader], ...]:
     """The built-in readers the user has CONSENTED to, in their fixed order.
 
     A reader whose host is not an enabled sync source is not invoked at all —
-    see ``HOST_READER_SOURCE_GATE``. Cursor has no sync source: ``cursor_consented`` is its
-    only gate (``HOST_USAGE_ONLY_CONSENT``). Grok Build is selected only when
+    see ``HOST_READER_SOURCE_GATE``. Grok Build is selected only when
     ``grok_consented`` is true (``config.grok_usage_consented``, which honors both the
     ``grok`` source and ``[retro] grok_host_usage``); every caller passes the same verdict
     so push capture, status, diag and the recapture notice agree.
@@ -556,12 +553,6 @@ def _default_host_readers(
             return grok_host.read_grok_usage(deadline=deadline, consented=True)
 
         chosen.append(("grok", _read_grok))
-    if cursor_consented:
-
-        def _read_cursor(*, deadline: float) -> host_usage.HostUsageResult:
-            return host_usage.read_cursor_usage(deadline=deadline, consented=True)
-
-        chosen.append(("cursor", _read_cursor))
     if HOST_READER_SOURCE_GATE["muse"] in enabled:
 
         def _read_muse(*, deadline: float) -> host_usage.HostUsageResult:
@@ -1442,7 +1433,6 @@ def _run_events_tail(
             prepare_token_cache=prepare_tail_token_cache,
             host_readers=_default_host_readers(
                 sources,
-                cursor_consented=mm_config.cursor_host_usage_enabled(config),
                 grok_consented=mm_config.grok_usage_consented(config),
             ),
         )
@@ -1663,7 +1653,6 @@ def _run_events_backfill(
             persist=True,
             host_readers=_default_host_readers(
                 sources,
-                cursor_consented=mm_config.cursor_host_usage_enabled(config),
                 grok_consented=mm_config.grok_usage_consented(config),
             ),
         )

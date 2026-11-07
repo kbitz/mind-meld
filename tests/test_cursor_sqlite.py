@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mind_meld import cli, errors
+from mind_meld import errors
 from mind_meld import host_usage as hu
 from mind_meld import token_usage as tu
 
@@ -1376,7 +1376,6 @@ def test_detail_is_read_tolerantly_and_the_code_falls_back_after_a_reload():
     assert hu._cursor_reason_detail({**base, "last_reason_detail": good}) == good
     reloaded = hu._cursor_reason_detail({**base, "last_reason_detail": {**good, "code": "lower!"}})
     assert reloaded == {"cause": "cannot_open", "store": S1}
-    assert "unknown SQLite error" in cli._cursor_store_detail_clause(reloaded)
     for bad in (None, [], "x", {"cause": "bad_json", "store": S1}, {"cause": 5}, {"store": S1}):
         assert hu._cursor_reason_detail({**base, "last_reason_detail": bad}) is None
     assert (
@@ -1387,19 +1386,6 @@ def test_detail_is_read_tolerantly_and_the_code_falls_back_after_a_reload():
         "cause": "cannot_open",
         "store": None,
     }
-    # Value: protects=a rejected store id renders as (unknown store) and a missing
-    # non_regular file name falls back to index.db; fails_when=the notice crashes
-    # or prints the forged path, None, or an empty file name; why_new=tolerant
-    # detail checks store is None but never renders the clause; seam=none
-    rendered = cli._cursor_store_detail_clause(
-        hu._cursor_reason_detail({**base, "last_reason_detail": forged})
-    )
-    assert rendered is not None
-    assert "(unknown store)" in rendered
-    assert "passwd" not in rendered and "../" not in rendered
-    bare = cli._cursor_store_detail_clause({"cause": "non_regular_path", "store": None})
-    assert bare is not None
-    assert "(unknown store)" in bare and "index.db" in bare
 
 
 # ── diag and status ───────────────────────────────────────────────────────
@@ -1434,19 +1420,8 @@ def test_the_writer_lock_does_not_make_the_counts_unknown():
 
 
 def test_every_persisted_cause_has_a_catalog_entry_or_an_explicit_no_clause():
-    assert set(cli._CURSOR_DETAIL_NO_CLAUSE) <= set(hu.CURSOR_SQLITE_READER_CAUSES)
-    for cause in hu.CURSOR_SQLITE_READER_CAUSES:
-        detail = {"cause": cause, "store": S1, "file": "index.db", "code": "SQLITE_ERROR"}
-        clause = cli._cursor_store_detail_clause(detail)
-        assert (clause is None) == (cause in cli._CURSOR_DETAIL_NO_CLAUSE), cause
-        if clause:
-            # Detail clauses never prescribe an upgrade or deletion.
-            assert "mm update" not in clause and "pipx" not in clause
-            assert "delete" not in clause.lower()
     for cause, reason in hu.CURSOR_SQLITE_READER_CAUSES.items():
         assert reason in {"malformed", "io_error", "stale"}, cause
-    corrupt = cli._cursor_store_detail_clause({"cause": "corrupt_database", "store": S1})
-    assert "SQLite " in corrupt and errors.CURSOR_SQLITE_URL in corrupt
 
 
 def test_the_url_anchor_resolves_in_the_readme():

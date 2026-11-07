@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-Mind Meld (mm) — CLI that keeps one person's AI coding-agent context (Claude Code memory, Codex skills, Muse memory, gstack state) identical across their machines, end-to-end encrypted, and reports agent usage across the fleet with `retro-fleet` (Claude Code, Codex, Cursor, Muse, Antigravity). 1.x syncs over iCloud Drive on macOS; 2.0 carries the same store to a Syncthing folder so Arch-based Linux machines join. [docs/SPEC.md](docs/SPEC.md) is the product authority, including what each host gets.
+Mind Meld (mm) — CLI that keeps one person's AI coding-agent context (Claude Code memory, Codex skills, Muse memory, gstack state) identical across their machines, end-to-end encrypted, and reports agent usage across the fleet with `retro-fleet` (Claude Code, Codex, Muse, Antigravity). 1.x syncs over iCloud Drive on macOS; 2.0 carries the same store to a Syncthing folder so Arch-based Linux machines join. [docs/SPEC.md](docs/SPEC.md) is the product authority, including what each host gets.
 
 <!-- roadmap:parallelism_cap=8 -->
 Up to eight Tracks can run across separate workspaces; the host owns branch and worktree lifecycle.
@@ -89,7 +89,7 @@ mm reads `Path.home()` at import: never run or import `tests/` outside `./bin/ch
 
 ## Commands
 
-mm --version | init | push | pull | status | diag | devices | diff | gc | sources | conflicts | resolve | recover | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet | recapture | update | cursor-agent (plus the hidden `capture-cursor-usage` hook)
+mm --version | init | push | pull | status | diag | devices | diff | gc | sources | conflicts | resolve | recover | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet | recapture | update
 
 Attended `mm push` refreshes consented host usage under the lock. Exit 0 means content sync succeeded regardless of capture outcome; verify recorded capture/publication with `mm status`. Autopush stays change-gated and never warms; previews never capture. Flags and exit codes: README and SPEC.
 

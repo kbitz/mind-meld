@@ -2596,36 +2596,11 @@ class TestSkillLinkStatusNag:
             assert "mm install-skills" in flat
 
 
-def test_cursor_drift_survives_capture_and_attempt_outcomes(cursor_store, tmp_path, monkeypatch):
-    from mind_meld import attemptlog, events_tail
+def test_reader_outcomes_distinguish_unsupported_from_no_metadata_ledger():
+    from mind_meld import attemptlog
 
-    iso, _ = _setup_events_tail_config(tmp_path, monkeypatch)
-    path = sorted(cursor_store.glob("*/runs.ndjson"))[0]
-    row = json.loads(path.read_text().splitlines()[0])
-    row["status"] = "completed"  # renamed terminal is drift, not source absence
-    path.write_text(json.dumps(row) + "\n")
-    sources = [
-        {
-            "name": "mm-events",
-            "type": "generic",
-            "path": str(tmp_path / "mm-events"),
-            "include_dirs": ["events"],
-        }
-    ]
-    cfg = {
-        "device": {"id": "dev-deg"},
-        "sync": {"sources": sources},
-        "retro": {"cursor_host_usage": True},
-    }
-    outcome = cli_module._capture_attended_usage(cfg, sources, sources, verbose=False)
-    assert outcome.readers["cursor"] == "dropped:unsupported"
     assert "dropped:unsupported" in attemptlog.READER_OUTCOMES
     assert "dropped:no_metadata_ledger" not in attemptlog.READER_OUTCOMES
-    phrase = events_tail._host_skip_phrase("cursor", "unsupported", readiness="ready")
-    assert "[retro] cursor_host_usage = false" in phrase
-    assert "disable-source cursor" in phrase
-    degradations = events_tail._run_events_tail(cfg, sources, "dev-deg", dry_run=False, quiet=True)
-    assert any("cursor unsupported" in reason for reason in degradations)
 
 
 def test_status77_stale_crypto_replaced_by_real_attended_push(tmp_path, monkeypatch):

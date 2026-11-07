@@ -64,22 +64,9 @@ def usage_capture_readiness(
     return "ready" if reader_consented else "no-reader"
 
 
-HOST_USAGE_ONLY_CONSENT = {"cursor": "cursor_host_usage"}
-"""Readers with no sync source; their only consent is a local retro bit."""
-
-
 def host_usage_consent_remedy(reader: str, *, enabled: bool) -> str:
     verb = "enable" if enabled else "disable"
-    key = HOST_USAGE_ONLY_CONSENT.get(reader)
-    if key is None:
-        return f"Run mm {verb}-source {reader}."
-    if enabled:
-        return (
-            f"Run mm enable-source {reader} (also installs the completion hook for "
-            f"standalone sessions), or set [retro] {key} = true in config.toml "
-            "(Conductor runs only)."
-        )
-    return f"Run mm disable-source {reader}, or set [retro] {key} = false in config.toml."
+    return f"Run mm {verb}-source {reader}."
 
 
 def usage_capture_remedy(readiness: UsageCaptureReadiness, *, reader: str | None = None) -> str:
@@ -94,7 +81,7 @@ def usage_capture_remedy(readiness: UsageCaptureReadiness, *, reader: str | None
         "unavailable": "Restore access to the configured mm-events folder.",
         "no-reader": (
             "No host reader is consented. Run mm enable-source codex, mm enable-source grok, "
-            "mm enable-source cursor, mm enable-source muse, or mm enable-source agy."
+            "mm enable-source muse, or mm enable-source agy."
         ),
         "unknown": "Usage capture readiness is unknown; repair the unreadable config first.",
     }[readiness]
@@ -624,11 +611,6 @@ def _validate(config: dict[str, Any]) -> None:
                 f"config: retro.host_usage_autopush_budget_ms ({autopush}) must not exceed "
                 f"retro.{interactive_key} ({interactive})."
             )
-        for key in ("cursor_host_usage",):
-            if key in retro and not isinstance(retro[key], bool):
-                raise ConfigError(
-                    f"config: retro.{key} must be a boolean, got {type(retro[key]).__name__}."
-                )
         if "repo_roots" in retro:
             _validate_repo_roots(retro["repo_roots"])
 
@@ -903,12 +885,6 @@ def grok_usage_consented(config: dict[str, Any]) -> bool:
             return True
     retro = config.get("retro")
     return isinstance(retro, dict) and retro.get("grok_host_usage") is True
-
-
-def cursor_host_usage_enabled(config: dict[str, Any]) -> bool:
-    """Usage-only consent; a source named cursor never grants this permission."""
-    retro = config.get("retro")
-    return isinstance(retro, dict) and retro.get("cursor_host_usage") is True
 
 
 def _resolve_source_path(value: str, *, label: str) -> str:

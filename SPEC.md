@@ -401,11 +401,8 @@ mm autopush                 # silent push for Claude Code (one-line output, neve
 mm enable-source NAME       # turn a configured sync source ON for this machine
                             # NAME=agy adds scoped skills/ rules/ AGENTS.md GEMINI.md sync and authorizes its usage reader
                             # NAME=muse adds its scoped memory/ source (never auto-enabled) and authorizes its usage reader
-                            # NAME=cursor is a usage-only alias (no files sync): installs mm's stop hook in ~/.cursor/hooks.json, then sets [retro].cursor_host_usage (v1.5.0)
-                            # an explicitly configured file source named cursor keeps its ordinary file-source toggle
 mm disable-source NAME [--force]   # turn a configured sync source OFF for this machine; --force accepts unknown names (forward-compat for not-yet-shipped sources)
                             # retired grok/opencode names are rejected even with --force; use mm migrate-config
-                            # NAME=cursor revokes that consent first, then removes mm's hook; a hooks.json mm cannot edit only warns
 mm reconfigure-sources      # re-run the source picker against current config + new defaults
 mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns, and set include_patterns to the current default when that key is absent or still a previous default list; an edited list, even empty, stays
 mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
@@ -424,9 +421,6 @@ mm recapture [WINDOW] [--dry-run]
 mm update                   # install the latest release through pipx (v1.3.0); needs no config or passphrase, so it works while sync is refusing
                             # exit 0: mm is on the latest release; exit 1: the update did not complete, or this install is not one mm can update (source-tree build, non-pipx, pipx pin, fork)
                             # push/pull/autopull/autopush run the in-place pipx upgrade themselves unless [upgrade] auto_install = false; see README "Automatic updates"
-mm cursor-agent [CURSOR ARGS...]   # run cursor-agent unchanged; in print mode (--print / -p) with Cursor usage consent, also record the completed run's usage (v1.5.0)
-                            # exit status is Cursor's (signal exits map to 128+N); a recording failure warns without changing it
-                            # the hidden `capture-cursor-usage` command is the stop-hook entry point: bounded stdin, prints {}, always exits 0
 ```
 
 `mm diag --json` separates reader cache inventory (`host_usage`) from recorded
@@ -849,15 +843,13 @@ v2 manifests carry a `sources` dict keyed by source name. Compat with older on-d
 ## Host Interchangeability
 
 [docs/SPEC.md](docs/SPEC.md#what-mm-syncs-and-reports) owns the supported host
-scope. Claude Code, Codex, Cursor, Muse and Antigravity feed fleet usage;
-Cursor runs count under their model family, including Grok. The Agents table
-orders Claude, Codex, Grok, Muse, Antigravity and Unclassified.
+scope. Claude Code, Codex, Grok Build, Muse and Antigravity feed fleet usage.
+The Agents table orders Claude, Codex, Grok, Muse, Antigravity and Unclassified.
 
 | Host | Context sync and consent |
 |---|---|
 | Claude Code | Project `memory/` and `todos/`; session transcripts stay local. |
 | Codex | `skills/`, `plugins/`, `AGENTS.md`; enabling the source also authorizes usage capture. |
-| Cursor | No built-in file source; `mm enable-source cursor` enrolls the CLI hook and authorizes local usage capture. |
 | Muse | `memory/` only; explicit opt-in authorizes local usage capture. |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config`; `mm enable-source agy` also authorizes conversation-step usage capture. |
 
