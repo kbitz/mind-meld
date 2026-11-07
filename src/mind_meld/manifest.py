@@ -1374,9 +1374,8 @@ def _assert_revision_privacy(
     *,
     source_name: str | None,
     source_type: str | None,
-    check_ancestors: bool = True,
 ) -> None:
-    if base is not None and check_ancestors:
+    if base is not None:
         probe_target = (
             path.parent if Path.lstat is _DEFAULT_PATH_LSTAT and stat.S_ISREG(st.st_mode) else path
         )
@@ -1411,7 +1410,6 @@ def read_file_revision(
     source_type: str | None = None,
     base: Path | None = None,
     rel_path: str | None = None,
-    verified_clean_parent: bool = False,
     pre_stat: os.stat_result | None = None,
 ) -> FileRevision:
     """Read one regular-file revision from a single no-follow descriptor.
@@ -1514,9 +1512,6 @@ def read_file_revision(
             pre_fd_st,
             source_name=source_name,
             source_type=source_type,
-            check_ancestors=(
-                not use_os_lstat or not same_pre_inode or pre_fd_st.st_size > max_file_size
-            ),
         )
         if not same_pre_inode:
             _refuse(
@@ -1578,7 +1573,6 @@ def read_file_revision(
             post_fd_st,
             source_name=source_name,
             source_type=source_type,
-            check_ancestors=not (verified_clean_parent and use_os_lstat and same_post_inode),
         )
         if not same_post_inode:
             _assert_revision_privacy(
@@ -1909,7 +1903,6 @@ def _record_file(
     diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
     holds: SourceHolds | None = None,
     rel_path: str | None = None,
-    verified_clean_parent: bool = False,
     pre_stat: os.stat_result | None = None,
     skip_exclude_check: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
@@ -1949,8 +1942,6 @@ def _record_file(
         }
         if rel_path is not None:
             read_args["rel_path"] = rel
-        if verified_clean_parent:
-            read_args["verified_clean_parent"] = True
         try:
             try:
                 if pre_stat is not None:
@@ -2524,22 +2515,10 @@ def walk_grok_source(
     collected_with_rel = [(_rel_or_name(p, base), p) for p in collected_paths]
     collected_with_rel.sort(key=lambda item: item[0])
     seen: set[tuple[int, int]] = set()
-    clean_parents: set[Path] = set()
-    use_parent_cache = Path.lstat is _DEFAULT_PATH_LSTAT
     for rel, path in collected_with_rel:
         if not grok_path_allowed(rel):
             continue
-        if use_parent_cache:
-            parent = path.parent
-            if parent not in clean_parents:
-                if path_has_descendant_symlink(
-                    parent, base, strict=strict, source_name=source_name
-                ):
-                    if on_skip:
-                        on_skip(str(path), "symlink")
-                    continue
-                clean_parents.add(parent)
-        elif path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
+        if path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
             if on_skip:
                 on_skip(str(path), "symlink")
             continue
@@ -2580,7 +2559,6 @@ def walk_grok_source(
             source_type="grok",
             holds=holds,
             rel_path=rel,
-            verified_clean_parent=use_parent_cache,
             pre_stat=st,
             skip_exclude_check=not extra,
         ):

@@ -1405,6 +1405,14 @@ missing Grok `observations/_inbox/` path (`manifest.is_grok_inbox_path`) whose
 `ledger.base(peer_id, "grok", path) == remote_sha` and whose `memory-v2` anchor is
 valid is treated as `held` even when `own_lists` is False, preventing a peer pull
 from resurrecting an observation that local Dream archived before this machine pushed.
+Grok workspace names are opaque: mm copies them unchanged and does not implement
+Grok's hash or add branch names. The 1.0.77 live checks recorded in host-parity.md
+show matching origin-derived names for clones and linked worktrees. The owner
+accepted on 2026-11-06 that no-origin repositories (`device_local=1`) and
+non-repository scopes transfer as inert copies when the receiving Grok computes
+a different path-derived name. Only global memory and matching origin-derived
+repository scopes promise active cross-machine memory in this Track; no-origin
+mapping remains outside its accepted scope.
 `resolveflow._synced_scan_dirs` includes `manifest.grok_memory_scan_dirs(base_path)`
 and `resolveflow._find_conflict_files` checks `manifest.grok_memory_path_allowed` on
 the derived canonical path (`manifest._canonical_for_conflict`) so `mm conflicts`
