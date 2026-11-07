@@ -699,7 +699,7 @@ def test_warm_host_cache_inline_reads_grok_consented(tmp_path):
 
 
 def test_grok_returns_to_its_pre_v1_11_8_slot_after_codex():
-    expected = ("codex", "grok", "cursor", "muse", "agy")
+    expected = ("codex", "grok", "muse", "agy")
     assert events.ACTIVE_HOST_READERS == expected
     assert events.HOST_USAGE_TOKEN_SOURCES == expected
     assert tuple(host_registry.HOST_READER_DIAGS) == expected
@@ -859,7 +859,8 @@ def test_degraded_grok_reader_is_named_in_coverage_notes():
     ("sources", "accepted"),
     [
         (["codex", "grok", "cursor"], True),  # retained mm 1.11.7 rows
-        (["codex", "cursor", "grok"], False),  # out of the fixed order
+        (["codex", "muse", "grok"], False),  # live names out of the fixed order
+        (["codex", "cursor", "grok"], True),  # cursor retired; live codex, grok holds
         (["codex", "grok", "cursor", "muse", "agy"], True),
     ],
 )

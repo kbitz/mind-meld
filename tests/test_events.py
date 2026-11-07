@@ -2544,32 +2544,39 @@ class TestMakeHostUsageSnapshot:
             device="dev-a",
             token_sources=("codex",),
             hosts={"codex": {"2026-08-15": _u(1)}},
-            degraded_sources=("cursor",),
+            degraded_sources=("muse",),
         )
-        assert ev["degraded_sources"] == ["cursor"]
+        assert ev["degraded_sources"] == ["muse"]
         assert set(ev["degraded_sources"]).isdisjoint(ev["token_sources"])
 
     def test_writer_does_not_emit_retired_name_in_coverage_fields(self):
         """Post-retirement provenance: a retired name is peer-only. The local
         writer filters coverage fields through the live reader set, so passing
-        ``opencode`` as degraded_sources does not put it on the wire. ``grok`` is a
-        live reader again (Track 110A) and stays, in its wire slot before cursor."""
+        retired ``opencode`` or ``cursor`` does not put them on the wire in
+        ``degraded_sources``, ``partial_sources``, or ``empty_sources``. ``grok``
+        is a live reader again (Track 110A) and stays."""
         ev = events.make_host_usage_snapshot(
             device="dev-a",
-            token_sources=("codex",),
+            token_sources=("codex", "muse", "cursor"),
             hosts={"codex": {"2026-08-15": _u(1)}},
             degraded_sources=("opencode", "grok", "cursor"),
+            partial_days={"codex": ["2026-08-15"], "cursor": ["2026-08-15"]},
+            usage_days={"codex": ["2026-08-15"], "muse": [], "cursor": []},
         )
-        assert ev["degraded_sources"] == ["grok", "cursor"]
+        assert ev["degraded_sources"] == ["grok"]
         assert "opencode" not in ev["degraded_sources"]
-        assert "opencode" not in ev["token_sources"]
+        assert "cursor" not in ev["degraded_sources"]
+        assert ev["partial_sources"] == ["codex"]
+        assert "cursor" not in ev["partial_sources"]
+        assert ev["empty_sources"] == ["muse"]
+        assert "cursor" not in ev["empty_sources"]
 
     def test_degraded_sources_drops_overlap_with_token_sources(self):
         ev = events.make_host_usage_snapshot(
             device="dev-a",
-            token_sources=("codex", "cursor"),
+            token_sources=("codex", "muse"),
             hosts={},
-            degraded_sources=("cursor",),
+            degraded_sources=("muse",),
         )
         assert "degraded_sources" not in ev
 
@@ -2833,24 +2840,24 @@ class TestMakeHostUsageSnapshot:
         assert "partial_sources" not in ev
 
     def test_d2_partial_day_inside_cap_emits_partial_sources(self):
-        hosts = {"cursor": {"2026-08-15": _u(10)}}
+        hosts = {"muse": {"2026-08-15": _u(10)}}
         ev = events.make_host_usage_snapshot(
             device="dev-a",
-            token_sources=("cursor",),
+            token_sources=("muse",),
             hosts=hosts,
             tokens_by_day=self._sibling_for(hosts),
-            partial_days={"cursor": ["2026-08-15"]},
+            partial_days={"muse": ["2026-08-15"]},
         )
-        assert ev["partial_sources"] == ["cursor"]
+        assert ev["partial_sources"] == ["muse"]
 
     def test_d3_max_days_zero_omits_partial_sources(self):
-        hosts = {"cursor": {"2026-08-15": _u(10)}}
+        hosts = {"muse": {"2026-08-15": _u(10)}}
         ev = events.make_host_usage_snapshot(
             device="dev-a",
-            token_sources=("cursor",),
+            token_sources=("muse",),
             hosts=hosts,
             tokens_by_day=self._sibling_for(hosts),
-            partial_days={"cursor": ["2026-08-15"]},
+            partial_days={"muse": ["2026-08-15"]},
             max_days=0,
         )
         assert "partial_sources" not in ev
@@ -2858,17 +2865,17 @@ class TestMakeHostUsageSnapshot:
     def test_d4_effectively_empty_hosts_omits_partial_sources(self):
         ev = events.make_host_usage_snapshot(
             device="dev-a",
-            token_sources=("cursor",),
-            hosts={"cursor": {}},
-            partial_days={"cursor": ["2026-08-15"]},
+            token_sources=("muse",),
+            hosts={"muse": {}},
+            partial_days={"muse": ["2026-08-15"]},
         )
         assert "partial_sources" not in ev
 
     def test_d5_empty_partial_sources_omits_the_key(self):
-        hosts = {"cursor": {"2026-08-15": _u(10)}}
+        hosts = {"muse": {"2026-08-15": _u(10)}}
         ev = events.make_host_usage_snapshot(
             device="dev-a",
-            token_sources=("cursor",),
+            token_sources=("muse",),
             hosts=hosts,
             tokens_by_day=self._sibling_for(hosts),
             partial_days={},
@@ -2876,16 +2883,16 @@ class TestMakeHostUsageSnapshot:
         assert "partial_sources" not in ev
 
     def test_d6_partial_sources_intersects_token_sources(self):
-        hosts = {"cursor": {"2026-08-15": _u(10)}}
+        hosts = {"muse": {"2026-08-15": _u(10)}}
         ev = events.make_host_usage_snapshot(
             device="dev-a",
-            token_sources=("cursor",),
+            token_sources=("muse",),
             hosts=hosts,
             tokens_by_day=self._sibling_for(hosts),
             degraded_sources=("codex",),
-            partial_days={"cursor": ["2026-08-15"], "codex": ["2026-08-15"]},
+            partial_days={"muse": ["2026-08-15"], "codex": ["2026-08-15"]},
         )
-        assert ev["partial_sources"] == ["cursor"]
+        assert ev["partial_sources"] == ["muse"]
         assert set(ev["partial_sources"]) <= set(ev["token_sources"])
         assert ev["degraded_sources"] == ["codex"]
         assert set(ev["degraded_sources"]).isdisjoint(ev["token_sources"])

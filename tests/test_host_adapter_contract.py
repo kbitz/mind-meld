@@ -532,11 +532,6 @@ def test_failure_isolation_keeps_sibling_reader_publishing(row: str, failure_mod
     )
 
 
-def _active_readers_without_cursor() -> set[str]:
-    # Track 114A unhooks cursor from capture; Track 115A deletes it from ACTIVE_HOST_READERS.
-    return set(events.ACTIVE_HOST_READERS) - {"cursor"}
-
-
 @pytest.mark.parametrize("row", _ROWS)
 def test_registry_and_diag_completeness(row: str):
     """Registry tables, diag keys, coldness predicate, and unknown-reader error."""
@@ -546,8 +541,8 @@ def test_registry_and_diag_completeness(row: str):
     assert set(events_tail.WARMABLE_HOST_READERS) <= set(events.ACTIVE_HOST_READERS), _clause_msg(
         row, "registry", "WARMABLE_HOST_READERS is a subset of ACTIVE_HOST_READERS"
     )
-    assert set(events_tail.HOST_READER_SOURCE_GATE) == _active_readers_without_cursor(), (
-        _clause_msg(row, "registry", "HOST_READER_SOURCE_GATE covers active readers")
+    assert set(events_tail.HOST_READER_SOURCE_GATE) == set(events.ACTIVE_HOST_READERS), _clause_msg(
+        row, "registry", "HOST_READER_SOURCE_GATE covers active readers"
     )
     spec = host_registry.HOST_READER_DIAGS[row]
     assert callable(getattr(spec.owner, spec.function)), _clause_msg(

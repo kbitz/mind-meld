@@ -2111,16 +2111,6 @@ def test_legacy_cursor_consent_omits_cursor_from_status_diag_and_recapture(tmp_p
     cfg = load_config()
     cfg.setdefault("retro", {})["cursor_host_usage"] = True
     save_config(cfg)
-    monkeypatch.setattr(
-        host_usage,
-        "cursor_usage_diag",
-        lambda *_a, **_kw: pytest.fail("cursor_usage_diag must not be called"),
-    )
-    monkeypatch.setattr(
-        host_usage,
-        "cursor_hook_state",
-        lambda *_a, **_kw: pytest.fail("cursor_hook_state must not be called"),
-    )
     for command in (["status"], ["diag"]):
         res = runner.invoke(app, command)
         assert res.exit_code == 0, res.output
@@ -2791,3 +2781,109 @@ def test_disabled_grok_source_overrides_the_retro_bit_in_status(tmp_path, monkey
     cfg["sync"]["disabled_sources"] = ["grok"]
     save_config(cfg)
     assert "Grok Build usage capture" not in runner.invoke(app, ["status"]).output
+
+
+def test_grok_diag_reports_unreadable_config_consent_as_unknown(tmp_path, monkeypatch):
+    _storage, cfg_path, _backend = _setup(tmp_path, monkeypatch)
+    _enable_grok(tmp_path, via="source")
+    cfg_path.write_text("not = [valid toml\n", encoding="utf-8")
+    calls: list[bool] = []
+    real_grok_diag = grok_host.grok_usage_diag
+
+    def spy_grok_diag(*, count_logs: bool = False):
+        calls.append(count_logs)
+        return real_grok_diag(count_logs=count_logs)
+
+    monkeypatch.setattr(grok_host, "grok_usage_diag", spy_grok_diag)
+    diag_res = runner.invoke(app, ["diag"])
+    assert diag_res.exit_code == 0, diag_res.output
+    assert calls == [False]
+    diag = " ".join(diag_res.output.split())
+    assert "grok consented: (config unreadable)" in diag
+    assert "grok consented: yes" not in diag
+    assert "grok prior successful scan: yes" not in diag
+    assert "a prior scan completed successfully" not in diag
+
+    calls.clear()
+    json_res = runner.invoke(app, ["diag", "--json"])
+    assert json_res.exit_code == 0, json_res.output
+    assert calls == [False]
+    payload = json.loads(json_res.stdout)
+    assert payload["config"]["state"].startswith("error:")
+    assert payload["host_usage"]["grok"]["consented"] is None
+    assert payload["host_usage"]["grok"]["complete_once"] is False
+
+
+def test_grok_unreadable_cache_reports_unreadable_in_status_and_diag(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=())
+    _enable_grok(tmp_path, via="source")
+    session_dir = grok_host.GROK_SESSIONS_PATH / "w1" / "s1"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "usage.json").write_text("{}", encoding="utf-8")
+    grok_host.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    grok_host.CACHE_PATH.write_bytes(b"{not-json")
+
+    status = " ".join(runner.invoke(app, ["status"]).output.split())
+    assert "Grok Build usage capture: enabled, but no successful scan yet" in status
+    assert "Grok Build usage capture: enabled; a prior scan completed successfully" not in status
+
+    diag = " ".join(runner.invoke(app, ["diag"]).output.split())
+    assert "grok consented: yes" in diag
+    assert "grok prior successful scan: unreadable" in diag
+    assert "grok cache inventory: unreadable" in diag
+    assert "grok sessions cached: unknown of 1" in diag
+    assert "grok usage read blocker:" not in diag
+
+    as_json = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["grok"]
+    assert as_json["cache_state"] == "unreadable"
+    assert as_json["complete_once"] is False
+    assert as_json["files_cached"] is None
+    assert as_json["files_on_disk"] == 1
+
+
+@pytest.mark.parametrize("files_on_disk", [8, None])
+def test_grok_deadline_refreshes_inventory_count_in_status_and_diag(
+    tmp_path, monkeypatch, files_on_disk
+):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=())
+    _enable_grok(tmp_path, via="source")
+    calls: list[bool] = []
+
+    def fake_grok_diag(*, count_logs: bool = False):
+        calls.append(count_logs)
+        return {
+            "cache_state": "ok",
+            "complete_once": True,
+            "last_reason": "deadline",
+            "last_reason_since": "2026-10-01T00:00:00+00:00",
+            "last_deadline_allotted_ms": 250,
+            "last_complete_ms": 300,
+            "last_complete_at": "2026-10-01T00:00:00+00:00",
+            "usage_less_skipped": 0,
+            "model_count": 1,
+            "models": ["grok-4.7-build"],
+            "files_cached": 5,
+            "files_on_disk": files_on_disk if count_logs else None,
+        }
+
+    monkeypatch.setattr(grok_host, "grok_usage_diag", fake_grok_diag)
+    expected_disk = "unknown" if files_on_disk is None else str(files_on_disk)
+
+    status = " ".join(runner.invoke(app, ["status"]).output.split())
+    assert calls == [False, True]
+    assert (
+        "Grok Build usage capture: enabled — host-usage snapshot skipped (grok deadline)" in status
+    )
+    assert "Grok Build usage capture: enabled; a prior scan completed successfully" not in status
+    assert f"5 of {expected_disk} sessions cached" in status
+
+    calls.clear()
+    diag = " ".join(runner.invoke(app, ["diag"]).output.split())
+    assert calls == [True]
+    assert "grok usage read blocker: host-usage snapshot skipped (grok deadline)" in diag
+    assert f"5 of {expected_disk} sessions cached" in diag
+    assert f"grok sessions cached: 5 of {expected_disk}" in diag

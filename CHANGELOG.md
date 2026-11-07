@@ -2,6 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.23] - 2026-11-07
+
+Removes the retired Cursor usage reader, and retro-fleet instructions drop Cursor.
+
+### Removed
+
+- The Cursor usage reader is removed.
+
+### Changed
+
+- Retro-fleet reader instructions drop Cursor.
+
 ## [1.12.22] - 2026-11-07
 
 Removes mm cursor-agent, Cursor's hook command, and Cursor usage consent, and published Cursor usage stops counting after the next push.

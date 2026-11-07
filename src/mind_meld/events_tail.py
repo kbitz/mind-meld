@@ -243,9 +243,10 @@ read time. Deadlines are cooperative, not filesystem-interrupt ceilings."""
 HOST_READER_RESERVE_MS = 300
 """Attended sweep: time held back for EACH later reader (Track 101A), so one
 reader's overrun cannot take another's whole read. Sized from measured reads:
-Antigravity 109 to 236 ms, Cursor 100 ms, Muse 84 to 642 ms, and Codex 746 ms
-warm to 1,812 ms while learning new rollouts, which under the 3,000 ms attended
-default gets a 2,100 ms first share (three later readers). Capped per sweep at
+Grok Build 19 to 20 ms warm (Track 57A E16), Antigravity 109 to 236 ms, Muse
+84 to 642 ms, and Codex 746 ms warm to 1,812 ms while learning new rollouts,
+which under the 3,000 ms attended default gets a 2,100 ms first share (three
+later readers: Grok Build, Muse and Antigravity). Capped per sweep at
 ``sweep / (2 * readers)`` and floored per later reader at the reserve. The
 autopush sweep passes no reserve and keeps ``HOST_READER_GRACE_MS``."""
 
@@ -327,7 +328,7 @@ their totals published to the fleet. Only aggregates ever crossed the boundary,
 but "we read it unless you read the README" is the wrong default for a tool
 whose whole premise is scoped, opt-in sync."""
 
-WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok", "cursor", "muse", "agy"})
+WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok", "muse", "agy"})
 """Readers with cached totals an attended warm can populate.
 
 A future reader whose cache stores no totals must not be added here.
@@ -670,15 +671,12 @@ def _merge_host_usage_maps(
 ) -> None:
     """Add a completed reader's buckets to ``target`` without aliasing it.
 
-    A (family, UTC day) collision is possible whenever two readers classify
-    into the same canonical family — historically Codex and OpenCode both
-    landed GPT in ``codex``. Today Cursor and Grok Build share the ``grok``
-    family (Cursor's Grok runs and Grok Build's own sessions), so a day and a
-    model id can collide across them, and the merge sums
-    TOKEN_FIELDS at every level: a shallow map update would silently drop
-    whichever reader landed first, and a synthetic or future reader that
-    shares a family would regress without this. The same collision exists
-    one level down on model id.
+    A (family, UTC day) collision is possible because classification follows
+    model IDs, not reader identity: different readers can share a canonical
+    family, including ``other`` for unrecognized models. The merge sums
+    TOKEN_FIELDS at every level so a shallow map update cannot silently drop
+    whichever reader landed first. The same collision rule applies one level
+    down on model id.
     """
     for family, days in source.items():
         target_days = target.setdefault(family, {})
@@ -806,7 +804,6 @@ _HOST_DISPLAY_NAMES = {
     "grok": "Grok Build",
     "muse": "Muse",
     "agy": "Antigravity",
-    "cursor": "Cursor",
 }
 """Closed display names for the no-release clause; an unknown reader shows its id."""
 
@@ -892,16 +889,9 @@ def _host_skip_phrase(
             unit = {"muse": "session logs", "agy": "conversation DBs", "grok": "sessions"}.get(
                 reader, "rollouts"
             )
-            if reader == "cursor":
-                progress = (
-                    f"{shown(evidence.files_cached)} retained runs; "
-                    "Conductor files still on disk are not counted"
-                )
-            else:
-                progress = (
-                    f"{shown(evidence.files_cached)} of "
-                    f"{shown(evidence.files_on_disk)} {unit} cached"
-                )
+            progress = (
+                f"{shown(evidence.files_cached)} of {shown(evidence.files_on_disk)} {unit} cached"
+            )
             return (
                 f"{phrase}. Last read allowed {shown(evidence.last_deadline_allotted_ms)} ms; "
                 f"last complete read {shown(evidence.last_complete_ms)} ms "

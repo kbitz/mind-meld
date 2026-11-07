@@ -110,10 +110,6 @@ class TestReaderOrchestration:
     def _enabled(self, *names: str) -> list[dict]:
         return [{"name": n, "path": f"/tmp/{n}", "type": "generic"} for n in names]
 
-    def _active_readers_114a(self) -> list[str]:
-        # Track 114A unhooks cursor from capture; Track 115A deletes it from ACTIVE_HOST_READERS.
-        return [r for r in _mm_events.ACTIVE_HOST_READERS if r != "cursor"]
-
     def test_default_readers_are_the_active_built_ins_in_fixed_order(self):
         assert [
             name
@@ -121,7 +117,7 @@ class TestReaderOrchestration:
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
                 grok_consented=True,
             )
-        ] == self._active_readers_114a()
+        ] == list(_mm_events.ACTIVE_HOST_READERS)
 
     def test_readers_are_gated_on_the_user_enabling_that_source(self):
         """A host's local store is only read when the user enabled that host as
@@ -178,7 +174,7 @@ class TestReaderOrchestration:
         no consent check at all. Strict equality against the live reader set
         is the consent guarantee. Relaxing this to a subset would let a
         future reader run with no gate entry."""
-        assert set(events_tail.HOST_READER_SOURCE_GATE) == set(self._active_readers_114a())
+        assert set(events_tail.HOST_READER_SOURCE_GATE) == set(_mm_events.ACTIVE_HOST_READERS)
         invoked = [
             name
             for name, _ in events_tail._default_host_readers(
@@ -388,7 +384,7 @@ class TestReaderOrchestration:
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
                 grok_consented=True,
             )
-        ] == self._active_readers_114a()
+        ] == list(_mm_events.ACTIVE_HOST_READERS)
 
     def test_warmable_readers_are_a_subset_of_active_readers(self):
         """A name that is not a live reader cannot be warmed.
@@ -715,7 +711,7 @@ class TestHostDeadline:
         capture = events_tail._capture_host_usage(
             _readers(
                 ("codex", codex),
-                ("cursor", later("cursor", 0.1)),
+                ("grok", later("grok", 0.1)),
                 ("muse", later("muse", 0.084)),
                 ("agy", later("agy", 0.236)),
             ),
@@ -725,7 +721,7 @@ class TestHostDeadline:
         )
 
         assert seen["codex"] == pytest.approx(2.1)
-        assert capture.token_sources == ("cursor", "muse", "agy")
+        assert capture.token_sources == ("grok", "muse", "agy")
         assert capture.dropped == (("codex", "deadline"),)
         assert clock["t"] <= 3.0
 
@@ -746,11 +742,12 @@ class TestHostDeadline:
         assert capture.dropped == (("codex", "deadline"), ("agy", "deadline"))
 
     def test_attended_reserve_fits_measured_warm_reads(self):
-        """The slowest reads measured on the owner's Mac (Codex 1.812 s, Cursor
-        0.100, Muse 0.642, Antigravity 0.236) all complete inside 3.0 s."""
+        """The slowest reads measured on the owner's Mac (Codex 1.812 s, Grok
+        0.020 [19–20 ms warm Grok read, events_tail.py:238-240 / E16], Muse 0.642,
+        Antigravity 0.236) all complete inside 3.0 s."""
         clock = {"t": 0.0}
-        names = ("codex", "cursor", "muse", "agy")
-        costs = (1.812, 0.100, 0.642, 0.236)
+        names = ("codex", "grok", "muse", "agy")
+        costs = (1.812, 0.020, 0.642, 0.236)
 
         capture = events_tail._capture_host_usage(
             _readers(*[(n, self._clocked_reader(clock, n, c)) for n, c in zip(names, costs)]),
@@ -1887,7 +1884,7 @@ class TestColdCacheWarmAndRetry:
         # Codex overruns the 250 ms sweep by 20 ms; the others are instant.
         readers = tuple(
             (name, reader(name, 0.27 if name == "codex" else 0.0))
-            for name in ("codex", "cursor", "muse", "agy")
+            for name in ("codex", "grok", "muse", "agy")
         )
         monkeypatch.setattr(events_tail, "_default_host_readers", lambda *_a, **_kw: readers)
         warmed: list[dict] = []
@@ -1901,7 +1898,7 @@ class TestColdCacheWarmAndRetry:
             _tail_config(sources), sources, "dev-a", dry_run=False, quiet=True
         )
 
-        assert [name for name, _start, _deadline in seen] == ["codex", "cursor", "muse", "agy"]
+        assert [name for name, _start, _deadline in seen] == ["codex", "grok", "muse", "agy"]
         _name, first_start, sweep = seen[0]
         assert sweep - first_start == pytest.approx(0.25)
         for _name, start, deadline in seen[1:]:
@@ -2287,17 +2284,6 @@ def test_partial_takes_the_retry_sentence_not_warming(reader):
     assert "warming" not in phrase
 
 
-def test_cursor_deadline_reports_retained_runs():
-    evidence = events_tail.HostReadEvidence(250, 300, "2026-09-23T00:00:00+00:00", 3, None)
-    phrase = events_tail._host_skip_phrase(
-        "cursor", "deadline", readiness="ready", evidence=evidence
-    )
-    assert "3 retained runs" in phrase
-    assert "Conductor files still on disk are not counted" in phrase
-    assert "unknown of unknown" not in phrase
-    assert "run files" not in phrase
-
-
 @pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_deadline_names_bounded_interactive_warm(reader):
     phrase = events_tail._host_skip_phrase(reader, "deadline", readiness="ready")
@@ -2572,8 +2558,18 @@ def test_deadline_wording_follows_whether_the_caller_could_warm(
 def test_cursor_is_absent_from_host_reader_gate_and_default_readers():
     import inspect
 
+    from mind_meld import errors
+
     source = [{"name": "cursor", "path": "/unused", "type": "generic"}]
     assert "cursor" not in events_tail.HOST_READER_SOURCE_GATE
+    assert "cursor" not in _mm_host_registry.HOST_READER_DIAGS
+    assert "cursor" not in _mm_events.ACTIVE_HOST_READERS
+    assert "cursor" not in _mm_events.HOST_USAGE_TOKEN_SOURCES
+    assert "cursor" not in events_tail.WARMABLE_HOST_READERS
+    assert "cursor" not in events_tail._HOST_DISPLAY_NAMES
+    assert set(events_tail._HOST_DISPLAY_NAMES) == set(_mm_events.ACTIVE_HOST_READERS)
+    assert [n for n in dir(_mm_host_usage) if "cursor" in n.lower()] == []
+    assert [n for n in dir(errors) if "cursor" in n.lower()] == []
     assert events_tail._default_host_readers(source) == ()
     assert "cursor_consented" not in inspect.signature(events_tail._default_host_readers).parameters
 
@@ -2581,6 +2577,7 @@ def test_cursor_is_absent_from_host_reader_gate_and_default_readers():
 @pytest.mark.parametrize("entry", ["tail", "backfill", "attended"])
 def test_legacy_cursor_consent_selects_no_reader_in_capture_callers(tmp_path, monkeypatch, entry):
     from mind_meld import cli
+    from mind_meld import config as mm_config
 
     root = tmp_path / "events_root"
     root.mkdir()
@@ -2592,20 +2589,27 @@ def test_legacy_cursor_consent_selects_no_reader_in_capture_callers(tmp_path, mo
         "sync": {"sources": sources, "max_file_size": 52_428_800},
         "retro": {"cursor_host_usage": True},
     }
-    seen = []
+    assert (
+        events_tail._default_host_readers(
+            sources, grok_consented=mm_config.grok_usage_consented(config)
+        )
+        == ()
+    )
+    readers_seen: list[tuple] = []
+    real_capture = events_tail._capture_host_usage
 
-    def read(*, deadline, consented=False):
-        seen.append(consented)
-        return _complete()
+    def spy_capture(readers=None, **kw):
+        readers_seen.append(tuple(readers or ()))
+        return real_capture(readers=readers, **kw)
 
-    monkeypatch.setattr(_mm_host_usage, "read_cursor_usage", read)
+    monkeypatch.setattr(events_tail, "_capture_host_usage", spy_capture)
     if entry == "attended":
         cli._capture_attended_usage(config, sources, sources, verbose=False)
     elif entry == "tail":
         events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=True)
     else:
         events_tail._run_events_backfill(config, sources, "dev-a")
-    assert seen == []
+    assert all(r == () for r in readers_seen)
     for row in _rows(root):
         assert "cursor" not in row.get("token_sources", [])
         assert "cursor" not in row.get("empty_sources", [])
@@ -2833,9 +2837,7 @@ class TestCaptureBudget85A:
             "warm_host_cache_inline",
             lambda **kw: warmed.append(kw["reader"]) or _complete(),
         )
-        four = tuple(
-            (n, lambda *, deadline: _complete()) for n in ("codex", "cursor", "muse", "agy")
-        )
+        four = tuple((n, lambda *, deadline: _complete()) for n in ("codex", "grok", "muse", "agy"))
         slow = tuple((n, lambda *, deadline: _incomplete("deadline")) for n in ("codex", "muse"))
 
         events_tail._capture_host_snapshot(

@@ -18,7 +18,6 @@ GIT_WALK_FAILURES_URL = (
     "https://github.com/kbitz/mind-meld#dropped-repositories-and-ignored-git-environment-variables"
 )
 HOST_USAGE_CAPTURE_URL = "https://github.com/kbitz/mind-meld#host-usage-capture"
-CURSOR_SQLITE_URL = "https://github.com/kbitz/mind-meld#cursor-sqlite-stores"
 NEWER_STORAGE_URL = "https://github.com/kbitz/mind-meld#newer-or-damaged-storage-format"
 KEY_HEADER_COPIES_URL = "https://github.com/kbitz/mind-meld#key-header-copies-differ"
 LOCK_HELD_URL = "https://github.com/kbitz/mind-meld#another-mm-operation-is-running"

@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.23 | 2026-11-07 | Removes the retired Cursor usage reader, and retro-fleet instructions drop Cursor. |
 | 1.12.22 | 2026-11-07 | Removes mm cursor-agent, Cursor's hook command, and Cursor usage consent, and published Cursor usage stops counting after the next push. |
 | 1.12.21 | 2026-11-07 | Sync includes gstack-extend per-host run history, and migration preview and docs clarify custom-source handling and run history boundaries. |
 | 1.12.20 | 2026-11-07 | Documentation adds a Syncthing fleet cutover runbook and clarifies rehearsal isolation, cutover checks, and inherited XDG discovery. |

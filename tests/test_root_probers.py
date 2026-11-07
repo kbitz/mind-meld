@@ -323,7 +323,6 @@ class TestRegistryAndIsolation:
 
         monkeypatch.setattr(host_usage, "read_muse_usage", forbidden("muse"))
         monkeypatch.setattr(host_usage, "read_agy_usage", forbidden("agy"))
-        monkeypatch.setattr(host_usage, "read_cursor_usage", forbidden("cursor"))
         monkeypatch.setattr(codex_host, "read_codex_usage", forbidden("codex"))
         repo = _fake_repo(home / "repo")
         _codex_rollout(_codex_day(home) / "rollout-1.jsonl", str(repo))

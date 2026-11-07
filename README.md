@@ -24,6 +24,16 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Cursor usage reader removed (Track 115A):** mm no longer reads Cursor usage.
+Its private leftovers under `~/.config/mind-meld/` — `cursor-host-tokens.json`,
+`cursor-host-tokens.json.lock`, `cursor-standalone-spool.jsonl` and
+`cursor-standalone-spool.jsonl.merging` — are no longer read and can be deleted.
+Older published `host-usage-snapshot` rows that name `cursor` remain unchanged,
+with no migration; `mm retro-fleet` labels a failed or incomplete Cursor read on
+those rows `unknown/retired reader`. A last attended-attempt record written by
+mm 1.12.21 or older that names Cursor shows `record corrupt — the next attended
+mm push rewrites it` until that push.
+
 **Cursor CLI wrapper, hook and usage consent removed (Track 114A):** `mm cursor-agent`,
 `mm capture-cursor-usage`, and the `cursor` source alias for `mm enable-source` /
 `mm disable-source` are removed, and `mm push`, `mm status` and `mm diag` no longer
@@ -32,10 +42,13 @@ select or report the Cursor usage reader. Scripts and aliases that ran
 without starting Cursor. On any machine where `mm enable-source cursor` was run earlier,
 delete the `stop` hook entry whose command is `mm capture-cursor-usage` from
 `~/.cursor/hooks.json` and keep your other hooks; until you do, Cursor runs that missing
-command after every turn. Published Cursor rows are not migrated, but each machine's
-next `mm push` publishes a usage snapshot without Cursor, and `retro-fleet` counts only
-each machine's latest snapshot, so that machine's earlier Cursor usage stops counting.
-Usage capture ignores a
+command after every turn. Published Cursor rows are not migrated: `retro-fleet` counts
+only each machine's latest snapshot, so a machine with another consented host reader replaces
+its earlier snapshot on the next push that captures host usage, while a machine with no
+consented host readers skips pre-push attended host capture on a converged `mm push` and
+replaces its earlier snapshot with an empty `host-usage-snapshot` (`token_sources: []`) on
+its next push with content/identity changes or `mm autopush` (or until its earlier row ages
+past the 90-day retention window). Usage capture ignores a
 leftover `[retro] cursor_host_usage` key in `~/.config/mind-meld/config.toml`, but while
 it is `true`, git-root discovery still reads Cursor's session metadata
 (`~/.cursor/acp-sessions`) and Conductor's Cursor store, including its `index.db`, until a
@@ -2217,10 +2230,6 @@ storage backend; it does not prove delivery to another Mac.
 
 Capture requires enabled, available `mm-events` and consented readers. Enable
 with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok` / `mm enable-source muse` / `mm enable-source agy`.
-
-<a id="cursor-sqlite-stores"></a>
-
-Cursor usage capture, including the Conductor SQLite usage reader, is removed in Track 114A. Until a later release removes it, git-root discovery still opens Conductor's Cursor store while a leftover `[retro] cursor_host_usage = true` is set; see [Upgrading](#upgrading).
 
 Restore an unavailable custom mm-events folder before retrying. Enabling Codex
 sync now authorizes reading its local rollouts on **every attended push**, including

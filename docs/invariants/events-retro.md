@@ -14,7 +14,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_validated_settled_days` / `_validated_settled_memo` / `_validated_settled_entry` / `_slim_entry` / `_unclosed_settled_records` / `_record_memo` / `_reduce_with_settled_memos` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
 - `src/mind_meld/hosts/grok.py` — `read_grok_usage` / `grok_usage_diag` / `GROK_SESSIONS_PATH` / `CACHE_PATH` / `_scan_grok_root` / `_parse_usage`
 - `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
-- `src/mind_meld/host_usage.py` — `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
+- `src/mind_meld/host_usage.py` — `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `_ReadFailure` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
 - `src/mind_meld/attemptlog.py` — local attended-attempt writer, validation and read/render states (65A)
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `_is_cache_stale` / `_store_refresh` / `_persist_or_yield_concurrent` / `_persist_force` / `CACHE_PATH` / `TTL_SECONDS`
@@ -290,7 +290,7 @@ settling, a cached rollout idle at least 24h is a stat-only cache hit (no
 helpers (`_day_dir_date`, `_settle_date_eligible`, `_stat_digest`,
 `SETTLE_DAYS`/`SETTLE_IDLE_NS`) live in `host_usage.py`; Muse's own freeze
 code is untouched. The memo is additive on cache `version` 1, with no
-`CACHE_VERSION` bump: that constant is shared with the Cursor, Muse and
+`CACHE_VERSION` bump: that constant is shared with the Grok Build, Muse and
 Antigravity caches, so a bump would cold-start all four, and `settled_days` and
 earlier fields were added the same way. An older mm rejects slim entries and
 re-parses a settled group's files, then writes records without a memo; the next
@@ -668,7 +668,7 @@ repository by common Git directory, unchanged.
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Grok Build / Muse / Antigravity readers (Track 114A stopped selecting Cursor's) as one additive
+The tail publishes the local Codex / Grok Build / Muse / Antigravity readers as one additive
 `host-usage-snapshot` row. `hosts/codex.py` and `hosts/grok.py` own the Codex and Grok Build readers;
 `host_usage` owns the shared reader kit, other readers and model-family
 classification, and `host_registry` owns diagnostic and warm dispatch.
@@ -724,9 +724,7 @@ that distinction backwards silently under-reports the fleet.
 Grok, Muse and Antigravity to their source names. Grok selection uses the separate
 `grok_consented` verdict from `config.grok_usage_consented`, which also supports
 usage-only consent; Codex, Muse and Antigravity require their source enabled.
-Track 114A unhooked Cursor from `HOST_READER_SOURCE_GATE` and `_default_host_readers`
-ahead of Track 115A's reader deletion (`ACTIVE_HOST_READERS` and `HOST_USAGE_TOKEN_SOURCES`
-drop `"cursor"` in Track 115A). Unknown inbound names (retired `opencode`
+Unknown inbound names (retired `opencode`, `cursor`,
 or a future reader) are retained by the aggregator, not listed here.
 `_default_host_readers(sources, *, grok_consented=...)` returns only those.
 A user who declined the `codex` source does not get `~/.codex/sessions`
@@ -850,284 +848,16 @@ The census and fatal-check list are
 walker never opens `sessions/`; the usage reader is a separate consented walk
 of `session.jsonl` only. Muse gets no `AgentRow` (it discovers `~/.claude/skills`).
 
-**Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A; unhooked in Track 114A, deleted in Track 115A).** Track 114A removed the Cursor CLI wrapper and hook commands, the `cursor` source alias in `sourceflow.py`, the `[retro] cursor_host_usage` validation/helper in `config.py`, and all Cursor selection and reporting in `events_tail.py` and `statusflow.py`. The `host_usage.py` reader, spool and hook-editor functions remain, unreachable, until Track 115A deletes them, as do the `cursor` entries in `ACTIVE_HOST_READERS`, `HOST_USAGE_TOKEN_SOURCES`, `WARMABLE_HOST_READERS` and `host_registry.HOST_READER_DIAGS` and the `reader == "cursor"` branches in `events_tail.py`, `statusflow._host_usage_blocker` and `host_registry`; `aggregator._cursor_acp_gap_notes` remains until Track 116A.
-
-The private authoritative history
-holds hashed generation IDs and counters; the local capture's UTC date owns
-standalone runs. Duplicate callbacks keep the original completion day and
-replace counters, rather than adding again, whether they fold in one read or
-across reads. Conductor `requestId` hashes map to canonical run-ID hashes in an
-additive private `requests` map: a matching standalone generation is removed
-only once the Conductor run is retained **with counters**. A running run or a
-usageRef placeholder never erases known standalone usage, and later callbacks
-keep updating it until then. Aliases survive pruning of their source files.
-Malformed aliases refuse without resetting history. Measured 2026-10-04
-(Conductor 0.90.1): a Conductor Cursor run fires no user-level stop hook, so
-the two never overlap and this dedup is defensive. Conductor 0.90.1 also moved
-new runs from `runs.ndjson` to a SQLite `index.db`; Track 70A reads it, and its
-rules are in Conductor SQLite stores below.
-
-On a Mac without a Conductor store, history is authoritative once a scan
-completed or a queued standalone completion was folded while no
-`unsupported`/`malformed` blocker stood (`complete_once`); a transient prior
-reason does not block that latch, so a first read that timed out cannot stall
-a store-less Mac. A
-transient persisted reason (`deadline`, `io_error`, `stale`) then does not
-outlive the missing store; only `unsupported`/`malformed` survive it
-(`_CURSOR_STORE_BLOCKERS`). Before history is authoritative, the prior reason
-still stands.
-
-Hook and wrapper completions (none arrive since Track 114A removed both commands;
-`record_cursor_usage` keeps this contract, unreachable, until Track 115A) never
-touch the history lock. They append one
-sanitized row (hashed generation ID, UTC day, model, counters, partial) to the
-private `cursor-standalone-spool.jsonl` with `fsutil.append_rotatable_jsonl`,
-which writes only after its flock confirms the path still names the locked
-inode, then fsyncs the file and its directory on every append, so a push
-reader's multi-second hold (first-pass read plus an immediate 5 s warm) can
-never drop or delay a completion. Rows carry `"v": 1`. Under the history lock,
-`read_cursor_usage` renames the spool to `.merging` with `fsutil.rotate_jsonl`
-(non-blocking, never sleeping past the read deadline; a busy spool rotates on
-a later read), folds it, writes history durably, and only then unlinks
-`.merging`. A crash in between re-folds the leftover idempotently before the
-live spool rotates again. Torn or invalid rows are skipped with a notice; a
-batch with no valid row is retired at once (including on the early
-`no_metadata_ledger` return), so it can never block later rotations. A row
-from a newer spool version refuses as `unsupported` and keeps the batch for
-the upgraded mm; like any spool read failure it is persisted through
-`_carry_reason`, so status shows the upgrade remedy. The spool is capped at `CURSOR_SPOOL_MAX_BYTES` (16 MiB). Folded rows make
-history authoritative (`complete_once`) when no blocker is outstanding.
-`cursor_usage_diag` computes `pending_completions` read-only, but since Track 114A
-`mm diag` no longer calls it. A corrupt history refuses as before
-and leaves the queue in place.
-
-`configure_cursor_hook` refuses the
-real `~/.cursor/hooks.json` under pytest, derived from the account database
-rather than HOME, comparing resolved, case-folded paths. A symlinked hooks.json
-is refused with a message naming the entry to add where the file is managed.
-`cursor_hook_state` reads without a lock: bounded, non-blocking, regular files
-only (a FIFO or over-deep JSON is `malformed`, never a hang or a traceback);
-the writer's atomic replace makes old-or-new reads coherent. A requestId that names a different retained run
-than an earlier scan recorded refuses as `malformed`, like a conflict within
-one scan.
-
-The persisted schema producer is Conductor **0.87.3**, with sessions generated
-by Cursor CLI **2026.09.18-9a7762b**. The fixture contract pins both versions
-and documents the three-run, two-session, one-Mac census. Runtime validation,
-not version pins, detects drift. In the legacy `runs.ndjson` ledger only
-`finished` plus non-null usage counts (SQLite rows follow the row policy in
-Conductor SQLite stores below); `queued`/`running` plus null usage is pending.
-`cancelled`/`error` rows with null usage and no usageRef contribute nothing: Conductor recorded no counters
-for them (2026-10-03 store: 10 cancelled, 1 error, 1 queued across 7 of 16
-files, all null usage), so any spend they incurred is invisible to mm. Counters
-or a usageRef on any unfinished status, missing usage, malformed counters and
-unknown statuses refuse the reader. No store and
-no prior cache is `no_metadata_ledger`; found-but-unreadable data
-is `malformed`/`unsupported`, never invisible source absence (a SQLite layout this
-mm cannot read is store-scoped drift instead, never `unsupported`; see below).
-A known unreadable store disappearing preserves its blocker rather than
-becoming source absence; previously captured runs survive a missing store.
-
-Conductor counters are disjoint and must satisfy input + output + cacheRead + cacheWrite
-== totalTokens. No inclusive normalization applies to them (the unreachable
-stop-hook path's counters are inclusive and were normalized once on intake; Track
-114A removed its callers and that paragraph). reasoningTokens must be
-between zero and outputTokens and is not added again. Each whole turn belongs
-to **endedAt's UTC date** in the legacy ledger, or to its terminal stamp in
-SQLite (`finished_at`, `cancelled_at`, `expired_at`; an `ERROR` run uses
-`updated_at`); a turn crossing midnight is never split.
-A timestamp below 2020-01-01 UTC is malformed, so a seconds-scale clock
-cannot be reaped as ancient history and still report a successful scan.
-A timestamp more than one day after the read is malformed, so a far-future
-day cannot take a slot in the shared 90-day snapshot window.
-A nonzero cacheWrite labels the day partial via `unattributable_days`; it does
-not suppress the counters or the disjoint-v1 marker. The identity must still
-hold, and the unpublished cache-write price remains unknown. A null usage with
-non-null usageRef persists a partial placeholder. When known usage shares that
-day, the row carries partial_sources. If the day has no token bucket, the reader
-returns incomplete `partial`, since the existing writer trims that warning away.
-This fail-closed resolution was accepted during implementation; it invents no
-zero tokens and changes no wire shape.
-
-**Conductor SQLite stores (Track 70A, Conductor 0.90.1).** The adapter reads one
-workspace store's `index.db` and nothing else of it. Its fixture contract is the
-SQLite census section of `tests/fixtures/host_sessions/cursor/CONTRACT.md`; items
-labeled producer-source-only there are exercised by mutation, not census.
-
-*Open rule.* Only a directory named `[0-9a-f]{16}` (Conductor's
-`sha256(workspaceDir)[:16]`) is a SQLite store; another name holding an `index.db`
-is ignored and not counted as unread. All four files (`index.db`, `-wal`, `-shm`,
-`-journal`) are lstat-ed first and must be regular, non-symlink files, else
-`io_error/non_regular_path` with the file's name, before anything is opened. A
-non-empty `-journal` is `stale/hot_journal`. With no `-wal` the database opens
-`mode=ro&immutable=1` (a plain read-only open would create `-shm`/`-wal`), pinned
-by (dev, ino, size, mtime_ns) plus the `-wal`'s continued absence; with a `-wal`
-it opens `mode=ro`, pinned by (dev, ino, type) of the files present, and the
-`-shm` SQLite itself creates is exempt. A change across the read is
-`stale/identity_changed`. mm never writes, checkpoints or copies a store file,
-never opens a per-agent `store.db`, never reads `result`, `error_code`, `agents`,
-`run_events` or a blob table, and never `os.open`s a database file while
-connected. Footprint-free holds only in steady states, and means no file is created
-or removed and `index.db` and `-wal` stay byte-identical: SQLite itself updates the
-`-shm` wal-index (read marks with a live writer; its mtime alone when it re-validates
-a quit writer's residue, observed live 2026-10-09 with content unchanged), so the
-`-shm` is exempt from the post-read check beyond (dev, ino, type). A close race or a
-crash can leave SQLite-valid `-wal`/`-shm` files, which Conductor recovers on its next
-open.
-That is a known departure from the codex-memory owned-tree rule; the README says
-so in one sentence. The same-user race between lstat and open is accepted, and the
-legacy JSONL reader keeps its skip-if-non-regular behavior, an asymmetry that is
-intentional. Under `PYTEST_CURRENT_TEST` opening any store under the account's
-real Conductor path (resolved through the account database, not `HOME`) raises
-`RuntimeError`, which is not a read failure and propagates.
-
-*Connection discipline.* `sqlite3` is imported lazily (an ImportError is
-reader-wide `io_error/sqlite_unavailable`). The connection is `isolation_level=None`
-with a busy wait of `min(remaining, 100 ms)` (then `locked`, never persisted), a
-progress handler enforcing the read deadline (`SQLITE_INTERRUPT` is `deadline`),
-`setlimit(LENGTH, 65536)` (an oversize cell is `TOOBIG`, so `oversize_or_type`
-without materializing that value in Python), `text_factory=bytes` with strict UTF-8, and
-`trusted_schema=OFF`, `query_only=ON`, `cell_size_check=ON`, `mmap_size=0`; the
-first two are read back and a mismatch is `io_error/sqlite_pragma`. These run only
-when a store is opened. An explicit `BEGIN` makes `sqlite_master`,
-`table_info(runs)` and the row read one snapshot. The SQL is built from constant
-identifiers only, over exactly `run_id`, `request_id`, `status`, `model`,
-`model_params_json`, `usage_json`, `usage_ref` (presence only), `finished_at`,
-`cancelled_at`, `expired_at`, `updated_at`; every selected value is paired with `typeof`.
-`run_id`, `request_id`, `status`, `usage_json` and `usage_ref` must be text or null
-on every row; contributing rows also follow the model and timestamp rules below.
-There is deliberately no SQLite authorizer: a test pins the
-SQL instead. Errors are classified by `sqlite_errorcode & 0xFF`; no
-`sqlite3.Error` escapes and there is no publishing catch-all.
-
-*Row policy.* Check order: unknown status (store-scoped `unknown_status`); a
-non-terminal row carrying `usage_json` or `usage_ref` (also `unknown_status`,
-otherwise it contributes nothing); then what a terminal row contributes: any
-terminal row with `usage_json` counts on its terminal UTC day, a `FINISHED` row
-with only a `usage_ref` is the existing partial placeholder, and every other row
-(including a `usage_ref`-only `CANCELLED`/`ERROR`/`EXPIRED`) contributes nothing.
-**A row that contributes nothing skips timestamp and model validation.** Shared
-identity, type and SQLite size guards still apply. A contributing row's terminal stamp must fullmatch
-`YYYY-MM-DDTHH:MM:SS.mmmZ`, parse, and sit inside the 2020 floor and the one-day
-future slack (else `bad_timestamp`). A NULL model is `cursor-unknown`; a non-text,
-empty or oversize one is `bad_model`. Only `grok-4.7` consults
-`model_params_json`: no fast param (NULL, `[]` or none) is the unpriced
-`grok-4.7-unspecified`, `fast=true` is `grok-4.7-fast`, `fast=false` is `grok-4.7`;
-more than one fast param, a value other than true/false, or a non-list is
-store-scoped `model_params`. Counters follow the shared rules (valid counters, the
-disjoint identity, `reasoningTokens <= outputTokens` when present), but a missing
-`reasoningTokens` is accepted (the property is optional), unlike the legacy ledger.
-The shared validators live in `_cursor_entry` / `_cursor_placeholder` /
-`_cursor_bounded_day`; `_cursor_run` and `_sqlite_run` are the per-format adapters,
-and a golden test pins the JSONL projection byte for byte across that split.
-
-*Store-scoped drift versus reader-wide failure.* A store whose layout this mm
-cannot read contributes nothing, keeps its retained history, is recorded in
-`sqlite_read.stores[id]`, and does not stop the pass: `unknown_status`,
-`missing_required_column` (pre-ALTER included), `schema_object` (no `runs` table, a
-view, or `SQLITE_AUTH`), `model_params`, `column_type`, and `schema_unreadable`
-(CORRUPT on the first schema read). These never set a reader-wide reason, so they
-never set `unsupported`, never reach `_usage_capture_needs_upgrade`, and never
-print the shared "mm update" remedy. Data and IO failures are reader-wide and
-stop the pass: `malformed` (`bad_json`, `oversize_or_type`, `bad_timestamp`,
-`bad_utf8`, `bad_counters`, `bad_model`, `corrupt_database`, `duplicate_request`,
-`conflict`), `io_error` (`non_regular_path`, `cannot_open`, `sqlite_pragma`,
-`sqlite_unavailable`) and `stale` (`hot_journal`, `identity_changed`); `locked` and
-`deadline` carry no cause. One unreadable store therefore pauses all Cursor usage on
-that Mac; per-store isolation is deferred until a real blackout is observed. A
-store that vanishes (a missing `index.db` at the lstat, or `CANTOPEN` followed by
-`ENOENT`) is skipped with its retained history intact.
-
-*Retention: SQLite never retracts.* A non-contributing SQLite row never removes a
-retained run, counted rows replace by key, and a SQLite placeholder never replaces
-retained counters (also after an alias dedup). Persisted SQLite keys protect those
-counters from legacy empty/placeholder copies after pruning, drift, disappearance
-or an incomplete pass. Pure JSONL keys keep their revision semantics. Within one workspace
-directory both formats are read and reconciled per `run_id`: counted beats
-placeholder beats non-contributing, and SQLite wins a tie. A vanished
-`runs.ndjson` is dropped when `index.db` exists (Conductor's migration deletes
-it); otherwise it is still a failure. `_stage_cursor_directory` owns both formats
-and the reconciliation; `read_cursor_usage` keeps only commit, conflict and carry.
-The first failing directory stops the pass: earlier directories commit history and
-read-set entries, the failing one contributes nothing and later ones are not read.
-A cross-directory conflict is `malformed/conflict` and commits nothing. SQLite stages
-`request_id` aliases only for contributing rows, so a counterless cancellation
-does not claim an alias. A duplicate is `malformed/duplicate_request`. No fingerprint skip:
-every store is read every pass, so short passes need not converge.
-
-*Persisted metadata.* Three additive top-level keys, carried explicitly through the
-`updated = {...}` rebuild, with no per-run field and no `CACHE_VERSION` bump.
-`sqlite_read = {stores: {<16-hex>: "read" | <store-scoped cause>}}` is written when a
-directory commits (nothing on a conflict) and entries for vanished directories are
-dropped only after a complete enumeration; it is read per entry, so garbage
-entries are dropped individually, and an older mm that rewrites the cache without
-the key degrades to "all unread" and recovers on the next pass.
-`sqlite_retained` is a sorted list of 64-hex run hashes that have received SQLite
-retention protection. The reader carries it across passes, adds keys only when
-their stage commits, and removes keys when cutoff or alias dedup removes the
-retained entry. Missing means a legacy cache; a malformed present value refuses
-the cache without rewriting it. Unlike diagnostic metadata, dropping it could
-lose history. An older mm may drop the field and cannot preserve this guarantee;
-all active capture entrypoints must use the upgraded build.
-`last_reason_detail = {cause, store, file?, code?}` explains a standing reader-wide
-reason: `store` is a 16-hex id or null (null for `conflict`, `sqlite_pragma`,
-`sqlite_unavailable`, and a cross-directory `duplicate_request` raised while staging a
-directory that holds no SQLite store), `file` one of the four store file names, `code` a SQLite or OS
-error name matching `[A-Z_]{1,40}` (rendered "unknown SQLite error" when absent or
-invalid after a reload). Lifecycle, `_carry_reason_detail`: a non-persistable pass
-(`locked`), or a transient one while a permanent prior reason stands, keeps the
-prior detail; otherwise the carried reason is this pass's and so is its detail,
-even None (a persistable `deadline`, and every JSONL, spool or cache-write
-failure, persist none); it clears with the reason. A detail is honored only beside
-the reason its cause maps to, and an invalid one is absent, never an error.
-
-*Diag and status.* `unread_sqlite_stores` is the 16-hex `index.db` stores absent
-from `sqlite_read.stores`: a valid snapshot uses its read set, a missing cache is an
-empty read set (all unread), an unreadable or lock-failed snapshot or an unlistable
-root is unknown. A running push does not make the count unknown: writers lock the
-sibling `.lock`, so the unlocked snapshot is the last committed state.
-`unsupported_sqlite_stores` is `{count, causes}` over the recorded drift.
-Track 114A removed the Cursor rows and store-detail clauses from `statusflow.py`
-(`status` and `diag`); Track 115A deletes the remaining `cursor_usage_diag` helpers.
-
-The private `cursor-host-tokens.json` is **authoritative history after pruning**,
-not a disposable parse cache. It uses shared `host_usage.CACHE_VERSION` and
-reader-owned `CURSOR_HOST_CACHE_RETENTION_DAYS = 90`, numerically equal to but
-not derived from `events.CURSOR_SCAN_DAYS` (the mm-events read-position window).
-Entries are keyed by hashed runId. A later finished revision replaces the old
-model, day and counters; reducing the replaced map reverses the old contribution.
-A running revision retracts an old terminal contribution. Conductor-deleted runs
-remain until the reader's retention cutoff. Runs deleted before mm ever read
-them are unrecoverable; accumulation bounds future loss and does not fix backlog.
-
-Every file is reparsed, with descriptor and path stats before/after, including
-ctime. A torn/changed file contributes no staged prefix. Files fully read before
-that failure are kept. A cross-file runId conflict commits nothing from that
-scan, so one copy cannot erase retained history. An outstanding blocker
-outranks retained history when the store disappears. Stable complete files
-learned before a later failure/deadline commit; incomplete reader totals never
-publish. If the store disappears before the first complete scan, the learned
-prefix stays in the cache and the read stays incomplete. Repeated short-budget scans **need not converge**, because cached run
-IDs do not eliminate parsing of rewritten files. The tests pin repeated deadline
-results followed by an adequate-budget scan with exact, nonduplicated totals.
-Cursor is warmable and has both the WARMABLE_HOST_READERS entry and the inline
-warm branch; attended warming or a larger configured budget is the remedy.
-
-`lockedjson.locked_json_durable_rmw` locks a stable sibling `.lock` inode and
-writes through `fsutil.atomic_write_bytes(fsync=True, mode=0o600)`: temp-file
-fsync, atomic rename, parent-directory fsync. Corrupt/empty/version-mismatched
-history refuses without normalization or reset. Write/fsync failure returns
-incomplete io_error, never a successful observation. Pre-rename failure preserves
-the old bytes; directory-fsync failure may occur after rename. Read-only diagnostics
-inspect an immutable old-or-new data inode without creating a lock or store.
-Existing Codex/Grok forensic caches retain their original write protocol.
-
 `HOST_READER_DIAGS` dispatches each reader to its own diagnostic and readiness
-predicate, including status, recapture's reminder and diag JSON. Track 114A omits
-`"cursor"` from `statusflow.py` (`status` and `diag`), and Track 115A removes the
-`cursor` entry from `HOST_READER_DIAGS`, `ACTIVE_HOST_READERS` and
-`HOST_USAGE_TOKEN_SOURCES`. (Track 110A restored the Grok reader's slot; see the
-Grok Build section below.)
+predicate, including status, recapture's reminder and diag JSON. Track 114A
+unhooked Cursor's CLI wrapper, hook, source alias and reader selection; Track
+115A deleted the Cursor reader, SQLite adapter, spool, hook helpers and registry
+entries (`ACTIVE_HOST_READERS`, `HOST_USAGE_TOKEN_SOURCES`, `WARMABLE_HOST_READERS`,
+`HOST_READER_DIAGS`, and `tests/fixtures/host_sessions/cursor/`).
+Older published `host-usage-snapshot` rows that name `cursor` in `token_sources`,
+`partial_sources`, or `degraded_sources` remain readable as-is without migration;
+`aggregator._cursor_acp_gap_notes` and Cursor Grok pricing remain until Track 116A.
+(Track 110A restored the Grok reader's slot; see the Grok Build section below.)
 
 **First-success carve-out (Track 21A) — retired from sweep policy in Track 31A.**
 The latch's premise was already false (`complete_once` arms on an empty
@@ -1460,10 +1190,9 @@ do not automatically discard a device or ledger based on equal totals.
 - **`claude` is a legal host family**, so a host ledger carrying `claude-*`
   models merges INTO the Claude row rather than being dropped. The row means
   "usage of this model family across the fleet". The two corpora cannot
-  overlap: `hosts/codex.py` reads Codex ledgers; `host_usage` reads Muse ledgers, Antigravity databases and Cursor
-  (Conductor runs plus enrolled standalone completions), never Claude Code's
-  own session jsonls. Cursor offers Claude models;
-  the initial Cursor census observed only Grok 4.7, not Claude usage.
+  overlap: `hosts/codex.py` and `hosts/grok.py` read Codex and Grok Build
+  ledgers; `host_usage` reads Muse ledgers and Antigravity databases, never
+  Claude Code's own session jsonls.
 - **`AGENT_ROW_ORDER` is the only label registry.** The pre-1.1 pair
   (`MODEL_FAMILY_ROWS` + `AGENT_FAMILY_ROWS`, with deliberately different
   labels like `Claude (via agents)`) existed so two adjacent card blocks could
@@ -1877,9 +1606,8 @@ capture default when neither key is set). Invalid config still stops ordinary sy
 
 **Same-family day collisions still sum.** Historically Codex and OpenCode
 classified GPT models into the same canonical `codex` family, so two readers
-could return the same `(family, UTC day)` bucket. Grok Build and Cursor now both
-contribute to the `grok` family (Track 110A), superseding the post-36A claim that
-no live readers collide. The merge sums
+could return the same `(family, UTC day)` bucket, as did Grok Build and the
+retired Cursor reader for the `grok` family. The merge sums
 `token_usage.merge_usage_bucket` at every level — a shallow update would drop
 whichever reader landed first. The same rule applies one level down
 on `(day, model)` in `tokens_by_day`. `_merge_warm_retry_capture` fuses both
@@ -2619,11 +2347,11 @@ Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 
 **The warm is gated on a FAILED bounded attempt AND on the failing reader.**
 `warm_host_cache_inline(reader=...)` reads names in `WARMABLE_HOST_READERS`
-(today Codex, Grok, Cursor and Muse). Only `deadline` qualifies, including a reader whose
-first invocation was prevented by sweep expiry. A healthy empty scan never
-warms. Autopush supplies no warm callback. Codex/Grok/Muse continue to converge
-through partial commits; Cursor commits stable-file progress but reparses
-rewritten files, so repeated short passes need not converge.
+(today Codex, Grok Build, Muse and Antigravity). Only `deadline` qualifies,
+including a reader whose first invocation was prevented by sweep expiry.
+A healthy empty scan never warms. Autopush supplies no warm callback.
+All four readers continue to converge
+through partial cache commits.
 
 `warm_host_cache` is the attended-notice hook only.
 `_capture_host_snapshot` runs each retry inside a singleton
@@ -2710,7 +2438,7 @@ The budget lever ships, so these measurements document headroom rather than
 gate merge. Remeasure on each producing Mac/version before changing its budget.
 
 **Tests must never read a real host store.** `conftest._isolate_host_usage`
-redirects every reader root (Codex live and archived, Grok, Cursor, Muse) and all four
+redirects every reader root (Codex live and archived, Grok, Muse, Antigravity) and all four
 caches per test; tests needing data monkeypatch the reader functions. Without
 it the suite's result would depend on which agents are installed on the machine
 running it — a developer
@@ -4093,19 +3821,18 @@ The nine clauses below record the existing reader obligations and named
 exceptions; they do not add a new reader API. `tests/test_host_adapter_contract.py`
 qualifies the detailed runtime rows for Codex, Muse and (Track 110A) Grok Build,
 while `tests/test_module_boundaries.py` enforces ownership and imports.
-Cursor and Antigravity remain in place until their own adapter work. Grok Build's
+Antigravity remains in place until its own adapter work. Grok Build's
 adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-reader-track-110a)).
 
 1. **Consent gate and closed default (`events_tail.HOST_READER_SOURCE_GATE`, `_default_host_readers`).**
-   Every live reader in `events_tail.HOST_READER_SOURCE_GATE` (all of
-   `events.ACTIVE_HOST_READERS` except `"cursor"`, which Track 114A unhooked ahead
-   of Track 115A) has an entry in `HOST_READER_SOURCE_GATE`. For source-gated
+   Every live reader in `events.ACTIVE_HOST_READERS` has an entry in
+   `events_tail.HOST_READER_SOURCE_GATE`. For source-gated
    readers, an absent gating source in resolved sources makes
    `_default_host_readers(sources)` omit the reader. Grok Build is selected only
    when `grok_consented` (`config.grok_usage_consented`) is true; its gate entry
    `"grok"` names the source its stop remedy disables, and every
    `_default_host_readers` call site passes the same verdict. For readers that
-   carry a `consented` parameter (`read_muse_usage`, `read_cursor_usage`,
+   carry a `consented` parameter (`read_muse_usage`,
    `read_agy_usage`, `read_grok_usage`), the default is `consented=False` and an unconsented call
    returns `_incomplete("no_metadata_ledger")` before any filesystem stat,
    directory listing, file open, or cache creation.
@@ -4128,7 +3855,7 @@ adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-rea
    deadline check keeps its successful result if only serialization overruns.
 4. **Private cache durability, permissions, and compact encoding (`lockedjson.locked_json_rmw`).**
    Reader caches live under `~/.config/mind-meld/` at mode `0600`, guarded by
-   `locked_json_rmw(..., compact=True)` (or `locked_json_durable_rmw` for Cursor)
+   `locked_json_rmw(..., compact=True)`
    and `fsutil.refuse_real_state_write_under_pytest`. Lock contention returns
    `_incomplete("locked")` without mutating the cache. For Codex, Grok, Muse and
    Antigravity, a cache write `OSError`
@@ -4136,10 +3863,7 @@ adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-rea
    and preserves the scan's in-memory `HostUsageResult`. Codex, Grok and Muse's unchanged
    failed sweeps do not rewrite the cache when neither the standing `(last_reason, last_reason_since)`
    pair, the deadline allotment, nor any learned file entry changed.
-   Cursor's cache is authoritative retained history: an `OSError` or
-   `StorageError` during durable persistence returns `_incomplete("io_error")`
-   and cannot preserve a successful observation. See the Cursor history
-   contract above and [durable-writer error policies](sync.md#atomic-write-publication-failures).
+   See [durable-writer error policies](sync.md#atomic-write-publication-failures).
 5. **GC pause restoration (`_pause_gc`).**
    Full reader passes run inside `with host_usage._pause_gc():`, disabling
    cyclic garbage collection during the scan and restoring the caller's prior
@@ -4163,10 +3887,7 @@ adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-rea
    `ready_value`, and `label`. Every `<reader>_usage_diag()` returns at least
    `cache_state`, `last_reason`, `last_reason_since`, `model_count`, `models`,
    and `spec.ready_key`. Codex, Muse, Antigravity and Grok Build also expose
-   `files_cached` and `files_on_disk` (Grok Build adds `usage_less_skipped`); Cursor instead exposes `runs_cached` and store counters
-   because its inventory is retained history; since Track 114A `mm status` and
-   `mm diag` no longer call `cursor_usage_diag` or report these keys, and Track
-   115A deletes it. `warm_host_cache_inline`
+   `files_cached` and `files_on_disk` (Grok Build adds `usage_less_skipped`). `warm_host_cache_inline`
    raises `ValueError` naming `host_registry.py` and this section anchor when
    given an unknown reader name.
 8. **Call-time owner resolution (monkeypatch contract).**
@@ -4209,7 +3930,7 @@ adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-rea
 ## Grok Build usage reader (Track 110A)
 
 `src/mind_meld/hosts/grok.py` (`read_grok_usage`, `grok_usage_diag`) reads Grok Build's
-per-turn usage into the `grok` host family beside Cursor's Grok runs. It replaces the reader
+per-turn usage into the `grok` host family. It replaces the reader
 retired before v1.11.8; its record shapes, census and the reasons for the source choice are in
 `tests/fixtures/host_sessions/grok/CONTRACT.md` (Grok Build 1.0.70, bound to
 `GROK_USAGE_CENSUS_HOST_VERSION` by `tests/test_grok_usage.py`).
@@ -4261,12 +3982,12 @@ retired before v1.11.8; its record shapes, census and the reasons for the source
   session ids or cost. A complete scan replaces and prunes the file map; an incomplete one
   (deadline) merges staged sessions over cached ones, so progress resumes without re-reading.
   Autopush never warms; the attended push warms a Grok `deadline` like the other warmable readers.
-- **Wire slot.** `grok` returns to its pre-v1.11.8 slot: `ACTIVE_HOST_READERS`,
-  `HOST_USAGE_TOKEN_SOURCES` and `HOST_READER_DIAGS` read `("codex", "grok", "cursor", "muse",
-  "agy")`, because retained rows from mm 1.11.7 and earlier list `grok` before `cursor` and
+- **Wire slot.** `grok` occupies its pre-v1.11.8 slot: `ACTIVE_HOST_READERS`,
+  `HOST_USAGE_TOKEN_SOURCES` and `HOST_READER_DIAGS` read `("codex", "grok", "muse",
+  "agy")` after Track 115A removed `"cursor"`, because retained rows from mm 1.11.7 and earlier list `grok` before `muse` and
   `aggregator._token_sources_subsequence` rejects a known name out of order. Peers that predate
   this release show `grok` as an unknown or retired reader in coverage notes but still count the
   family.
-- **Retro.** Grok Build tokens add to the Grok row beside Cursor's Grok runs (`grok-4.7-build` is
+- **Retro.** Grok Build tokens add to the Grok row (`grok-4.7-build` is
   in `token_usage.GROK_47_MODEL_IDS`, priced from the Grok 4.7 card; unknown ids remain an
   unpriced floor until a rate is available).
