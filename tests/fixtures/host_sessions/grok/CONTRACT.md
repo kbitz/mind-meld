@@ -23,7 +23,7 @@ Every conditional check passed: every session with a `turn_completed` has a `usa
 twice in `usage.json` (below). The file is not a documented stable contract, so a format change
 fails this reader closed (see Validation).
 
-## Census (2026-11-05 UTC, machine 349C-kb-ms, Grok Build 1.0.70)
+## Census (2026-11-05 UTC, one Mac, Grok Build 1.0.70)
 
 Key names, counts and booleans only; no prompt, path or counter value was recorded.
 
