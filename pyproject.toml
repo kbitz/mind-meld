@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "mind-meld"
 version = "1.12.18"
-description = "Sync AI coding-agent context across machines via iCloud Drive"
+description = "Sync AI coding-agent context across machines through a Syncthing folder, end-to-end encrypted"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Karl Bitz" }]
-keywords = ["claude", "codex", "sync", "cli", "encryption", "icloud"]
+keywords = ["claude", "codex", "sync", "cli", "encryption", "syncthing"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
