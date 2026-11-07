@@ -829,7 +829,7 @@ Update every machine, then run `mm push` and `mm pull` on each, before deleting 
 
 - The card carries one `AGENTS` block instead of `MODELS (Claude Code sessions)` above `AGENT LOGS`. Those two reported different units (tokens vs distinct days) from different sources and carried a standing prohibition on comparing them, which is what made the card read Claude-first. Comparing the rows is now the point.
 - Host tokens are summed fleet-wide per agent. The pre-1.1 refusal rested on a claim that a migrated home directory's overlapping history was undetectable; it is not. A migration copies the ledger byte for byte, so duplicated days carry identical counter tuples on both devices, and `_detect_duplicate_ledgers` reports that as health code `duplicate_ledger`. The asymmetry it replaced was indefensible on its own terms: Claude's tokens were already summed under the identical hazard, with the risk stated out loud in the scope sentence.
-- Machines are identified by hostname (`mac-a`) rather than device id (`3a6c7dc9`); duplicate hostnames include short IDs so remedies identify the right Mac. The registry has always carried `device_name`; the retro simply never read it.
+- Machines are identified by hostname (`kb-mbp`) rather than device id (`3a6c7dc9`); duplicate hostnames include short IDs so remedies identify the right Mac. The registry has always carried `device_name`; the retro simply never read it.
 - Cost floors name their causes. Partial or failed readers conservatively floor every agent's priced subtotal because the wire cannot attribute missing data to model families. Grok's inherent prompt-size pricing uncertainty remains specific to its models.
 - Step 0 gates on `SKILL_MIN_VERSION` (v1.1.0) for the rendering Mac, distinct from `ATTENDED_USAGE_MIN_VERSION` (v0.14.17) for a peer publishing a capture.
 
@@ -2064,7 +2064,7 @@ Reviewed via `/plan-eng-review` (4 architecture decisions taken interactively, r
 
 **Future-clamp edge case (acknowledged).** When peer's mtime is itself at the 60s clamp ceiling, `max(now, peer_mtime + 1.0) = peer_mtime + 1.0` gets capped back to `now + 60s = peer_mtime` — local-mtime is not strictly greater. Cycle persists one more pull and self-heals on peer's next legitimate push (peer's mtime drops back to normal). A non-symmetric local violation of the clamp invariant (writing > now+60s on our own canonical) would propagate worse: downstream peers re-clamp on receive, creating a fresh local/remote divergence and a *new* conflict. Not worth the workaround for the 1-extra-pull edge case.
 
-**Codex P1 caught during /review's adversarial pass: mtime bump alone doesn't propagate.** First pass of this fix bumped canonical's mtime on disk but didn't reach peers because `_push_core`'s v0.12.2 substantive-change gate uses `diff_files` (sha256-keyed). A push after `mm resolve` (l)ocal would print "Nothing to push" and never upload the manifest — the resolving Mac's local cycle break worked but its peer's view stayed wedged. Fixed by adding `_has_mtime_only_changes_vs_remote(local_manifest, remote_sources, source_filter=None)`: walks the intersection of local-and-remote files where sha256 matches and reports True iff any has STRICTLY-NEWER local mtime. Wired as `has_mtime_only` into the gate alongside `has_substantive` and `recovering_from_corrupt`. Per-source upload loop still uses `skip_unchanged=True` so no blob bytes upload (sha matches → `put_exclusive` dedup). The manifest itself uploads with refreshed mtimes. New "Refreshing manifest (metadata-only changes)..." console message distinguishes this case from the recovery rewrite and the normal-upload path. `mm status` and `mm push --dry-run` gained symmetric metadata-only branches via the same helper (additional Codex P2/P3 catches) so users running preflight checks see "Metadata-only changes pending (run `mm push` to publish updated mtimes)" instead of the misleading "All sources in sync".
+**Codex P1 caught during /review's adversarial pass: mtime bump alone doesn't propagate.** First pass of this fix bumped canonical's mtime on disk but didn't reach peers because `_push_core`'s v0.12.2 substantive-change gate uses `diff_files` (sha256-keyed). A push after `mm resolve` (l)ocal would print "Nothing to push" and never upload the manifest — kb-ms's local cycle break worked but kb-mbp's view stayed wedged. Fixed by adding `_has_mtime_only_changes_vs_remote(local_manifest, remote_sources, source_filter=None)`: walks the intersection of local-and-remote files where sha256 matches and reports True iff any has STRICTLY-NEWER local mtime. Wired as `has_mtime_only` into the gate alongside `has_substantive` and `recovering_from_corrupt`. Per-source upload loop still uses `skip_unchanged=True` so no blob bytes upload (sha matches → `put_exclusive` dedup). The manifest itself uploads with refreshed mtimes. New "Refreshing manifest (metadata-only changes)..." console message distinguishes this case from the recovery rewrite and the normal-upload path. `mm status` and `mm push --dry-run` gained symmetric metadata-only branches via the same helper (additional Codex P2/P3 catches) so users running preflight checks see "Metadata-only changes pending (run `mm push` to publish updated mtimes)" instead of the misleading "All sources in sync".
 
 **Codex P2: forward-only invariant (downgrade hazard).** Second adversarial pass caught that the helper's initial `!=` mtime comparison would also republish DOWNGRADED mtimes (e.g. after `git checkout` / file-restore / `touch -t` to a past date). Downgrading the manifest's recorded mtime is a silent-skip hazard: a peer with different bytes and mtime BETWEEN the old-remote and the downgraded value would now hit `local_mtime > remote_mtime` on pull and skip — losing the conflict surface that resolves divergent state. Fixed by gating on `local_mtime > remote_mtime` (strict greater-than, lexicographic string compare on ISO-8601 — sorts correctly for any well-formed manifest). Forward-only matches the helper's actual user-driven trigger (`_bump_canonical_mtime_post_resolve` always bumps to `max(now, peer_mtime + 1.0)`) and rules out the downgrade hazard for all benign filesystem-metadata operations.
 
@@ -3999,7 +3999,7 @@ prompts.
 
 Disabling a source MUST NOT generate deletion tombstones for that source's
 files on the next push, or the disable-on-one-machine action propagates
-fleet-wide deletion. Same shape as the 2026-04-24 first-pull
+fleet-wide deletion. Same shape as the kb-mbp 2026-04-24
 `exclude_patterns` regression fix; same fix pattern.
 
 `disabled_sources` applies at TWO consumer boundaries (`_push_core`
@@ -4051,8 +4051,8 @@ Cosmetic-only — zero behavioral changes, all 836 tests still pass.
   refusal). Closes the doc gap where v0.9.5's user-visible behavior was only
   described in CHANGELOG and CLAUDE.md.
 - Internal commentary across CHANGELOG / CLAUDE / SPEC / ROADMAP / PROGRESS /
-  cli.py / config.py / `tests/test_*.py` rephrased to remove
-  personal-machine hostnames from case-study descriptions
+  cli.py / config.py / `tests/test_*.py` rephrased to remove `kb-mbp` /
+  `kb-mac` personal-machine identifiers from case-study descriptions
   (replaced with `2026-04-24 first-pull` and `machine-a` / `machine-b`).
   Test fixture strings only — no semantic meaning, all assertions still pass.
 - `src/mind_meld/upgrade.py` module docstring no longer references a
