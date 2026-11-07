@@ -15,6 +15,10 @@
     "tests/fixtures/host_sessions/grok/**": [
       "tests/test_grok_usage.py"
     ],
+    "tests/fixtures/host_sessions/cursor/**": [
+      "tests/test_host_adapter_contract.py",
+      "tests/test_docs_routing.py"
+    ],
     "tests/test_host_skill_discovery.py": [],
     "tests/fixtures/host_sessions/muse/2026/10/13/session-a/session.jsonl": [
       "tests/test_muse_usage.py"
