@@ -896,8 +896,9 @@ batch with no valid row is retired at once (including on the early
 from a newer spool version refuses as `unsupported` and keeps the batch for
 the upgraded mm; like any spool read failure it is persisted through
 `_carry_reason`, so status shows the upgrade remedy. The spool is capped at `CURSOR_SPOOL_MAX_BYTES` (16 MiB). Folded rows make
-history authoritative (`complete_once`) when no blocker is outstanding. Diag
-reports `pending_completions` read-only. A corrupt history refuses as before
+history authoritative (`complete_once`) when no blocker is outstanding.
+`cursor_usage_diag` computes `pending_completions` read-only, but since Track 114A
+`mm diag` no longer calls it. A corrupt history refuses as before
 and leaves the queue in place.
 
 `configure_cursor_hook` refuses the
