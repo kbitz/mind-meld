@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.21] - 2026-11-07
+
+Sync includes gstack-extend per-host run history, and migration preview and docs clarify custom-source handling and run history boundaries.
+
+### Added
+
+- Sync includes gstack-extend per-host run history.
+
+### Changed
+
+- Documentation clarifies run history migration boundaries.
+
+### Fixed
+
+- Migration preview clarifies custom-source handling.
+
 ## [1.12.20] - 2026-11-07
 
 Documentation adds a Syncthing fleet cutover runbook and clarifies rehearsal isolation, cutover checks, and inherited XDG discovery.

@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.21 | 2026-11-07 | Sync includes gstack-extend per-host run history, and migration preview and docs clarify custom-source handling and run history boundaries. |
 | 1.12.20 | 2026-11-07 | Documentation adds a Syncthing fleet cutover runbook and clarifies rehearsal isolation, cutover checks, and inherited XDG discovery. |
 | 1.12.19 | 2026-11-07 | Documentation and examples use generic machine names. |
 | 1.12.18 | 2026-11-06 | mm syncs Grok Build memory between machines for consolidated topics. |
