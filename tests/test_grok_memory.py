@@ -1083,8 +1083,9 @@ class TestGrokBranchAWorkspaceMapping:
 
 
 class TestGrokMemoryFirstSyncCollision:
+    @pytest.mark.parametrize("exclude_pattern", [None, "memory-v2/*", "memory-v2/**"])
     def test_first_sync_of_two_populated_stores_preserves_local_and_lists_conflict_copy(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exclude_pattern: str | None
     ) -> None:
         env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
         dev_a = env.devices[DEV_A]
@@ -1107,7 +1108,10 @@ class TestGrokMemoryFirstSyncCollision:
         # Local canonical bytes on B are preserved.
         assert file_b.read_text() == "Machine B conventions\n"
 
-        # Remote bytes are saved as a .sync-conflict-* sidecar and surfaced by _find_conflict_files.
+        # A later sync opt-out must not hide an unresolved local conflict copy.
+        if exclude_pattern is not None:
+            dev_b.cfg["sync"]["sources"][0]["exclude_patterns"] = [exclude_pattern]
+        # Remote bytes remain discoverable for conflicts, resolution, and GC.
         hits = resolveflow._find_conflict_files(dev_b.cfg)
         assert len(hits) == 1
         src_name, conflict_path, canonical_path = hits[0]

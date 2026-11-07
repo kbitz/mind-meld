@@ -110,11 +110,8 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
             candidate = base_path / sub
             if candidate.is_dir() and not candidate.is_symlink():
                 dirs.append(candidate)
-        dirs.extend(
-            manifest.grok_memory_scan_dirs(
-                base_path, exclude_patterns=src_cfg.get("exclude_patterns")
-            )
-        )
+        # Conflict discovery intentionally includes excluded trees.
+        dirs.extend(manifest.grok_memory_scan_dirs(base_path))
         return dirs
     if src_type == "muse":
         dirs = []
