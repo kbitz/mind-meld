@@ -44,6 +44,36 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Malformed managed record at init
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Record parsing is tested, but init's controlled stop for a malformed management record lacks a direct integration assertion.
+- **Hypothesis (untested):** verify init stops before prompts or writes when the record loader raises ConfigError; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py, `_check_syncthing`
+- **Evidence:** Track 118A outside review and source audit; no failure reproduced.
+- **Context:** /review-and-prep, branch mmm/c58912d3 at 30dd2b5, 2026-11-08. Revisit on the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Stale management record on default Syncthing
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The stale-record test covers owner-managed configuration, but not replacing a stale ID when the live configuration is default.
+- **Hypothesis (untested):** assert the current local device ID is recorded before the first managed write; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py, `_check_syncthing` and `_save_syncthing_record_or_stop`
+- **Evidence:** Track 118A outside review and source audit; no failure reproduced.
+- **Context:** /review-and-prep, branch mmm/c58912d3 at 30dd2b5, 2026-11-08. Revisit on the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Managed join default-folder refusal
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The writer's default-folder protection is covered, but the managed join's handling of a default-folder-in-use refusal lacks a direct integration assertion.
+- **Hypothesis (untested):** simulate the stock folder becoming occupied or shared after classification, then assert the join stops without accepting the offer; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py, `_managed_join` and `_require_syncthing`
+- **Evidence:** Track 118A outside review and source audit; no failure reproduced.
+- **Context:** /review-and-prep, branch mmm/c58912d3 at 30dd2b5, 2026-11-08. Revisit on the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Writer HTTPS transport
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Exercise successful and certificate-rejected writes over loopback HTTPS; existing TLS tests cover GET only.
