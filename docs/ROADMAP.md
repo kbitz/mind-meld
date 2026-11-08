@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Everything through Track 93A (the cutover runbook, v1.12.20) has shipped and lives in shipped history. The owner removed Cursor support on 2026-11-07 ("cursor -- removed totally, don't worry about old usage, as if we never supported"); Tracks 114A to 116A delete it. The same day the owner made the git-history hostname scrub a condition of 2.0.0 and of making the repository public again (Track 117A). Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); its qualification, Track 96A, waits in Future for the cutover.
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. On 2026-11-07 the owner dropped the fleet-wide cutover: there is no migration tool, each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet, a Mac not yet moved keeps running on iCloud Drive, and a first install sets Syncthing up itself when Syncthing still has its default configuration (SPEC O2). Tracks 113A to 116A have shipped (v1.12.21 to v1.12.24), which completes the Cursor removal; Tracks 117A to 120A deliver O2's setup, approval and per-machine move; Track 121A is the owner-gated git-history hostname scrub, a condition of 2.0.0 and of making the repository public again. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); its qualification, Track 96A, waits in Future for 2.0.0's acceptance.
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -12,7 +12,7 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 - **Host discovery must not publish filesystem paths or transcripts.** Local discovery may read host logs, but encoded cwd paths never go on the events wire. Codex session attribution from decoded cwd remains refused; reconsider only with a metadata-only project index.
 - **Explicit scope refusals remain in force.** OpenCode integrations and the roadmap-staleness gate remain dropped by user decision. Reopening any of them requires a new user scope decision. Standalone Grok Build support, dropped on 2026-10-19, was reopened by such a decision on 2026-11-05 (docs/SPEC.md). Cursor support, removed by the owner on 2026-11-07, is refused the same way: reopening it needs a new owner decision (docs/SPEC.md).
 - **Publication-status precision requires an observed user problem.** A status/diag publication-evidence Track needs a wrong or permanently unknown status line a user actually saw. A synthetic probe alone does not admit that work.
-- **Syncthing stays owner-managed (spec, 2026-10-18).** mm discovers Syncthing and reads its state for `mm status` and `mm diag`. Invite codes, mesh healing, relays, folder configuration through Syncthing's API and scan requests are refused until the spec's revisit trigger is observed.
+- **Syncthing stays owner-managed outside O2 (spec, 2026-11-07).** mm discovers Syncthing and reads its state for `mm status` and `mm diag`, and changes Syncthing's configuration only for O2's setup, approval and introducers on a machine where it found the default configuration. Invite codes, relays, changing a pre-existing configuration, removing dead machines and scan requests are refused until the spec's revisit trigger is observed.
 - **One user, no compatibility work (spec, 2026-10-19).** Commands, config, output and host families may change with a README Upgrading note; only the storage-format refusal gates are kept. A Track that exists only to preserve compatibility is refused.
 - **Output earns its line (spec O8, 2026-10-19).** A Track that adds output to push, pull or the auto commands must show it is the outcome, a failure with its fix, data at risk or an actionable warning; everything else goes to `mm status`, `mm diag` or `--verbose`.
 - **Core and extensions (spec, 2026-10-23).** Before a Track changes a host adapter or command group that still lives in `cli.py` or `host_usage.py`, a move-only Track just before it moves that piece into its own module behind a contract test, with no behavior change. No Track moves code that no planned Track changes; there is no one-shot rewrite.
@@ -25,118 +25,113 @@ None declared (2026-11-07). No branch, session or open pull request is active fo
 
 ## Current Plan
 
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112_
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116_
 
-### Group 113: gstack-extend run history
+### Group 117: Syncthing default-configuration check and writer
 
 _Depends on: none_
 
-**This group delivers:** Every machine's gstack-extend run history reaches the owner's other machines.
+**This group delivers:** mm can tell whether Syncthing has its default configuration and can make O2's Syncthing changes where it manages Syncthing, never elsewhere.
 
-#### Track 113A: Sync gstack-extend's per-host run history
-_1 task . ~90 LOC . low risk . 5 files_
-_tier: routine_
-**Outcome:** With the default `gstack-extend` source, every machine's gstack-extend run history (`~/.gstack-extend/analytics/stage-runs/<host>.jsonl`, one file per machine) reaches the owner's other machines after push and pull, so gstack-extend's readers there see every machine's rows; nothing else under `analytics/` syncs.
-**Supports:** docs/SPEC.md "What mm syncs and reports" `gstack, gstack-extend` row ("Project state, analytics and retros"), made true on the owner's 2026-11-06 decision ("yes make it true"); docs/roadmap-future.md "Sync gstack-extend's run history", whose trigger (gstack-extend shipping per-host files) is met by gstack-extend v0.71.0.
-**Done when:** the default `gstack-extend` source in `config.py` also syncs `analytics/stage-runs/*.jsonl` (regular files directly in that folder, the same walker rules as the source's other paths: no links, no nested folders unless the code already allows them), and nothing else under `analytics/`: not the historical single-file `analytics/stage-runs.jsonl` (each machine has its own file of that same name, so syncing it would collide), `skill-usage.jsonl`, `workflow-metrics/` or any other file; an existing config whose `gstack-extend` entry is the old default picks up the new path the way earlier default-path additions did (follow the code's existing migration or recommended-include mechanism; do not invent a new one); tests pin the allowlist against a fixture `~/.gstack-extend` holding two machines' per-host files plus every excluded shape, and that two machines' files with different names never conflict; `docs/invariants/sync.md` describes the path and why the historical file stays local; README's source table names it; no machine hostname appears in tests, fixtures or docs (use neutral names such as `mac-a.jsonl`, `linux-a.jsonl`); `./bin/check --affected` passes.
-_touches: src/mind_meld/config.py, tests/test_config.py, tests/test_gstack_extend_analytics.py (new), docs/invariants/sync.md, README.md_
-_out: 114A_
-_read-first: docs/invariants/README.md, docs/invariants/sync.md_
+#### Track 117A: Detect Syncthing's default configuration and give mm a Syncthing writer
+_4 tasks . ~720 LOC . medium risk . 6 files_
+**Outcome:** mm can tell whether this machine's Syncthing has its default configuration and, on a machine where mm manages Syncthing, can create mm's folder with its options, add a device, accept a folder offer, list pending devices, mark a device as introducer and remove the stock Default Folder through Syncthing's local API; every write refuses on a machine whose Syncthing the owner manages.
+**Supports:** MVP-1; docs/SPEC.md O2.1 (default configuration; mm manages Syncthing only where it found the default configuration at setup), O2.4 (no change to a pre-existing configuration) and O2.6 (no other Syncthing writes). Necessary prerequisite of the setup and approval Tracks.
+**Done when:** `syncthing.py` classifies a configuration as default exactly when it has no remote device and no folder except Syncthing's stock Default Folder that is shared with no device and empty on disk, ignoring GUI and other option changes, and reports which device or folder made it pre-existing (names through the caller's `safety` sanitizer, never raw); a separate writer exposes only the operations O2.2 and O2.3 need (create mm's folder with every `FOLDER_OPTIONS` value, add a device, accept a folder offer from a named device, read pending devices, set a device's introducer flag, remove the unshared empty stock Default Folder) and refuses unless the caller passes mm's record that it manages Syncthing on this machine; the existing read-only functions keep their behavior and the module stays standard-library only; tests run against a local stand-in for Syncthing's REST API (no real Syncthing, no network beyond loopback) and cover default, each pre-existing shape, a non-empty or shared Default Folder, API errors and timeouts, and the writer's refusal without the managed record; the API key is never printed or logged; the four recorded Syncthing client test gaps get tests (certificate acceptance and rejection and successful or slow TLS responses; a redirect refused with zero contact to its destination; a total request budget shorter than one request's timeout or exhausted across endpoints; an oversized config or HTTP body rejected at its byte ceiling); `docs/invariants/sync.md` and the routing rows replace "never mutates Syncthing's configuration" with the writer's exact limits; `./bin/check --affected` passes.
+_touches: src/mind_meld/syncthing.py, tests/test_syncthing.py, tests/test_syncthing_write.py (new), tests/syncthing_folder.py, docs/invariants/sync.md, docs/invariants/README.md_
+_read-first: docs/invariants/README.md, docs/invariants/sync.md, docs/invariants/init-devices.md_
+_session: fresh · effort: high · verify: ./bin/check --affected_
+
+_Source: owner decisions 2026-11-07 (Karl: "it should set up syncthing IF syncthing had not otherwise been configured -- if there is a pre-existing syncthing config (that's not simply the default), then it should give the user a docs guide"; "No devices, no folders" chosen as the definition of default; "Auto full mesh" chosen, so the writer sets introducer flags). Verified at `488094e`: `syncthing.py`'s docstring says it "never mutates Syncthing's configuration or state" and reads `config.xml` and the GUI REST API (`read_state`, `config_dirs`, `FOLDER_OPTIONS`). Test gaps: docs/roadmap-future.md "Test gap: Syncthing HTTPS certificate and response cases", "... redirect destination isolation", "... total request budget" and "... input byte ceilings" (`[review]`, Track 92A, `51999d4`), placed here because this Track's `_touches:` cover their trigger paths; combined into one task to stay inside the size cap._
+
+- **Default-configuration classifier and its tests** -- _src/mind_meld/syncthing.py, tests/test_syncthing.py, tests/syncthing_folder.py, ~200 lines._ (M)
+- **Syncthing writer limited to O2's operations, with the managed-record gate and its tests** -- _src/mind_meld/syncthing.py, tests/test_syncthing_write.py (new), ~350 lines._ (M)
+- **Recorded Syncthing client test gaps** -- _tests/test_syncthing.py, ~120 lines._ (S)
+- **Sync invariants and routing rows** -- _docs/invariants/sync.md, docs/invariants/README.md, ~50 lines._ (S)
+
+### Group 118: Syncthing setup from the bootstrap script and `mm init`
+
+_Depends on: Group 117_
+
+**This group delivers:** A fresh machine with a default Syncthing configuration gets Syncthing started at login and set up by `mm init`, for a new fleet or a join; a machine with its own Syncthing configuration gets the README guide instead.
+
+#### Track 118A: Set Syncthing up from the bootstrap script and `mm init` on a default configuration
+_3 tasks . ~670 LOC . medium risk . 9 files_
+**Outcome:** On a machine whose Syncthing has its default configuration, the bootstrap script starts Syncthing at login, `mm init --new-fleet` creates the shared folder with mm's options, and `mm init` on a joining machine asks for one fleet machine's Syncthing device ID, pairs with it as an introducer, accepts the fleet folder with mm's options, prints this machine's own device ID for the approval step and joins once the key header arrives; on a pre-existing configuration mm changes nothing in Syncthing and points to a new README guide.
+**Supports:** MVP-1; docs/SPEC.md O2.1, O2.2 ("the install starts Syncthing at login"), O2.4, O2.5 (join, `--new-fleet` on macOS or Linux) and Constraints (the bootstrap script starts Syncthing at login where Syncthing has its default configuration).
+**Done when:** `initflow.init` checks Syncthing's configuration before it writes anything; on default it records in mm's local config that mm manages Syncthing on this machine, then `--new-fleet` creates the folder at the storage path (removing the unshared empty stock Default Folder first when mm's folder would be nested inside it) before its existing key-header bootstrap, and the join path asks for a fleet machine's device ID (validated as a Syncthing device ID before any write), adds that device as introducer, accepts its fleet folder offer with mm's options, prints this machine's device ID and the approval command to run on the fleet machine, and then follows the existing join (it never creates a key header and stops with "wait for Syncthing" until the header arrives); on a pre-existing configuration it writes nothing to Syncthing, prints the README guide's heading and continues with the existing join or `--new-fleet` once the folder is shared; Syncthing not running or its API unreachable stops with the start command and writes nothing; re-running `mm init` after any partial step continues without duplicating a device or folder; README's Install section says the bootstrap script starts Syncthing at login where Syncthing has its default configuration, and README gains the guide for a pre-existing Syncthing configuration (pairing, sharing the folder, the five folder options, `.stignore`, approving a new machine by hand) and describes the setup; `cli.py`'s `init` help matches; tests cover new fleet, join, pre-existing, Syncthing down, an invalid pasted ID and a rerun against the Syncthing stand-in from Track 117A; `docs/invariants/init-devices.md` records the new order of writes; `bin/bootstrap` runs `brew services start syncthing` on macOS or `systemctl --user enable --now syncthing.service` on Arch only when Syncthing has no configuration yet or the default-configuration check from Track 117A reports default (the plan chooses how the shell script asks; it never parses Syncthing's XML itself), never starts a second Syncthing where one is already running (including a Syncthing.app or other non-brew instance it can detect), prints what broke and the one fixing command when a start fails, and its closing message drops "This script pairs no machine, shares no folder and writes no Syncthing configuration" and tells the owner to run `mm init --new-fleet` or `mm init`; `tests/test_bootstrap.py` covers default, pre-existing, already-running and failed-start cases with stubbed commands; `./bin/check --affected` passes.
+_touches: src/mind_meld/initflow.py, src/mind_meld/cli.py, src/mind_meld/config.py, tests/test_initflow.py, tests/test_config.py, bin/bootstrap, tests/test_bootstrap.py, README.md, docs/invariants/init-devices.md_
+_blocked-by: Track 117A_
+_read-first: docs/invariants/README.md, docs/invariants/init-devices.md, docs/invariants/sync.md, docs/SPEC.md, docs/roadmap-future.md_
+_session: fresh · effort: high · verify: ./bin/check --affected_
+
+_Source: owner decisions 2026-11-07 (setup when Syncthing has its default configuration, the guide otherwise; one pasted device ID to join; auto full mesh through introducers). Verified at `488094e`: `initflow.init(new_fleet=...)`, `_bootstrap_new_fleet` (the only key-header writer), `_classify_folder` and `_write_stignore` exist; `cli.py`'s `init` docstring says to "share the folder in Syncthing and run 'mm init' on the other machines"; `bin/bootstrap` prints `start_syncthing_cmd` (`brew services start syncthing`, `systemctl --user enable --now syncthing.service`) as a next step and says "This script pairs no machine, shares no folder and writes no Syncthing configuration". The bootstrap change was folded in from a separate Track by the owner (Karl, 2026-11-07: "Do we need this many separate tracks?", then "Revise as discussed"). docs/roadmap-future.md's "Bootstrap hardening candidates" (item 5: a second, brew-installed Syncthing for Syncthing.app users) is the already-running case; the two bootstrap test-gap entries stay deferred by the owner's same decision even though this Track's `_touches:` meet their trigger._
+
+- **Setup and join through Syncthing's API on a default configuration** -- _src/mind_meld/initflow.py, src/mind_meld/config.py, tests/test_initflow.py, tests/test_config.py, ~380 lines._ (L)
+- **Bootstrap starts Syncthing at login on a default configuration, never twice** -- _bin/bootstrap, tests/test_bootstrap.py, ~120 lines._ (S)
+- **README setup description, the pre-existing-configuration guide and init invariants** -- _README.md, src/mind_meld/cli.py, docs/invariants/init-devices.md, ~160 lines._ (S)
+
+### Group 119: Approving a joining machine
+
+_Depends on: Group 117, Group 118_
+
+**This group delivers:** `mm devices` moves into its own module, and the owner approves a new machine with one pasted device ID, after which every machine where mm manages Syncthing links to every other.
+
+#### Track 119A: Move `mm devices` into its own module, then approve a joining machine with `mm devices approve <device-id>`
+_3 tasks . ~580 LOC . medium risk . 10 files_
+**Outcome:** On a fleet machine where mm manages Syncthing, the owner pastes the new machine's device ID into `mm devices approve <device-id>`; mm accepts that exact pending device, shares the fleet folder with it and marks it as introducer, so the new machine connects to every machine where mm manages Syncthing; nothing else is ever accepted.
+**Supports:** MVP-1; docs/SPEC.md O2.3 (exact-match approval, never automatic, introducers) and O2.6; the core-and-extensions constraint, met by a move-only first task in its own commit (the owner folded the separate move-only Track into this one, 2026-11-07).
+**Done when:** first, in a move-only commit with no behavior change, the body of `cli.py`'s `devices` command (table and `--format json` output, `_list_devices_warn` use, the `--format` validation) moves to a new `src/mind_meld/devicesflow.py`, `cli.py` keeps only the registration that calls it module-qualified, and a contract test pins `mm devices` table output and the `--format json` keys (`device_id`, `device_name`, `last_seen`, `last_seen_version`, nulls for missing fields, `[]` for an empty fleet) that retro-fleet's aggregator reads; then `mm devices approve <device-id>` (in `devicesflow.py`, registered from `cli.py` module-qualified, `mm devices` and `mm devices --format json` unchanged) accepts only a device whose full ID exactly matches an entry in Syncthing's pending devices, adds it, shares the fleet folder with it and sets it as introducer; a malformed ID, an ID that is not pending, or a near-match changes nothing and says what to check, exit 1; on a machine where mm does not manage Syncthing it changes nothing and names the README guide's approval steps; Syncthing down stops with the start command; an approve that is repeated after success reports the machine already approved, exit 0; no push, pull or auto command ever accepts a device; `tests/test_integration.py`'s `COMMAND_INTENTS62` and `tests/test_module_boundaries.py` list the command and the new module; `docs/invariants/README.md`'s module map and routing rows name `devicesflow.py`; tests cover each case against the Syncthing stand-in; README's command list and fleet sections describe it; `docs/invariants/init-devices.md` records it; `./bin/check --affected` passes.
+_touches: src/mind_meld/devicesflow.py (new), src/mind_meld/cli.py, tests/test_devices_command.py (new), tests/test_devices_approve.py (new), tests/test_integration.py, tests/test_module_boundaries.py, README.md, AGENTS.md, docs/invariants/init-devices.md, docs/invariants/README.md_
+_blocked-by: Track 117A, Track 118A_
+_read-first: docs/invariants/README.md, docs/invariants/init-devices.md, docs/invariants/sync.md, docs/SPEC.md_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
 
-_Source: Karl, 2026-11-06, "yes make it true" (Denver 16's report that SPEC's row says analytics sync while `config.py`'s gstack-extend source includes only `projects/`). Trigger: Denver 17, 2026-11-07, gstack-extend v0.71.0 (PR #213, 7640a38) writes provenance rows to `~/.gstack-extend/analytics/stage-runs/<host>.jsonl`; gstack-extend's `docs/telemetry.md` (installed copy, "Execution provenance") says `<host>` is the configured `host_id` or the sanitized lowercase short nodename, each file is created 0600, a symlink at `stage-runs/` or at the file is not written, historical rows remain in `analytics/stage-runs.jsonl`, and its reader joins `stage-runs.jsonl` plus `stage-runs/*.jsonl`. On one of the owner's machines at 2026-11-07 12:55Z, `analytics/` holds the historical file and `workflow-metrics/`; `stage-runs/` does not exist yet (it is created at the first finish after the upgrade). Card text from the manager's launch card (`~/.mmm/projects/kbitz-mind-meld/cards/track-gse-analytics.md`), placed by the 2026-11-07 regeneration; moving pre-v0.71.0 rows out of the historical file is gstack-extend's job, not this Track's._
+_Source: owner, 2026-11-07, choosing approval by pasted ID ("on the existing fleet machine the owner runs one mm command with that pasted ID (e.g. mm devices approve <device-id>), and mm accepts only an exact match among Syncthing's pending devices, then adds the device and shares the fleet folder. Never auto-accept.") and "Auto full mesh". AGENTS.md's Commands line gains the command, which is why it is touched. It follows Track 118A because approval needs the record, written at setup, that mm manages Syncthing on this machine. Verified at `488094e`: `cli.py` defines `devices` as a single `@app.command()` (`def devices(fmt: ...)`), and `tests/test_module_boundaries.py` lists `devices` in its command inventory; AGENTS.md "Core and extensions" and docs/SPEC.md Constraints require the move before the change._
 
-- **The per-host analytics path and its tests and docs** -- _the five files above, ~90 lines._ (S)
+- **Move the `devices` command body and pin its output (move-only commit)** -- _src/mind_meld/cli.py, src/mind_meld/devicesflow.py (new), tests/test_devices_command.py (new), tests/test_module_boundaries.py, docs/invariants/README.md, ~180 lines._ (M)
+- **The approve command with exact-match acceptance and introducer marking** -- _src/mind_meld/devicesflow.py, src/mind_meld/cli.py, tests/test_devices_approve.py (new), tests/test_integration.py, tests/test_module_boundaries.py, ~320 lines._ (M)
+- **README and AGENTS.md command lists and the device invariants** -- _README.md, AGENTS.md, docs/invariants/init-devices.md, ~70 lines._ (S)
 
-### Group 114: Cursor commands and consent
+### Group 120: Per-machine move
 
-_Depends on: Group 113_
+_Depends on: Group 118, Group 119_
 
-**This group delivers:** No mm command knows Cursor: `mm cursor-agent`, the hook command and Cursor usage consent are gone.
+**This group delivers:** README describes moving one machine at a time off iCloud Drive instead of a cutover, and a test proves a moved machine loses no file.
 
-#### Track 114A: Remove `mm cursor-agent`, Cursor's hook command and Cursor usage consent
-_4 tasks . ~450 LOC . medium risk . 15 files_
-**Outcome:** Cursor no longer appears in any mm command: `mm cursor-agent` and the hidden `capture-cursor-usage` hook command are gone, `mm enable-source`, `mm disable-source` and `mm reconfigure-sources` no longer know a `cursor` name, and no push, autopush, recapture, `mm status` or `mm diag` reads or reports Cursor usage.
-**Supports:** MVP-1; docs/SPEC.md O7.1 (usage summed from Claude Code, Codex, Grok Build, Muse and Antigravity) and its Cursor non-goal (owner, 2026-11-07: "cursor -- removed totally, don't worry about old usage, as if we never supported").
-**Done when:** `cli.py` has no `cursor-agent` or `capture-cursor-usage` command and passes no Cursor consent to capture; `sourceflow.py` drops `_toggle_cursor_usage` and treats `cursor` as an unknown source name; `config.py` drops the Cursor entry of `HOST_USAGE_ONLY_CONSENT`, `cursor_host_usage_enabled` and the `[retro] cursor_host_usage` validation, and a `config.toml` that still holds that key loads without error; `events_tail.py` never selects the Cursor reader; `statusflow.py` drops the Cursor capture rows, hook state and remedies; `tests/test_integration.py`'s `COMMAND_INTENTS62` and `tests/test_module_boundaries.py`'s command and symbol inventories drop the removed names, and the tests of the removed commands and consent go; README drops `mm cursor-agent`, Cursor consent and the hook from its command, source and usage sections and adds an Upgrading note telling the owner to delete mm's `capture-cursor-usage` stop entry from `~/.cursor/hooks.json` on any machine that enabled Cursor usage; AGENTS.md's Project line and command list and root SPEC.md's CLI reference drop Cursor and the two commands; `docs/invariants/` rows for the removed symbols go; the recorded test gap "reconfigure reenrolls disabled Grok" gets its test (accepting Grok in `mm reconfigure-sources` after it was disabled restores the canonical block and consent, removes `grok` from `disabled_sources` and keeps other disabled names); the Cursor reader in `host_usage.py` may stay, unreachable, until Track 115A; `./bin/check --affected` passes.
-_touches: src/mind_meld/cli.py, src/mind_meld/sourceflow.py, src/mind_meld/config.py, src/mind_meld/events_tail.py, src/mind_meld/statusflow.py, tests/test_integration.py, tests/test_module_boundaries.py, tests/test_write_guard_inventory.py, tests/test_source_toggle.py, tests/test_config.py, tests/test_diag.py, README.md, AGENTS.md, SPEC.md, docs/invariants/_
-_blocked-by: Track 113A_
-_out: 115A_
-_read-first: docs/invariants/README.md, docs/invariants/sync.md, docs/invariants/events-retro.md, docs/SPEC.md_
+#### Track 120A: Replace the cutover runbook with the per-machine move, and prove a move loses no file
+_3 tasks . ~450 LOC . medium risk . 4 files_
+**Outcome:** README tells the owner how to move one machine at a time off iCloud Drive (uninstall mm, reinstall with the bootstrap script, then `mm init` to join or `mm init --new-fleet` to start the Syncthing fleet) and keeps no cutover runbook; an integration test shows that a machine holding iCloud-era mm state and agent files that have drifted from the fleet's joins a fresh fleet without losing or overwriting a local file it cannot prove is older.
+**Supports:** MVP-1; docs/SPEC.md O2.5 (move by reinstall and join; no local agent file lost), O2.7 (the integration-test evidence) and the Constraints and Known limits that replace the cutover.
+**Done when:** README's "Moving the fleet from iCloud Drive to Syncthing (cutover runbook)" section and its links are replaced by a short per-machine move section (what stays in the home, that a Mac not yet moved keeps syncing over iCloud Drive, that the two stores exchange nothing until a machine moves, that `retro-fleet` on Syncthing does not show the iCloud store's history, and that the old iCloud folder can be deleted once the last Mac has moved); AGENTS.md and root `SPEC.md` stop calling iCloud Drive "the pre-cutover path"; a new integration test builds a machine with a populated state database and synced history from one store, edits some agent files, then joins a separate fresh store whose peer holds other versions of some of those files, and shows that every local file still exists with its bytes or as a kept-both conflict, that only files with a proven last-synced base fast-forward, and that no file is deleted; if the test exposes loss, the Track stops and reports it to the owner rather than widening scope; `./bin/check --affected` passes.
+_touches: README.md, AGENTS.md, SPEC.md, tests/test_move_join.py (new)_
+_blocked-by: Track 118A, Track 119A_
+_read-first: docs/SPEC.md, docs/invariants/sync.md, docs/invariants/conflicts.md_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
 
-_Source: owner decisions relayed by manager Ephesus 9, 2026-11-06 ("we still need to remove support for cursor") and 2026-11-07 ("cursor -- removed totally, don't worry about old usage, as if we never supported"); docs/SPEC.md as amended 2026-11-07. Symbols verified at `fd23f25`: `cli.py` `capture_cursor_usage`, `cursor_agent`, `_cursor_usage_consented`; `sourceflow.py` `_toggle_cursor_usage`; `config.py` `HOST_USAGE_ONLY_CONSENT`, `cursor_host_usage_enabled`. Test gap: docs/TODOS.md `[review]`, Track 109A, drained 2026-11-05 and placed here because this Track touches `src/mind_meld/sourceflow.py` and `tests/test_source_toggle.py`. The core-and-extensions move-first rule does not apply: this Track deletes the Cursor surface rather than changing an adapter that stays._
+_Source: owner, 2026-11-07: "we don't need a migrate tool ... migration for me can be; uninstall mm and reinstall, register the machine w/ our fleet and boom, that machine is now g2g on syncthing", confirmed with the manager's reading (no fleet-wide cutover, the user's agent files merge on join through the existing first-run-from-divergent-state path). Verified at `488094e`: README has "## Moving the fleet from iCloud Drive to Syncthing (cutover runbook)" and links to it from its storage and add-a-machine sections; AGENTS.md's Key Principles and root SPEC.md say "iCloud Drive is the pre-cutover path only"; the pull ledger (`peer_base`, `seen_version`) is keyed per peer and path (docs/invariants/sync.md "Fast-forward, propagated deletions and anchors")._
 
-- **Delete `mm cursor-agent` and `capture-cursor-usage` with their tests** -- _src/mind_meld/cli.py, tests/test_integration.py, tests/test_module_boundaries.py, tests/test_write_guard_inventory.py, ~250 lines (del)._ (S)
-- **Remove Cursor usage consent from the source commands, config, capture and status** -- _src/mind_meld/sourceflow.py, src/mind_meld/config.py, src/mind_meld/events_tail.py, src/mind_meld/statusflow.py, src/mind_meld/cli.py, tests/test_source_toggle.py, tests/test_config.py, tests/test_diag.py, ~120 lines._ (M)
-- **Test gap: reconfigure re-enrols disabled Grok** -- _tests/test_source_toggle.py, ~40 lines._ (S)
-- **README, AGENTS.md, root SPEC.md and invariant docs** -- _README.md, AGENTS.md, SPEC.md, docs/invariants/, ~60 lines._ (S)
+- **Per-machine move section in place of the cutover runbook** -- _README.md, ~150 lines (net negative)._ (M)
+- **AGENTS.md and root SPEC.md wording** -- _AGENTS.md, SPEC.md, ~10 lines._ (S)
+- **Integration test: a machine with prior-store state joins a fresh fleet without loss** -- _tests/test_move_join.py (new), ~250 lines._ (M)
 
-### Group 115: Cursor usage reader removal
+### Group 121: Git-history hostname scrub
 
-_Depends on: Group 114_
-
-**This group delivers:** mm holds no Cursor usage reader, so the Grok row counts only Grok Build's own runs.
-
-#### Track 115A: Remove the Cursor usage reader
-_4 tasks . ~2,400 LOC . medium risk . 10 files_
-**Outcome:** mm no longer contains a Cursor usage reader: the Conductor `runs.ndjson` and SQLite `index.db` readers, the standalone completion spool, the `~/.cursor/hooks.json` editor and Cursor's caches are gone, so new Grok usage comes only from Grok Build and no capture outcome, event, status line or diagnostic names a Cursor reader.
-**Supports:** MVP-1; docs/SPEC.md O7.1 and O7.3 (no Cursor source, so no Cursor coverage gap) and its Cursor non-goal (owner, 2026-11-07).
-**Done when:** `host_usage.py` keeps the shared reader kit and the Muse and Antigravity readers and drops every Cursor reader, the SQLite adapter, hook editing (`configure_cursor_hook`), completion recording (`record_cursor_usage`, `cursor_cli_model`), the spool and cache paths and the Cursor-only parts of the host-family classifier; `host_registry.py` has no `cursor` entry; `events.py`'s `ACTIVE_HOST_READERS` and `HOST_USAGE_TOKEN_SOURCES` and `events_tail.py`'s `WARMABLE_HOST_READERS` and reader labels drop `cursor`, and the Cursor hold and coverage degradations go from `events_tail.py` and `attemptlog.py`; `errors.py` drops `CURSOR_SQLITE_URL` and README its Cursor SQLite stores section; `statusflow.py` keeps no Cursor-only branch; `retro-fleet` still renders a fleet whose older rows name a `cursor` token source, and those rows are left as they are, with no migration (owner, 2026-11-07); `tests/test_cursor_sqlite.py` and `tests/fixtures/host_sessions/cursor/` are deleted, and other tests drop their Cursor cases, fixtures and `tests/conftest.py` path patches; the recorded test gap "Grok diagnostic unknown-state branches" gets its tests (unreadable Grok config or cache text and the deadline inventory refresh in `mm status` and `mm diag` report unknown, never ready); `docs/invariants/` (events-retro, the module map and the routing rows) describes no Cursor reader; `./bin/check --affected` passes.
-_touches: src/mind_meld/host_usage.py, src/mind_meld/host_registry.py, src/mind_meld/events_tail.py, src/mind_meld/events.py, src/mind_meld/attemptlog.py, src/mind_meld/errors.py, src/mind_meld/statusflow.py, tests/, docs/invariants/, README.md_
-_blocked-by: Track 114A_
-_out: 116A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, tests/fixtures/host_sessions/cursor/CONTRACT.md_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
-
-_Source: owner decisions 2026-11-06 and 2026-11-07 as for Track 114A. Symbols verified at `fd23f25`: `host_usage.py` `read_cursor_usage`, `_read_cursor_sqlite`, `configure_cursor_hook`, `record_cursor_usage`, `cursor_cli_model`, `CURSOR_HOOK_CONFIG_PATH`; `host_registry.py` `HOST_READER_DIAGS["cursor"]`; `events.py` `ACTIVE_HOST_READERS`, `HOST_USAGE_TOKEN_SOURCES`; `events_tail.py` `_CURSOR_HOLD_DEGRADATION`, `_CURSOR_COVERAGE_DEGRADATION`; `errors.py` `CURSOR_SQLITE_URL`. `statedb.CursorRow` and the git-capture `repo_cursors` are pull and walk cursors, not Cursor, and stay. Test gap: docs/TODOS.md `[review]`, Track 110A, drained 2026-11-05 and placed here because this Track touches `src/mind_meld/statusflow.py` and `tests/` (which holds `tests/test_diag.py`). The `tests/` entry is a folder because the deleted symbols reach test files the code does not list in advance. The core-and-extensions move-first rule does not apply: the Cursor adapter is deleted, not changed._
-
-- **Delete the Cursor reader, its SQLite adapter, hook editor and spool with their tests and fixtures** -- _src/mind_meld/host_usage.py, tests/test_host_usage.py, tests/test_cursor_sqlite.py, tests/fixtures/host_sessions/cursor/, tests/conftest.py, ~2,100 lines (del)._ (S)
-- **Remove Cursor from the reader registry, capture tail, event constants, attempt log, errors and status** -- _src/mind_meld/host_registry.py, src/mind_meld/events_tail.py, src/mind_meld/events.py, src/mind_meld/attemptlog.py, src/mind_meld/errors.py, src/mind_meld/statusflow.py, tests/, ~150 lines._ (M)
-- **Test gap: Grok diagnostic unknown-state branches** -- _tests/test_diag.py, ~60 lines._ (S)
-- **Invariant docs and README** -- _docs/invariants/, README.md, ~100 lines._ (S)
-
-### Group 116: Cursor traces in discovery, pricing and retro
-
-_Depends on: Group 115_
-
-**This group delivers:** Nothing else in mm reads Cursor's files or names Cursor.
-
-#### Track 116A: Remove Cursor from git-root discovery, pricing provenance and retro-fleet
-_4 tasks . ~450 LOC . low risk . 15 files_
-**Outcome:** Nothing else in mm reads Cursor's files or names Cursor: git-root discovery no longer opens `~/.cursor/acp-sessions` or Conductor's Cursor SDK store, Grok prices cite xAI rather than Cursor, and `retro-fleet` and its SKILL.md no longer mention Cursor or print the Cursor ACP gap note.
-**Supports:** MVP-1; docs/SPEC.md O7.1 and O7.3 and its Cursor non-goal (owner, 2026-11-07).
-**Done when:** `rootprobes.py` has no Cursor prober (the `_cursor_*` helpers, `_CONDUCTOR_STORE` and its `PROBERS` row), and `fsutil.py`'s pytest account-state guard and `tests/conftest.py` drop `.cursor`; `token_usage.py` drops `PRICING_CURSOR_LAST_UPDATED` and its Cursor citations, the Grok 4.7 cards that Grok Build's ids use keep their rates with xAI provenance, and a card only Cursor ids used goes; `aggregator.py` drops `CURSOR_ACP_GAP_NOTE`, `_cursor_acp_gap_notes`, the Cursor pricing-provenance field and its Cursor comments; the retro SKILL.md drops Cursor; the recorded test gap "complete Grok row with cache writes suppresses ceiling" gets its test (positive `cache_create`, `incomplete=False`, no override or a bundled-equal one, the model detail kept and `at most` absent), replacing the Cursor cache-write case; `docs/invariants/`, `docs/designs/host-parity.md` (its Cursor material marked historical) and README's pricing provenance match; outside CHANGELOG.md, `docs/archive/`, `docs/roadmap-shipped.md`, docs/TODOS.md drain records and docs/PROGRESS.md, `git grep -n -i -w cursor` finds only the unrelated pull, manifest and walk cursors; `./bin/check --affected` passes.
-_touches: src/mind_meld/rootprobes.py, src/mind_meld/fsutil.py, src/mind_meld/token_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_root_probers.py, tests/conftest.py, tests/test_token_usage.py, tests/test_retro_fleet_aggregator.py, tests/test_retro_usage_presentation.py, tests/test_grok_usage.py, tests/test_muse_usage.py, docs/invariants/, docs/designs/host-parity.md, README.md_
-_blocked-by: Track 115A_
-_out: 117A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, docs/designs/host-parity.md_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
-
-_Source: owner decisions 2026-11-06 and 2026-11-07 as for Track 114A. Symbols verified at `fd23f25`: `rootprobes.py` `_cursor_acp_root`, `_cursor_ndjson`, `_CONDUCTOR_STORE`, `RootProber("cursor", ...)`; `fsutil.py`'s guarded `.cursor` root; `token_usage.py` `PRICING_CURSOR_LAST_UPDATED`, `_builtin_verified_date`; `aggregator.py` `CURSOR_ACP_GAP_NOTE`, `_cursor_acp_gap_notes`, `cursor_verified`. Test gap: docs/TODOS.md `[review]`, Track 111B, drained 2026-11-06 and placed here because this Track touches `src/mind_meld/skills/retro_fleet/aggregator.py` and `tests/test_retro_usage_presentation.py`; the only cache-write cases it names are Cursor's and a partial Grok case._
-
-- **Delete the Cursor git-root prober and its tests** -- _src/mind_meld/rootprobes.py, src/mind_meld/fsutil.py, tests/test_root_probers.py, tests/conftest.py, ~300 lines (del)._ (S)
-- **Re-source Grok pricing provenance to xAI and remove Cursor from retro-fleet** -- _src/mind_meld/token_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_token_usage.py, tests/test_retro_fleet_aggregator.py, tests/test_grok_usage.py, tests/test_muse_usage.py, ~120 lines._ (M)
-- **Test gap: complete Grok row with cache writes suppresses ceiling** -- _tests/test_retro_usage_presentation.py, ~50 lines._ (S)
-- **Invariant docs, host-parity design and README** -- _docs/invariants/, docs/designs/host-parity.md, README.md, ~60 lines._ (S)
-
-### Group 117: Git-history hostname scrub
-
-_Depends on: Group 113, Group 116_
+_Depends on: Group 120_
 
 **This group delivers:** A git history free of the owner's machine hostnames, the last carded condition for 2.0.0 and for making the repository public again.
 
-#### Track 117A: Rewrite the git history to remove the owner's machine hostnames (owner-gated)
+#### Track 121A: Rewrite the git history to remove the owner's machine hostnames (owner-gated)
 _3 tasks . ~30 LOC . high risk . 1 file_
 **Outcome:** No commit, tag or other reachable ref in the repository contains any of the owner's machine hostnames or a fragment of one, so 2.0.0 can be cut and the repository can be made public again; installs keep upgrading from the same tag names.
 **Supports:** MVP-1; docs/SPEC.md's 2.0.0 release line and its hostname constraint (owner, 2026-11-07: "that scrub is required before we go public again and hit 2.0 fyi").
 **Done when:** the rewrite runs on a fresh mirror clone, never on a working checkout, with `git filter-repo` or an equivalent tool driven by a replacement list kept outside the repository and never committed, printed, or pasted into the PR or a log; before any push, a search of every blob, commit message, tag message and ref name in the rewritten mirror for each listed name prints nothing; every release tag, `latest` included, points at its rewritten commit under the same name; **the owner gives an explicit go in the session before any push**, lifts `main`'s force-push protection and restores it afterwards, and runs or approves the force-push of `main` and the tags; afterwards a search of a fresh clone prints nothing, and `mm update` on one machine reinstalls from `@latest` at the same version; README's Upgrading section tells every other clone and worktree to re-clone rather than rebase, and says pipx installs need no action; the refs GitHub keeps outside the owner's control (pull-request refs and cached views of old commits) are listed for the owner, who asks GitHub Support to purge them or accepts them before the repository goes public; no hostname appears in the PR, a commit message, README or any record the Track keeps; the Track does not make the repository public; `./bin/check tests/test_docs_routing.py` passes.
 _touches: README.md_
-_blocked-by: Track 113A, Track 116A_
+_blocked-by: Track 113A, Track 116A, Track 120A_
 _read-first: docs/SPEC.md, docs/roadmap-shipped.md_
 _session: fresh · effort: high · verify: ./bin/check tests/test_docs_routing.py_
 
-_Source: owner, 2026-11-06 ("we will need to scrub the git history at some point, don't have to do it now though") and 2026-11-07 ("that scrub is required before we go public again and hit 2.0 fyi"), relayed by manager Ephesus 9; docs/SPEC.md's 2.0.0 release line and hostname constraint as amended 2026-11-07; Track 112A's receipt (the current tree is scrubbed; past commits are not). Promoted from docs/roadmap-future.md "Rewrite git history to remove the owner's machine hostnames". It runs after every other carded Track so no open branch has to be rebased onto the rewritten history._
+_Source: owner, 2026-11-06 ("we will need to scrub the git history at some point, don't have to do it now though") and 2026-11-07 ("that scrub is required before we go public again and hit 2.0 fyi"), relayed by manager Ephesus 9; docs/SPEC.md's 2.0.0 release line and hostname constraint as amended 2026-11-07; Track 112A's receipt (the current tree is scrubbed; past commits are not). Promoted from docs/roadmap-future.md "Rewrite git history to remove the owner's machine hostnames". It runs after every other carded Track so no open branch has to be rebased onto the rewritten history; the 2026-11-07 regeneration adds the Syncthing setup and move Tracks ahead of it for that reason._
 
 - **Rewrite and verify on a mirror clone** -- _a fresh mirror outside every checkout; the replacement list stays outside the repository._ (M)
 - **Owner go, force-push of `main` and the tags, and the post-push checks** -- _the owner's go and push; one machine's `mm update`._ (S)
@@ -150,39 +145,39 @@ document order; document order is priority, not gating.
 Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
-- Group 113 ← {}
-- Group 114 ← {113}
-- Group 115 ← {114}
-- Group 116 ← {115}
-- Group 117 ← {113, 116}
+- Group 117 ← {}
+- Group 118 ← {117}
+- Group 119 ← {117, 118}
+- Group 120 ← {118, 119}
+- Group 121 ← {120}
 ```
 
 Track detail per group:
 
 ```
-Group 113: gstack-extend run history
-  +-- Track 113A .......... ~S . 1 task
-Group 114: Cursor commands and consent
-  +-- Track 114A .......... ~L . 4 tasks
-Group 115: Cursor usage reader removal
-  +-- Track 115A .......... ~L . 4 tasks
-Group 116: Cursor traces in discovery, pricing and retro
-  +-- Track 116A .......... ~L . 4 tasks
-Group 117: Git-history hostname scrub
-  +-- Track 117A .......... ~M . 3 tasks
+Group 117: Syncthing default-configuration check and writer
+  +-- Track 117A .......... ~L . 4 tasks
+Group 118: Syncthing setup from the bootstrap script and `mm init`
+  +-- Track 118A .......... ~L . 3 tasks
+Group 119: Approving a joining machine
+  +-- Track 119A .......... ~L . 3 tasks
+Group 120: Per-machine move
+  +-- Track 120A .......... ~L . 3 tasks
+Group 121: Git-history hostname scrub
+  +-- Track 121A .......... ~M . 3 tasks
 ```
 
 **Total: 5 groups . 5 tracks remaining.**
 
-Track 93A (the cutover runbook) shipped in v1.12.20 and Group 93 is retired. Track 96A (cross-model memory qualification) moved to Future: docs/SPEC.md plans O9 after 2.0 and says it starts after the cutover, which is the owner's own step and has not run. Track 113A keeps the ID its launch card gave it; Tracks 114A to 117A take the next free numbers, and IDs 95A and 96A stay unused because Future entries cite them.
+Tracks 113A, 114A, 115A and 116A shipped (v1.12.21, v1.12.22, v1.12.23 and v1.12.24) and Groups 113 to 116 are retired. The Syncthing Tracks take 117A to 120A, so the history scrub, Track 117A in the previous plan, is now Track 121A and still runs last so no open branch has to be rebased onto the rewritten history. The owner asked for the fewest Tracks the size audit allows (2026-11-07): the bootstrap start-at-login change rides in Track 118A, and the move-only `mm devices` module move is Track 119A's first task in its own commit rather than a separate Track. IDs 95A and 96A stay unused because Future entries cite them.
 
-The 2.0.0 cut is not a Track. Carded work before it: Tracks 113A to 117A, ending with the history rewrite, which needs the owner's explicit go and their force-push. The owner's own steps: confirm that the runbook's roles (the store Mac, another Mac, the first and second Linux machines) match the real machines in `mm devices`; run the README cutover runbook, including its step 7 owner checks; run `retro-fleet` on the fleet for O7.4; and confirm O1 to O4 on their own observation on one Mac and both Linux machines, with O6 to O8 holding, recorded in PROGRESS.md `## Acceptance`. Making the repository public again is a separate owner decision that waits for Track 117A. Problems found during the cutover are fixed as they appear.
+The 2.0.0 cut is not a Track. Carded work before it: Tracks 117A to 121A, ending with the history rewrite, which needs the owner's explicit go and their force-push. The owner's own steps: move each machine onto the Syncthing fleet by reinstalling mm and joining (README's per-machine move from Track 120A; machines may move earlier on the current release by pairing by hand), with the first machine running `mm init --new-fleet`; run `retro-fleet` on the Syncthing fleet for O7.4; and confirm O1 to O4 on their own observation on one Mac and both Linux machines, with O6 to O8 holding, recorded in PROGRESS.md `## Acceptance`. A Mac not yet moved keeps running on iCloud Drive and holds nothing up. Making the repository public again is a separate owner decision that waits for Track 121A. Problems found while machines move are fixed as they appear.
 
 ---
 
 ## Future
 
-Deferred: docs/roadmap-future.md (26 items)
+Deferred: docs/roadmap-future.md (25 items)
 
 ## Shipped
 

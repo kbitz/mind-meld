@@ -47,7 +47,20 @@ owner's machine hostnames must be removed from the repository's git history
 before 2.0.0 and before the repository is public again (owner: "that scrub
 is required before we go public again and hit 2.0 fyi"), which adds a
 condition to the 2.0.0 release line. Audience, target and the other outcomes
-are unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
+are unchanged. Amended again 2026-11-07 by `/project-spec` to drop the
+fleet-wide cutover (owner: "we don't need a migrate tool, because i'm the only
+user ... migration for me can be; uninstall mm and reinstall, register the
+machine w/ our fleet and boom"). Each machine moves on its own schedule by
+reinstalling mm and joining the Syncthing fleet, which may be started fresh
+on any machine; a machine not yet moved keeps running on iCloud Drive and holds
+nothing up; the iCloud store's usage history need not carry over. A first
+install sets Syncthing up itself when Syncthing still has its default
+configuration, and otherwise points to a guide (owner: "it should set up
+syncthing IF syncthing had not otherwise been configured"). O2 is rewritten
+for setup, pairing and approval, and the constraints, known limits, non-goals
+and 2.0.0 release line lose the cutover. Audience, target, the other outcomes
+and the hostname-scrub condition are unchanged. Earlier text lives in
+`git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -67,7 +80,9 @@ A command either succeeds, in one line, or says what broke and how to fix it.
 2.0 moves the transport from iCloud Drive to a Syncthing folder so the
 owner's two Linux machines join the fleet. It keeps the 1.x store (each
 machine's encrypted file list plus encrypted content) and fixes what breaks on
-Syncthing.
+Syncthing. There is no fleet-wide cutover and no migration tool: each machine
+moves when the owner reinstalls mm on it and joins the Syncthing fleet, and a
+first install sets Syncthing up so it just works.
 
 ## What mm syncs and reports
 
@@ -107,8 +122,9 @@ Grok row counts Grok Build's own runs only.
   script if missing; a desktop keyring (Keychain, or an unlocked Secret
   Service collection); a handful of machines with no always-on peer; sync sets
   of about 40k files and 1.3 GB; attended `mm push` and `mm pull` plus the
-  documented Claude Code and Codex hooks. Until
-  cutover, the Macs sync over iCloud Drive on 1.x.
+  documented Claude Code and Codex hooks. A Mac not yet moved to Syncthing
+  keeps syncing over iCloud Drive until the owner moves it; it holds no other
+  machine up.
 - Current achieved stage and evidence: see PROGRESS.md `## Acceptance`.
 
 ## Stage outcomes
@@ -147,19 +163,62 @@ holds the same synced files.
    of the push.
 4. Evidence: integration tests over a local folder that delivers files late
    and out of order, and the owner's own observation on one Mac and both
-   Linux machines with real hooks after following the cutover runbook,
-   recorded in PROGRESS.md `## Acceptance`. Problems are fixed as they appear.
+   Linux machines with real hooks once each has moved onto the Syncthing
+   fleet (O2.5), recorded in PROGRESS.md `## Acceptance`. Problems are fixed
+   as they appear.
 
-### O2: A machine joins the fleet with one mm command after Syncthing pairing
-1. On a machine paired in Syncthing with the shared folder accepted, one mm
-   command joins the fleet: it never creates a key header, verifies the
-   passphrase and pulls. If the fleet's key header has not arrived, it stops
-   without writing anything and says to wait for Syncthing; the owner reruns
-   `mm init` once it has. Creating a new fleet refuses on a folder that
-   already holds one. Observed on the owner's machines.
-2. `mm status` and `mm diag` read and report Syncthing's state (connected
-   peers, the folder's sync state and the folder options mm relies on). mm
-   never changes Syncthing's configuration.
+### O2: A machine joins the Syncthing fleet from a fresh install
+Owner decisions of 2026-11-07: no migration tool; mm sets Syncthing up only
+when Syncthing still has its default configuration; joining takes one pasted
+device ID on each side; every fleet machine links to every other.
+1. **Default configuration.** Syncthing has its default configuration when it
+   has no paired device and no folder except its stock Default Folder,
+   unshared and empty. Changes to the GUI or other options do not count. Any
+   paired device or any other folder is a pre-existing configuration. mm
+   manages Syncthing on a machine only if it found the default configuration
+   there when it set Syncthing up; the owner manages Syncthing on every other
+   machine.
+2. **Setup.** On a machine whose Syncthing has its default configuration, the
+   install starts Syncthing at login and mm configures it. `mm init
+   --new-fleet`, on macOS or Linux, creates the shared folder with mm's folder
+   options. `mm init` on a joining machine asks for one fleet machine's
+   Syncthing device ID, pairs with it, accepts the fleet folder with mm's
+   options and prints this machine's own device ID. mm may remove the
+   unshared, empty stock Default Folder so mm's folder is not nested inside
+   it.
+3. **Approval.** On a fleet machine where mm manages Syncthing, the owner
+   runs one mm command with the new machine's pasted device ID (for example
+   `mm devices approve <device-id>`). mm accepts only an exact match among
+   Syncthing's pending devices, then adds the device and shares the fleet
+   folder; it never accepts a device on its own. The two paired machines mark
+   each other as Syncthing introducers, so every machine where mm manages
+   Syncthing connects to every other with no further step. On a fleet
+   machine where the owner manages Syncthing, the owner approves the new
+   machine in Syncthing as the README guide describes.
+4. **Pre-existing configuration.** On a machine whose Syncthing has a
+   pre-existing configuration, mm changes nothing in Syncthing and points the
+   owner to the README guide for configuring Syncthing to work with mm
+   (pairing, sharing the folder and its options).
+5. **Join and move.** Once the folder is shared, `mm init` joins: it never
+   creates a key header, verifies the passphrase and pulls. If the fleet's
+   key header has not arrived, it stops without writing anything and says to
+   wait for Syncthing; the owner reruns `mm init` once it has. Creating a
+   new fleet refuses on a folder that already holds one. The owner moves a
+   machine from iCloud Drive by uninstalling mm, reinstalling it with the
+   bootstrap script and joining (or starting the fleet with `mm init
+   --new-fleet`). The machine's agent files stay in its home and merge
+   through the pull rules of O1.1: no local agent file is lost, and a file
+   that differs from the fleet's copy without a proven last-synced base is
+   kept both ways until `mm resolve`.
+6. `mm status` and `mm diag` read and report Syncthing's state (connected
+   peers, the folder's sync state and the folder options mm relies on).
+   Outside criteria 2 and 3, mm never changes Syncthing's configuration.
+7. Evidence: tests against a stand-in for Syncthing's local API cover setup,
+   approval, the exact-match refusal and the pre-existing-configuration
+   guide; an integration test joins a machine that holds iCloud-era state to
+   a fresh fleet without losing a file; and the owner observes setup, join
+   and approval on their own machines, recorded in PROGRESS.md
+   `## Acceptance`.
 
 ### O3: Partial sync is a reported state, never an error
 1. Content that has not arrived yet, a file Syncthing is replacing, and
@@ -246,8 +305,10 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
 - End-to-end encryption is mandatory; no plaintext sync data reaches storage.
 - Sync is allowlisted; session transcripts, credentials and whole-file
   settings that may hold credentials stay local.
-- Explicit push and pull; mm watches no files. Syncthing moves the files and
-  the owner manages Syncthing; mm reads and reports its state.
+- Explicit push and pull; mm watches no files. Syncthing moves the files.
+  mm configures Syncthing only as O2 describes, on a machine whose Syncthing
+  has its default configuration; otherwise the owner manages Syncthing and mm
+  reads and reports its state.
 - No storage file is rewritten by more than one machine.
 - Usage capture reads host data without changing it and publishes only usage
   metadata (tokens, models, times, commit counts), never prompts,
@@ -260,8 +321,9 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   `autopush`, at most once a day. It does not reach a machine that runs none
   of them, is pinned to a tag, has turned `auto_install` off, or is refused
   for newer storage. `mm devices` shows each machine's version; the owner
-  runs `mm update` on any machine that lags, and every machine must be on the
-  release before cutover.
+  runs `mm update` on any machine that lags. Until the owner's last Mac has
+  moved, a release keeps working on an iCloud Drive storage path, so a Mac
+  not yet moved keeps syncing whatever release auto-update gives it.
 - Core and extensions (owner, 2026-10-23). Host adapters (each agent's sync
   source and usage reader) and command groups are extensions to a small
   shared core, so a change is tested and reviewed against the piece it
@@ -279,13 +341,17 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   explicit go at that time; the owner gives that go and runs or approves
   the force-push.
 - A bootstrap script installs Python, pipx, mm and the Syncthing package on
-  macOS and Arch-based Linux, stops with instructions if Homebrew is missing
-  on macOS, and ships before 2.0.0.
-- Accepted manual steps: pairing machines and sharing the folder with the
-  README's options; running the cutover runbook once;
-  `mm resolve` for real conflicts; unlocking the Linux keyring before hooks
-  run; re-joining a machine restored from backup or cloned; removing a dead
-  machine from the fleet.
+  macOS and Arch-based Linux, starts Syncthing at login where Syncthing has
+  its default configuration (O2.1), stops with instructions if Homebrew is
+  missing on macOS, and ships before 2.0.0.
+- Accepted manual steps: pasting a fleet machine's Syncthing device ID into
+  `mm init` and the new machine's into the approval command; configuring
+  Syncthing with the README guide on a machine with a pre-existing Syncthing
+  configuration; moving each machine off iCloud Drive by uninstalling and
+  reinstalling mm; `mm resolve` for real conflicts; unlocking the Linux
+  keyring before hooks run; re-joining a machine restored from backup or
+  cloned; removing a dead machine from the fleet, in Syncthing on every
+  machine that still lists it (introducers re-add it otherwise).
 - Known limits: a project outside the home folder with no network git
   `origin` stays machine-specific. Grok Build memory for a repository with
   no `origin`, or for a folder that is not a repository, reaches other
@@ -297,17 +363,26 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   the other machine (owner, 2026-11-06). mm does not detect a restored or
   cloned machine, which can republish stale files until it is re-joined.
   Content blob names are content hashes: they show whether two machines hold
-  identical bytes, not the bytes. iCloud Drive is not supported after cutover.
+  identical bytes, not the bytes. While some machines are on iCloud Drive and
+  others on Syncthing, the two stores exchange nothing: a machine's changes
+  reach the other store only when it moves. `retro-fleet` on the Syncthing
+  fleet does not show the iCloud store's usage history. iCloud Drive is not
+  supported once the owner's last Mac has moved.
 
 ## Non-goals and later work
 - Windows and non-Arch Linux distributions. Revisit when such a machine needs
   to join the fleet.
 - Multi-user collaboration, a GUI, real-time file watching, syncing session
   transcripts, walking a host home root. Unchanged exclusions.
-- mm-managed Syncthing: invite codes, mesh healing, relays, folder setup
-  through Syncthing's API and scan requests after push. Revisit when the fleet
-  grows past a handful of machines, or manual pairing or folder settings cause
-  an observed missed sync.
+- mm-managed Syncthing beyond O2's setup, approval and introducers: invite
+  codes, relays, changing a pre-existing Syncthing configuration, removing
+  dead machines and scan requests after push. Revisit when the fleet grows
+  past a handful of machines, or pairing or folder settings cause an
+  observed missed sync.
+- A migration tool or fleet-wide cutover from iCloud Drive, and carrying the
+  iCloud store's usage history into the Syncthing fleet (owner, 2026-11-07:
+  "we don't need a migrate tool, because i'm the only user"). Revisit when a
+  second person needs to move an existing fleet.
 - Detecting restored, cloned or forked machines. Revisit when one damages
   fleet data in real use.
 - Per-path conflict policies and a richer resolver. Revisit when conflicts
@@ -317,7 +392,7 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   machines (2026-11-05). Revisit when the owner keeps a plugin or hook there
   that other machines need.
 - Cross-model memory before 2.0, and writing into any host's native memory
-  store at any time. O9 starts after the cutover.
+  store at any time. O9 starts after 2.0.0.
 - <a id="factory-handover"></a>Carrying mmm-factory's durable state
   (`~/.mmm/`) through mm, for backup or for handover between hosts (owner,
   2026-11-06: "hm, don't love that -- let's future this card and move on to
@@ -348,10 +423,13 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   2.0, **cross-model memory** (O9 criteria 1, 2 and 4; owner, 2026-10-29).
 - Stage versions: MVP-1 on iCloud (macOS) = 1.0.0, achieved. MVP-1 on
   Syncthing (macOS and Linux) = **2.0.0**: O1 to O4 accepted on the
-  owner's own observation after the cutover runbook, with O6 to O8 holding,
-  the bootstrap script shipped and the owner's machine hostnames removed
-  from the repository's git history (owner, 2026-11-07). MAJOR because the
-  transport changes and every machine must upgrade before cutover.
+  owner's own observation on one Mac and both Linux machines in the
+  Syncthing fleet, with O6 to O8 holding, the bootstrap script and O2's
+  Syncthing setup and approval shipped, and the owner's machine hostnames
+  removed from the repository's git history (owner, 2026-11-07). MAJOR
+  because the transport changes. A Mac not yet moved keeps running on iCloud
+  Drive and does not hold 2.0.0 or any other machine up; a machine may move
+  before 2.0.0 on any release that has the Syncthing support it needs.
 - Strict SemVer: not used. The 1.x compatibility contract that applied it
   from 1.0.0 is retired as of 2026-10-19. Strict SemVer would start at
   public-beta, which is not planned.

@@ -44,55 +44,38 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/host_usage.py|tests/test_agy_usage.py] Test gap: retained SQLite diagnostic code filtering
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Antigravity still filters optional SQLite error codes, but its surviving tests assert causes without checking allowed, malformed or overlong code values. The retired Cursor suite covered this shared filter.
-- **Hypothesis (untested):** Extend an existing Antigravity diagnostic test to check accepted and rejected code values after cache reload; re-verify the contract first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/host_usage.py:_sqlite_error_name`, `_ReadFailure.detail`, `_agy_reason_detail`
-- **Evidence:** Coverage audit at `5d344ac` traced the retained filter and surviving tests; no failure was reproduced.
-- **Context:** `/review-and-prep`, branch `mmm/b5023320`, before PR creation, 2026-11-07. Revisit when a Track next changes these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/attemptlog.py|tests/test_attemptlog.py] Test gap: retired Cursor attended-attempt upgrade
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Generic invalid-reader validation and no-reader record tests cover individual pieces, but no direct test starts with a well-formed old Cursor attempt, observes the corrupt-record message, and verifies its replacement by an attended push.
-- **Hypothesis (untested):** Extend the malformed-record table and an existing isolated attended-push fixture to exercise the documented upgrade chain; re-verify it first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/attemptlog.py:_valid`, `read`, `render`
-- **Evidence:** Coverage audit at `5d344ac` traced validation, rendering and attended writes; no failure was reproduced.
-- **Context:** `/review-and-prep`, branch `mmm/b5023320`, before PR creation, 2026-11-07. Revisit when a Track next changes these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/core.py|tests/test_gstack_extend_analytics.py] Test gap: unrecognized migration directory shapes
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The new retired-directory migration guard has coverage for default and custom string lists, but not absent, scalar or mixed-type `include_dirs` values.
-- **Hypothesis (untested):** Extend the migration fixture to prove these shapes stay unchanged while the absent allowlist is added; re-verify the config contract first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/core.py:_migrate_config_core`
-- **Evidence:** Static coverage audit at `4582a61`; config source validation does not reject these shapes. No failure reproduced; targeted checks passed.
-- **Context:** `/review-and-prep`, branch `mmm/ec2ff4e3`, 2026-11-07. Revisit when a Track next changes these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=docs/ROADMAP.md|src/mind_meld/events_tail.py|src/mind_meld/attemptlog.py] Track 115A card lists the push cursor's hold and coverage warnings as Cursor symbols
-- **Description:** Track 115A's done-when removes "the Cursor hold and coverage degradations" and its source note names `_CURSOR_HOLD_DEGRADATION` and `_CURSOR_COVERAGE_DEGRADATION`. Those are the git push cursor's data-at-risk warnings ("retro cursor held at last complete capture"), not Cursor the product (`events_tail.py` near lines 268-275 and 1516-1521, `attemptlog.py` near lines 374-375). Following the card literally would silence them, against AGENTS.md's rule never to quiet-gate data-at-risk warnings.
-- **Hypothesis (untested):** /roadmap drops these two names from Track 115A's card; re-verify the symbols first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `docs/ROADMAP.md` Track 115A
-- **Evidence:** Native adversarial review of Track 114A at `4c47a11`; the Track 114A plan's Risks section flagged the same claim.
-- **Context:** `/review-and-prep`, branch `mmm/f6e65ebe`, 2026-11-07. Revisit before planning Track 115A.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=README.md|docs/invariants/events-retro.md] Cursor-removal doc nits for Track 115A
-- **Description:** README's Track 114A Upgrading note says each machine's next `mm push` publishes a usage snapshot without Cursor. On a machine whose only consented host reader was Cursor, an attended `mm push` now has readiness `no-reader` and publishes no new snapshot; a content-carrying `mm autopush` appears to publish an empty `token_sources: []` row that replaces the Cursor one (inferred from `events_tail._capture_host_usage` / `_capture_host_snapshot`, not traced end to end). Until such an autopush row lands, that machine's last Cursor snapshot keeps counting in `retro-fleet`. `docs/invariants/events-retro.md`'s Cursor usage paragraph lists what stays until Track 115A but omits `events_tail._HOST_DISPLAY_NAMES["cursor"]`.
-- **Hypothesis (untested):** Qualify the README sentence for reader-less machines, and add the label entry to the paragraph, when Track 115A rewrites both.
-- **Upstream severity:** CRITICAL by /review's FIXABLE rule; adversarial-rated Low, non-blocking
-- **Found in:** `README.md` Upgrading (Track 114A note); `docs/invariants/events-retro.md` Cursor usage paragraph
-- **Evidence:** Native adversarial review of Track 114A, cycle 3, at `aa4e6f2` (`cli.py` `_capture_attended_usage` no-reader path, `suppress_host_capture`).
-- **Context:** `/review-and-prep`, branch `mmm/f6e65ebe`, 2026-11-07. Recorded as notes to avoid a fourth review cycle for doc wording. Revisit in Track 115A.
-- **Effort:** ? (user triages in /roadmap)
-
 ## Drain records
+
+### Roadmap regeneration — 2026-11-07 (no cutover: per-machine move and Syncthing setup)
+
+Run by `/project-spec` and a full `/roadmap` regeneration from manager Ephesus 13's brief on Karl's 2026-11-07 decisions. Verification baseline: `488094e` (v1.12.23). docs/SPEC.md drops the fleet-wide cutover and migration tool (each machine moves by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive) and rewrites O2 for first-install Syncthing setup when Syncthing has its default configuration, approval by pasted device ID and an introducer mesh. Tracks 113A, 114A and 115A are recorded as shipped and Groups 113 to 115 retired. In Progress and Current Plan were regenerated whole: Track 116A (kept, with one inbox item), Tracks 117A to 120A (new: Syncthing writer; bootstrap start at login and `mm init` setup; the move-only `mm devices` move and approval; per-machine move) and Track 121A (the history scrub, previously 117A, still last). The owner asked for the fewest Tracks the size audit allows (Karl, 2026-11-07: "Do we need this many separate tracks?", then "Revise as discussed"), so the first candidate's separate bootstrap and move-only Tracks were folded in. **Inbox: 6 drained: 1 placed, 3 deferred, 0 killed, 2 discharged. Leftover plan: 3 recorded as shipped, 2 kept. Brief: 3 placed. Future re-derived: 26 entries, 4 placed, 1 narrowed (removed and re-added), 1 trigger restated, 2 kept deferred by owner decision despite a met trigger, 3 added, so 26 → 25.** Authored-false rate: 2 / (8 + 2) = 20%.
+
+| Item | Disposition |
+|---|---|
+| Track 113A: Sync gstack-extend's per-host run history | shipped: receipt added (PR #284, `d4a104b`, 8 of 8 VERIFIED) |
+| Track 114A: Remove `mm cursor-agent`, Cursor's hook command and Cursor usage consent | shipped: receipt added (PR #285, `4b36180`, 16 of 16 VERIFIED) |
+| Track 115A: Remove the Cursor usage reader | shipped: receipt added (PR #286, `488094e`, 19 of 19 VERIFIED) |
+| Track 116A: Remove Cursor from git-root discovery, pricing provenance and retro-fleet | keep: premises re-verified at `488094e`; gains the inbox item below and `src/mind_meld/events.py`. It then shipped (PR #287, `7ea2cc0`, v1.12.24) while this PR was open; the merge of main records its receipt and retires Group 116 |
+| Track 117A (previous plan): Rewrite the git history to remove the owner's machine hostnames | keep as Track 121A, blocked also by Track 120A so it stays last |
+| Brief: no migration tool, per-machine move by reinstall and join (Karl, 2026-11-07) | place: Track 120A (README per-machine move replacing the cutover runbook, and a no-loss join test) |
+| Brief: mm sets Syncthing up when it has its default configuration, guide otherwise (Karl, 2026-11-07) | place: Tracks 117A (classifier and writer) and 118A (bootstrap starts Syncthing at login, `mm init` setup and the guide) |
+| Brief: approval by one pasted device ID, exact match, never automatic; auto full mesh (Karl, 2026-11-07) | place: Track 119A (a move-only first task for `mm devices`, as core-and-extensions requires, then `mm devices approve` and introducers) |
+| `[review]` Cursor leftovers after Track 114A (aggregator note offers `cursor`; `disable-source cursor --force` leaves the prober running) | place → Track 116A, which discharged it (see the Track 116A drain record below): re-verified at `488094e` (`aggregator.py` "No agent-log reader contributed" note; `events._enabled_root_probers` `prober.name == "cursor"` branch) |
+| `[review]` Track 115A card lists the push cursor's hold and coverage warnings as Cursor symbols | discharged@488094e: Track 115A's plan preserved them (completion matrix criterion 3, "preserve challenged progress warnings"); `_CURSOR_HOLD_DEGRADATION` and `_CURSOR_COVERAGE_DEGRADATION` remain in `events_tail.py` |
+| `[review]` Cursor-removal doc nits for Track 115A | discharged@488094e: README's Track 114A Upgrading note now qualifies machines with no consented host reader; `events_tail._HOST_DISPLAY_NAMES` has no `cursor` entry |
+| `[review]` Test gap: retained SQLite diagnostic code filtering | defer: no planned Track touches `src/mind_meld/host_usage.py` and `tests/test_agy_usage.py`; revisit when a Track's `_touches:` cover them |
+| `[review]` Test gap: retired Cursor attended-attempt upgrade | defer: no planned Track touches `src/mind_meld/attemptlog.py` and `tests/test_attemptlog.py`; revisit when a Track's `_touches:` cover them |
+| `[review]` Test gap: unrecognized migration directory shapes | defer: no planned Track touches `src/mind_meld/core.py` and `tests/test_gstack_extend_analytics.py`; revisit when a Track's `_touches:` cover them |
+
+**Future placements (4):** the four Syncthing client test gaps (HTTPS certificate and response cases, redirect destination isolation, total request budget, input byte ceilings) → Track 117A, combined into one task to stay inside the size cap; each trigger was "a Track's `_touches:` cover" its paths. "Test gap: bootstrap Arch install paths" and "Test gap: bootstrap version, os-release and pipx-link stops" stay deferred, unchanged, by the owner's decision to keep Track 118A lean, although its `_touches:` (`bin/bootstrap`, `tests/test_bootstrap.py`) meet their trigger.
+
+**Future reassessed for the target change (2):** "mm-managed Syncthing: invite codes, mesh healing, relays, folder setup and scan-after-push" is narrowed to "mm-managed Syncthing beyond O2: ..." with its full text kept, because SPEC O2 now covers folder setup, approval and the introducer mesh. "Qualify cross-model memory in isolated homes (Track 96A)" keeps its text; its trigger no longer names the dropped cutover runbook.
+
+**Reassessed killed record:** "Two distinct valid key headers" (killed 2026-11-05, reopen "before anyone creates a new fleet on a Syncthing folder") meets its reopen condition now that the fleet may start fresh. It stays killed: still unobserved and reversible (a machine re-joins), and the planned join path never writes a key header (`_bootstrap_new_fleet` is its only writer, reached only by `--new-fleet` in an empty folder).
+
+**Future kept (19, including the two bootstrap test gaps above):** the remaining entries were re-derived on the 2026-11-07 regeneration that preceded this one; none of their triggers is met by the new Tracks, and the manifestation gate prunes none (the unlink guard is the irreversible quadrant; the Antigravity and `mm status` hang entries were observed).
+
+**Version:** documentation-only change; no bump. The amended release policy changes the 2.0.0 conditions and adds no checkpoint; no `## Acceptance` entry is added.
 
 ### Track 116A drain — 2026-11-07
 
