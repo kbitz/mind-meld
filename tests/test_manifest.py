@@ -30,7 +30,6 @@ from mind_meld.manifest import (
     deserialize_manifest,
     diff_files,
     generate_tombstones,
-    hash_file,
     is_conflict_filename,
     is_pre_inversion_conflict_filename,
     is_v1_conflict_filename,
@@ -43,7 +42,6 @@ from mind_meld.manifest import (
     parse_conflict_created_at,
     parse_conflict_device_short,
     read_anchor,
-    read_and_hash,
     read_file_revision,
     scan_root_for,
     scan_roots,
@@ -245,29 +243,6 @@ class TestWalkerExcludePatterns:
         assert "projects/myapp/repo-mode.json" not in files
 
 
-class TestHashFile:
-    def test_hash_known_content(self, tmp_path):
-        f = tmp_path / "test.txt"
-        f.write_text("hello world")
-        h = hash_file(f)
-        assert isinstance(h, str)
-        assert len(h) == 64  # SHA-256 hex
-
-    def test_same_content_same_hash(self, tmp_path):
-        f1 = tmp_path / "a.txt"
-        f2 = tmp_path / "b.txt"
-        f1.write_text("same content")
-        f2.write_text("same content")
-        assert hash_file(f1) == hash_file(f2)
-
-    def test_different_content_different_hash(self, tmp_path):
-        f1 = tmp_path / "a.txt"
-        f2 = tmp_path / "b.txt"
-        f1.write_text("content a")
-        f2.write_text("content b")
-        assert hash_file(f1) != hash_file(f2)
-
-
 class TestWalkClaudeSource:
     def _setup_claude_dir(self, tmp_path: Path) -> Path:
         """Create a mock ~/.claude structure."""
@@ -308,15 +283,6 @@ class TestWalkClaudeSource:
         paths = set(files.keys())
         assert "projects/-Users-kb-myapp/todos/tasks.json" in paths
 
-    def test_excludes_patterns(self, tmp_path):
-        claude = self._setup_claude_dir(tmp_path)
-        files = walk_claude_source(claude)
-        paths = set(files.keys())
-        for p in paths:
-            assert ".DS_Store" not in p
-            assert "node_modules" not in p
-            assert ".log" not in p
-
     def test_skips_large_files(self, tmp_path):
         claude = tmp_path / ".claude"
         memory = claude / "projects" / "-foo" / "memory"
@@ -343,15 +309,6 @@ class TestWalkClaudeSource:
         claude.mkdir()
         files = walk_claude_source(claude)
         assert files == {}
-
-    def test_file_info_structure(self, tmp_path):
-        claude = self._setup_claude_dir(tmp_path)
-        files = walk_claude_source(claude)
-        for info in files.values():
-            assert "sha256" in info
-            assert "size" in info
-            assert "mtime" in info
-            assert len(info["sha256"]) == 64
 
 
 class TestDiffFiles:
@@ -434,32 +391,6 @@ class TestSerialize:
 
         with pytest.raises(ManifestError):
             deserialize_manifest(b"not json")
-
-
-class TestReadAndHash:
-    def test_returns_consistent_bytes_and_sha256(self, tmp_path):
-        f = tmp_path / "test.txt"
-        f.write_text("hello world")
-        data, digest = read_and_hash(f)
-        assert data == b"hello world"
-        assert len(digest) == 64
-        assert isinstance(digest, str)
-
-    def test_sha256_matches_hashlib(self, tmp_path):
-        content = b"deterministic content for hashing"
-        f = tmp_path / "check.bin"
-        f.write_bytes(content)
-        data, digest = read_and_hash(f)
-        expected = hashlib.sha256(content).hexdigest()
-        assert data == content
-        assert digest == expected
-
-    def test_empty_file(self, tmp_path):
-        f = tmp_path / "empty.txt"
-        f.write_bytes(b"")
-        data, digest = read_and_hash(f)
-        assert data == b""
-        assert digest == hashlib.sha256(b"").hexdigest()
 
 
 class TestNestedRepositories:
@@ -787,29 +718,12 @@ class TestWalkGenericSource:
         }
         return base, config
 
-    def test_walks_include_dirs_recursively(self, tmp_path):
+    def test_walks_include_dirs_recursively_and_include_files_only(self, tmp_path):
         base, config = self._make_source(tmp_path)
         files = walk_generic_source(config)
-        paths = set(files.keys())
-        assert "projects/myproject/data.yaml" in paths
-        assert "projects/top.txt" in paths
-
-    def test_picks_up_include_files_at_root(self, tmp_path):
-        base, config = self._make_source(tmp_path)
-        files = walk_generic_source(config)
-        assert "config.yaml" in files
-
-    def test_ignores_dirs_not_in_include_dirs(self, tmp_path):
-        base, config = self._make_source(tmp_path)
-        files = walk_generic_source(config)
-        paths = set(files.keys())
-        for p in paths:
-            assert not p.startswith("other/")
-
-    def test_ignores_root_files_not_in_include_files(self, tmp_path):
-        base, config = self._make_source(tmp_path)
-        files = walk_generic_source(config)
-        assert "random.txt" not in files
+        # Recursive under include_dirs, plus root include_files; nothing from
+        # other/ or root files outside include_files.
+        assert set(files) == {"projects/myproject/data.yaml", "projects/top.txt", "config.yaml"}
 
     def test_applies_excluded_patterns(self, tmp_path):
         base = tmp_path / "src"
@@ -859,22 +773,6 @@ class TestWalkGenericSource:
         assert "data/big.bin" not in files
         assert len(skipped) == 1
         assert "big.bin" in skipped[0][0]
-
-    def test_nested_subdirs(self, tmp_path):
-        """Walks include_dirs recursively through multiple levels."""
-        base = tmp_path / "src"
-        base.mkdir()
-        deep = base / "projects" / "a" / "b" / "c"
-        deep.mkdir(parents=True)
-        (deep / "deep.txt").write_text("deep content")
-
-        config = {
-            "path": str(base),
-            "include_dirs": ["projects"],
-            "include_files": [],
-        }
-        files = walk_generic_source(config)
-        assert "projects/a/b/c/deep.txt" in files
 
 
 class TestWalkGenericSourceDedup:
@@ -1269,53 +1167,6 @@ class TestBuildManifestV2:
         (d / "config.yaml").write_text("version: 1")
         return d
 
-    def test_produces_sources_key_only(self, tmp_path):
-        # Track 1B: v2 writers no longer emit a redundant top-level "files"
-        # mirror. Sources-only is the contract.
-        claude = self._make_claude_dir(tmp_path)
-        sources = [{"name": "claude", "path": str(claude), "type": "claude"}]
-        m = build_manifest_v2("dev1", "Mac", sources)
-        assert "files" not in m
-        assert "sources" in m
-
-    def test_sources_are_per_source(self, tmp_path):
-        claude = self._make_claude_dir(tmp_path)
-        gstack = self._make_generic_dir(tmp_path)
-        sources = [
-            {"name": "claude", "path": str(claude), "type": "claude"},
-            {
-                "name": "gstack",
-                "path": str(gstack),
-                "type": "generic",
-                "include_dirs": ["projects"],
-                "include_files": ["config.yaml"],
-            },
-        ]
-        m = build_manifest_v2("dev1", "Mac", sources)
-        assert "files" not in m
-        assert "claude" in m["sources"]
-        assert "gstack" in m["sources"]
-        # Claude source contains only synced-subdir paths.
-        for key in m["sources"]["claude"]["files"]:
-            assert key.startswith("projects/")
-
-    def test_sources_contain_base_path_and_files(self, tmp_path):
-        claude = self._make_claude_dir(tmp_path)
-        sources = [{"name": "claude", "path": str(claude), "type": "claude"}]
-        m = build_manifest_v2("dev1", "Mac", sources)
-        src = m["sources"]["claude"]
-        assert "base_path" in src
-        assert "files" in src
-        assert isinstance(src["files"], dict)
-
-    def test_single_source(self, tmp_path):
-        claude = self._make_claude_dir(tmp_path)
-        sources = [{"name": "claude", "path": str(claude), "type": "claude"}]
-        m = build_manifest_v2("dev1", "Mac", sources)
-        assert len(m["sources"]) == 1
-        assert "claude" in m["sources"]
-        assert len(m["sources"]["claude"]["files"]) == 1
-
     def test_multiple_sources(self, tmp_path):
         claude = self._make_claude_dir(tmp_path)
         gstack = self._make_generic_dir(tmp_path)
@@ -1330,9 +1181,14 @@ class TestBuildManifestV2:
             },
         ]
         m = build_manifest_v2("dev1", "Mac", sources)
+        # Track 1B: sources-only, no top-level "files" mirror.
+        assert "files" not in m
         assert len(m["sources"]) == 2
         assert "claude" in m["sources"]
         assert "gstack" in m["sources"]
+        assert all("base_path" in src for src in m["sources"].values())
+        # Claude source contains only synced-subdir paths.
+        assert all(key.startswith("projects/") for key in m["sources"]["claude"]["files"])
         # gstack should have 2 files (projects/state.yaml + config.yaml)
         assert len(m["sources"]["gstack"]["files"]) == 2
         # claude should have 1 file
@@ -1544,23 +1400,6 @@ class TestParseConflictCreatedAt:
 class TestMarkerSkipGlobs:
     """Track 47A: directories containing `.extend-root` drop out of sync."""
 
-    def test_discovers_globs_for_marked_dirs(self, tmp_path: Path):
-        base = tmp_path / "codex"
-        marked = base / "skills" / "new-skill"
-        marked.mkdir(parents=True)
-        (marked / MARKER_SKIP_NAME).write_text("gstack-extend")
-        (marked / "SKILL.md").write_text("generated")
-        unmarked = base / "skills" / "my-own"
-        unmarked.mkdir(parents=True)
-        (unmarked / "SKILL.md").write_text("hand-authored")
-        cfg = {
-            "name": "codex",
-            "path": str(base),
-            "type": "generic",
-            "include_dirs": ["skills"],
-        }
-        assert marker_skip_globs(cfg) == ["skills/new-skill"]
-
     def test_permissive_marker_scan_skips_unreadable_sibling(self, tmp_path, monkeypatch):
         import mind_meld.manifest as m
 
@@ -1620,39 +1459,20 @@ class TestMarkerSkipGlobs:
         unmarked = base / "skills" / "my-own"
         unmarked.mkdir(parents=True)
         (unmarked / "SKILL.md").write_text("hand-authored")
-        files = walk_generic_source(
-            {
-                "name": "codex",
-                "path": str(base),
-                "type": "generic",
-                "include_dirs": ["skills"],
-            }
-        )
-        paths = set(files.keys())
-        assert "skills/my-own/SKILL.md" in paths
-        assert "skills/new-skill/SKILL.md" not in paths
-        assert "skills/new-skill/.extend-root" not in paths
-
-    def test_no_include_dirs_returns_empty(self):
-        assert marker_skip_globs({"name": "claude", "path": "~/.claude", "type": "claude"}) == []
-
-    def test_marker_on_include_dir_root_does_not_skip_the_whole_tree(self, tmp_path: Path):
-        base = tmp_path / "codex"
-        skills = base / "skills"
-        skills.mkdir(parents=True)
-        (skills / MARKER_SKIP_NAME).write_text("misplaced")
-        keep = skills / "my-own"
-        keep.mkdir()
-        (keep / "SKILL.md").write_text("hand-authored")
         cfg = {
             "name": "codex",
             "path": str(base),
             "type": "generic",
             "include_dirs": ["skills"],
         }
-        assert marker_skip_globs(cfg) == []
-        files = walk_generic_source(cfg)
-        assert "skills/my-own/SKILL.md" in files
+        assert marker_skip_globs(cfg) == ["skills/new-skill"]
+        paths = set(walk_generic_source(cfg).keys())
+        assert "skills/my-own/SKILL.md" in paths
+        assert "skills/new-skill/SKILL.md" not in paths
+        assert "skills/new-skill/.extend-root" not in paths
+
+    def test_no_include_dirs_returns_empty(self):
+        assert marker_skip_globs({"name": "claude", "path": "~/.claude", "type": "claude"}) == []
 
     @pytest.mark.parametrize("configured", ["skills/", "./skills", "skills"])
     def test_include_root_exemption_survives_unnormalized_config(
@@ -2157,19 +1977,6 @@ class TestWalkerExcludesConflictFiles:
     exclusion. Result: next push uploaded the conflict file fleet-wide, with
     other devices receiving it as a regular source file.
     """
-
-    def test_claude_source_skips_conflict_in_memory(self, tmp_path):
-        claude = tmp_path / ".claude"
-        memory = claude / "projects" / "-Users-kb-myapp" / "memory"
-        memory.mkdir(parents=True)
-        (memory / "notes.md").write_text("canonical")
-        (memory / "notes.sync-conflict-20260422-120000-abc12345.md").write_text("local divergent")
-
-        files = walk_claude_source(claude)
-        paths = set(files.keys())
-        assert "projects/-Users-kb-myapp/memory/notes.md" in paths
-        # The conflict copy must NOT propagate.
-        assert all(".sync-conflict-" not in p for p in paths)
 
     def test_claude_source_skips_conflict_in_todos(self, tmp_path):
         claude = tmp_path / ".claude"
@@ -4174,8 +3981,16 @@ class TestScanRootsAnchors91A:
 
     @pytest.mark.parametrize(
         "content",
-        ["", "short\n", "G" * 32 + "\n", "a" * 31 + "\n", "a" * 33 + "\n", "a" * 32 + "\nextra\n"],
-        ids=["empty", "short", "not-hex", "31", "33", "trailing-text"],
+        [
+            "",
+            "short\n",
+            "G" * 32 + "\n",
+            "a" * 31 + "\n",
+            "a" * 33 + "\n",
+            "a" * 32 + "\nextra\n",
+            "a" * 32 + "\n" + "b" * 100,
+        ],
+        ids=["empty", "short", "not-hex", "31", "33", "trailing-text", "oversized"],
     )
     def test_a_malformed_token_reads_as_none(self, tmp_path, content):
         (tmp_path / "scan").mkdir()

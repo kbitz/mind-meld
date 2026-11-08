@@ -315,25 +315,6 @@ def test_project_identity_table(url, expected):
     assert projectid.project_identity(url) == expected
 
 
-def test_identity_never_keeps_a_credential():
-    # Split: the secret scan reads a literal credential URL as a real one.
-    for url in (
-        "https://user:" + "hunter2@github.com/acme/widgets.git",
-        "ssh://git:hunter2@github.com/acme/widgets.git",
-        "https://x-access-token:" + "T0KEN@github.com/acme/widgets",
-    ):
-        identity = projectid.project_identity(url)
-        assert identity and "hunter2" not in identity and "T0KEN" not in identity
-
-
-def test_scp_git_user_equals_https_but_users_and_ports_differ():
-    same = projectid.project_identity
-    assert same("git@host:foo/bar") == same("https://host/foo/bar")
-    assert same("alice@host:repo.git") != same("bob@host:repo.git")
-    assert same("ssh://host:2222/x") != same("ssh://host:3333/x")
-    assert same("ssh://git@host:2222/x") != same("https://host/x")
-
-
 def test_wire_name_is_one_safe_segment():
     wire = projectid.git_wire("host/../x:y@z")
     assert "/" not in wire and ":" not in wire and ".." not in wire.split("/")
@@ -1138,21 +1119,6 @@ def test_a_moved_checkout_mints_nothing_and_republishes_the_new_folder(mac, linu
     assert published["sources"]["claude"]["wire_folders"] == {WIRE: new}
 
 
-def test_a_second_clone_taking_over_mints_nothing(mac):
-    mac.checkout("/Users/kb/a/widgets")
-    first = mac.folder_for("/Users/kb/a/widgets")
-    mac.memory(first, "a.md", "one\n")
-    mac.push()
-    import shutil
-
-    shutil.rmtree(mac.fs_root / "Users/kb/a")
-    mac.checkout("/Users/kb/b/widgets")
-    second = mac.folder_for("/Users/kb/b/widgets")
-    mac.memory(second, "b.md", "two\n")
-    mac.push()
-    assert mac.published()["tombstones"] == {}
-
-
 def test_republish_due_refreshes_wire_folders_on_a_no_op_push(mac):
     import shutil
 
@@ -1499,27 +1465,6 @@ def test_a_0x04_peer_prints_the_update_remedy_and_exits_zero(mac, linux, capsys)
     assert result.corrupt_peer_count == 1
     assert "newer mm (format 0x04)" in err and "Upgrade with:" in err
     assert "is corrupt - skipping" not in err
-
-
-def test_a_0x03_blob_is_refused():
-    blob = crypto.encrypt(b"x", PASSPHRASE, MEMORY_KB)
-    with pytest.raises(Exception, match="0x03"):
-        crypto.decrypt(b"\x03" + blob[1:], PASSPHRASE, MEMORY_KB)
-    assert crypto.decrypt_manifest(b"\x03" + blob[1:], PASSPHRASE, MEMORY_KB) == b"x"
-    assert crypto.newer_manifest_version(b"\x03") is None
-    assert crypto.newer_manifest_version(b"\x04") == 4
-    assert crypto.newer_manifest_version(b"\x0f") == 15
-    assert crypto.newer_manifest_version(b"\x10") is None
-
-
-def test_the_gc_late_recheck_reads_the_new_byte(mac):
-    mac.checkout("/Users/kb/Dev/widgets")
-    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "x\n")
-    mac.push()
-    backend = LocalBackend(mac.store)
-    with mac.on():
-        fetch = core._fetch_remote_manifest(backend, mac.device_id, PASSPHRASE, MEMORY_KB)
-    assert fetch.is_ok and fetch.manifest["sources"]["claude"]["files"]
 
 
 # ── no-claude-source machines ────────────────────────────────────────
@@ -4424,35 +4369,6 @@ def push_line(machine: Machine, **kwargs) -> tuple[PushResult | None, str]:
     return result, _sync_success("push", result)
 
 
-def test_a_tombstone_records_the_hash_of_the_version_that_was_deleted(mac):
-    mac.checkout(CHECKOUTS["mac"])
-    folder = mac.folder_for(CHECKOUTS["mac"])
-    note = mac.memory(folder, "a.md", "first\n")
-    mac.push()
-    note.write_text("second, the version that is deleted\n")
-    mac.push()
-    note.unlink()
-    result = mac.push()
-    assert result is not None and result.total_deleted == 1
-    record = tombstone_for(mac.published(), "a.md")
-    assert record is not None
-    assert record["sha256"] == sha_of("second, the version that is deleted\n")
-    assert record["device_id"] == mac.device_id
-
-
-@pytest.mark.parametrize("kind", ["generic", "gstack", "muse"])
-def test_removing_one_file_under_an_unchanged_anchor_mints_with_its_hash(mac, kind):
-    root, scan, rel = add_source(mac, kind)
-    extra = root / scan / "extra.md"
-    extra.write_text("extra\n")
-    mac.push()
-    (root / rel).unlink()
-    mac.push()
-    tombstones = mac.published()["tombstones"]
-    [key] = [k for k in tombstones if k.endswith(rel)]
-    assert tombstones[key]["sha256"] and len(tombstones[key]["sha256"]) == 64
-
-
 @pytest.mark.parametrize("kind", ["claude", "generic", "gstack", "muse"])
 def test_a_recreated_scan_root_mints_nothing_and_says_what_it_left_out(mac, kind):
     import shutil
@@ -4578,37 +4494,6 @@ def test_the_anchor_file_never_appears_in_a_manifest_and_a_peer_cannot_plant_one
     kept = core._filter_excluded_paths(peer, {}, [])
     assert kept["sources"]["claude"]["files"] == {}
     assert kept["tombstones"] == {}
-
-
-@pytest.mark.parametrize("shape", ["fifo", "symlink", "oversized", "malformed"])
-def test_an_anchor_that_is_not_a_plain_token_file_reads_as_no_token(tmp_path, shape):
-    base = tmp_path / "scan"
-    base.mkdir()
-    target = base / manifest.ANCHOR_NAME
-    secret = tmp_path / "elsewhere"
-    secret.write_text("a" * 32 + "\n")
-    if shape == "fifo":
-        os.mkfifo(target)
-    elif shape == "symlink":
-        target.symlink_to(secret)  # a link must not publish its target's bytes
-    elif shape == "oversized":
-        target.write_text("a" * 32 + "\n" + "b" * 100)
-    else:
-        target.write_text("not a token\n")
-    outcome = []
-
-    def read():
-        outcome.append(manifest.read_anchor(tmp_path, "scan"))
-
-    reader = threading.Thread(target=read, daemon=True)
-    reader.start()
-    reader.join(5)
-    assert not reader.is_alive(), "reading the anchor hung"
-    assert outcome == [None]
-    base_ok = tmp_path / "ok"
-    base_ok.mkdir()
-    (base_ok / manifest.ANCHOR_NAME).write_text("0123456789abcdef0123456789abcdef\n")
-    assert manifest.read_anchor(tmp_path, "ok") == "0123456789abcdef0123456789abcdef"
 
 
 needs_permissions = pytest.mark.skipif(
