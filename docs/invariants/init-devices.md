@@ -3,7 +3,8 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `_ensure_device_registered` / `init` / `_attended_pull` / `_do_gc`
-- `src/mind_meld/initflow.py` — `init` / `_SyncthingSetup` / `_syncthing_start_command` / `_check_syncthing` / `_save_syncthing_record_or_stop` / `_require_syncthing` / `_read_syncthing_state_or_stop` / `_is_inside_stock_default_folder` / `_managed_new_fleet_folder` / `_has_valid_device_id_check_digits` / `_read_fleet_device_id` / `_managed_join` / `_register_and_save` / `_init_storage_guard` / `_probe_storage_occupancy` / `_classify_folder` / `_bootstrap_new_fleet` / `_verify_join` / `_write_stignore` / `_stop_for_missing_header` / `_refuse_new_fleet`
+- `src/mind_meld/core.py` — `SYNCTHING_GUIDE_HEADING` / `_syncthing_start_command` / `_has_valid_device_id_check_digits` / `_normalize_device_id` / `_device_id_problem`
+- `src/mind_meld/initflow.py` — `init` / `_SyncthingSetup` / `_check_syncthing` / `_save_syncthing_record_or_stop` / `_require_syncthing` / `_read_syncthing_state_or_stop` / `_is_inside_stock_default_folder` / `_managed_new_fleet_folder` / `_read_fleet_device_id` / `_managed_join` / `_register_and_save` / `_init_storage_guard` / `_probe_storage_occupancy` / `_classify_folder` / `_bootstrap_new_fleet` / `_verify_join` / `_write_stignore` / `_stop_for_missing_header` / `_refuse_new_fleet`
 - `src/mind_meld/config.py` — `SYNCTHING_FOLDER_ID` / `SYNCTHING_FOLDER_LABEL` / `syncthing_record_path` / `save_syncthing_record` / `load_syncthing_record`
 - `src/mind_meld/crypto.py` — `get_passphrase` / `_non_interactive_keyring_read` / `_read_secret_service` / `_secret_service_state` / `store_passphrase_in_keyring`
 - `src/mind_meld/errors.py` — `KeyringUnavailableError`

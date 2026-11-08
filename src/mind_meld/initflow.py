@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import os
 import socket
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -84,7 +83,6 @@ from mind_meld.storage.local import LocalBackend
 # that holds nothing else. `.stignore` itself never syncs.
 STIGNORE_PATTERN = "tmp*.tmp"
 STIGNORE_LINE = f"(?d){STIGNORE_PATTERN}"
-SYNCTHING_GUIDE_HEADING = "Configuring Syncthing yourself"
 
 # Top-level names a folder may hold and still be "empty" for `--new-fleet`.
 _BOOKKEEPING_NAMES = frozenset({".stfolder", ".stignore", ".stversions", ".DS_Store"})
@@ -102,14 +100,6 @@ class _SyncthingSetup:
     persisted: bool
 
 
-def _syncthing_start_command(platform: str | None = None) -> str:
-    """Return the platform command that starts Syncthing at login."""
-    target = sys.platform if platform is None else platform
-    if target == "darwin":
-        return "brew services start syncthing"
-    return "systemctl --user enable --now syncthing.service"
-
-
 def _check_syncthing() -> _SyncthingSetup:
     """Read-only Syncthing configuration check before `init` writes anything."""
     try:
@@ -125,7 +115,7 @@ def _check_syncthing() -> _SyncthingSetup:
             "init: Syncthing is not running on this machine (or its API at the GUI "
             "address is not answering), so mm cannot check its configuration. Nothing "
             "was written. Start it, then run 'mm init' again. "
-            f"Run: {_syncthing_start_command()}"
+            f"Run: {core._syncthing_start_command()}"
         )
     if (
         check.reach == "ok"
@@ -150,7 +140,8 @@ def _check_syncthing() -> _SyncthingSetup:
     ):
         console.print(
             "  Syncthing on this machine already has its own configuration, so mm "
-            f'changes nothing in it. Set it up as README "{SYNCTHING_GUIDE_HEADING}" describes.'
+            f'changes nothing in it. Set it up as README "{core.SYNCTHING_GUIDE_HEADING}" '
+            "describes."
         )
         return _SyncthingSetup(
             record=None,
@@ -197,7 +188,7 @@ def _require_syncthing(
         core._error(
             "init: Syncthing stopped answering while mm was setting it up "
             f"({safe_terminal_str(what)}). A rerun continues from where it stopped. "
-            f"Run: {_syncthing_start_command()}"
+            f"Run: {core._syncthing_start_command()}"
         )
     if result.outcome == "refused" and result.cause == "default-folder-in-use":
         core._error(
@@ -210,7 +201,7 @@ def _require_syncthing(
         core._error(
             "init: Syncthing already has a mind-meld folder with a different setup. "
             "Check its configured path, required options and shared devices in "
-            f'Syncthing\'s GUI (README "{SYNCTHING_GUIDE_HEADING}"), then use that path. '
+            f'Syncthing\'s GUI (README "{core.SYNCTHING_GUIDE_HEADING}"), then use that path. '
             f"Run: {rerun_cmd}"
         )
     if result.outcome == "refused" and result.cause == "path-overlap":
@@ -277,36 +268,12 @@ def _managed_new_fleet_folder(setup: _SyncthingSetup, full_path: Path) -> None:
     )
 
 
-def _has_valid_device_id_check_digits(device_id: str) -> bool:
-    """Return True when every 14-char group of ``device_id`` passes Luhn-32."""
-    compact = "".join(device_id.split("-"))
-    if len(compact) != 56:
-        return False
-    for offset in range(0, 56, 14):
-        chunk = compact[offset : offset + 14]
-        try:
-            expected = syncthing._luhn32(chunk[:13])
-        except ValueError:
-            return False
-        if chunk[13] != expected:
-            return False
-    return True
-
-
 def _read_fleet_device_id(local_id: str | None) -> str:
     """Prompt for and validate a fleet peer's Syncthing device ID before any write."""
     raw = typer.prompt("Syncthing device ID of a machine already in the fleet")
     trimmed = raw.strip()
-    candidate = trimmed.upper()
-    if "-" not in candidate and len(candidate) == 56:
-        candidate = "-".join(candidate[i : i + 7] for i in range(0, 56, 7))
-    why: str | None = None
-    if not syncthing.is_device_id(candidate):
-        why = "expected 8 groups of 7 base32 characters"
-    elif not _has_valid_device_id_check_digits(candidate):
-        why = "check digit mismatch"
-    elif local_id is not None and candidate == local_id:
-        why = "that is this machine's own device ID"
+    candidate = core._normalize_device_id(trimmed)
+    why = core._device_id_problem(candidate, local_id)
     if why is not None:
         core._error(
             f"init: '{safe_terminal_str(trimmed)}' is not a Syncthing device ID ({why}). "
@@ -369,7 +336,7 @@ def _managed_join(setup: _SyncthingSetup, full_path: Path) -> bool | None:
             "No device entry, config or key header was written. On the fleet "
             "machine, approve this machine with "
             f"'mm devices approve {safe_terminal_str(local_id)}' "
-            f'(or by hand, README "{SYNCTHING_GUIDE_HEADING}"), wait for '
+            f'(or by hand, README "{core.SYNCTHING_GUIDE_HEADING}"), wait for '
             "Syncthing, then run 'mm init' here again."
         )
     _require_syncthing(offer_res, "accept the fleet folder offer")

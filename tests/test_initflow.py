@@ -35,6 +35,7 @@ from typer.testing import CliRunner
 
 from mind_meld import (
     config,
+    core,
     crypto,
     devices,
     events_tail,
@@ -1022,7 +1023,7 @@ def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
     res_new, text_new = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
     assert res_new.exit_code == 0, res_new.output
     assert fake_syncthing.bodies == []
-    assert initflow.SYNCTHING_GUIDE_HEADING in text_new
+    assert core.SYNCTHING_GUIDE_HEADING in text_new
     assert text_new.endswith(NEW_FLEET_OUTCOME)
     if not stale_record:
         assert not config.syncthing_record_path().exists()
@@ -1033,7 +1034,7 @@ def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
     res_join, text_join = _run(f"{storage}\nMac B\npw\n{SOURCES_CLAUDE_ONLY}")
     assert res_join.exit_code == 0, res_join.output
     assert fake_syncthing.bodies == []
-    assert initflow.SYNCTHING_GUIDE_HEADING in text_join
+    assert core.SYNCTHING_GUIDE_HEADING in text_join
     assert text_join.endswith(JOIN_OUTCOME)
     assert not (storage / ".stignore").exists()
 
@@ -1046,7 +1047,7 @@ def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
     ],
 )
 def test_syncthing_start_command_table(platform_name, expected_cmd):
-    assert initflow._syncthing_start_command(platform_name) == expected_cmd
+    assert core._syncthing_start_command(platform_name) == expected_cmd
 
 
 @pytest.mark.parametrize("flags", [(), ("--new-fleet",)])
@@ -1059,7 +1060,7 @@ def test_syncthing_not_configured_stops_with_start_command_and_writes_nothing(
     assert result.exit_code == 1, result.output
     assert "Syncthing is not running on this machine" in text
     assert "Nothing was written." in text
-    assert text.endswith(f"Run: {initflow._syncthing_start_command()}")
+    assert text.endswith(f"Run: {core._syncthing_start_command()}")
     _assert_nothing_written(storage, before)
     assert not config.syncthing_record_path().exists()
 
@@ -1074,7 +1075,7 @@ def test_syncthing_unreachable_stops_with_start_command_and_writes_nothing(
     result, text = _run(f"{storage}\n")
     assert result.exit_code == 1, result.output
     assert "Syncthing is not running on this machine" in text
-    assert text.endswith(f"Run: {initflow._syncthing_start_command()}")
+    assert text.endswith(f"Run: {core._syncthing_start_command()}")
     _assert_nothing_written(storage, before)
     assert not config.syncthing_record_path().exists()
 

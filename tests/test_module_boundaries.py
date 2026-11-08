@@ -1255,8 +1255,13 @@ STATUSFLOW_DEFINITIONS = frozenset(
 # stays as 86A left it.
 INIT_CORE_DEFINITIONS = frozenset(
     """
+    SYNCTHING_GUIDE_HEADING
+    _device_id_problem
+    _has_valid_device_id_check_digits
+    _normalize_device_id
     _prompt_source_toggle
     _source_path_is_detected
+    _syncthing_start_command
     """.split()
 )
 
@@ -1508,7 +1513,7 @@ def test_init_single_ownership_and_qualified_calls():
             f"{module}: expected owner inventory {expected}"
         )
         assert _unqualified_owner_calls(source, module) == []
-    assert len(INIT_CORE_DEFINITIONS) == 2
+    assert len(INIT_CORE_DEFINITIONS) == 7
     assert len(INITFLOW_DEFINITIONS) == 26
 
 
