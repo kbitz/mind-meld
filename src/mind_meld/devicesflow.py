@@ -146,23 +146,34 @@ def _stop_unchanged(outcome: str, cause: str | None, candidate: str) -> None:
 def _stop_partial(
     candidate: str,
     *,
-    introducer_done: bool,
+    written: str,
     outcome: str,
     cause: str | None,
 ) -> None:
-    """Exit 1 after the device is configured in Syncthing but approval is incomplete."""
+    """Exit 1 after an approval write failed, naming what Syncthing confirmed.
+
+    ``written`` is the last confirmed step: ``"nothing"``, ``"added"`` or
+    ``"introducer"``. A write whose response was lost may still have applied, so
+    the failed step is reported as unconfirmed, never as not done; a rerun reads
+    Syncthing's state and finishes either way.
+    """
     id_s = safe_terminal_str(candidate)
     out_s = safe_terminal_str(outcome)
     cause_s = safe_terminal_str(cause or "unknown")
-    if introducer_done:
+    if written == "nothing":
         prefix = (
-            f"devices approve: Syncthing added {id_s} and marked it as introducer, "
-            f"but did not share the fleet folder with it ({out_s}/{cause_s})."
+            f"devices approve: Syncthing did not confirm adding {id_s} "
+            f"({out_s}/{cause_s}), so it may or may not have added it."
+        )
+    elif written == "added":
+        prefix = (
+            f"devices approve: Syncthing added {id_s} but did not confirm marking it as "
+            f"introducer or sharing the fleet folder with it ({out_s}/{cause_s})."
         )
     else:
         prefix = (
-            f"devices approve: Syncthing added {id_s} but did not mark it as "
-            f"introducer or share the fleet folder ({out_s}/{cause_s})."
+            f"devices approve: Syncthing added {id_s} and marked it as introducer, "
+            f"but did not confirm sharing the fleet folder with it ({out_s}/{cause_s})."
         )
     if outcome in ("not-found", "unreachable"):
         core._error(
@@ -224,13 +235,21 @@ def approve(device_id: str) -> None:
 
     if any(d.device_id == candidate for d in pending.devices):
         add_res = writer.add_device(candidate)
-        if add_res.outcome not in ("ok", "unchanged"):
+        if add_res.outcome in ("not-found", "refused"):
+            # The writer stopped before sending anything: nothing was changed.
             _stop_unchanged(add_res.outcome, add_res.cause, candidate)
+        if add_res.outcome not in ("ok", "unchanged"):
+            _stop_partial(
+                candidate,
+                written="nothing",
+                outcome=add_res.outcome,
+                cause=add_res.cause,
+            )
         intro_res = writer.mark_introducer(candidate)
         if intro_res.outcome not in ("ok", "unchanged"):
             _stop_partial(
                 candidate,
-                introducer_done=False,
+                written="added",
                 outcome=intro_res.outcome,
                 cause=intro_res.cause,
             )
@@ -238,7 +257,7 @@ def approve(device_id: str) -> None:
         if share_res.outcome not in ("ok", "unchanged"):
             _stop_partial(
                 candidate,
-                introducer_done=True,
+                written="introducer",
                 outcome=share_res.outcome,
                 cause=share_res.cause,
             )
@@ -255,7 +274,7 @@ def approve(device_id: str) -> None:
         if intro_res.outcome not in ("ok", "unchanged"):
             _stop_partial(
                 candidate,
-                introducer_done=False,
+                written="added",
                 outcome=intro_res.outcome,
                 cause=intro_res.cause,
             )
@@ -263,7 +282,7 @@ def approve(device_id: str) -> None:
         if share_res.outcome not in ("ok", "unchanged"):
             _stop_partial(
                 candidate,
-                introducer_done=True,
+                written="introducer",
                 outcome=share_res.outcome,
                 cause=share_res.cause,
             )

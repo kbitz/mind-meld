@@ -238,8 +238,8 @@ def test_approve_resumes_after_syncthing_stops_between_add_and_share(
     assert first.exit_code == 1
     text1 = " ".join(first.output.split())
     assert (
-        f"devices approve: Syncthing added {joining_id} but did not mark it as "
-        "introducer or share the fleet folder (unreachable/"
+        f"devices approve: Syncthing added {joining_id} but did not confirm marking it as "
+        "introducer or sharing the fleet folder with it (unreachable/"
     ) in text1
     assert f"Start Syncthing, then run 'mm devices approve {joining_id}' again to finish." in text1
     assert text1.endswith(f"Run: {core._syncthing_start_command()}")
@@ -300,7 +300,7 @@ def test_approve_resumes_after_syncthing_stops_between_introducer_and_share(
     text1 = " ".join(first.output.split())
     assert (
         f"devices approve: Syncthing added {joining_id} and marked it as introducer, "
-        "but did not share the fleet folder with it (unreachable/"
+        "but did not confirm sharing the fleet folder with it (unreachable/"
     ) in text1
     assert text1.endswith(f"Run: {core._syncthing_start_command()}")
 
@@ -344,7 +344,7 @@ def test_approve_share_http_500_reports_mm_diag_and_rerun_finishes_share_only(
     text1 = " ".join(first.output.split())
     assert (
         f"devices approve: Syncthing added {joining_id} and marked it as introducer, "
-        "but did not share the fleet folder with it (error/http-500)."
+        "but did not confirm sharing the fleet folder with it (error/http-500)."
     ) in text1
     assert (
         f"Once Syncthing accepts the change, run 'mm devices approve {joining_id}' "
@@ -374,6 +374,83 @@ def test_approve_share_http_500_reports_mm_diag_and_rerun_finishes_share_only(
                 ]
             },
         )
+    ]
+
+
+def test_approve_add_response_lost_after_apply_reports_unconfirmed_and_rerun_finishes(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    _my_id, _peer_id, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_id: {"name": "joining-box"}
+    }
+    real_add = syncthing.SyncthingWriter.add_device
+
+    def add_then_lose_response(self, device_id, name=""):
+        # Syncthing applies the POST, then the response never arrives.
+        assert real_add(self, device_id, name) == syncthing.WriteResult("ok", None)
+        return syncthing.WriteResult("unreachable", "timeout")
+
+    with monkeypatch.context() as lost:
+        lost.setattr(syncthing.SyncthingWriter, "add_device", add_then_lose_response)
+        first = runner.invoke(app, ["devices", "approve", joining_id])
+
+    assert first.exit_code == 1
+    text1 = " ".join(first.output.split())
+    assert (
+        f"devices approve: Syncthing did not confirm adding {joining_id} "
+        "(unreachable/timeout), so it may or may not have added it."
+    ) in text1
+    assert "Nothing was changed" not in text1
+    assert f"Start Syncthing, then run 'mm devices approve {joining_id}' again to finish." in text1
+    assert text1.endswith(f"Run: {core._syncthing_start_command()}")
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [("POST", "/rest/config/devices")]
+
+    fake_syncthing.bodies.clear()
+    second = runner.invoke(app, ["devices", "approve", joining_id])
+
+    assert second.exit_code == 0, second.output
+    assert second.output.startswith(
+        f"Finished approving {joining_id}: marked it as introducer and shared the fleet folder"
+    )
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("PATCH", f"/rest/config/devices/{joining_id}"),
+        ("PATCH", "/rest/config/folders/mind-meld"),
+    ]
+
+
+def test_approve_add_rejected_by_syncthing_reports_unconfirmed_and_rerun_approves(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    _my_id, _peer_id, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_id: {"name": "joining-box"}
+    }
+    fake_syncthing.write_responses[("POST", "/rest/config/devices")] = 500
+
+    first = runner.invoke(app, ["devices", "approve", joining_id])
+
+    assert first.exit_code == 1
+    text1 = " ".join(first.output.split())
+    assert f"Syncthing did not confirm adding {joining_id} (error/http-500)" in text1
+    assert (
+        f"Once Syncthing accepts the change, run 'mm devices approve {joining_id}' "
+        "again to finish. Run: mm diag"
+    ) in text1
+    assert text1.endswith("Run: mm diag")
+    assert joining_id in fake_syncthing.responses["/rest/cluster/pending/devices"]
+
+    del fake_syncthing.write_responses[("POST", "/rest/config/devices")]
+    fake_syncthing.bodies.clear()
+
+    second = runner.invoke(app, ["devices", "approve", joining_id])
+
+    assert second.exit_code == 0, second.output
+    assert second.output.startswith(f"Approved {joining_id}:")
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("POST", "/rest/config/devices"),
+        ("PATCH", f"/rest/config/devices/{joining_id}"),
+        ("PATCH", "/rest/config/folders/mind-meld"),
     ]
 
 
@@ -587,16 +664,23 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
         if rel == "syncthing.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for top in tree.body:
-            if not isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            # Every reference, not only a direct call, anywhere in the module
+            # (class methods and module scope included): an alias such as
+            # `m = writer.add_device` or `getattr(writer, "add_device")` counts.
+            if not (
+                (isinstance(node, ast.Attribute) and node.attr in pairing_methods)
+                or (isinstance(node, ast.Constant) and node.value in pairing_methods)
+            ):
                 continue
-            for node in ast.walk(top):
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in pairing_methods
-                ):
-                    call_sites.add((rel, top.name))
+            scope: list[str] = []
+            cur = node
+            while cur in parents:
+                cur = parents[cur]
+                if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    scope.append(cur.name)
+            call_sites.add((rel, ".".join(reversed(scope)) or "<module>"))
 
     assert call_sites == {
         ("devicesflow.py", "approve"),
@@ -605,10 +689,23 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
 
     cli_tree = ast.parse((src_root / "cli.py").read_text(encoding="utf-8"))
     sync_funcs = {"push", "pull", "autopull", "autopush", "_push_core", "_auto_command_setup"}
+    found = set()
     for top in cli_tree.body:
         if isinstance(top, ast.FunctionDef) and top.name in sync_funcs:
-            names = {n.id for n in ast.walk(top) if isinstance(n, ast.Name)}
-            assert "devicesflow" not in names, f"cli.py:{top.name} references devicesflow"
+            found.add(top.name)
+            for n in ast.walk(top):
+                refs = set()
+                if isinstance(n, ast.Name):
+                    refs.add(n.id)
+                elif isinstance(n, ast.ImportFrom):
+                    refs.add(n.module or "")
+                    refs.update(a.name for a in n.names)
+                elif isinstance(n, ast.Import):
+                    refs.update(a.name for a in n.names)
+                assert not any("devicesflow" in r for r in refs), (
+                    f"cli.py:{top.name} references devicesflow"
+                )
+    assert found == sync_funcs
 
     # Behavioral check: autopull and autopush with a managed record, a pending
     # device and no mm config send no Syncthing write request.
