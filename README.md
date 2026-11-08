@@ -24,32 +24,35 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
-**Cursor support removed (Tracks 114A–116A):** `mm cursor-agent`, `mm capture-cursor-usage`,
-the `cursor` source alias for `mm enable-source` / `mm disable-source`, the Cursor usage
-reader, the Cursor git-root discovery prober, and Cursor pricing provenance are removed.
-Scripts and aliases that ran `mm cursor-agent ...` must call `cursor-agent ...` directly;
-the old command now exits 2 without starting Cursor. On any machine where
-`mm enable-source cursor` was run earlier, delete the `stop` hook entry whose command is
-`mm capture-cursor-usage` from `~/.cursor/hooks.json` and keep your other hooks; until you
-do, Cursor runs that missing command after every turn. Leftover private files under
-`~/.config/mind-meld/` (`cursor-host-tokens.json`, `cursor-host-tokens.json.lock`,
-`cursor-standalone-spool.jsonl`, `cursor-standalone-spool.jsonl.merging`) and any
-`[retro] cursor_host_usage` key in `~/.config/mind-meld/config.toml` are ignored and can
-be deleted; git-root discovery drops any cached `cursor` prober state on its next complete
-pass. Repositories that only Cursor's records named leave discovery from the first push
-after upgrading and are no longer captured: pin any you still use in `[retro] repo_roots`,
-then run `mm recapture <window>` once with a window reaching back to that upgrade (at most
-`90d`) to collect their commits. Older published `host-usage-snapshot` rows that name
-`cursor` remain unchanged, with no migration: `mm retro-fleet` labels a failed or
-incomplete Cursor read on those rows `unknown/retired reader`, and counts retained
-`grok-4.7-fast` or effort-suffixed tokens in the Grok row as unpriced while
-`grok-4.7` and `grok-4.7-build` stay priced from xAI's rates. A machine with another consented host reader replaces its earlier snapshot on the
+**Cursor support removed (Tracks 114A–116A):** `mm cursor-agent`,
+`mm capture-cursor-usage`, the `cursor` source alias for `mm enable-source` /
+`mm disable-source`, the Cursor usage reader, the Cursor git-root discovery prober, and
+Cursor pricing provenance are removed. Scripts and aliases that ran `mm cursor-agent ...`
+must call `cursor-agent ...` directly; the old command now exits 2 without starting
+Cursor. On any machine where `mm enable-source cursor` was run earlier, delete the `stop`
+hook entry whose command is `mm capture-cursor-usage` from `~/.cursor/hooks.json` and keep
+your other hooks; until you do, Cursor runs that missing command after every turn.
+Leftover private files under `~/.config/mind-meld/` (`cursor-host-tokens.json`,
+`cursor-host-tokens.json.lock`, `cursor-standalone-spool.jsonl`,
+`cursor-standalone-spool.jsonl.merging`) and any `[retro] cursor_host_usage` key in
+`~/.config/mind-meld/config.toml` are ignored and can be deleted; git-root discovery drops
+any cached `cursor` prober state on its next complete pass. Repositories that only
+Cursor's records named leave discovery from the first push after upgrading and are no
+longer captured: on the Mac that works in them, pin any you still use in
+`[retro] repo_roots`, then run `mm recapture 90d` there once to collect the commits it
+missed (`retro-fleet` counts each commit once, so the full window is safe). Older
+published `host-usage-snapshot` rows that name `cursor` remain unchanged, with no
+migration: `mm retro-fleet` labels a failed or incomplete Cursor read on those rows
+`unknown/retired reader`, and counts retained `grok-4.7-fast` or effort-suffixed tokens in
+the Grok row as unpriced while `grok-4.7` and `grok-4.7-build` stay priced from xAI's
+rates. A machine with another consented host reader replaces its earlier snapshot on the
 next push that captures host usage, while a machine with no consented host readers skips
 pre-push attended host capture on a converged `mm push` and replaces its earlier snapshot
 with an empty `host-usage-snapshot` (`token_sources: []`) on its next push with
 content/identity changes or `mm autopush` (or until its earlier row ages past the 90-day
-retention window). A last attended-attempt record written by mm 1.12.21 or older that names
-Cursor shows `record corrupt — the next attended mm push rewrites it` until that push.
+retention window). A last attended-attempt record written by mm 1.12.21 or older that
+names Cursor shows `record corrupt — the next attended mm push rewrites it` until that
+push.
 
 **Grok Build `memory-v2/` sync (Track 111A):** on machines where the `grok` source is
 already enabled, the first `mm push` after upgrading publishes existing topic
