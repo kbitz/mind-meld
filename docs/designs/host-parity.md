@@ -17,6 +17,11 @@
 > parity with Claude Code and Codex; see
 > [Grok Build parity](#grok-build-parity-2026-11-05) below and docs/SPEC.md's
 > table.
+>
+> **Cursor removed (2026-11-07):** docs/SPEC.md removes Cursor support; mm
+> neither syncs nor reports it, and Grok models run through Cursor no longer
+> reach the Grok row. The matrix's Cursor column and the Cursor via Conductor
+> section are historical.
 
 ## Outcome
 
@@ -338,7 +343,7 @@ Plan C is independent of the usage-card work. It is not a prerequisite for
 
 ## Cursor via Conductor (Track 67A)
 
-`[retro] cursor_host_usage = true` authorizes reading Conductor's metadata-only
+*Historical (removed in Tracks 114A–116A, 2026-11-07).* `[retro] cursor_host_usage = true` authorizes reading Conductor's metadata-only
 `runs.ndjson`. Bare cursor-agent has no persisted billing ledger. **Superseded
 in part:** `mm enable-source cursor` now enrolls a `stop` hook and
 `mm cursor-agent` wraps print runs, so future standalone completions are

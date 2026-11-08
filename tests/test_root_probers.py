@@ -2,7 +2,7 @@
 
 Every test builds a ``tmp_path`` home with synthetic records. The autouse
 ``_isolate_git_capture_cache`` fixture redirects ``rootprobes._discovery_home``
-so none of these ever reads the real account's Codex, Cursor, Muse,
+so none of these ever reads the real account's Codex, Muse,
 Antigravity, Paseo or mmm stores.
 """
 
@@ -48,12 +48,10 @@ def _fake_repo(path: Path) -> Path:
     return path.resolve()
 
 
-def _cfg(*sources: str, cursor: bool = False, disabled: tuple[str, ...] = ()) -> dict:
+def _cfg(*sources: str, disabled: tuple[str, ...] = ()) -> dict:
     config: dict = {"sync": {"sources": [{"name": name} for name in sources]}}
     if disabled:
         config["sync"]["disabled_sources"] = list(disabled)
-    if cursor:
-        config["retro"] = {"cursor_host_usage": True}
     return config
 
 
@@ -140,7 +138,6 @@ class TestRegistryAndIsolation:
             "mmm",
             "agy",
             "muse",
-            "cursor",
             "codex",
         ]
         assert {p.name: p.kind for p in rootprobes.PROBERS} == {
@@ -148,7 +145,6 @@ class TestRegistryAndIsolation:
             "mmm": "tool",
             "agy": "provider",
             "muse": "provider",
-            "cursor": "provider",
             "codex": "provider",
         }
 
@@ -326,9 +322,9 @@ class TestRegistryAndIsolation:
         monkeypatch.setattr(codex_host, "read_codex_usage", forbidden("codex"))
         repo = _fake_repo(home / "repo")
         _codex_rollout(_codex_day(home) / "rollout-1.jsonl", str(repo))
-        found = _discover(_cfg("codex", "muse", "agy", cursor=True))
+        found = _discover(_cfg("codex", "muse", "agy"))
         assert calls == [] and found.errors == ()
-        assert found.probers_ran == ("agy", "muse", "cursor", "codex")
+        assert found.probers_ran == ("agy", "muse", "codex")
         assert list(found.roots) == [repo]
 
     def test_normalization_keeps_valid_probe_index_parts(self):
@@ -514,115 +510,104 @@ def _spy_rollouts(monkeypatch) -> list[Path]:
     return read
 
 
-class TestCursorProber:
-    def _acp(self, home: Path, session: str, cwd: str) -> None:
-        directory = home / ".cursor" / "acp-sessions" / session
-        directory.mkdir(parents=True)
-        (directory / "meta.json").write_text(
-            json.dumps({"cwd": cwd, "schemaVersion": 1, "title": "t"})
-        )
+def test_credential_neighbours_are_never_opened(home, monkeypatch):
+    repo = _fake_repo(home / "repo")
+    (home / ".paseo").mkdir()
+    (home / ".paseo" / "config.json").write_text('{"secret": 1}')
+    oauth = home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+    oauth.parent.mkdir(parents=True)
+    oauth.write_text("secret")
+    _make_db(
+        home / ".gemini" / "antigravity-cli" / "conversation_summaries.db",
+        "conversation_summaries",
+        "workspace_uris",
+        [json.dumps([repo.as_uri()])],
+    )
 
-    def _conductor(self, home: Path) -> Path:
-        return home / "Library" / "Application Support" / "com.conductor.app" / "cursor-sdk-store"
+    touched: list[str] = []
 
-    def test_acp_ndjson_and_index_db_all_name_roots(self, home):
-        acp_repo = _fake_repo(home / "acp-repo")
-        ndjson_repo = _fake_repo(home / "ndjson-repo")
-        db_repo = _fake_repo(home / "db-repo")
-        self._acp(home, "s1", str(acp_repo))
-        store = self._conductor(home) / "store-1"
-        store.mkdir(parents=True)
-        (store / "agents.ndjson").write_text(
-            json.dumps({"cwd": str(ndjson_repo)}) + "\nnot json\n" + json.dumps({"id": 1}) + "\n"
-        )
-        _make_db(store / "index.db", "agents", "workspace_ref", [str(db_repo), "relative", "x"])
-        found = _discover(_cfg(cursor=True), persist=True)
-        assert found.probers_ran == ("cursor",)
-        assert {p.name for p in found.roots} == {"acp-repo", "ndjson-repo", "db-repo"}
-        assert {source for source, _ in found.attribution} == {"cursor"}
-        assert set(_cached_units("cursor")) == {
-            "acp/s1",
-            "conductor/store-1/agents.ndjson",
-            "conductor/store-1/index.db",
+    def recording(real):
+        def spy(*args, **kwargs):
+            target = args[0] if args else next(iter(kwargs.values()), "")
+            touched.append(str(target))
+            return real(*args, **kwargs)
+
+        return spy
+
+    monkeypatch.setattr(builtins, "open", recording(builtins.open))
+    monkeypatch.setattr(os, "open", recording(os.open))
+    monkeypatch.setattr(sqlite3, "connect", recording(sqlite3.connect))
+    monkeypatch.setattr(os, "scandir", recording(os.scandir))
+    found = _discover(_cfg("agy"))
+    assert list(found.roots) == [repo]
+    ours = [t for t in touched if str(home) in t]
+    assert ours, "the spy saw the probers' own reads"
+    for forbidden in ("oauth-token", "config.json"):
+        assert not [t for t in ours if forbidden in t], forbidden
+
+
+def test_legacy_cursor_key_runs_no_prober_and_reads_nothing_under_dot_cursor(home, monkeypatch):
+    repo = _fake_repo(home / "repo")
+    acp = home / ".cursor" / "acp-sessions" / "s1" / "meta.json"
+    acp.parent.mkdir(parents=True)
+    acp.write_text(json.dumps({"cwd": str(repo)}))
+    ndjson = (
+        home
+        / "Library"
+        / "Application Support"
+        / "com.conductor.app"
+        / "cursor-sdk-store"
+        / "s1"
+        / "agents.ndjson"
+    )
+    ndjson.parent.mkdir(parents=True)
+    ndjson.write_text(json.dumps({"cwd": str(repo)}) + "\n")
+
+    touched: list[str] = []
+
+    def recording(real):
+        def spy(*args, **kwargs):
+            target = args[0] if args else next(iter(kwargs.values()), "")
+            touched.append(str(target))
+            return real(*args, **kwargs)
+
+        return spy
+
+    monkeypatch.setattr(builtins, "open", recording(builtins.open))
+    monkeypatch.setattr(os, "open", recording(os.open))
+    monkeypatch.setattr(sqlite3, "connect", recording(sqlite3.connect))
+    monkeypatch.setattr(os, "scandir", recording(os.scandir))
+    config = {**_cfg("codex", "muse", "agy"), "retro": {"cursor_host_usage": True}}
+    found = _discover(config, persist=True)
+    assert found.roots == ()
+    assert "cursor" not in found.probers_ran
+    ours = [t for t in touched if str(home) in t]
+    for forbidden in (".cursor", "cursor-sdk-store"):
+        assert not [t for t in ours if forbidden in t], forbidden
+
+
+def test_older_cursor_probe_index_and_resume_marker_are_dropped(home):
+    cursor_repo = _fake_repo(home / "cursor-repo")
+    codex_repo = _fake_repo(home / "codex-repo")
+    _codex_rollout(_codex_day(home) / "rollout-a.jsonl", str(codex_repo))
+    cache = events._default_git_capture_cache()
+    cache["prober_resume_after"] = "cursor"
+    cache["probe_index"] = {
+        "cursor": {
+            "units": {"acp/s1": [None, [str(cursor_repo)]]},
+            "state": {"listing_stores": {"s1": []}},
         }
-
-    def test_cursor_needs_its_usage_consent(self, home):
-        self._acp(home, "s1", str(_fake_repo(home / "repo")))
-        for config in (_cfg("cursor"), _cfg(), {"retro": {"cursor_host_usage": False}}):
-            found = _discover(config)
-            assert "cursor" not in found.probers_ran and found.roots == ()
-        assert "cursor" in _discover(_cfg(cursor=True)).probers_ran
-
-    def test_credential_neighbours_are_never_opened(self, home, monkeypatch):
-        repo = _fake_repo(home / "repo")
-        self._acp(home, "s1", str(repo))
-        auth = home / ".cursor" / "projects" / "p" / "mcp-auth.json"
-        auth.parent.mkdir(parents=True)
-        auth.write_text('{"token": "never-read"}')
-        store_db = home / ".cursor" / "chats" / "x" / "y" / "store.db"
-        store_db.parent.mkdir(parents=True)
-        store_db.write_bytes(b"not a database")
-        (home / ".cursor" / "cli-config.json").write_text("{}")
-        (home / ".paseo").mkdir()
-        (home / ".paseo" / "config.json").write_text('{"secret": 1}')
-        oauth = home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
-        oauth.parent.mkdir(parents=True)
-        oauth.write_text("secret")
-        _make_db(
-            home / ".gemini" / "antigravity-cli" / "conversation_summaries.db",
-            "conversation_summaries",
-            "workspace_uris",
-            [json.dumps([repo.as_uri()])],
-        )
-
-        touched: list[str] = []
-
-        def recording(real):
-            def spy(*args, **kwargs):
-                target = args[0] if args else next(iter(kwargs.values()), "")
-                touched.append(str(target))
-                return real(*args, **kwargs)
-
-            return spy
-
-        monkeypatch.setattr(builtins, "open", recording(builtins.open))
-        monkeypatch.setattr(os, "open", recording(os.open))
-        monkeypatch.setattr(sqlite3, "connect", recording(sqlite3.connect))
-        monkeypatch.setattr(os, "scandir", recording(os.scandir))
-        found = _discover(_cfg("agy", cursor=True))
-        assert list(found.roots) == [repo]
-        ours = [t for t in touched if str(home) in t]
-        assert ours, "the spy saw the probers' own reads"
-        for forbidden in ("mcp-auth", "store.db", "oauth-token", "config.json", "cli-config"):
-            assert not [t for t in ours if forbidden in t], forbidden
-        for directory in (".cursor/projects", ".cursor/chats"):
-            assert not [t for t in ours if directory in t], directory
-
-    def test_index_db_with_a_hot_journal_is_skipped_until_it_settles(self, home):
-        repo = _fake_repo(home / "repo")
-        store = self._conductor(home) / "store-1"
-        store.mkdir(parents=True)
-        _make_db(store / "index.db", "agents", "workspace_ref", [str(repo)])
-        (store / "index.db-journal").write_bytes(b"")
-        assert _discover(_cfg(cursor=True), persist=True).roots == ()
-        (store / "index.db-journal").unlink()
-        assert list(_discover(_cfg(cursor=True), persist=True).roots) == [repo]
-
-    def test_acp_session_without_meta_is_retried(self, home):
-        # Value: protects=late Cursor cwd is discovered after missing or incomplete metadata;
-        # fails_when=an empty ACP observation becomes a permanent negative cache;
-        # why_new=the existing assertion checked cache absence but never a later successful read;
-        # seam=none; no_claim=live Cursor format acceptance (synthetic metadata).
-        (home / ".cursor" / "acp-sessions" / "fresh").mkdir(parents=True)
-        found = _discover(_cfg(cursor=True), persist=True)
-        assert found.roots == () and not found.exceeded
-        assert "acp/fresh" not in _cached_units("cursor")
-        metadata = home / ".cursor" / "acp-sessions" / "fresh" / "meta.json"
-        metadata.write_text("{}")
-        assert _discover(_cfg(cursor=True), persist=True).roots == ()
-        repo = _fake_repo(home / "repo")
-        metadata.write_text(json.dumps({"cwd": str(repo)}))
-        assert _discover(_cfg(cursor=True), persist=True).roots == (repo,)
+    }
+    mm_config.GIT_CAPTURE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mm_config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+    config = {**_cfg("codex", "muse", "agy"), "retro": {"cursor_host_usage": True}}
+    found = _discover(config, persist=True)
+    assert not found.exceeded and found.errors == ()
+    assert found.probers_ran == ("agy", "muse", "codex")
+    assert found.roots == (codex_repo,)
+    after = events.read_git_capture_cache()
+    assert "cursor" not in after["probe_index"]
+    assert after["prober_resume_after"] is None
 
 
 class TestMuseProber:
@@ -812,7 +797,7 @@ class TestToolProbers:
     def test_tools_that_are_not_installed_do_not_run(self, home):
         (home / ".paseo").mkdir()
         (home / ".mmm").mkdir()
-        found = _discover(_cfg("codex", "muse", "agy", cursor=True))
+        found = _discover(_cfg("codex", "muse", "agy"))
         assert "paseo" not in found.probers_ran and "mmm" not in found.probers_ran
 
     def test_gstack_project_state_runs_no_prober(self, home):
@@ -865,14 +850,13 @@ class TestToolProbers:
         subprocess.run(
             ["git", "-C", str(main), "worktree", "add", "-b", "wt-two", str(second)], check=True
         )
-        for name, path in (("s1", first), ("s2", second)):
-            directory = home / ".cursor" / "acp-sessions" / name
-            directory.mkdir(parents=True)
-            (directory / "meta.json").write_text(json.dumps({"cwd": str(path)}))
-        found = _discover(_cfg(cursor=True), persist=True)
+        day = _codex_day(home)
+        _codex_rollout(day / "rollout-1.jsonl", str(first))
+        _codex_rollout(day / "rollout-2.jsonl", str(second))
+        found = _discover(_cfg("codex"), persist=True)
         assert len(found.roots) == 1
         assert found.roots[0] in {first.resolve(), second.resolve()}
-        assert found.attribution[0][0] == "cursor"
+        assert found.attribution[0][0] == "codex"
 
 
 # ---------------------------------------------------------------------------
@@ -1032,32 +1016,6 @@ def test_muse_read_cap_bounds_input_before_oversize_drain(home, monkeypatch, cap
     assert capsys.readouterr().err == ""
 
 
-def test_cursor_stream_keeps_progress_between_budgeted_pushes(home, monkeypatch):
-    repos = [_fake_repo(home / f"repo-{i}") for i in range(6)]
-    path = home.joinpath(*rootprobes._CONDUCTOR_STORE) / "store" / "agents.ndjson"
-    path.parent.mkdir(parents=True)
-    path.write_text("".join(json.dumps({"cwd": str(repo)}) + "\n" for repo in repos))
-    clock = [0.0]
-    original = rootprobes._loads
-    reads = []
-
-    def load(raw):
-        result = original(raw)
-        if isinstance(result, dict) and "cwd" in result:
-            reads.append(result["cwd"])
-            clock[0] += 1.0
-        return result
-
-    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(rootprobes, "_loads", load)
-    for _ in range(4):
-        result = _discover(_cfg(cursor=True), persist=True, seconds=2.5)
-        if not result.exceeded:
-            break
-    assert not result.exceeded and set(result.roots) == set(repos)
-    assert reads == [str(repos[i]) for i in (0, 1, 2, 2, 3, 4, 4, 5)]
-
-
 def test_pending_unit_restarts_on_change_and_is_pruned_when_vanished(home, monkeypatch):
     first = _fake_repo(home / "first")
     second = _fake_repo(home / "second")
@@ -1117,18 +1075,6 @@ def test_agy_malformed_sqlite_value_does_not_hide_valid_rows(home):
     assert _discover(_cfg("agy")).roots == (repo,)
 
 
-def test_cursor_cap_preserves_roots_from_complete_prefix(home, monkeypatch, capsys):
-    repo = _fake_repo(home / "repo")
-    path = home.joinpath(*rootprobes._CONDUCTOR_STORE) / "store" / "agents.ndjson"
-    path.parent.mkdir(parents=True)
-    first = json.dumps({"cwd": str(repo)}) + "\n"
-    path.write_text(first + "x" * 128)
-    monkeypatch.setattr(rootprobes, "_CURSOR_NDJSON_CAP", len(first.encode()) + 16)
-    result = _discover(_cfg(cursor=True), persist=True)
-    assert not result.exceeded and result.roots == (repo,)
-    assert capsys.readouterr().err == ""
-
-
 def test_codex_pending_retries_share_progress_across_pushes(home, monkeypatch):
     repo = _fake_repo(home / "repo")
     day = _codex_day(home)
@@ -1160,7 +1106,7 @@ def test_codex_pending_retries_share_progress_across_pushes(home, monkeypatch):
     assert reads == ["rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl"]
 
 
-@pytest.mark.parametrize("provider", ["muse", "cursor", "codex"])
+@pytest.mark.parametrize("provider", ["muse", "codex"])
 def test_greptile_listing_progress_survives_push_boundaries(home, monkeypatch, provider):
     repo = _fake_repo(home / "repo")
     for i in range(6):
@@ -1168,10 +1114,6 @@ def test_greptile_listing_progress_survives_push_boundaries(home, monkeypatch, p
             path = home / f".local/share/muse/sessions/2026/11/{i + 1:02d}/s/session.jsonl"
             path.parent.mkdir(parents=True)
             path.write_text(json.dumps({"payload": {"record": {"workspace_root": str(repo)}}}))
-        elif provider == "cursor":
-            path = home / f".cursor/acp-sessions/s{i}/meta.json"
-            path.parent.mkdir(parents=True)
-            path.write_text(json.dumps({"cwd": str(repo)}))
         else:
             _codex_rollout(_codex_day(home, f"2026/11/{i + 1:02d}") / "rollout-a.jsonl", str(repo))
     clock = [0.0]
@@ -1256,30 +1198,29 @@ def test_greptile_classification_is_bounded_and_resumes(home, monkeypatch):
 
 def test_greptile_reader_acknowledgment_skips_costly_classified_prefix(home, monkeypatch):
     repos = [_fake_repo(home / f"repo-{i}") for i in range(6)]
-    path = home.joinpath(*rootprobes._CONDUCTOR_STORE) / "store/agents.ndjson"
-    path.parent.mkdir(parents=True)
-    path.write_text("".join(json.dumps({"cwd": str(repo)}) + "\n" for repo in repos))
+    day = _codex_day(home)
+    for i, repo in enumerate(repos):
+        _codex_rollout(day / f"rollout-{i}.jsonl", str(repo))
     clock = [0.0]
     reads = []
-    original_load = rootprobes._loads
+    original_read = rootprobes._codex_rollout_cwd
     original_classify = events._classify_git_root
 
-    def load(raw):
-        value = original_load(raw)
-        if isinstance(value, dict) and "cwd" in value:
-            reads.append(value["cwd"])
-            clock[0] += 0.6
-        return value
+    def read(path):
+        cwd = original_read(path)
+        reads.append(cwd)
+        clock[0] += 0.6
+        return cwd
 
     def classify(path):
         clock[0] += 0.75
         return original_classify(path)
 
     monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(rootprobes, "_loads", load)
+    monkeypatch.setattr(rootprobes, "_codex_rollout_cwd", read)
     monkeypatch.setattr(events, "_classify_git_root", classify)
     for _ in range(10):
-        result = _discover(_cfg(cursor=True), persist=True, seconds=2.5)
+        result = _discover(_cfg("codex"), persist=True, seconds=2.5)
         if not result.exceeded:
             break
     assert set(result.roots) == set(repos) and not result.exceeded
@@ -1439,22 +1380,34 @@ def test_greptile_rotation_preserves_canonical_source_and_disabled_cleanup(home,
     assert cache["probe_index"] == {} and cache["prober_resume_after"] is None
 
 
-def test_cursor_record_symlink_is_not_followed_and_replacement_is_read(home):
-    # Value: protects=record-only discovery refuses a symlink at the named metadata file;
-    # fails_when=the reader follows a metadata symlink into an unrelated local file;
+def test_record_symlink_is_not_followed_and_replacement_is_read(home):
+    # Value: protects=record-only discovery refuses a symlink at the named session file;
+    # fails_when=the reader follows a session symlink into an unrelated local file;
     # why_new=credential-neighbour tests use ordinary neighbours rather than record symlinks;
-    # seam=none; no_claim=all filesystem races or live Cursor stores.
+    # seam=none; no_claim=all filesystem races or live Muse stores.
     repo = _fake_repo(home / "repo")
-    unrelated = home / "unrelated.json"
-    unrelated.write_text(json.dumps({"cwd": str(repo)}))
-    metadata = home / ".cursor" / "acp-sessions" / "s" / "meta.json"
-    metadata.parent.mkdir(parents=True)
-    metadata.symlink_to(unrelated)
-    result = _discover(_cfg(cursor=True), persist=True)
+    line = json.dumps({"payload": {"record": {"workspace_root": str(repo)}}}) + "\n"
+    unrelated = home / "unrelated.jsonl"
+    unrelated.write_text(line)
+    session = (
+        home
+        / ".local"
+        / "share"
+        / "muse"
+        / "sessions"
+        / "2026"
+        / "11"
+        / "03"
+        / "s"
+        / "session.jsonl"
+    )
+    session.parent.mkdir(parents=True)
+    session.symlink_to(unrelated)
+    result = _discover(_cfg("muse"), persist=True)
     assert result.roots == () and not result.exceeded
-    metadata.unlink()
-    metadata.write_text(json.dumps({"cwd": str(repo)}))
-    assert _discover(_cfg(cursor=True), persist=True).roots == (repo,)
+    session.unlink()
+    session.write_text(line)
+    assert _discover(_cfg("muse"), persist=True).roots == (repo,)
 
 
 def test_sqlite_unreadable_record_recovers_after_replacement_and_deadline_is_incomplete(home):
@@ -1472,7 +1425,6 @@ def test_sqlite_unreadable_record_recovers_after_replacement_and_deadline_is_inc
     _make_db(database, "conversation_summaries", "workspace_uris", [json.dumps([repo.as_uri()])])
     assert _discover(_cfg("agy"), persist=True).roots == (repo,)
     assert rootprobes._agy_read(home, "conversation_summaries.db", -1.0) == (None, False)
-    assert rootprobes._cursor_read(home, "conductor/store/index.db", -1.0) == (None, False)
 
 
 def test_malformed_resume_state_is_replaced_without_losing_discovered_roots(home):
@@ -1610,8 +1562,8 @@ def test_one_explicit_run_completes_discovery_left_with_a_stale_round(home, monk
 
 def test_closing_round_completes_beside_a_record_that_never_caches(home, monkeypatch):
     # Value: protects=the closing round finishes a resumed round in one call;
-    # fails_when=a cleanly read record with nothing to cache (a Cursor ACP meta
-    # with no cwd) holds the closing round open, costing the extra push it saves;
+    # fails_when=a cleanly read record with nothing to cache (a record that
+    # names no directory) holds the closing round open, costing the extra push it saves;
     # why_new=the stale-round test above has no such record; seam=persisted state;
     # no_claim=records whose read this call interrupted (they keep the round open).
     repo_a = _fake_repo(home / "a")

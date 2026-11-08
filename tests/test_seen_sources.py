@@ -201,7 +201,7 @@ class TestAcknowledge:
 
         threads = [
             threading.Thread(target=call_ack, args=(n,))
-            for n in ["codex", "cursor", "aider", "shell"]
+            for n in ["codex", "other-agent", "aider", "shell"]
         ]
         for t in threads:
             t.start()
@@ -211,7 +211,7 @@ class TestAcknowledge:
         assert errors == []
         # File on disk must contain ALL added names.
         on_disk = set(json.loads(seen_sources.seen_path().read_text()))
-        assert {"claude", "gstack", "codex", "cursor", "aider", "shell"} <= on_disk
+        assert {"claude", "gstack", "codex", "other-agent", "aider", "shell"} <= on_disk
 
     def test_idempotent_redundant_names(self):
         result1 = seen_sources.acknowledge(["claude"], initial=["claude", "gstack"])

@@ -67,7 +67,7 @@ class _CacheEntry(TypedDict, total=False):
     never be a cache hit: an evicted record's files are re-read in full. It is
     additive on cache ``version`` 1, with no ``CACHE_VERSION`` bump for the
     reason given under "Entries written before this Track" below: the constant
-    is shared with the Cursor, Muse and Antigravity caches. A pre-105A
+    is shared with the Muse and Antigravity caches. A pre-105A
     ``settled_days`` record has no memo and full entries; the first complete
     pass memoizes it from those entries without re-parsing anything.
 

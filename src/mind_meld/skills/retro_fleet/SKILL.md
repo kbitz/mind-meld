@@ -223,7 +223,7 @@ Python truncates with `…` when content overflows; aim short on purpose.
 
 Before Pass 2, inspect the first pass's `MM_HEALTH.pricing`. When
 `refresh_due` is true, check official vendor pricing docs: use the supplied
-`anthropic_url`, `openai_url`, `cursor_url`, `xai_url`, `google_url`, and
+`anthropic_url`, `openai_url`, `xai_url`, `google_url`, and
 `muse_url`. Check the table when its `effective_verified_date` is more than
 seven days before the report's UTC end date, and check each active
 `unverified_model_ids` entry (including family-extrapolated models).

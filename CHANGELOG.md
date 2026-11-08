@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.24] - 2026-11-07
+
+Cursor-only repositories leave discovery, with a 90-day recapture window from this upgrade.
+
+### Changed
+
+- Cursor-only repositories leave discovery.
+
+### Removed
+
+- The Cursor git-root prober is removed.
+
+### Upgrade notes
+
+- Recapture Cursor-only repositories within 90 days of this upgrade.
+
 ## [1.12.23] - 2026-11-07
 
 Removes the retired Cursor usage reader, and retro-fleet instructions drop Cursor.

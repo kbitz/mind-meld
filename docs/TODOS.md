@@ -74,15 +74,6 @@ here by hand, use the H3 form.
 - **Context:** `/review-and-prep`, branch `mmm/ec2ff4e3`, 2026-11-07. Revisit when a Track next changes these files.
 - **Effort:** ? (user triages in /roadmap)
 
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|src/mind_meld/sourceflow.py|src/mind_meld/events.py] Cursor leftovers after Track 114A: dead `enable-source cursor` hint and a no-op `disable-source cursor --force`
-- **Description:** After Track 114A, retro-fleet's "No agent-log reader contributed on any machine" note (`aggregator.py` near line 3889) still suggests `mm enable-source cursor`, which now exits 1 as an unknown source, and never names `grok`. `mm disable-source cursor --force` prints "Disabled source 'cursor' on this device." while a true `[retro] cursor_host_usage` keeps the Cursor git-root prober running (`events._enabled_root_probers` ignores `disabled_sources`).
-- **Hypothesis (untested):** Track 116A deletes the prober, which makes the `--force` case harmless; it should also delete the key's last reader, the `prober.name == "cursor"` branch in `events._enabled_root_probers`, although `events.py` is not in its card's touches list (flag for /roadmap); change the aggregator note to `(or grok, muse, or agy)`, matching `config.usage_capture_remedy("no-reader")`. Re-verify against current code first.
-- **Upstream severity:** INFORMATIONAL (aggregator note); CRITICAL by /review's FIXABLE rule, adversarial-rated Low and non-blocking (`--force`)
-- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3889`; `src/mind_meld/sourceflow.py:_validate_source_name`
-- **Evidence:** Red Team and native adversarial review of Track 114A at `fcb972d`. README's Upgrading note now tells the owner to delete the key. Deferred because the plan fences off `skills/retro_fleet/` and the CLI change goes beyond the card.
-- **Context:** `/review-and-prep`, branch `mmm/f6e65ebe`, 2026-11-07. Revisit in Track 116A, which touches `aggregator.py` and removes the prober.
-- **Effort:** ? (user triages in /roadmap)
-
 ### [review:files=docs/ROADMAP.md|src/mind_meld/events_tail.py|src/mind_meld/attemptlog.py] Track 115A card lists the push cursor's hold and coverage warnings as Cursor symbols
 - **Description:** Track 115A's done-when removes "the Cursor hold and coverage degradations" and its source note names `_CURSOR_HOLD_DEGRADATION` and `_CURSOR_COVERAGE_DEGRADATION`. Those are the git push cursor's data-at-risk warnings ("retro cursor held at last complete capture"), not Cursor the product (`events_tail.py` near lines 268-275 and 1516-1521, `attemptlog.py` near lines 374-375). Following the card literally would silence them, against AGENTS.md's rule never to quiet-gate data-at-risk warnings.
 - **Hypothesis (untested):** /roadmap drops these two names from Track 115A's card; re-verify the symbols first.
@@ -102,6 +93,14 @@ here by hand, use the H3 form.
 - **Effort:** ? (user triages in /roadmap)
 
 ## Drain records
+
+### Track 116A drain — 2026-11-07
+
+Drained by Track 116A (`/implement`, branch `mmm/fc43e378`):
+
+| Item | Disposition |
+|---|---|
+| `[review]` Cursor leftovers after Track 114A: dead `enable-source cursor` hint and a no-op `disable-source cursor --force` | discharged in Track 116A: `rootprobes.py` removes the `cursor` prober, `events._enabled_root_probers` drops `[retro] cursor_host_usage`, and `aggregator.py`'s no-reader note names `codex`, `grok`, `muse` and `agy` |
 
 ### Roadmap regeneration — 2026-11-07 (Cursor removed, history scrub before 2.0, Future cleanup)
 
