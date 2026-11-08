@@ -33,7 +33,7 @@ Every piece of documentation targets one of two audiences:
 
 ## Architecture
 
-Single local-folder storage backend at the root of a shared Syncthing folder (`~/Sync/mind-meld` by default; mm never moves an existing configured path, and iCloud Drive is the pre-cutover path only). Encrypted blobs and manifests are written to that folder on disk, and Syncthing replicates them between each machine's `~/Sync/mind-meld/`. The CLI supports multiple sync sources (e.g. `~/.claude` and `~/.gstack`) via configurable `[[sync.sources]]` in config.toml.
+Single local-folder storage backend at the root of a shared Syncthing folder (`~/Sync/mind-meld` by default; mm never moves an existing configured path, and a Mac not yet moved to Syncthing keeps its iCloud Drive path ([docs/SPEC.md](docs/SPEC.md))). Encrypted blobs and manifests are written to that folder on disk, and Syncthing replicates them between each machine's `~/Sync/mind-meld/`. The CLI supports multiple sync sources (e.g. `~/.claude` and `~/.gstack`) via configurable `[[sync.sources]]` in config.toml.
 
 ```
 ┌─────────────┐      encrypted blobs       ┌───────────────────────┐
@@ -83,7 +83,7 @@ Track 16A (v0.12.21) cut six modules out of `cli.py`. The load-bearing rule that
 
 ### No API Server
 
-claude-sync.com runs an API that brokers auth, generates presigned URLs, and stores manifests. We skip all of that. The CLI reads and writes encrypted blobs in the shared Syncthing folder on the local filesystem (`~/Sync/mind-meld` by default; existing configured paths are never moved automatically, and iCloud Drive is the pre-cutover path only). Manifests live alongside the data.
+claude-sync.com runs an API that brokers auth, generates presigned URLs, and stores manifests. We skip all of that. The CLI reads and writes encrypted blobs in the shared Syncthing folder on the local filesystem (`~/Sync/mind-meld` by default; existing configured paths are never moved automatically, and a Mac not yet moved to Syncthing keeps its iCloud Drive path ([docs/SPEC.md](docs/SPEC.md))). Manifests live alongside the data.
 
 ---
 
