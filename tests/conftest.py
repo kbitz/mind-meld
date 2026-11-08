@@ -339,6 +339,26 @@ def fake_syncthing(tmp_path):
         server.close()
 
 
+@pytest.fixture
+def real_syncthing_gate() -> None:
+    """Opt a test into running ``initflow._check_syncthing`` without ``fake_syncthing``."""
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _default_init_syncthing(request, monkeypatch) -> None:
+    """Default ``initflow._check_syncthing`` to silent owner-managed unless opted in."""
+    if "fake_syncthing" in request.fixturenames or "real_syncthing_gate" in request.fixturenames:
+        return
+    from mind_meld import initflow
+
+    monkeypatch.setattr(
+        initflow,
+        "_check_syncthing",
+        lambda: initflow._SyncthingSetup(record=None, local_id=None, persisted=False),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolate_identity_cache(monkeypatch, tmp_path) -> None:
     """Redirect ``mind_meld.identity.CACHE_PATH`` to a per-test path.

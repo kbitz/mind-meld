@@ -10,11 +10,13 @@ decision is mocked. Stubbed because they act outside the storage folder:
 `_isolate_keyring` and the `PYTEST_CURRENT_TEST` guard on
 `crypto.store_passphrase_in_keyring`. PASSPHRASE is a synthetic test credential.
 
-Input order follows `initflow.init`: storage path, then the re-init confirm
-if a device is already configured, device name, passphrase(s), then seven
-source prompts. `--new-fleet` is the only flow that creates the key header;
-plain `mm init` joins and stops when the header has not arrived. The join's
-pull lives in the `cli.init` shell and is covered in tests/test_integration.py.
+Input order follows `initflow.init`: storage path, then (on the managed join
+before the fleet folder is accepted) a fleet machine's Syncthing device ID,
+then the re-init confirm if a device is already configured, device name,
+passphrase(s), then seven source prompts. `--new-fleet` is the only flow that
+creates the key header; plain `mm init` joins and stops when the header has not
+arrived. The join's pull lives in the `cli.init` shell and is covered in
+tests/test_integration.py.
 """
 
 from __future__ import annotations
@@ -31,7 +33,16 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from mind_meld import config, crypto, devices, events_tail, fsutil, initflow, skill_link
+from mind_meld import (
+    config,
+    crypto,
+    devices,
+    events_tail,
+    fsutil,
+    initflow,
+    skill_link,
+    syncthing,
+)
 from mind_meld.errors import StorageError
 from mind_meld.storage.keys import blob_key
 from mind_meld.storage.local import LocalBackend
@@ -491,7 +502,7 @@ def test_a_configured_machine_declining_re_init_changes_nothing(env):
     result, text = _run(f"y\n{storage}\nn\n")
     assert result.exit_code == 0, result.output
     assert "orphaning existing device" in text
-    assert "Nothing changed." in text
+    assert "Device registration cancelled." in text
     assert config.CONFIG_PATH.read_bytes() == saved
     assert len(_device_keys(backend)) == 2
 
@@ -606,3 +617,520 @@ def test_initflow_contract_import_does_not_register_cli():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+# ── Track 118A: Syncthing setup in initflow ──────────────────────────
+
+
+def _valid_syncthing_id(seed_char: str) -> str:
+    chunk13 = seed_char * 13
+    group14 = chunk13 + syncthing._luhn32(chunk13)
+    full56 = group14 * 4
+    return "-".join(full56[i : i + 7] for i in range(0, 56, 7))
+
+
+def _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch):
+    stock_root = tmp_path / "home" / "Sync"
+    monkeypatch.setattr(syncthing, "stock_default_folder_path", lambda: stock_root)
+    my_id = _valid_syncthing_id("A")
+    peer_id = _valid_syncthing_id("B")
+    fake_syncthing.my_id = my_id
+    fake_syncthing.peer_id = peer_id
+    fake_syncthing.set_shape(folders=[fake_syncthing.stock_folder(stock_root)])
+    fake_syncthing.responses["/rest/cluster/pending/folders"] = {}
+    return stock_root, my_id, peer_id
+
+
+def test_managed_new_fleet_removes_default_folder_creates_mm_folder_before_header(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    _storage, _backend = env
+    stock_root, my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+    observed: dict[str, object] = {}
+
+    def on_write(method, path, body):
+        if method == "POST" and path == "/rest/config/folders":
+            observed["record_at_post"] = config.load_syncthing_record()
+            observed["header_at_post"] = (storage / "mm-crypto-init").exists()
+
+    fake_syncthing.on_write = on_write
+    result, text = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+    assert result.exit_code == 0, result.output
+    assert config.load_syncthing_record() == my_id
+    assert observed == {"record_at_post": my_id, "header_at_post": False}
+    assert len(fake_syncthing.bodies) == 2
+    assert fake_syncthing.bodies[0] == ("DELETE", "/rest/config/folders/default", None)
+    post_method, post_path, post_body = fake_syncthing.bodies[1]
+    assert (post_method, post_path) == ("POST", "/rest/config/folders")
+    assert post_body["id"] == "mind-meld"
+    assert post_body["label"] == "Mind Meld"
+    assert post_body["path"] == str(storage.resolve())
+    for opt_name, _expected, _reason in syncthing.FOLDER_OPTIONS:
+        assert opt_name in post_body
+        val = post_body[opt_name]["type"] if opt_name == "versioning" else post_body[opt_name]
+        assert syncthing.option_is_ok(opt_name, val)
+    assert (storage / "mm-crypto-init").is_file()
+    assert (storage / ".stignore").read_text() == STIGNORE
+    assert config.CONFIG_PATH.is_file()
+    assert f"This machine's Syncthing device ID is {my_id}." in text
+    assert "paste this ID when it asks." in text
+
+
+def test_managed_new_fleet_outside_default_folder_skips_delete(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    _storage, _backend = env
+    _stock_root, my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    outside = tmp_path / "outside-sync" / "mind-meld"
+    result, text = _new_fleet(f"{outside}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+    assert result.exit_code == 0, result.output
+    assert config.load_syncthing_record() == my_id
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [("POST", "/rest/config/folders")]
+    assert (outside / "mm-crypto-init").is_file()
+    assert my_id in text
+
+
+def test_managed_new_fleet_rerun_after_header_failure_does_not_duplicate_folder(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    _storage, _backend = env
+    stock_root, my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+    real_bootstrap = initflow.bootstrap_crypto_init
+    calls = 0
+
+    def fail_once(be, passphrase, argon2_memory_kb):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_bootstrap(be, passphrase, argon2_memory_kb=argon2_memory_kb)
+
+    monkeypatch.setattr(initflow, "bootstrap_crypto_init", fail_once)
+    first, _text = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+    assert first.exit_code == 1, first.output
+    assert config.load_syncthing_record() == my_id
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("DELETE", "/rest/config/folders/default"),
+        ("POST", "/rest/config/folders"),
+    ]
+    assert not (storage / "mm-crypto-init").exists()
+
+    # Plain init cannot wait for a peer to deliver a header to a local-only
+    # folder. It must explain how to resume the interrupted first-machine setup.
+    writes = list(fake_syncthing.bodies)
+    joined, joined_text = _run(f"{storage}\n")
+    assert joined.exit_code == 1, joined.output
+    assert "no peer" in joined_text
+    assert joined_text.endswith("Run: mm init --new-fleet")
+    assert "Syncthing has accepted" not in joined_text
+    assert fake_syncthing.bodies == writes
+    assert not config.CONFIG_PATH.exists()
+
+    second, text = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+    assert second.exit_code == 0, second.output
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("DELETE", "/rest/config/folders/default"),
+        ("POST", "/rest/config/folders"),
+    ]
+    assert (storage / "mm-crypto-init").is_file()
+    assert my_id in text
+
+
+@pytest.mark.parametrize("new_fleet", [False, True])
+def test_managed_rerun_changed_path_explains_existing_folder_recovery(
+    env, fake_syncthing, tmp_path, monkeypatch, new_fleet
+):
+    storage, _backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
+    }
+    first, _text = _run(f"{storage}\n{peer_id}\n")
+    assert first.exit_code == 1
+    writes = list(fake_syncthing.bodies)
+    other_path = tmp_path / "different-folder"
+
+    result, text = (
+        _new_fleet(f"{other_path}\nMac B\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+        if new_fleet
+        else _run(f"{other_path}\n{peer_id}\n")
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "Syncthing's GUI" in text
+    assert "configured path" in text
+    assert text.endswith("Run: mm init --new-fleet" if new_fleet else "Run: mm init")
+    assert fake_syncthing.bodies == writes
+    assert not config.CONFIG_PATH.exists()
+    assert not other_path.exists()
+
+
+@pytest.mark.parametrize("contents", ["plaintext", "foreign-fleet", "in-flight"])
+def test_managed_join_refuses_populated_new_share_before_any_write(
+    env, fake_syncthing, tmp_path, monkeypatch, contents
+):
+    storage, backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    if contents == "plaintext":
+        (storage / "notes.txt").write_text("private notes")
+    elif contents == "foreign-fleet":
+        _populate(backend)
+    else:
+        (storage / ".syncthing.notes.tmp").write_text("partial content")
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
+    }
+    before = _tree(storage)
+
+    result, text = _run(f"{storage}\n{peer_id}\n")
+
+    assert result.exit_code == 1, result.output
+    assert "Choose an empty storage folder" in text
+    assert fake_syncthing.bodies == []
+    assert not config.syncthing_record_path().exists()
+    assert not config.CONFIG_PATH.exists()
+    assert _tree(storage) == before
+
+
+@pytest.mark.parametrize("unreadable_folders", [False, True])
+def test_managed_new_fleet_refuses_accepted_share_waiting_for_header(
+    env, fake_syncthing, tmp_path, monkeypatch, unreadable_folders
+):
+    storage, _backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
+    }
+    joined, _text = _run(f"{storage}\n{peer_id}\n")
+    assert joined.exit_code == 1
+    before = _tree(storage)
+    writes = list(fake_syncthing.bodies)
+    if unreadable_folders:
+        real_read_state = syncthing.read_state
+
+        def transient_unreadable_folders(*args, **kwargs):
+            configured = fake_syncthing.responses["/rest/config/folders"]
+            fake_syncthing.responses["/rest/config/folders"] = {}
+            try:
+                return real_read_state(*args, **kwargs)
+            finally:
+                # A writer's later read recovers, so it cannot provide the
+                # missing proof that this bootstrap target is local-only.
+                fake_syncthing.responses["/rest/config/folders"] = configured
+
+        monkeypatch.setattr(syncthing, "read_state", transient_unreadable_folders)
+
+    result, text = _new_fleet(f"{storage}\nMac B\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 1, result.output
+    assert ("could not check Syncthing" if unreadable_folders else "already shared") in text
+    assert fake_syncthing.bodies == writes
+    assert not config.CONFIG_PATH.exists()
+    assert _tree(storage) == before
+
+
+@pytest.mark.parametrize("new_fleet", [False, True])
+def test_managed_setup_state_failure_stops_before_writes(
+    env, fake_syncthing, tmp_path, monkeypatch, new_fleet
+):
+    storage, _backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses["/rest/system/connections"] = 500
+    before = _tree(storage)
+    result, text = (
+        _new_fleet(f"{storage}\nMac B\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+        if new_fleet
+        else _run(f"{storage}\n{peer_id}\n")
+    )
+    assert result.exit_code == 1, result.output
+    assert text.endswith("Run: mm diag")
+    assert fake_syncthing.bodies == []
+    assert not config.syncthing_record_path().exists()
+    assert not config.CONFIG_PATH.exists()
+    assert _tree(storage) == before
+
+
+@pytest.mark.parametrize("error_type", [OSError, StorageError])
+def test_managed_record_write_failure_stops_before_syncthing_writes(
+    env, fake_syncthing, tmp_path, monkeypatch, error_type
+):
+    storage, _backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+
+    def fail_write(*args, **kwargs):
+        raise error_type("record publication failed")
+
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", fail_write)
+    result, text = _run(f"{storage}\n{peer_id}\n")
+    assert result.exit_code == 1, result.output
+    assert "could not record that mm manages Syncthing" in text
+    assert fake_syncthing.bodies == []
+    assert not config.syncthing_record_path().exists()
+    assert not config.CONFIG_PATH.exists()
+
+
+@pytest.mark.parametrize(
+    "option,invalid_value",
+    [
+        ("type", "receiveonly"),
+        ("versioning", {"type": "simple"}),
+        ("maxConflicts", 0),
+        ("ignorePerms", True),
+        ("order", "random"),
+    ],
+)
+@pytest.mark.parametrize("missing", [False, True])
+def test_managed_join_rerun_refuses_invalid_or_missing_folder_option(
+    env, fake_syncthing, tmp_path, monkeypatch, option, invalid_value, missing
+):
+    storage, backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    (storage / ".stignore").unlink(missing_ok=True)
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
+    }
+    accepted, accepted_text = _run(f"{storage}\n{peer_id}\n")
+    assert accepted.exit_code == 1, accepted.output
+    assert "Syncthing has accepted the fleet folder" in accepted_text
+
+    # Delivery finishes after the owner changes one option in Syncthing's GUI.
+    # Retrying must not enroll this machine with the unsafe folder setup.
+    _populate(backend)
+    configured = next(
+        folder
+        for folder in fake_syncthing.responses["/rest/config/folders"]
+        if folder["id"] == "mind-meld"
+    )
+    if missing:
+        del configured[option]
+    else:
+        configured[option] = invalid_value
+    writes = list(fake_syncthing.bodies)
+    before = _tree(storage)
+    record_before = config.syncthing_record_path().read_bytes()
+
+    result, text = _run(f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 1, result.output
+    assert "Syncthing's GUI" in text
+    assert text.endswith("Run: mm init")
+    assert "Device name" not in text
+    assert fake_syncthing.bodies == writes
+    assert _tree(storage) == before
+    assert config.syncthing_record_path().read_bytes() == record_before
+    assert not config.CONFIG_PATH.exists()
+    assert not (storage / ".stignore").exists()
+
+
+def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+
+    # Run 1: peer has not shared the folder yet -> add device, mark introducer,
+    # remove Default Folder, stop on no-offer with approval command.
+    run1, text1 = _run(f"{storage}\n{peer_id}\n")
+    assert run1.exit_code == 1, run1.output
+    assert my_id in text1
+    assert f"mm devices approve {my_id}" in text1
+    assert config.load_syncthing_record() == my_id
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("POST", "/rest/config/devices"),
+        ("PATCH", f"/rest/config/devices/{peer_id}"),
+        ("DELETE", "/rest/config/folders/default"),
+    ]
+    assert fake_syncthing.bodies[0][2]["deviceID"] == peer_id
+    assert fake_syncthing.bodies[0][2]["introducer"] is False
+    assert fake_syncthing.bodies[1][2] == {"introducer": True}
+    assert not config.CONFIG_PATH.exists()
+    assert not (storage / "mm-crypto-init").exists()
+    assert not (storage / ".stignore").exists()
+
+    # Run 2: peer now offers the folder, but key header has not arrived yet.
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {
+            "offeredBy": {
+                peer_id: {
+                    "label": "Mind Meld",
+                    "receiveEncrypted": False,
+                    "remoteEncrypted": False,
+                }
+            }
+        }
+    }
+    run2, text2 = _run(f"{storage}\n{peer_id}\n")
+    assert run2.exit_code == 1, run2.output
+    assert "Syncthing has accepted the fleet folder" in text2
+    assert "Wait for Syncthing to deliver it, then run 'mm init' again." in text2
+    assert len(fake_syncthing.bodies) == 4
+    post_method, post_path, post_body = fake_syncthing.bodies[3]
+    assert (post_method, post_path) == ("POST", "/rest/config/folders")
+    assert post_body["id"] == "mind-meld"
+    assert post_body["devices"] == [
+        {"deviceID": my_id},
+        {"deviceID": peer_id},
+    ]
+    for opt_name, _expected, _reason in syncthing.FOLDER_OPTIONS:
+        assert opt_name in post_body
+        val = post_body[opt_name]["type"] if opt_name == "versioning" else post_body[opt_name]
+        assert syncthing.option_is_ok(opt_name, val)
+    assert not config.CONFIG_PATH.exists()
+    assert not (storage / "mm-crypto-init").exists()
+    assert not (storage / ".stignore").exists()
+
+    # Run 3: key header arrives -> no device ID prompt, verifies passphrase,
+    # writes .stignore, registers device, and returns the passphrase.
+    storage.mkdir(parents=True, exist_ok=True)
+    backend = LocalBackend(storage)
+    _populate(backend)
+    run3, text3 = _run(
+        f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}",
+        command="capture",
+    )
+    assert run3.exit_code == 0, run3.output
+    assert _joined == [PASSPHRASE]
+    assert text3.endswith(JOIN_OUTCOME)
+    assert (storage / ".stignore").read_text() == STIGNORE
+    assert config.CONFIG_PATH.is_file()
+    assert len(_device_keys(backend)) == 2
+    # Across all three runs: exactly one device POST, one introducer PATCH,
+    # one Default Folder DELETE, and one folder POST.
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("POST", "/rest/config/devices"),
+        ("PATCH", f"/rest/config/devices/{peer_id}"),
+        ("DELETE", "/rest/config/folders/default"),
+        ("POST", "/rest/config/folders"),
+    ]
+
+
+@pytest.mark.parametrize("stale_record", [False, True])
+def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
+    env, fake_syncthing, stale_record
+):
+    storage, backend = env
+    # FakeSyncthing.__init__ sets up a pre-existing configuration (shared
+    # mind-meld folder + 2 peers) and writes .stignore; remove .stignore so
+    # --new-fleet starts in an empty folder and join starts without .stignore.
+    (storage / ".stignore").unlink(missing_ok=True)
+    if stale_record:
+        config.save_syncthing_record(_valid_syncthing_id("C"))
+
+    res_new, text_new = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+    assert res_new.exit_code == 0, res_new.output
+    assert fake_syncthing.bodies == []
+    assert initflow.SYNCTHING_GUIDE_HEADING in text_new
+    assert text_new.endswith(NEW_FLEET_OUTCOME)
+    if not stale_record:
+        assert not config.syncthing_record_path().exists()
+
+    # Now test plain join on the same pre-existing Syncthing configuration.
+    config.CONFIG_PATH.unlink()
+    (storage / ".stignore").unlink(missing_ok=True)
+    res_join, text_join = _run(f"{storage}\nMac B\npw\n{SOURCES_CLAUDE_ONLY}")
+    assert res_join.exit_code == 0, res_join.output
+    assert fake_syncthing.bodies == []
+    assert initflow.SYNCTHING_GUIDE_HEADING in text_join
+    assert text_join.endswith(JOIN_OUTCOME)
+    assert not (storage / ".stignore").exists()
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "expected_cmd"),
+    [
+        ("darwin", "brew services start syncthing"),
+        ("linux", "systemctl --user enable --now syncthing.service"),
+    ],
+)
+def test_syncthing_start_command_table(platform_name, expected_cmd):
+    assert initflow._syncthing_start_command(platform_name) == expected_cmd
+
+
+@pytest.mark.parametrize("flags", [(), ("--new-fleet",)])
+def test_syncthing_not_configured_stops_with_start_command_and_writes_nothing(
+    env, real_syncthing_gate, flags
+):
+    storage, _backend = env
+    before = _tree(storage)
+    result, text = _run(f"{storage}\n", *flags)
+    assert result.exit_code == 1, result.output
+    assert "Syncthing is not running on this machine" in text
+    assert "Nothing was written." in text
+    assert text.endswith(f"Run: {initflow._syncthing_start_command()}")
+    _assert_nothing_written(storage, before)
+    assert not config.syncthing_record_path().exists()
+
+
+def test_syncthing_unreachable_stops_with_start_command_and_writes_nothing(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    storage, _backend = env
+    _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.close()
+    before = _tree(storage)
+    result, text = _run(f"{storage}\n")
+    assert result.exit_code == 1, result.output
+    assert "Syncthing is not running on this machine" in text
+    assert text.endswith(f"Run: {initflow._syncthing_start_command()}")
+    _assert_nothing_written(storage, before)
+    assert not config.syncthing_record_path().exists()
+
+
+@pytest.mark.parametrize(
+    ("pasted", "why"),
+    [
+        ("not-a-device-id", "expected 8 groups of 7 base32 characters"),
+        (
+            "BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB",
+            "check digit mismatch",
+        ),
+        ("OWN", "that is this machine's own device ID"),
+    ],
+)
+def test_managed_join_refuses_invalid_device_id_before_any_write(
+    env, fake_syncthing, tmp_path, monkeypatch, pasted, why
+):
+    _storage, _backend = env
+    stock_root, my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+    candidate = my_id if pasted == "OWN" else pasted
+    result, text = _run(f"{storage}\n{candidate}\n")
+    assert result.exit_code == 1, result.output
+    assert why in text
+    assert "Nothing was written." in text
+    assert fake_syncthing.bodies == []
+    assert not config.syncthing_record_path().exists()
+    assert not config.CONFIG_PATH.exists()
+
+
+def test_managed_join_normalizes_lowercase_dashless_valid_id(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    _storage, _backend = env
+    stock_root, _my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+    compact_lower = "".join(peer_id.split("-")).lower()
+    result, _text = _run(f"{storage}\n{compact_lower}\n")
+    assert result.exit_code == 1, result.output
+    method, path, body = fake_syncthing.bodies[0]
+    assert (method, path) == ("POST", "/rest/config/devices")
+    assert body["deviceID"] == peer_id
+    assert body["introducer"] is False
+
+
+def test_unknown_syncthing_classification_stops_with_mm_diag_and_writes_nothing(
+    env, fake_syncthing
+):
+    storage, _backend = env
+    fake_syncthing.responses["/rest/config/folders"] = 500
+    before = _tree(storage)
+    result, text = _run(f"{storage}\n")
+    assert result.exit_code == 1, result.output
+    assert "could not read Syncthing's configuration" in text
+    assert text.endswith("Run: mm diag")
+    assert fake_syncthing.bodies == []
+    _assert_nothing_written(storage, before)
+    assert not config.syncthing_record_path().exists()

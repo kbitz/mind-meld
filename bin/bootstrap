@@ -62,6 +62,50 @@ unsupported_os() {
   die "$1 is not supported; bootstrap supports macOS and Arch-based Linux. Install Python 3.11+, pipx and Syncthing 2.1+ yourself" "pipx install $MM_INSTALL_SPEC"
 }
 
+start_syncthing_if_default() {
+  st_check_py='from mind_meld import syncthing
+c = syncthing.classify_config(sanitize=str)
+print(c.state, c.reach)'
+  st_check=$("$venvs/mind-meld/bin/python" -I -c "$st_check_py" 2>/dev/null || true)
+  st_state=""
+  st_reach=""
+  if [ -n "$st_check" ]; then
+    st_state=${st_check%% *}
+    if [ "$st_state" != "$st_check" ]; then
+      st_reach=${st_check#* }
+      st_reach=${st_reach%% *}
+    fi
+  fi
+  if [ "$st_state" = "pre-existing" ]; then
+    say "Syncthing already has its own configuration, so this script leaves it alone; see README \"Configuring Syncthing yourself\"."
+    return 0
+  fi
+  if [ "$st_state" != "default" ] && [ "$st_state" != "no-config" ]; then
+    say "could not check Syncthing's configuration, so it was not started; mm diag shows why."
+    return 0
+  fi
+  running=0
+  case "$st_reach" in
+    ok|unauthorized|error)
+      running=1
+      ;;
+  esac
+  if [ "$running" -eq 0 ] && command -v pgrep >/dev/null 2>&1; then
+    if pgrep -x -u "$(id -u)" syncthing >/dev/null 2>&1; then
+      running=1
+    fi
+  fi
+  if [ "$running" -eq 1 ]; then
+    say "Syncthing is already running; not starting another."
+  else
+    # shellcheck disable=SC2086
+    if ! $start_syncthing_cmd; then
+      die "$start_syncthing_cmd failed" "$start_syncthing_cmd"
+    fi
+    say "started Syncthing and set it to start at login ($start_syncthing_cmd)."
+  fi
+}
+
 main() {
   os_name=$(uname -s)
   platform=""
@@ -254,10 +298,8 @@ main() {
   else
     say "nothing to change: Python $py_ver, pipx, Syncthing $st_ver and mm are already installed."
   fi
-  say "This script pairs no machine, shares no folder and writes no Syncthing configuration. Next steps:"
-  say "1. Start Syncthing ($start_syncthing_cmd) and pair this machine with your others."
-  say "2. Share the mind-meld folder, default ~/Sync/mind-meld, or accept it here."
-  say "3. Run mm init, or mm init --new-fleet on a new fleet's first machine. README Quick Start has the details."
+  start_syncthing_if_default
+  say "Next: run mm init --new-fleet on your fleet's first machine, or mm init to join this machine to the fleet. README Quick Start has the details."
 }
 
 main "$@"

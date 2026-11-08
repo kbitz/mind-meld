@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.26] - 2026-11-08
+
+Init sets up default Syncthing configurations, saves that setup while a join waits, and recovers from partial setup.
+
+### Added
+
+- Default Syncthing configurations are set up during init.
+
+### Changed
+
+- Setup is saved while a join waits.
+
+### Fixed
+
+- Syncthing folder options are validated on managed retries.
+- Parsed Syncthing folder discovery is required before bootstrap.
+- Recovery from partial Syncthing setup is explained.
+
 ## [1.12.25] - 2026-11-07
 
 Syncthing setup classifies default configurations and gates writes, with safe handling of malformed folder device lists, retries, and failures.

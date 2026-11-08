@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
 
-from mind_meld import fsutil
+from mind_meld import fsutil, syncthing
 from mind_meld.errors import ConfigError, SnapshotError, os_error_cause, snapshot_refusal
 from mind_meld.safety import safe_terminal_str
 
@@ -23,6 +23,8 @@ CONFIG_DIR = Path.home() / ".config" / "mind-meld"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 LOCK_PATH = CONFIG_DIR / "mind-meld.lock"
 GIT_CAPTURE_CACHE_PATH = CONFIG_DIR / "git-capture-cache.json"
+SYNCTHING_FOLDER_ID = "mind-meld"
+SYNCTHING_FOLDER_LABEL = "Mind Meld"
 
 # Defaults. Paths use tilde-form so they round-trip through TOML readably.
 # Expansion happens at use sites (get_sources, walker, storage) — keeping
@@ -1327,6 +1329,58 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> None:
     # internal state, not user-shared content.
     data = "\n".join(lines).encode("utf-8")
     fsutil.atomic_write_bytes(config_path, data, fsync=True, mode=0o600)
+
+
+def syncthing_record_path() -> Path:
+    """Return the Syncthing management record path, derived from ``CONFIG_PATH`` at call time."""
+    return CONFIG_PATH.parent / "syncthing.toml"
+
+
+def save_syncthing_record(device_id: str) -> None:
+    """Write ``syncthing.toml`` recording that mm manages Syncthing for ``device_id``."""
+    if not syncthing.is_device_id(device_id):
+        raise ConfigError("config: managed_device_id is not a canonical Syncthing device ID.")
+    save_config({"syncthing": {"managed_device_id": device_id}}, syncthing_record_path())
+
+
+def load_syncthing_record() -> str | None:
+    """Read ``managed_device_id`` from ``syncthing.toml``, or return ``None`` when absent."""
+    record_path = syncthing_record_path()
+    try:
+        raw_bytes = record_path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid Syncthing record "
+            f"({os_error_cause(e)})."
+        ) from e
+    try:
+        parsed = tomllib.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid Syncthing record "
+            f"(could not parse TOML: {safe_terminal_str(e)})."
+        ) from e
+    st_table = parsed.get("syncthing") if isinstance(parsed, dict) else None
+    if not isinstance(st_table, dict):
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid Syncthing record "
+            "(missing [syncthing] table)."
+        )
+    if "managed_device_id" not in st_table:
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid Syncthing record "
+            "(missing syncthing.managed_device_id)."
+        )
+    device_id = st_table.get("managed_device_id")
+    if not syncthing.is_device_id(device_id):
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid Syncthing record "
+            "(syncthing.managed_device_id is not a canonical Syncthing device ID)."
+        )
+    assert isinstance(device_id, str)
+    return device_id
 
 
 def patch_config_on_disk(updates: dict[str, dict[str, Any]], path: Path | None = None) -> None:

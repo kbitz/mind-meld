@@ -12,7 +12,7 @@ On a fresh Mac or Arch-based Linux machine, fetch and run the bootstrap script f
 mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap) && sh -c "$mm_bootstrap"
 ```
 
-It installs missing prerequisites (`python`, `pipx`, and `syncthing` with Homebrew on macOS, where a `python3` older than 3.11 counts as missing; `python`, `python-pipx`, `syncthing`, and `git` with `pacman -S --needed` on Arch-based Linux), checks that Python is 3.11 or newer and Syncthing is 2.1 or newer, installs `mm` through `pipx` from `@latest`, and verifies that `mm` on `PATH` is pipx's copy. It stops with the fixing command when Homebrew is missing or off `PATH` on macOS, on an unsupported system, when an installed Python or Syncthing is too old, or when `mm` is missing from `PATH`, shadowed by another install, or not pipx's copy. A rerun changes nothing. Pairing machines and sharing the folder stay manual — the script never touches Syncthing's configuration; see [Quick Start](#quick-start) for the next steps.
+It installs missing prerequisites (`python`, `pipx`, and `syncthing` with Homebrew on macOS, where a `python3` older than 3.11 counts as missing; `python`, `python-pipx`, `syncthing`, and `git` with `pacman -S --needed` on Arch-based Linux), checks that Python is 3.11 or newer and Syncthing is 2.1 or newer, installs `mm` through `pipx` from `@latest`, and verifies that `mm` on `PATH` is pipx's copy. Where Syncthing has no configuration yet or its default configuration and is not already running, the script starts Syncthing at login (`brew services start syncthing` on macOS, `systemctl --user enable --now syncthing.service` on Arch-based Linux); it never changes Syncthing's configuration itself. `mm init` sets Syncthing up on a default configuration, while a machine with its own Syncthing configuration follows [Configuring Syncthing yourself](#configuring-syncthing-yourself); see [Quick Start](#quick-start) for the next steps. The script stops with the fixing command when Homebrew is missing or off `PATH` on macOS, on an unsupported system, when an installed Python or Syncthing is too old, when starting Syncthing fails, or when `mm` is missing from `PATH`, shadowed by another install, or not pipx's copy. A rerun changes nothing.
 
 To install manually when you already have the prerequisites (Python 3.11+, pipx, and Syncthing 2.1 or newer sharing one folder between your machines):
 
@@ -285,14 +285,16 @@ ls ~/.claude/projects/*widgets*/memory
 **`mm init --new-fleet` and the new default storage path (Track 89A):** only
 `mm init --new-fleet` creates the fleet's key header (`mm-crypto-init`), and only
 in an empty folder; plain `mm init` joins, and when the header has not arrived
-it stops without writing anything, so a machine that joins before Syncthing
-has delivered the folder can no longer start a second fleet. On a join,
+it stops before registering the mm device or writing to the Mind Meld store.
+Managed Syncthing setup and its local record may already be saved, but a
+machine joining before delivery can no longer start a second fleet. On a join,
 `mm init` now also runs the first `mm pull` with the passphrase you just typed.
 The first machine of a brand-new fleet therefore needs `--new-fleet`; the
 typed `BRICK` override is gone. The default storage path is now
 `~/Sync/mind-meld`. It does not move an existing store or change a configured
-`storage.path`, and Macs still on iCloud Drive keep working. On such a Mac, `mm init` needs the
-iCloud path typed at the prompt. mm no longer rewrites the key header or
+`storage.path`, and configured Macs still on iCloud Drive keep syncing. New or restored
+machines now use the Syncthing setup described in Quick Start; `mm init` requires
+Syncthing to be running. mm no longer rewrites the key header or
 moves a differing copy: repair now only removes `mm-crypto-init` conflict
 copies that are byte-identical to the main file. Differing copies stay
 where they are (see [Key header copies differ](#key-header-copies-differ)),
@@ -560,18 +562,18 @@ not prove host usage was captured or published.
 
 ## Quick Start
 
-The storage path is the root of a Syncthing folder shared by every machine (`~/Sync/mind-meld` by default). A fleet still on iCloud Drive moves to Syncthing with the [cutover runbook](#moving-the-fleet-from-icloud-drive-to-syncthing-cutover-runbook); iCloud Drive is not supported after cutover ([docs/SPEC.md](docs/SPEC.md)). One block per role:
+The storage path is the root of a Syncthing folder shared by every machine (`~/Sync/mind-meld` by default). On a machine where Syncthing has its default configuration, `mm init` sets Syncthing up for you; on a machine that already has its own Syncthing configuration, `mm init` leaves Syncthing alone and points you to [Configuring Syncthing yourself](#configuring-syncthing-yourself). A fleet still on iCloud Drive moves to Syncthing with the [cutover runbook](#moving-the-fleet-from-icloud-drive-to-syncthing-cutover-runbook); iCloud Drive is not supported after cutover ([docs/SPEC.md](docs/SPEC.md)). One block per role:
 
 ```bash
 # First machine of a new fleet (empty folder):
-mm init --new-fleet   # creates the key header and .stignore, sets passphrase
+mm init --new-fleet   # sets up the Syncthing folder on default config, creates key header and .stignore, prints this machine's Syncthing device ID
 mm push --dry-run   # preview: changes nothing except the lock file
 mm push    # upload configured agent context
 ```
 
 ```bash
-# Every other machine (after Syncthing has delivered the folder):
-mm init    # verifies the passphrase, registers this device, pulls
+# Every other machine:
+mm init    # on default config: asks for the fleet machine's Syncthing device ID, pairs, prints this machine's ID and the approval command; once approved and the key header arrives, verifies the passphrase, writes .stignore, registers this device, pulls
 mm push    # publishes this machine's own files
 ```
 
@@ -582,7 +584,7 @@ mm pull --dry-run   # preview: changes nothing except the lock file
 mm pull    # download from another device, any time
 ```
 
-Plain `mm init` stops and writes nothing until the key header (`mm-crypto-init`) has arrived in the folder. Wait for Syncthing to finish delivering it, then run `mm init` again.
+Plain `mm init` never creates a key header and stops until the fleet's key header (`mm-crypto-init`) has arrived in the folder. Wait for Syncthing to finish delivering it, then run `mm init` again.
 
 Config lives at `~/.config/mind-meld/config.toml` — not tied to your current directory. Install `mm` anywhere, run from anywhere; it always syncs the sources configured in your global config.
 
@@ -592,14 +594,15 @@ See [Status verdicts](#status-verdicts) to interpret `mm status` after your firs
 
 To add another Mac or an Arch-based Linux machine to a Syncthing fleet (a fleet still on iCloud Drive moves first with the [cutover runbook](#moving-the-fleet-from-icloud-drive-to-syncthing-cutover-runbook)):
 
-1. Run the bootstrap script from [Install](#install) on the new machine.
-2. Start Syncthing with the command `bin/bootstrap` prints (`brew services start syncthing` on macOS, or `systemctl --user enable --now syncthing.service` on Arch-based Linux).
-3. Pair the new machine with an existing fleet machine ([Pairing machines in Syncthing](#pairing-machines-in-syncthing)), accept the shared folder at `~/Sync/mind-meld` with the [Syncthing folder options](#syncthing-folder-options), add `(?d)tmp*.tmp` to `~/Sync/mind-meld/.stignore` (Syncthing does not sync `.stignore` itself), and wait until Syncthing reports the folder `Up to Date`. The storage path you give `mm` is the **root of that Syncthing folder**.
-4. On Linux, install `libsecret` and `gnome-keyring` and unlock the login keyring in your desktop session before hooks run (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)).
-5. Run Claude Code once so `~/.claude` exists.
-6. `mm init` — accept `~/Sync/mind-meld` and enter the **same passphrase**. It verifies the passphrase against the fleet's key header, registers the new device against the existing roster, and pulls. If the key header has not arrived yet, `mm init` stops and writes nothing; rerun it once Syncthing delivers `mm-crypto-init`. If the folder is still syncing blobs, run `mm pull` again when delivery finishes.
-7. `mm push` — publishes anything this machine has that the others don't; push is what shares this machine's own files.
-8. Add the `# Mind Meld` hook block to your global agent instructions ([Claude Code Integration](#claude-code-integration)).
+1. Run the bootstrap script from [Install](#install) on the new machine. On a default Syncthing configuration it starts Syncthing at login (`brew services start syncthing` on macOS, or `systemctl --user enable --now syncthing.service` on Arch-based Linux).
+2. On Linux, install `libsecret` and `gnome-keyring` and unlock the login keyring in your desktop session before hooks run (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)).
+3. Run Claude Code once so `~/.claude` exists.
+4. Run `mm init` on the new machine:
+   - **Default Syncthing configuration (managed by `mm`):** choose an empty storage folder (normally `~/Sync/mind-meld`) and paste the Syncthing device ID of a machine already in the fleet (printed by `mm init --new-fleet` on the first machine, or shown in Syncthing's **Actions > Show ID**). `mm init` adds that fleet machine as an introducer, removes the unshared empty stock Default Folder at `~/Sync` when `~/Sync/mind-meld` sits inside it, and prints this machine's Syncthing device ID plus the approval command (`mm devices approve <device-id>`) to run on the fleet machine (or approve by hand under [Configuring Syncthing yourself](#configuring-syncthing-yourself)). After the fleet machine shares the `mind-meld` folder, rerun `mm init` here: it accepts the folder offer with mm's options, and once Syncthing delivers the key header (`mm-crypto-init`), verifies the **same passphrase**, writes `(?d)tmp*.tmp` to `.stignore`, registers the new device, and pulls.
+   - **Pre-existing Syncthing configuration (owner-managed):** `mm init` changes nothing in Syncthing and names [Configuring Syncthing yourself](#configuring-syncthing-yourself). Pair the machines, share the `mind-meld` folder at `~/Sync/mind-meld` with the [Syncthing folder options](#syncthing-folder-options), add `(?d)tmp*.tmp` to `~/Sync/mind-meld/.stignore`, wait for Syncthing to deliver `mm-crypto-init`, and rerun `mm init`.
+5. If the folder is still syncing blobs after `mm init` finishes, run `mm pull` again when delivery finishes.
+6. `mm push` — publishes anything this machine has that the others don't; push is what shares this machine's own files.
+7. Add the `# Mind Meld` hook block to your global agent instructions ([Claude Code Integration](#claude-code-integration)).
 
 A project's Claude memory lands only where mm can place it: in a Claude project folder that already exists on this machine for the checkout, or in the checkout you run `mm pull` from. Either way `~/.claude` must exist: on a new machine, run Claude once first, or mm skips the `claude` source and places nothing. A project you have not opened here is listed as `Not placed here` (see [Project memory across machines](#project-memory-across-machines)); clone it and run `mm pull` inside it.
 
@@ -613,12 +616,21 @@ After the first successful `mm push` on Machine A, open Machine B and `mm pull`,
 
 First-run-from-divergent-state is explicitly supported: if each machine already has its own memory/todos/analytics before you first run `mm init`, the three-way sync will merge the JSONLs, download missing files, and flag any true content conflicts as `.sync-conflict-*` for you to triage with `mm resolve`.
 
+### Configuring Syncthing yourself
+
+When Syncthing on a machine already has its own configuration (extra devices, non-default folders, or a shared/non-empty Default Folder), `bin/bootstrap` and `mm init` leave Syncthing untouched. Configure Syncthing by hand on that machine, or when approving a joining machine without `mm devices approve`:
+
+- **Pairing machines:** follow [Pairing machines in Syncthing](#pairing-machines-in-syncthing) so both machines show **Connected**.
+- **Sharing the folder:** share the storage folder root (default `~/Sync/mind-meld`) with Syncthing folder ID `mind-meld` (label `Mind Meld`). A joining machine where `mm` manages Syncthing looks for the folder offer with ID `mind-meld`.
+- **Five folder options and `.stignore`:** set the five [Syncthing folder options](#syncthing-folder-options) (`type = sendreceive`, `versioning = none`, `maxConflicts != 0`, `ignorePerms = false`, `order = alphabetic`) and add `(?d)tmp*.tmp` to `.stignore` in the storage folder on every owner-managed machine (`mm init` writes `.stignore` automatically on machines where `mm` manages Syncthing).
+- **Approving a new machine by hand on a fleet machine:** in the fleet machine's Syncthing GUI, accept the incoming device connection request (or click **Add Remote Device** and paste the joining machine's Syncthing device ID), open the `mind-meld` folder's **Edit > Sharing** tab, check the new device so Syncthing offers `mind-meld` to it, optionally mark the device as **Introducer** so it learns the rest of the fleet automatically, and save.
+
 ### Pairing machines in Syncthing
 
 1. Open Syncthing's web GUI on each machine at the address `mm diag` reports as `gui_address` (default `http://127.0.0.1:8384`).
 2. Exchange device IDs: in the GUI, open **Actions > Show ID** to copy each machine's Device ID.
 3. Click **Add Remote Device**, paste the other machine's Device ID, and save; accept the connection prompt on the other machine (or add each side on both machines) so both show **Connected**.
-4. On the machine that already has `~/Sync/mind-meld` configured in Syncthing, open the folder's **Edit** dialog, check the remote device under the **Sharing** tab, and save.
+4. On the machine that already has `~/Sync/mind-meld` configured in Syncthing, confirm the folder ID is `mind-meld`, open the folder's **Edit** dialog, check the remote device under the **Sharing** tab, and save.
 5. On the joining machine, accept the incoming folder share prompt with path `~/Sync/mind-meld`, apply the [Syncthing folder options](#syncthing-folder-options) below, and add `(?d)tmp*.tmp` to `~/Sync/mind-meld/.stignore`.
 
 ### Syncthing folder options
@@ -629,12 +641,12 @@ Share the storage folder's root (by default `~/Sync/mind-meld`), not a parent or
 - **`versioning = none`** — mm keeps its own conflict and deleted-file copies; Syncthing's `.stversions` duplicates encrypted blobs without context.
 - **`maxConflicts != 0`** (keep Syncthing's default `-1` or any positive count, never `0`) — `0` deletes losing conflict copies silently, which can discard a manifest or device update before mm can read it.
 - **`ignorePerms = false`** — mode `0600` on synced files must survive.
-- **`order = alphabetic`** — blobs under `data/` arrive before the `manifests/` that name them, reducing waiting pulls.
-- **`.stignore` contains `(?d)tmp*.tmp`** — `mm init --new-fleet` writes `.stignore` on the first machine; add `(?d)tmp*.tmp` to `.stignore` by hand in the synced folder on every other machine, because Syncthing does not sync `.stignore` itself.
+- **`order = alphabetic`** — blobs under `data/` arrive before the `manifests/` that name them.
+- **`.stignore` contains `(?d)tmp*.tmp`** — `mm init --new-fleet` and a managed `mm init` join write `.stignore` automatically; add `(?d)tmp*.tmp` to `.stignore` by hand in the synced folder on any machine where you configure Syncthing yourself, because Syncthing does not sync `.stignore` itself.
 
-Syncthing's first start can create a **Default Folder** at `~/Sync`, which is the parent directory of `~/Sync/mind-meld`. Share `~/Sync/mind-meld` as its own Syncthing folder — never share only the parent `~/Sync`. If you do not use the **Default Folder** at `~/Sync`, remove it in the Syncthing GUI (**Edit > Remove**, which removes the Syncthing folder entry without deleting files on disk); if you keep `~/Sync` shared for other files, keep the store out of it by adding `/mind-meld` (or `mind-meld`) to `~/Sync/.stignore` on every machine that shares `~/Sync`.
+Syncthing's first start can create a **Default Folder** at `~/Sync`, which is the parent directory of `~/Sync/mind-meld`. Share `~/Sync/mind-meld` as its own Syncthing folder — never share only the parent `~/Sync`. On a default Syncthing configuration, `mm init` removes the unshared empty **Default Folder** automatically when your storage path sits inside `~/Sync`. If you configure Syncthing yourself and do not use the **Default Folder** at `~/Sync`, remove it in the Syncthing GUI (**Edit > Remove**, which removes the Syncthing folder entry without deleting files on disk); if you keep `~/Sync` shared for other files, keep the store out of it by adding `/mind-meld` (or `mind-meld`) to `~/Sync/.stignore` on every machine that shares `~/Sync`.
 
-mm discovers Syncthing's local `config.xml`, reads its local REST API with the API key from that file, sends only `GET` requests with short timeouts, and never changes Syncthing's configuration. `mm status` shows the Syncthing connection and folder state, and `mm diag` checks each folder option above and `.stignore`. Inspection prefers a folder matching the storage root; for an existing parent-folder share, it reports and checks the deepest containing folder and that folder's `.stignore`.
+mm discovers Syncthing's local `config.xml` and talks to its local REST API with the API key from that file using short timeouts. On a machine where mm found Syncthing's default configuration when it set Syncthing up (recorded in `~/.config/mind-meld/syncthing.toml`), `mm init` creates or accepts mm's folder (`mind-meld`), adds the pasted fleet device and marks it introducer, and may remove the unshared empty Default Folder, through Syncthing's local REST API; `mm status` and `mm diag` send only `GET` requests, and mm never changes a pre-existing Syncthing configuration. `mm status` shows the Syncthing connection and folder state, and `mm diag` checks each folder option above and `.stignore`. Inspection prefers a folder matching the storage root; for an existing parent-folder share, it reports and checks the deepest containing folder and that folder's `.stignore`.
 
 Status reports Syncthing's folder state and needed-file count independently: queued files do not mean it is actively syncing. It says `up to date` only when the folder is idle and both needed files and pull errors are known to be zero. Positive pull-error counts direct you to `mm diag`, which also displays the count; `mm diag --json` retains an unknown count as `syncthing.pull_errors: null`.
 
@@ -728,7 +740,7 @@ Use the **absolute path printed on each machine** for both its `mm init` storage
    mm pull --dry-run
    ```
 
-   Then add `~/Sync/mind-meld` in Syncthing as its own folder with all five [Syncthing folder options](#syncthing-folder-options), put the `# Mind Meld` hook block back in `~/.claude/CLAUDE.md` (and Codex instructions if used), and run `mm push`.
+   Then add `~/Sync/mind-meld` in Syncthing as its own folder with folder ID `mind-meld` and all five [Syncthing folder options](#syncthing-folder-options), put the `# Mind Meld` hook block back in `~/.claude/CLAUDE.md` (and Codex instructions if used), and run `mm push`.
 
 5. **Another Mac (any other Mac that stays in the fleet): pair, switch `storage.path`, and restore hooks.**
    On **another Mac** that stays active:
@@ -1024,8 +1036,8 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 |---------|-------------|
 | `mm --version` | Print the installed version and exit |
 | `mm update` | Update mm to the latest release through pipx. Needs no config or passphrase. Exit 0 means mm is on the latest release; exit 1 means the update did not complete, or `mm update` leaves this install alone (a source-tree build, a non-pipx install, a `pipx pin` or a fork; the message names the fix). `pull` and `push` do this on their own — see [Automatic updates](#automatic-updates) |
-| `mm init` | Join the fleet: verify the passphrase against the key header in the storage folder, register this device, save config and pull. Stops and writes nothing until the key header has arrived |
-| `mm init --new-fleet` | First machine of a new fleet only: create the key header (`mm-crypto-init`) and `.stignore` in an empty folder |
+| `mm init` | Check Syncthing; on a default configuration, ask for a fleet device ID and set up sharing. Wait for its key header, then verify the passphrase, register this device, save config and pull. Syncthing setup may be saved while waiting; no mm device entry, config or key header is written |
+| `mm init --new-fleet` | First machine of a new fleet only: set up default Syncthing, create the key header (`mm-crypto-init`) and `.stignore` in an empty folder, and print this machine's Syncthing device ID. Refuses a managed folder already shared with peers |
 | `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture) |
 | `mm push --dry-run` | Preview publication and deletions (files a recreated scan folder hides are not counted as deletions); changes nothing except the local lock file |
 | `mm pull --dry-run` | Preview what a pull would write, merge, conflict, delete or hold back as `older` (add `--verbose` for why a file with a deletion record is kept: `keep (<reason>)`); changes nothing except the local lock file |
