@@ -851,7 +851,7 @@ _tombstone: 93_
 - Delivered: README's onboarding for macOS and Arch-based Linux with the bootstrap script, pairing and the five Syncthing folder options, an optional isolated rehearsal, and the nine-step role-named cutover runbook (update, push and stop hooks, copy the store out of iCloud Drive, switch `storage.path`, the per-machine `.stignore` rule, Linux joins one at a time, the owner checks, retiring a dead machine, and deleting the iCloud folder last after convergence); AGENTS.md, root SPEC.md and the sync and init invariants describe the Syncthing folder; package metadata names Syncthing; `tests/test_version.py` fails when `VERSION` and `pyproject.toml` differ.
 
 ## Individual Track history
-_tombstone: 113, 114, 115_
+_tombstone: 113, 114, 115, 116_
 
 ### Track 113A: Sync gstack-extend's per-host run history ✓ Shipped (v1.12.21)
 
@@ -870,3 +870,9 @@ _tombstone: 113, 114, 115_
 - 2026-11-07: merged [PR #286](https://github.com/kbitz/mind-meld/pull/286) (commit `488094e6172547a9e74bb8e504cc19366b2b5b4a`); verified land-time Track 115A, original/current Group 115, factory branch `mmm/b5023320`. Card placed by the 2026-11-07 regeneration (`569777c`, PR #283). Plan SHA-256 `a2ccf84d9416e17206110e757c7f46d7f7f198bbf5d00dd1516fc8b57c290d36`. PATCH release.
 - Closure evidence: the PR's completion matrix records 19 of 19 VERIFIED (criteria 1 to 12, T1 to T7), none partial, missing, unverifiable or deferred; caller-attested full `./bin/check` 11,269 passed, 32 skipped. The plan kept the git push cursor's hold and coverage warnings, which the card had misnamed as Cursor symbols (criterion 3). Two test gaps went to the inbox.
 - Delivered: the Cursor reader, its SQLite adapter, hook editor, spool, caches, registry entries, diagnostics and fixtures are gone; Codex, Grok Build, Muse and Antigravity readers remain; older published Cursor rows keep their totals and render with the generic retired-reader label; the recorded test gap "Grok diagnostic unknown-state branches" has its tests.
+
+### Track 116A: Remove Cursor from git-root discovery, pricing provenance and retro-fleet ✓ Shipped (v1.12.24)
+
+- 2026-11-07 (UTC 2026-11-08): merged [PR #287](https://github.com/kbitz/mind-meld/pull/287) (commit `7ea2cc0660b80d8b04feac17e703447da043cdd4`); verified land-time Track 116A, original/current Group 116, factory branch `mmm/fc43e378`. Card placed by the 2026-11-07 regeneration (`569777c`, PR #283); the inbox item "Cursor leftovers after Track 114A" was added to it by the next regeneration (PR #288) and drained by this Track. Plan SHA-256 `15b39ea8e2fa2960c811941611737576cf10f4c2588a6be34592c4defbf11efe`. PATCH release.
+- Closure evidence: the PR's completion matrix records 15 of 17 rows VERIFIED (C1 to C6, C8 to C10 and T1 to T6), with C7 and T7, the full suite, awaiting the external gate; `./bin/check` then passed on the release head `cb1527a9c358`, which covers them. The review stopped at its cycle cap and was released under the capped-release rule with the owner's go ("Karl 1a"), all findings fixed and nothing unresolved. No test gap recorded.
+- Delivered: git-root discovery no longer reads Cursor's ACP sessions or Conductor's Cursor store, and the legacy `[retro] cursor_host_usage` key has no reader left; Grok pricing cites xAI rather than Cursor, and `MM_HEALTH.pricing` drops the Cursor fields; retro-fleet and its SKILL.md drop Cursor and the ACP gap note, and the no-reader note names `codex`, `grok`, `muse` and `agy`; invariants, the host-parity design and README match.

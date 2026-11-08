@@ -14,8 +14,8 @@ names a directory is read for that directory alone. No session is attributed
 to a project from its working directory, and no working directory leaves this
 machine.
 
-Credential-bearing neighbours are never opened: Cursor ``projects/*`` and
-``chats/*``, ``~/.gemini/antigravity-cli/antigravity-oauth-token`` and
+Credential-bearing neighbours are never opened:
+``~/.gemini/antigravity-cli/antigravity-oauth-token`` and
 ``~/.paseo/config.json``. Every reader names its record files exactly.
 """
 
@@ -559,126 +559,6 @@ def _muse_read(home: Path, key: str, deadline: float | None):
 
 
 # ---------------------------------------------------------------------------
-# Cursor (provider, usage consent): ACP sessions and Conductor's SDK store.
-# Never opens ~/.cursor/projects/* or ~/.cursor/chats/*.
-# ---------------------------------------------------------------------------
-
-_CURSOR_ACP_CAP = 64 * 1024
-_CURSOR_NDJSON_CAP = 8 * 1024 * 1024
-_CONDUCTOR_STORE = ("Library", "Application Support", "com.conductor.app", "cursor-sdk-store")
-
-
-def _cursor_acp_root(home: Path) -> Path:
-    return home / ".cursor" / "acp-sessions"
-
-
-def _cursor_list(home: Path, state: dict, deadline: float | None):
-    _check_home(home)
-    units: list[tuple[str, Stamp]] = []
-    root = _cursor_acp_root(home)
-    entries = _listing_entries(root, state, deadline)
-    if entries is None:
-        return None
-    sessions = [(entry.st_mtime_ns, entry.name) for entry in entries if entry.is_dir()]
-    sessions.sort(reverse=True)
-    units.extend((f"acp/{name}", None) for _mtime, name in sessions)
-    stores = _child_dirs(home.joinpath(*_CONDUCTOR_STORE), _FILE_NAME, deadline, state)
-    if stores is None:
-        return None
-    parts = state.setdefault("listing_stores", {})
-    for store in stores:
-        if store.name in parts:
-            units.extend(parts[store.name])
-            continue
-        if _expired(deadline):
-            return None
-        start = len(units)
-        ndjson = _lstat(Path(store.path) / "agents.ndjson")
-        if ndjson is not None and stat.S_ISREG(ndjson.st_mode):
-            units.append(
-                (f"conductor/{store.name}/agents.ndjson", [ndjson.st_mtime_ns, ndjson.st_size])
-            )
-        stamp = _sqlite_stamp(Path(store.path) / "index.db")
-        if stamp is not None:
-            units.append((f"conductor/{store.name}/index.db", stamp))
-        parts[store.name] = units[start:]
-    return units
-
-
-def _cursor_read(home: Path, key: str, deadline: float | None):
-    return _cursor_resume(home, key, deadline, {})
-
-
-def _cursor_resume(home: Path, key: str, deadline: float | None, state: dict, consume=None):
-    _check_home(home)
-    kind, _, rest = key.partition("/")
-    if kind == "acp":
-        if not _FILE_NAME.fullmatch(rest) or rest in (".", ".."):
-            return None, True
-        data = _loads(_read_capped(_cursor_acp_root(home) / rest / "meta.json", _CURSOR_ACP_CAP))
-        if not isinstance(data, dict):
-            return None, True
-        paths = _strings([data.get("cwd")])
-        return paths or None, True
-    store, _, name = rest.partition("/")
-    if kind != "conductor" or not _FILE_NAME.fullmatch(store) or store in (".", ".."):
-        return None, True
-    directory = home.joinpath(*_CONDUCTOR_STORE) / store
-    if name == "agents.ndjson":
-        return _cursor_ndjson(directory / name, deadline, state, consume)
-    if name == "index.db":
-        if _lstat(directory / "index.db-journal") is not None:
-            return None, True  # mid-transaction; the stamp changes when it settles
-        try:
-            values = _sqlite_first_column(
-                directory / name, "SELECT workspace_ref FROM agents", deadline
-            )
-        except _Cut:
-            return None, False
-        if values is None:
-            return None, True
-        return _strings(v for v in values if isinstance(v, str) and v.startswith("/")), True
-    return None, True
-
-
-def _cursor_ndjson(path: Path, deadline: float | None, state: dict, consume=None):
-    fh = _open_regular(path)
-    if fh is None:
-        return None, True
-    found: list[Any] = []
-    offset = state.get("offset", 0)
-    if not isinstance(offset, int) or not 0 <= offset < _CURSOR_NDJSON_CAP:
-        offset = 0
-    try:
-        with fh:
-            fh.seek(offset)
-            lines = token_usage.iter_bounded_lines(
-                _RecordStream(fh, _CURSOR_NDJSON_CAP - offset, deadline),
-                str(path),
-                offset,
-                label="root probe",
-                yield_final_partial=True,
-            )
-            for raw, end in lines:
-                record = _loads(raw.strip())
-                if isinstance(record, dict):
-                    cwd = record.get("cwd")
-                    if consume is not None:
-                        if not consume(cwd):
-                            return [], False
-                    else:
-                        found.append(cwd)
-                state["offset"] = end
-    except _Cut:
-        return _strings(found), False
-    except _ReadLimit:
-        return _strings(found), True
-    except OSError:
-        return None, True
-    return _strings(found), True
-
-
-# ---------------------------------------------------------------------------
 # Codex (provider): rollouts' first record, a session_meta carrying payload.cwd.
 # Units are live day directories and archived date groups. Never opens
 # state_5.sqlite or session_index.jsonl (neither is read: see Track 102A).
@@ -963,8 +843,8 @@ def _codex_resume(home: Path, key: str, deadline: float | None, state: dict, con
 
 # ---------------------------------------------------------------------------
 # Registry. Order is load-bearing: discovery stops at its deadline, so cheap
-# probers run first and a cold Codex or Cursor corpus cannot starve Paseo or
-# mmm. Attribution goes to the first prober that finds a root.
+# probers run first and a cold Codex corpus cannot starve Paseo or mmm.
+# Attribution goes to the first prober that finds a root.
 # ---------------------------------------------------------------------------
 
 PROBERS: tuple[RootProber, ...] = (
@@ -972,7 +852,6 @@ PROBERS: tuple[RootProber, ...] = (
     RootProber("mmm", "tool", _mmm_list, _mmm_read),
     RootProber("agy", "provider", _agy_list, _agy_read),
     RootProber("muse", "provider", _muse_list, _muse_read),
-    RootProber("cursor", "provider", _cursor_list, _cursor_read, _cursor_resume, _cursor_resume),
     RootProber("codex", "provider", _codex_list, _codex_read, _codex_resume, _codex_resume),
 )
 

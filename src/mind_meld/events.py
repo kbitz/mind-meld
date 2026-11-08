@@ -81,10 +81,11 @@ WALK_TIME_BUDGET_INTERACTIVE_MS = 500
 WALK_TIME_BUDGET_AUTOPUSH_MS = 250
 ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS = 100
 ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS = 50
-# Attended push with the partitioned tail (Track 106A). A cold Codex and Cursor
-# index measured about 3.2 s to finish on one Mac (2.8 s unbounded pass plus a
-# 0.4 s closing pass); 1,500 ms per push finishes it within three pushes, and
-# a warm index costs about 0.1 s of it. The tail deadline still clamps it.
+# Attended push with the partitioned tail (Track 106A). A cold index measured
+# about 3.2 s to finish on one Mac when it included a prober Track 116A
+# removed (2.8 s unbounded pass plus a 0.4 s closing pass); 1,500 ms per push
+# finishes it within three pushes, and a warm index costs about 0.1 s of it.
+# The tail deadline still clamps it.
 ROOT_DISCOVERY_BUDGET_ATTENDED_MS = 1500
 MAX_GIT_WORKERS = 8
 PER_REPO_TIMEOUT_FLOOR_MS = 200
@@ -421,10 +422,9 @@ tuple (the writer) and from the gate. Do not serialize this constant into a
 row; see ``make_host_usage_snapshot``.
 
 ``grok`` (Grok Build, Track 110A) stays at index 1, right after ``codex``:
-retained rows from mm 1.11.7 and earlier list ``grok`` before ``cursor``
-(``fb0e12d^`` had ``("codex", "grok", "cursor", "muse")``). After Track 115A,
-``cursor`` is a retired name: the aggregator keeps it on retained rows as an
-unknown name and does not advance the known-name position for it
+retained rows from mm 1.11.7 and earlier list ``grok`` before ``muse``.
+Retired reader names are kept on retained rows as unknown names and do not
+advance the known-name position for them
 (``aggregator._token_sources_subsequence``)."""
 
 HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "muse", "agy")
@@ -750,10 +750,8 @@ def discover_git_roots(
     # that names a directory, so a "gstack" enabled source stays a no-op for
     # discovery. The registry runs `_probe_claude`, then the host-record
     # probers in `rootprobes.PROBERS` order (cheap tools first, so a cold
-    # Codex or Cursor corpus cannot starve Paseo or mmm).
-    host_probers = (
-        [] if exceeded or deadline_expired() else _enabled_root_probers(config, enabled_sources)
-    )
+    # Codex corpus cannot starve Paseo or mmm).
+    host_probers = [] if exceeded or deadline_expired() else _enabled_root_probers(enabled_sources)
     host_prober_names = {prober.name for prober in host_probers}
     if "claude" in enabled_sources:
         probers.append(("claude", _probe_claude))
@@ -1002,12 +1000,11 @@ def _enabled_source_names(config: dict) -> set[str]:
     return {n for n in names if isinstance(n, str) and n not in disabled}
 
 
-def _enabled_root_probers(config: dict, enabled_sources: set[str]) -> list[rootprobes.RootProber]:
+def _enabled_root_probers(enabled_sources: set[str]) -> list[rootprobes.RootProber]:
     """Host-record probers that may run, in registry order.
 
     A provider runs under the consent its usage reader already uses: its
-    enabled sync source (codex, muse, agy) or, for Cursor until Track 116A,
-    the legacy ``[retro] cursor_host_usage`` key. A tool runs when its record
+    enabled sync source (codex, muse, agy). A tool runs when its record
     exists.
     """
     home = rootprobes._discovery_home()
@@ -1015,11 +1012,6 @@ def _enabled_root_probers(config: dict, enabled_sources: set[str]) -> list[rootp
     for prober in rootprobes.PROBERS:
         if prober.kind == "tool":
             allowed = rootprobes.installed(prober, home)
-        elif prober.name == "cursor":
-            # Track 114A removed cursor_host_usage_enabled; Track 116A removes
-            # this prober and this last reader of the legacy key.
-            retro = config.get("retro")
-            allowed = isinstance(retro, dict) and retro.get("cursor_host_usage") is True
         else:
             allowed = prober.name in enabled_sources
         if allowed:
@@ -1488,7 +1480,6 @@ def _probe_host_records(
                 "unit_remaining",
                 "round_incomplete",
                 "listing_steps",
-                "listing_stores",
             ):
                 state.pop(name, None)
         return complete, not remaining

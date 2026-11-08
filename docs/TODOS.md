@@ -55,12 +55,12 @@ Run by `/project-spec` and a full `/roadmap` regeneration from manager Ephesus 1
 | Track 113A: Sync gstack-extend's per-host run history | shipped: receipt added (PR #284, `d4a104b`, 8 of 8 VERIFIED) |
 | Track 114A: Remove `mm cursor-agent`, Cursor's hook command and Cursor usage consent | shipped: receipt added (PR #285, `4b36180`, 16 of 16 VERIFIED) |
 | Track 115A: Remove the Cursor usage reader | shipped: receipt added (PR #286, `488094e`, 19 of 19 VERIFIED) |
-| Track 116A: Remove Cursor from git-root discovery, pricing provenance and retro-fleet | keep: premises re-verified at `488094e`; gains the inbox item below and `src/mind_meld/events.py` |
+| Track 116A: Remove Cursor from git-root discovery, pricing provenance and retro-fleet | keep: premises re-verified at `488094e`; gains the inbox item below and `src/mind_meld/events.py`. It then shipped (PR #287, `7ea2cc0`, v1.12.24) while this PR was open; the merge of main records its receipt and retires Group 116 |
 | Track 117A (previous plan): Rewrite the git history to remove the owner's machine hostnames | keep as Track 121A, blocked also by Track 120A so it stays last |
 | Brief: no migration tool, per-machine move by reinstall and join (Karl, 2026-11-07) | place: Track 120A (README per-machine move replacing the cutover runbook, and a no-loss join test) |
 | Brief: mm sets Syncthing up when it has its default configuration, guide otherwise (Karl, 2026-11-07) | place: Tracks 117A (classifier and writer) and 118A (bootstrap starts Syncthing at login, `mm init` setup and the guide) |
 | Brief: approval by one pasted device ID, exact match, never automatic; auto full mesh (Karl, 2026-11-07) | place: Track 119A (a move-only first task for `mm devices`, as core-and-extensions requires, then `mm devices approve` and introducers) |
-| `[review]` Cursor leftovers after Track 114A (aggregator note offers `cursor`; `disable-source cursor --force` leaves the prober running) | place → Track 116A: re-verified at `488094e` (`aggregator.py` "No agent-log reader contributed" note; `events._enabled_root_probers` `prober.name == "cursor"` branch) |
+| `[review]` Cursor leftovers after Track 114A (aggregator note offers `cursor`; `disable-source cursor --force` leaves the prober running) | place → Track 116A, which discharged it (see the Track 116A drain record below): re-verified at `488094e` (`aggregator.py` "No agent-log reader contributed" note; `events._enabled_root_probers` `prober.name == "cursor"` branch) |
 | `[review]` Track 115A card lists the push cursor's hold and coverage warnings as Cursor symbols | discharged@488094e: Track 115A's plan preserved them (completion matrix criterion 3, "preserve challenged progress warnings"); `_CURSOR_HOLD_DEGRADATION` and `_CURSOR_COVERAGE_DEGRADATION` remain in `events_tail.py` |
 | `[review]` Cursor-removal doc nits for Track 115A | discharged@488094e: README's Track 114A Upgrading note now qualifies machines with no consented host reader; `events_tail._HOST_DISPLAY_NAMES` has no `cursor` entry |
 | `[review]` Test gap: retained SQLite diagnostic code filtering | defer: no planned Track touches `src/mind_meld/host_usage.py` and `tests/test_agy_usage.py`; revisit when a Track's `_touches:` cover them |
@@ -76,6 +76,14 @@ Run by `/project-spec` and a full `/roadmap` regeneration from manager Ephesus 1
 **Future kept (19, including the two bootstrap test gaps above):** the remaining entries were re-derived on the 2026-11-07 regeneration that preceded this one; none of their triggers is met by the new Tracks, and the manifestation gate prunes none (the unlink guard is the irreversible quadrant; the Antigravity and `mm status` hang entries were observed).
 
 **Version:** documentation-only change; no bump. The amended release policy changes the 2.0.0 conditions and adds no checkpoint; no `## Acceptance` entry is added.
+
+### Track 116A drain — 2026-11-07
+
+Drained by Track 116A (`/implement`, branch `mmm/fc43e378`):
+
+| Item | Disposition |
+|---|---|
+| `[review]` Cursor leftovers after Track 114A: dead `enable-source cursor` hint and a no-op `disable-source cursor --force` | discharged in Track 116A: `rootprobes.py` removes the `cursor` prober, `events._enabled_root_probers` drops `[retro] cursor_host_usage`, and `aggregator.py`'s no-reader note names `codex`, `grok`, `muse` and `agy` |
 
 ### Roadmap regeneration — 2026-11-07 (Cursor removed, history scrub before 2.0, Future cleanup)
 

@@ -916,9 +916,8 @@ def aggregate_agent_usage(
         # pointed at a Claude model, or a legacy peer). Dropping the host side
         # would silently lose real tokens, so the row means "usage of this
         # model family across the fleet" and both sources add into it. The two
-        # corpora are disjoint: host_usage reads Codex, Grok Build and Cursor
-        # (Conductor plus standalone) ledgers, never Claude Code session jsonls. Cursor offers
-        # Claude models too (not observed in the initial Cursor census).
+        # corpora are disjoint: host readers read Codex, Grok Build, Muse and
+        # Antigravity records, never Claude Code session jsonls.
         merged_by_model = {m: dict(b) for m, b in existing.by_model.items()}
         for model, usage_bucket in host_row.by_model.items():
             dest = merged_by_model.setdefault(model, {k: 0 for k in token_usage.TOKEN_FIELDS})
@@ -3796,8 +3795,8 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
         detailed.append(model)
     if not models:
         return None
-    # grok-4.6-build stays a Grok Build log limit. Every Grok 4.7 id (Fast,
-    # effort and -build included) has uncertainty from the per-request tier a
+    # grok-4.6-build stays a Grok Build log limit. Every Grok 4.7 id
+    # (-build included) has uncertainty from the per-request tier a
     # per-turn aggregate cannot recover.
     if any(model in token_usage.GROK_47_MODEL_IDS for model in detailed):
         lead = (
@@ -3806,27 +3805,6 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
     else:
         lead = "Grok's logs do not record per-request prompt sizes; no action resolves this ("
     return lead + "; ".join(models) + ")"
-
-
-CURSOR_ACP_GAP_NOTE = (
-    "Cursor runs through ACP front-ends such as Paseo are not counted: cursor-agent's ACP "
-    "mode reports no usage and fires no completion hook, so no action resolves this."
-)
-
-
-def _cursor_acp_gap_notes(data: RetroData) -> list[str]:
-    """Name the known Cursor coverage gap when any machine published Cursor usage.
-
-    Kept apart from ``_agent_coverage_notes``: it is not a refresh problem, so it
-    carries no attended-producer remedy.
-    """
-    inventory = data.host_inventory
-    if not isinstance(inventory, HostUsageInventory):
-        return []
-    for snap in inventory.by_device.values():
-        if isinstance(snap, HostDeviceSnapshot) and "cursor" in snap.consulted:
-            return [CURSOR_ACP_GAP_NOTE]
-    return []
 
 
 def _agent_coverage_notes(
@@ -3886,7 +3864,7 @@ def _agent_coverage_notes(
             # the latter as a consent failure.
             notes.append(
                 "No agent-log reader contributed on any machine. If no source is enabled, "
-                "enable with `mm enable-source codex` (or `cursor`, `muse`, or `agy`), then "
+                "enable with `mm enable-source codex` (or `grok`, `muse`, or `agy`), then "
                 f"{_attended_usage_remedy()}; readers with no attributable local ledger "
                 "are also omitted."
             )
@@ -4479,7 +4457,6 @@ def _render_health_block(
     builtin_date = min(
         token_usage.PRICING_LAST_UPDATED,
         token_usage.PRICING_OPENAI_LAST_UPDATED,
-        token_usage.PRICING_CURSOR_LAST_UPDATED,
         token_usage.PRICING_XAI_LAST_UPDATED,
         token_usage.PRICING_GOOGLE_LAST_UPDATED,
         token_usage.PRICING_MUSE_LAST_UPDATED,
@@ -4501,10 +4478,8 @@ def _render_health_block(
             "anthropic_url": "https://platform.claude.com/docs/en/about-claude/pricing",
             "openai_verified": token_usage.PRICING_OPENAI_LAST_UPDATED,
             "openai_url": "https://developers.openai.com/api/docs/pricing",
-            "cursor_verified": token_usage.PRICING_CURSOR_LAST_UPDATED,
-            "cursor_url": "https://cursor.com/docs/models/grok-4-7",
             "xai_verified": token_usage.PRICING_XAI_LAST_UPDATED,
-            "xai_url": "https://docs.x.ai/developers/models/grok-4.6",
+            "xai_url": "https://docs.x.ai/developers/models",
             "google_verified": token_usage.PRICING_GOOGLE_LAST_UPDATED,
             "google_url": "https://ai.google.dev/gemini-api/docs/pricing",
             "muse_verified": token_usage.PRICING_MUSE_LAST_UPDATED,
@@ -4791,8 +4766,6 @@ def format_retro(
         for detail in _extrapolation_notes(row.by_model, scope=row.label):
             note("pricing_extrapolated", detail, agent=row.label)
     for detail in _agent_coverage_notes(data, view=agent_view, labels=labels):
-        note("agent_coverage", detail)
-    for detail in _cursor_acp_gap_notes(data):
         note("agent_coverage", detail)
     if data.fleet.unregistered_event_devices:
         note(

@@ -260,17 +260,6 @@ short-context, not Batch / Flex / Fast / long-context.
 ``gpt-5.6-terra`` during review ($2/$12 vs $2.50/$15); this table uses
 the official page on this date, not a third-party aggregator."""
 
-PRICING_CURSOR_LAST_UPDATED = "2026-11-05"
-"""Cursor: https://cursor.com/docs/models-and-pricing and
-https://cursor.com/docs/models/grok-4-7, verified on this date. Standard
-Grok 4.7 shares xAI's $2/$0.50/$0/$6 card; >256k input per REQUEST doubles
-it ($4/$1/$0/$12). Fast mode bills on its own ``grok-4.7-fast`` pseudo-id
-card at 2x standard ($4/$1/$0/$12) and 3x standard at >256k long context
-($6/$1.50/$0/$18), ending 1.2.0's deliberately unpriced Fast policy. Effort
-has no separate rate; flat effort/Fast ids alias onto ``grok-4.7`` and
-``grok-4.7-fast``. Per-turn aggregates cannot select the context tier.
-Cache-write price is unpublished (0.0), not proven free."""
-
 PRICING_GOOGLE_LAST_UPDATED = "2026-10-22"
 """Google Gemini API rates: https://ai.google.dev/gemini-api/docs/pricing, accessed
 on this date. Antigravity uses Google Gemini models. Censused models:
@@ -414,28 +403,12 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # repaired the reader, but no Grok tokens had reached the wire. The base
 # card is always a floor: aggregate counters cannot recover request tiers.
 #
-# Track 109B prices Cursor Grok Fast as a ``grok-4.7-fast`` pseudo-id card
-# in ``VENDOR_FAMILY_TIERS`` / ``VENDOR_LONG_CONTEXT_TIERS`` rather than a
-# parameter on the base card: ``resolve_prices`` and ``estimate_cost`` take a
-# string model id (not ``(id, params)``), and ``grok-4.7-fast`` already sits
-# in ``cursor-host-tokens.json`` and synced ``mm-events`` rows. Every other
-# Grok 4.7 id normalizes by dropping its suffix: effort (``-low``, ``-medium``,
-# ``-high``, ``-xhigh``) and ``-build`` drop to ``grok-4.7``, and a trailing
-# ``-fast`` keeps Fast as ``grok-4.7-fast``. These exact aliases let
-# already-cached or peer-published ids price without a cache reset.
+# Grok Build's observed Grok 4.7 id is ``grok-4.7-build``, which aliases
+# onto the xAI ``grok-4.7`` card alongside exact ``grok-4.7``.
 GROK_47_MODEL_IDS: frozenset[str] = frozenset(
     {
         "grok-4.7",
-        "grok-4.7-fast",
         "grok-4.7-build",
-        "grok-4.7-low",
-        "grok-4.7-medium",
-        "grok-4.7-high",
-        "grok-4.7-xhigh",
-        "grok-4.7-low-fast",
-        "grok-4.7-medium-fast",
-        "grok-4.7-high-fast",
-        "grok-4.7-xhigh-fast",
     }
 )
 
@@ -449,10 +422,7 @@ PRICING_FAMILY_BY_MODEL: dict[str, str] = {
     "gemini-4-argon": "gemini-4-argon",
     "gemini-3.8-flash": "gemini-3.8-flash",
     "grok-4.6-build": "grok-4.6",
-    **{
-        model: "grok-4.7-fast" if model.endswith("-fast") else "grok-4.7"
-        for model in sorted(GROK_47_MODEL_IDS)
-    },
+    **{model: "grok-4.7" for model in sorted(GROK_47_MODEL_IDS)},
     "gpt-6-astra": "gpt-6-astra",
     "gpt-5.6-terra": "gpt-5.6-terra",
     "gpt-5.6-sol": "gpt-5.6-sol",
@@ -501,7 +471,7 @@ VERIFIED_MODEL_IDS = frozenset(
 )
 
 # Track 111B: Grok aliases whose local pricing override can also come from their
-# underlying card id (`grok-4.7`, `grok-4.7-fast`, `grok-4.6`), under both ids'
+# underlying card id (`grok-4.7`, `grok-4.6`), under both ids'
 # date gates. Identity entries are excluded; exact-id overrides take precedence.
 _GROK_OVERRIDE_CARD_BY_MODEL: dict[str, str] = {
     m: f for m, f in PRICING_FAMILY_BY_MODEL.items() if m.startswith("grok-") and m != f
@@ -531,24 +501,13 @@ VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
         "cache_create": 0.0,
         "output": 3.75,
     },
-    # Cursor (https://cursor.com/docs/models-and-pricing, https://cursor.com/docs/models/grok-4-7,
-    # verified PRICING_CURSOR_LAST_UPDATED = 2026-11-05) and xAI
-    # (https://docs.x.ai/developers/models/grok-4.7, verified
+    # xAI Grok 4.7 (https://docs.x.ai/developers/models/grok-4.7, verified
     # PRICING_XAI_LAST_UPDATED = 2026-11-05): standard Grok 4.7 is $2/$0.50/$0/$6.
     "grok-4.7": {
         "input": 2.0,
         "cache_read": 0.5,
         "cache_create": 0.0,
         "output": 6.0,
-    },
-    # Cursor Grok 4.7 Fast (https://cursor.com/docs/models-and-pricing and
-    # https://cursor.com/docs/models/grok-4-7, verified PRICING_CURSOR_LAST_UPDATED = 2026-11-05):
-    # 2x standard at standard context ($4/$1/$0/$12).
-    "grok-4.7-fast": {
-        "input": 4.0,
-        "cache_read": 1.0,
-        "cache_create": 0.0,
-        "output": 12.0,
     },
     # xAI Grok 4.6 (https://docs.x.ai/developers/models/grok-4.6, verified
     # PRICING_XAI_LAST_UPDATED = 2026-11-05).
@@ -594,21 +553,12 @@ VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # Codex's observed 258,400-token window is below OpenAI's 272K threshold;
 # its short-context estimate rests on that assumption (tripwire in TODOS).
 VENDOR_LONG_CONTEXT_TIERS: dict[str, dict[str, float]] = {
-    # Cursor (>256k input, verified PRICING_CURSOR_LAST_UPDATED = 2026-11-05) and
-    # xAI (>=200k prompt, verified PRICING_XAI_LAST_UPDATED = 2026-11-05): 2x base.
+    # xAI Grok 4.7 (>=200k prompt, verified PRICING_XAI_LAST_UPDATED = 2026-11-05): 2x base.
     "grok-4.7": {
         "input": 4.0,
         "cache_read": 1.0,
         "cache_create": 0.0,
         "output": 12.0,
-    },
-    # Cursor Grok 4.7 Fast (>256k input, verified PRICING_CURSOR_LAST_UPDATED = 2026-11-05):
-    # 3x standard Grok 4.7 base ($6/$1.50/$0/$18).
-    "grok-4.7-fast": {
-        "input": 6.0,
-        "cache_read": 1.5,
-        "cache_create": 0.0,
-        "output": 18.0,
     },
     # xAI Grok 4.6 (>=200k prompt, verified PRICING_XAI_LAST_UPDATED = 2026-11-05): 2x base.
     "grok-4.6": {
@@ -936,13 +886,11 @@ def vendor_model_family(model: str) -> str | None:
 
 
 def _builtin_verified_date(model: str) -> str:
-    """Per-card provenance, including Cursor's distinct Grok verification."""
+    """Per-card provenance."""
     if model.startswith("claude-"):
         return PRICING_LAST_UPDATED
     if model.startswith("gpt-"):
         return PRICING_OPENAI_LAST_UPDATED
-    if model in GROK_47_MODEL_IDS:
-        return PRICING_CURSOR_LAST_UPDATED
     if model.startswith("grok-"):
         return PRICING_XAI_LAST_UPDATED
     if model.startswith("gemini-"):
@@ -2481,7 +2429,6 @@ __all__ = [
     "PRICING_OPENAI_LAST_UPDATED",
     "PRICING_GOOGLE_LAST_UPDATED",
     "PRICING_XAI_LAST_UPDATED",
-    "PRICING_CURSOR_LAST_UPDATED",
     "PRICING_MUSE_LAST_UPDATED",
     "PRICING_MUSE_SOURCE_URL",
     "PRICING_CACHE_MAX_MODELS",

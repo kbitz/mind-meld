@@ -860,8 +860,8 @@ remain unselected until explicitly enabled or selected in the interactive picker
 mm maintains `retro-fleet` skill links for Claude Code, Codex and Antigravity.
 Muse discovers `~/.claude/skills` itself. Standalone Grok Build and OpenCode
 support is retired: no reader, source walker, discovery probe or link reaper
-runs for them. Historical Grok usage and Grok models used through Cursor still
-appear in the Grok row.
+runs for them. Historical Grok usage still
+appears in the Grok row.
 
 Claude's events tail also emits project/session/skill snapshots. The other
 host readers publish aggregate usage only; they do not publish encoded host

@@ -6404,17 +6404,31 @@ class TestAgentCoverageNotes:
     def test_no_reader_contribution_names_the_ambiguous_state_and_next_step(self):
         """An empty token_sources list means no reader contributed, not that no
         source is enabled: absent-ledger readers are deliberately omitted too."""
+        import re
+
+        from mind_meld import config as mm_config
+
         notes = aggregator._agent_coverage_notes(
             self._data([_snap("dev-a", self.UNTIL, consulted=())])
         )
-        assert any(
-            "No agent-log reader contributed" in n
+        matching = [
+            n
+            for n in notes
+            if "No agent-log reader contributed" in n
             and "If no source is enabled" in n
             and "mm enable-source codex" in n
+            and "(or `grok`, `muse`, or `agy`)" in n
             and "no attributable local ledger" in n
             and "opencode" not in n
-            for n in notes
+            and "cursor" not in n
+        ]
+        assert matching
+        remedy_readers = re.findall(
+            r"mm enable-source ([a-z]+)", mm_config.usage_capture_remedy("no-reader")
         )
+        assert remedy_readers
+        for reader in remedy_readers:
+            assert f"`{reader}`" in matching[0] or f"mm enable-source {reader}" in matching[0]
 
     def test_configured_fleet_is_never_nagged(self):
         notes = aggregator._agent_coverage_notes(
@@ -6432,26 +6446,16 @@ class TestAgentCoverageNotes:
         )
         assert any("predate this window" in n for n in notes)
 
-    def test_cursor_acp_gap_note_needs_a_snapshot_that_consulted_cursor(self):
+    def test_retained_cursor_snapshot_emits_no_acp_gap_note(self):
+        assert not hasattr(aggregator, "CURSOR_ACP_GAP_NOTE")
+        assert not hasattr(aggregator, "_cursor_acp_gap_notes")
         with_cursor = self._data([_snap("dev-a", self.UNTIL, consulted=("codex", "cursor"))])
-        without = self._data([_snap("dev-a", self.UNTIL, consulted=("codex",))])
-        gap = aggregator.CURSOR_ACP_GAP_NOTE
-        assert aggregator._cursor_acp_gap_notes(with_cursor) == [gap]
-        assert aggregator._cursor_acp_gap_notes(without) == []
-        no_inventory = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
-        assert aggregator._cursor_acp_gap_notes(no_inventory) == []
         flagged = [
             e["detail"]
             for e in _health(aggregator.format_retro(with_cursor))
             if e["code"] == "agent_coverage"
         ]
-        assert aggregator.CURSOR_ACP_GAP_NOTE in flagged
-        assert "Paseo" in aggregator.CURSOR_ACP_GAP_NOTE
-        assert not any(
-            aggregator.CURSOR_ACP_GAP_NOTE == e["detail"]
-            for e in _health(aggregator.format_retro(without))
-            if e["code"] == "agent_coverage"
-        )
+        assert not any("ACP" in detail for detail in flagged)
 
     def test_missing_snapshot_is_unknown_not_zero(self):
         notes = aggregator._agent_coverage_notes(
@@ -6850,7 +6854,7 @@ class TestUnifiedAgents:
             "dev-a",
             self.UNTIL.isoformat(),
             hosts=hosts,
-            token_sources=("codex", "cursor", "muse"),
+            token_sources=("codex", "grok", "muse"),
             extra={"tokens_by_day": {day: {**_usage(6_000_000), "by_model": models}}},
         )
         data = self._data([], known_ids=("dev-a",))
@@ -7764,6 +7768,7 @@ class TestAgentEconomics:
         assert pricing["openai_verified"] == tu.PRICING_OPENAI_LAST_UPDATED
         assert pricing["xai_verified"] == tu.PRICING_XAI_LAST_UPDATED
         assert "docs.x.ai" in pricing["xai_url"]
+        assert "cursor_url" not in pricing and "cursor_verified" not in pricing
         assert "never zero" in pricing["basis"]
 
     @pytest.mark.parametrize("readers", [("grok",), ("codex", "grok")])
@@ -8161,9 +8166,9 @@ class TestPricingRefreshHealth:
     def test_refresh_age_uses_oldest_vendor_and_window_utc_date(self, monkeypatch, age, due):
         from mind_meld import token_usage as tu
 
-        for vendor in ("", "OPENAI_", "CURSOR_", "XAI_", "GOOGLE_", "MUSE_"):
+        for vendor in ("", "OPENAI_", "XAI_", "GOOGLE_", "MUSE_"):
             monkeypatch.setattr(tu, "PRICING_" + vendor + "LAST_UPDATED", "2026-10-27")
-        monkeypatch.setattr(tu, "PRICING_CURSOR_LAST_UPDATED", "2026-10-20")
+        monkeypatch.setattr(tu, "PRICING_XAI_LAST_UPDATED", "2026-10-20")
         until = datetime(2026, 10, 20, tzinfo=timezone.utc) + timedelta(days=age)
         data = aggregator.RetroData(window_days=7, since=until - timedelta(days=7), until=until)
         pricing = self._pricing(data)
@@ -8172,11 +8177,11 @@ class TestPricingRefreshHealth:
         assert pricing["muse_verified"] == tu.PRICING_MUSE_LAST_UPDATED
         assert pricing["muse_url"] == tu.PRICING_MUSE_SOURCE_URL
 
-    @pytest.mark.parametrize("oldest", ["", "OPENAI_", "CURSOR_", "XAI_", "GOOGLE_", "MUSE_"])
-    def test_effective_date_is_min_over_all_six_vendors(self, monkeypatch, oldest):
+    @pytest.mark.parametrize("oldest", ["", "OPENAI_", "XAI_", "GOOGLE_", "MUSE_"])
+    def test_effective_date_is_min_over_all_five_vendors(self, monkeypatch, oldest):
         from mind_meld import token_usage as tu
 
-        for vendor in ("", "OPENAI_", "CURSOR_", "XAI_", "GOOGLE_", "MUSE_"):
+        for vendor in ("", "OPENAI_", "XAI_", "GOOGLE_", "MUSE_"):
             monkeypatch.setattr(tu, "PRICING_" + vendor + "LAST_UPDATED", "2026-10-27")
         monkeypatch.setattr(tu, "PRICING_" + oldest + "LAST_UPDATED", "2026-10-20")
         until = datetime(2026, 10, 27, tzinfo=timezone.utc)

@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. On 2026-11-07 the owner dropped the fleet-wide cutover: there is no migration tool, each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet, a Mac not yet moved keeps running on iCloud Drive, and a first install sets Syncthing up itself when Syncthing still has its default configuration (SPEC O2). Tracks 113A to 115A have shipped (v1.12.21 to v1.12.23); Track 116A finishes the Cursor removal; Tracks 117A to 120A deliver O2's setup, approval and per-machine move; Track 121A is the owner-gated git-history hostname scrub, a condition of 2.0.0 and of making the repository public again. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); its qualification, Track 96A, waits in Future for 2.0.0's acceptance.
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. On 2026-11-07 the owner dropped the fleet-wide cutover: there is no migration tool, each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet, a Mac not yet moved keeps running on iCloud Drive, and a first install sets Syncthing up itself when Syncthing still has its default configuration (SPEC O2). Tracks 113A to 116A have shipped (v1.12.21 to v1.12.24), which completes the Cursor removal; Tracks 117A to 120A deliver O2's setup, approval and per-machine move; Track 121A is the owner-gated git-history hostname scrub, a condition of 2.0.0 and of making the repository public again. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); its qualification, Track 96A, waits in Future for 2.0.0's acceptance.
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -25,34 +25,11 @@ None declared (2026-11-07). No branch, session or open pull request is active fo
 
 ## Current Plan
 
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115_
-
-### Group 116: Cursor traces in discovery, pricing and retro
-
-_Depends on: none_
-
-**This group delivers:** Nothing else in mm reads Cursor's files or names Cursor, and retro-fleet's no-reader note offers only real sources.
-
-#### Track 116A: Remove Cursor from git-root discovery, pricing provenance and retro-fleet
-_4 tasks . ~470 LOC . low risk . 18 files_
-**Outcome:** Nothing else in mm reads Cursor's files or names Cursor: git-root discovery no longer opens `~/.cursor/acp-sessions` or Conductor's Cursor SDK store, Grok prices cite xAI rather than Cursor, and `retro-fleet` and its SKILL.md no longer mention Cursor or print the Cursor ACP gap note.
-**Supports:** MVP-1; docs/SPEC.md O7.1 and O7.3 and its Cursor non-goal (owner, 2026-11-07).
-**Done when:** `rootprobes.py` has no Cursor prober (the `_cursor_*` helpers, `_CONDUCTOR_STORE` and its `PROBERS` row), `events._enabled_root_probers` loses its `prober.name == "cursor"` branch (the last reader of the legacy `[retro] cursor_host_usage` key, so `mm disable-source cursor --force` no longer leaves a prober running), and `fsutil.py`'s pytest account-state guard and `tests/conftest.py` drop `.cursor`; `token_usage.py` drops `PRICING_CURSOR_LAST_UPDATED` and its Cursor citations, the Grok 4.7 cards that Grok Build's ids use keep their rates with xAI provenance, and a card only Cursor ids used goes; `aggregator.py` drops `CURSOR_ACP_GAP_NOTE`, `_cursor_acp_gap_notes`, the Cursor pricing-provenance field and its Cursor comments, and its "No agent-log reader contributed" note suggests `mm enable-source codex` (or `grok`, `muse`, or `agy`), matching `config.usage_capture_remedy("no-reader")`; the retro SKILL.md drops Cursor; the recorded test gap "complete Grok row with cache writes suppresses ceiling" gets its test (positive `cache_create`, `incomplete=False`, no override or a bundled-equal one, the model detail kept and `at most` absent), replacing the Cursor cache-write case; `docs/invariants/`, `docs/designs/host-parity.md` (its Cursor material marked historical) and README's pricing provenance match; outside CHANGELOG.md, `docs/archive/`, `docs/roadmap-shipped.md`, docs/TODOS.md drain records and docs/PROGRESS.md, `git grep -n -i -w cursor` finds only the unrelated pull, manifest and walk cursors; `./bin/check --affected` passes.
-_touches: src/mind_meld/rootprobes.py, src/mind_meld/events.py, src/mind_meld/fsutil.py, src/mind_meld/token_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_root_probers.py, tests/conftest.py, tests/test_token_usage.py, tests/test_retro_fleet_aggregator.py, tests/test_retro_usage_presentation.py, tests/test_grok_usage.py, tests/test_muse_usage.py, docs/invariants/events-retro.md, docs/invariants/sync.md, docs/invariants/README.md, docs/designs/host-parity.md, README.md_
-_blocked-by: Track 115A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, docs/designs/host-parity.md_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
-
-_Source: owner decisions 2026-11-06 and 2026-11-07 as for Track 114A. Symbols verified at `fd23f25`: `rootprobes.py` `_cursor_acp_root`, `_cursor_ndjson`, `_CONDUCTOR_STORE`, `RootProber("cursor", ...)`; `fsutil.py`'s guarded `.cursor` root; `token_usage.py` `PRICING_CURSOR_LAST_UPDATED`, `_builtin_verified_date`; `aggregator.py` `CURSOR_ACP_GAP_NOTE`, `_cursor_acp_gap_notes`, `cursor_verified`. Test gap: docs/TODOS.md `[review]`, Track 111B, drained 2026-11-06 and placed here because this Track touches `src/mind_meld/skills/retro_fleet/aggregator.py` and `tests/test_retro_usage_presentation.py`; the only cache-write cases it names are Cursor's and a partial Grok case. Inbox item "Cursor leftovers after Track 114A" (docs/TODOS.md `[review:files=src/mind_meld/skills/retro_fleet/aggregator.py|src/mind_meld/sourceflow.py|src/mind_meld/events.py]`, Track 114A review at `fcb972d`) was drained 2026-11-07 and placed here; re-verified at `488094e`: the aggregator note still offers `cursor` and `events.py` still has the `prober.name == "cursor"` branch._
-
-- **Delete the Cursor git-root prober, its last key reader and its tests** -- _src/mind_meld/rootprobes.py, src/mind_meld/events.py, src/mind_meld/fsutil.py, tests/test_root_probers.py, tests/conftest.py, ~300 lines (del)._ (S)
-- **Re-source Grok pricing provenance to xAI and remove Cursor from retro-fleet** -- _src/mind_meld/token_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_token_usage.py, tests/test_retro_fleet_aggregator.py, tests/test_grok_usage.py, tests/test_muse_usage.py, ~120 lines._ (M)
-- **Test gap: complete Grok row with cache writes suppresses ceiling** -- _tests/test_retro_usage_presentation.py, ~50 lines._ (S)
-- **Invariant docs, host-parity design and README** -- _docs/invariants/events-retro.md, docs/invariants/sync.md, docs/invariants/README.md, docs/designs/host-parity.md, README.md, ~60 lines._ (S)
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116_
 
 ### Group 117: Syncthing default-configuration check and writer
 
-_Depends on: Group 116_
+_Depends on: none_
 
 **This group delivers:** mm can tell whether Syncthing has its default configuration and can make O2's Syncthing changes where it manages Syncthing, never elsewhere.
 
@@ -140,7 +117,7 @@ _Source: owner, 2026-11-07: "we don't need a migrate tool ... migration for me c
 
 ### Group 121: Git-history hostname scrub
 
-_Depends on: Group 116, Group 120_
+_Depends on: Group 120_
 
 **This group delivers:** A git history free of the owner's machine hostnames, the last carded condition for 2.0.0 and for making the repository public again.
 
@@ -168,19 +145,16 @@ document order; document order is priority, not gating.
 Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
-- Group 116 ← {}
-- Group 117 ← {116}
+- Group 117 ← {}
 - Group 118 ← {117}
 - Group 119 ← {117, 118}
 - Group 120 ← {118, 119}
-- Group 121 ← {116, 120}
+- Group 121 ← {120}
 ```
 
 Track detail per group:
 
 ```
-Group 116: Cursor traces in discovery, pricing and retro
-  +-- Track 116A .......... ~L . 4 tasks
 Group 117: Syncthing default-configuration check and writer
   +-- Track 117A .......... ~L . 4 tasks
 Group 118: Syncthing setup from the bootstrap script and `mm init`
@@ -193,11 +167,11 @@ Group 121: Git-history hostname scrub
   +-- Track 121A .......... ~M . 3 tasks
 ```
 
-**Total: 6 groups . 6 tracks remaining.**
+**Total: 5 groups . 5 tracks remaining.**
 
-Tracks 113A, 114A and 115A shipped (v1.12.21, v1.12.22 and v1.12.23) and Groups 113 to 115 are retired. Track 116A keeps its number; the Syncthing Tracks take 117A to 120A, so the history scrub, Track 117A in the previous plan, is now Track 121A and still runs last so no open branch has to be rebased onto the rewritten history. The owner asked for the fewest Tracks the size audit allows (2026-11-07): the bootstrap start-at-login change rides in Track 118A, and the move-only `mm devices` module move is Track 119A's first task in its own commit rather than a separate Track. IDs 95A and 96A stay unused because Future entries cite them.
+Tracks 113A, 114A, 115A and 116A shipped (v1.12.21, v1.12.22, v1.12.23 and v1.12.24) and Groups 113 to 116 are retired. The Syncthing Tracks take 117A to 120A, so the history scrub, Track 117A in the previous plan, is now Track 121A and still runs last so no open branch has to be rebased onto the rewritten history. The owner asked for the fewest Tracks the size audit allows (2026-11-07): the bootstrap start-at-login change rides in Track 118A, and the move-only `mm devices` module move is Track 119A's first task in its own commit rather than a separate Track. IDs 95A and 96A stay unused because Future entries cite them.
 
-The 2.0.0 cut is not a Track. Carded work before it: Tracks 116A to 121A, ending with the history rewrite, which needs the owner's explicit go and their force-push. The owner's own steps: move each machine onto the Syncthing fleet by reinstalling mm and joining (README's per-machine move from Track 120A; machines may move earlier on the current release by pairing by hand), with the first machine running `mm init --new-fleet`; run `retro-fleet` on the Syncthing fleet for O7.4; and confirm O1 to O4 on their own observation on one Mac and both Linux machines, with O6 to O8 holding, recorded in PROGRESS.md `## Acceptance`. A Mac not yet moved keeps running on iCloud Drive and holds nothing up. Making the repository public again is a separate owner decision that waits for Track 121A. Problems found while machines move are fixed as they appear.
+The 2.0.0 cut is not a Track. Carded work before it: Tracks 117A to 121A, ending with the history rewrite, which needs the owner's explicit go and their force-push. The owner's own steps: move each machine onto the Syncthing fleet by reinstalling mm and joining (README's per-machine move from Track 120A; machines may move earlier on the current release by pairing by hand), with the first machine running `mm init --new-fleet`; run `retro-fleet` on the Syncthing fleet for O7.4; and confirm O1 to O4 on their own observation on one Mac and both Linux machines, with O6 to O8 holding, recorded in PROGRESS.md `## Acceptance`. A Mac not yet moved keeps running on iCloud Drive and holds nothing up. Making the repository public again is a separate owner decision that waits for Track 121A. Problems found while machines move are fixed as they appear.
 
 ---
 
