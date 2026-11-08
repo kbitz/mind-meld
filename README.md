@@ -36,13 +36,14 @@ do, Cursor runs that missing command after every turn. Leftover private files un
 `cursor-standalone-spool.jsonl`, `cursor-standalone-spool.jsonl.merging`) and any
 `[retro] cursor_host_usage` key in `~/.config/mind-meld/config.toml` are ignored and can
 be deleted; git-root discovery drops any cached `cursor` prober state on its next complete
-pass. Repositories that only Cursor's records named then leave discovery and are no longer
-captured: pin any you still use in `[retro] repo_roots` and run `mm recapture <window>`
-once to collect their commits since. Older published `host-usage-snapshot` rows that name
+pass. Repositories that only Cursor's records named leave discovery from the first push
+after upgrading and are no longer captured: pin any you still use in `[retro] repo_roots`,
+then run `mm recapture <window>` once with a window reaching back to that upgrade (at most
+`90d`) to collect their commits. Older published `host-usage-snapshot` rows that name
 `cursor` remain unchanged, with no migration: `mm retro-fleet` labels a failed or
-incomplete Cursor read on those rows `unknown/retired reader`, and counts retained `grok-4.7-fast` or effort-suffixed tokens in
-the Grok row as unpriced while `grok-4.7` and `grok-4.7-build` stay priced from xAI's
-rates. A machine with another consented host reader replaces its earlier snapshot on the
+incomplete Cursor read on those rows `unknown/retired reader`, and counts retained
+`grok-4.7-fast` or effort-suffixed tokens in the Grok row as unpriced while
+`grok-4.7` and `grok-4.7-build` stay priced from xAI's rates. A machine with another consented host reader replaces its earlier snapshot on the
 next push that captures host usage, while a machine with no consented host readers skips
 pre-push attended host capture on a converged `mm push` and replaces its earlier snapshot
 with an empty `host-usage-snapshot` (`token_sources: []`) on its next push with
