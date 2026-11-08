@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import threading
 import time
 from pathlib import Path
 
@@ -352,10 +353,57 @@ def test_accept_folder_offer_validations_and_success(fake_syncthing, isolated_ho
     _, probs = syncthing._extract_options(body)
     assert probs == []
 
-    # Rerun -> unchanged
+    # Syncthing removes an accepted offer; retry must use the configured folder.
+    assert fake_syncthing.responses[pending_path] == {}
     res_rerun = writer.accept_folder_offer("mind-meld", fake_syncthing.peer_id, "Mind Meld", target)
     assert res_rerun == syncthing.WriteResult("unchanged", None)
     assert len(fake_syncthing.bodies) == 1
+
+
+@pytest.mark.parametrize("op_name", _ALL_OPS)
+@pytest.mark.parametrize("suffix", ["\ninvalid", "\rinvalid", "\u2603"])
+def test_writer_malformed_header_is_safe_and_never_contacts_server(
+    fake_syncthing, isolated_home, op_name, suffix, capsys
+):
+    fake_syncthing.write_config(gui_value=fake_syncthing.gui_value + suffix)
+    writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(fake_syncthing.my_id))
+    result = _call_op(writer, op_name, fake_syncthing.peer_id, isolated_home / "fleet")
+    assert result.outcome == "config-unreadable"
+    assert fake_syncthing.requests == []
+    assert fake_syncthing.gui_value not in repr(result)
+    captured = capsys.readouterr()
+    assert fake_syncthing.gui_value not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "op_name", ["create_folder", "accept_folder_offer", "remove_default_folder"]
+)
+@pytest.mark.parametrize("failure", [OSError, RuntimeError])
+def test_writer_path_resolution_failure_returns_safe_outcome(
+    fake_syncthing, isolated_home, monkeypatch, op_name, failure
+):
+    target = isolated_home / "Sync"
+    fake_syncthing.set_config(
+        devices=[{"deviceID": fake_syncthing.peer_id}],
+        folders=[fake_syncthing.stock_folder(target)] if op_name == "remove_default_folder" else [],
+    )
+    pending_path = f"/rest/cluster/pending/folders?device={fake_syncthing.peer_id}"
+    fake_syncthing.responses[pending_path] = {
+        "mind-meld": {"offeredBy": {fake_syncthing.peer_id: {}}}
+    }
+    original_resolve = Path.resolve
+
+    def fail_target(path, *args, **kwargs):
+        if path == target:
+            raise failure(fake_syncthing.gui_value)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fail_target)
+    writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(fake_syncthing.my_id))
+    result = _call_op(writer, op_name, fake_syncthing.peer_id, target)
+    assert result == syncthing.WriteResult("error", "path-unreadable")
+    assert fake_syncthing.gui_value not in repr(result)
+    assert fake_syncthing.bodies == []
 
 
 def test_pending_devices_parsing_sorting_and_errors(fake_syncthing, isolated_home):
@@ -482,7 +530,7 @@ def test_remove_default_folder_guards_and_delete(fake_syncthing, isolated_home, 
     assert (marker_dir / "syncthing-folder-123456.txt").is_file()
 
 
-def test_write_errors_redirects_timeouts_and_stopped_server(fake_syncthing, isolated_home):
+def test_write_errors_redirects_and_stopped_server(fake_syncthing, isolated_home):
     fake_syncthing.set_config(devices=(), folders=())
     writer = syncthing.SyncthingWriter(
         syncthing.ManagedRecord(fake_syncthing.my_id),
@@ -524,22 +572,55 @@ def test_write_errors_redirects_timeouts_and_stopped_server(fake_syncthing, isol
         dest_sock.close()
     fake_syncthing.write_responses.clear()
 
-    # Held POST times out within budget + 1s
-    hold_ev = fake_syncthing.hold("/rest/config/folders")
-    t0 = time.monotonic()
-    res_timeout = writer.create_folder(
-        "mind-meld", "Mind Meld", isolated_home / "Sync" / "mind-meld"
-    )
-    assert time.monotonic() - t0 < 1.25
-    assert res_timeout == syncthing.WriteResult("unreachable", "timeout")
-    hold_ev.set()
-    fake_syncthing.holds.clear()
-
     # Stopped server -> unreachable / refused with no offline fallback
     fake_syncthing.close()
     assert writer.add_device(fake_syncthing.peer_id, "mac-b") == syncthing.WriteResult(
         "unreachable", "refused"
     )
+
+
+@pytest.mark.parametrize("op_name", ["create_folder", "accept_folder_offer"])
+def test_applied_folder_write_timeout_rerun_is_unchanged(fake_syncthing, isolated_home, op_name):
+    fake_syncthing.set_config(devices=[{"deviceID": fake_syncthing.peer_id}], folders=())
+    pending_path = f"/rest/cluster/pending/folders?device={fake_syncthing.peer_id}"
+    fake_syncthing.responses[pending_path] = {
+        "mind-meld": {"offeredBy": {fake_syncthing.peer_id: {}}}
+    }
+    applied = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def hold_applied_write(method, path, body):
+        assert (method, path) == ("POST", "/rest/config/folders")
+        applied.set()
+        try:
+            release.wait(timeout=5.0)
+        finally:
+            finished.set()
+
+    fake_syncthing.on_write = hold_applied_write
+    writer = syncthing.SyncthingWriter(
+        syncthing.ManagedRecord(fake_syncthing.my_id), timeout=0.1, budget=0.5
+    )
+    target = isolated_home / "Sync" / "mind-meld"
+    started = time.monotonic()
+    try:
+        result = _call_op(writer, op_name, fake_syncthing.peer_id, target)
+        assert time.monotonic() - started < 1.5
+        assert result == syncthing.WriteResult("unreachable", "timeout")
+        assert applied.is_set(), "the timeout must occur after the POST applies"
+        assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [("POST", "/rest/config/folders")]
+        assert fake_syncthing.responses["/rest/config/folders"][0]["id"] == "mind-meld"
+        if op_name == "accept_folder_offer":
+            assert fake_syncthing.responses[pending_path] == {}
+    finally:
+        release.set()
+        assert finished.wait(timeout=2.0)
+    fake_syncthing.on_write = None
+    assert _call_op(writer, op_name, fake_syncthing.peer_id, target) == syncthing.WriteResult(
+        "unchanged"
+    )
+    assert len(fake_syncthing.bodies) == 1
 
 
 @pytest.mark.parametrize(

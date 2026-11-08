@@ -379,6 +379,22 @@ class FakeSyncthing:
                 if not replaced:
                     folders.append(dict(parsed_body))
                 self.responses["/rest/config/folders"] = folders
+                shared_ids = {entry["deviceID"] for entry in parsed_body.get("devices", [])}
+                for route, pending in self.responses.items():
+                    if not route.startswith("/rest/cluster/pending/folders") or not isinstance(
+                        pending, dict
+                    ):
+                        continue
+                    offer = pending.get(fid)
+                    if not isinstance(offer, dict) or not isinstance(offer.get("offeredBy"), dict):
+                        continue
+                    remaining = {
+                        d: value for d, value in offer["offeredBy"].items() if d not in shared_ids
+                    }
+                    if remaining:
+                        pending[fid] = {**offer, "offeredBy": remaining}
+                    else:
+                        del pending[fid]
                 if self.on_write is not None:
                     self.on_write(method, path, parsed_body)
                 return 200

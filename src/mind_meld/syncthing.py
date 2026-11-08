@@ -1189,21 +1189,22 @@ def _write_route_ok(method: str, path: str) -> bool:
         return False
     if "?" in path or "#" in path:
         return False
-    if (method, path) in (
-        ("POST", "/rest/config/folders"),
-        ("POST", "/rest/config/devices"),
-        ("DELETE", "/rest/config/folders/default"),
-    ):
-        return True
-    if method == "PATCH" and path.startswith("/rest/config/folders/"):
-        seg = path[len("/rest/config/folders/") :]
-        if not seg or "/" in seg:
+    for allowed_method, route in _WRITE_ROUTES:
+        if method != allowed_method:
+            continue
+        if not route.endswith("/{id}"):
+            if path == route:
+                return True
+            continue
+        prefix = route.removesuffix("{id}")
+        if not path.startswith(prefix):
+            continue
+        segment = path[len(prefix) :]
+        if not segment or "/" in segment:
             return False
-        unquoted = urllib.parse.unquote(seg)
-        return bool(_FOLDER_ID_RE.fullmatch(unquoted))
-    if method == "PATCH" and path.startswith("/rest/config/devices/"):
-        seg = path[len("/rest/config/devices/") :]
-        return is_device_id(seg)
+        if route == "/rest/config/devices/{id}":
+            return is_device_id(segment)
+        return bool(_FOLDER_ID_RE.fullmatch(urllib.parse.unquote(segment)))
     return False
 
 
@@ -1253,11 +1254,7 @@ def _send_json(
         return ("unreachable", "tls")
     except TimeoutError:
         return ("unreachable", "timeout")
-    except (OSError, http.client.HTTPException) as exc:
-        if isinstance(exc, ssl.SSLError):
-            return ("unreachable", "tls")
-        if isinstance(exc, TimeoutError):
-            return ("unreachable", "timeout")
+    except (OSError, http.client.HTTPException):
         return ("unreachable", "refused")
     finally:
         try:
@@ -1301,6 +1298,41 @@ class PendingDevices:
     devices: tuple[PendingDevice, ...] = ()
 
 
+def _writer_path(path: str | Path) -> Path | None:
+    """Resolve a writer path without exposing filesystem errors to its caller."""
+    try:
+        return Path(path).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _existing_folder_result(
+    folders: list[dict[str, Any]],
+    folder_id: str,
+    target_path: Path,
+    required_devices: set[str],
+) -> WriteResult | None:
+    """Check a configured folder without creating it or requiring a pending offer."""
+    for entry in folders:
+        if entry.get("id") != folder_id:
+            continue
+        raw_path = entry.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return WriteResult("refused", "folder-exists")
+        candidate_path = _writer_path(raw_path.strip())
+        if candidate_path is None:
+            return WriteResult("error", "path-unreadable")
+        _, problems = _extract_options(entry)
+        if (
+            candidate_path == target_path
+            and not problems
+            and required_devices.issubset(_folder_device_ids(entry))
+        ):
+            return WriteResult("unchanged")
+        return WriteResult("refused", "folder-exists")
+    return None
+
+
 class SyncthingWriter:
     """Gated Syncthing REST writer limited to O2.2 and O2.3 operations."""
 
@@ -1337,6 +1369,14 @@ class SyncthingWriter:
                 deadline,
                 WriteResult(reach, cause),
             )
+        # http.client includes invalid header bytes in its ValueError. Validate
+        # before the gate's GET as well as every later write using this endpoint.
+        try:
+            endpoint.header_val.encode("latin-1")
+        except UnicodeEncodeError:
+            return (None, None, per_req_timeout, deadline, WriteResult("config-unreadable"))
+        if "\r" in endpoint.header_val or "\n" in endpoint.header_val:
+            return (None, None, per_req_timeout, deadline, WriteResult("config-unreadable"))
         out, sys_status, req_cause = _get_json(
             endpoint.norm_addr,
             "/rest/system/status",
@@ -1411,34 +1451,26 @@ class SyncthingWriter:
     ) -> WriteResult:
         if not isinstance(folder_id, str) or not _FOLDER_ID_RE.fullmatch(folder_id):
             return WriteResult("refused", "bad-folder-id")
-        target_path = Path(path).expanduser().resolve(strict=False)
+        target_path = _writer_path(path)
+        if target_path is None:
+            return WriteResult("error", "path-unreadable")
         folders, err = self._get_list(
             endpoint, "/rest/config/folders", timeout=timeout, deadline=deadline
         )
         if err is not None or folders is None:
             return err or WriteResult("error", "bad-response")
 
-        for entry in folders:
-            if entry.get("id") == folder_id:
-                raw_p = entry.get("path")
-                if not isinstance(raw_p, str) or not raw_p.strip():
-                    return WriteResult("refused", "folder-exists")
-                cand_path = _expand_folder_path(raw_p.strip())
-                _, opt_problems = _extract_options(entry)
-                dev_ids = set(_folder_device_ids(entry))
-                if (
-                    cand_path == target_path
-                    and not opt_problems
-                    and {my_id, *peers}.issubset(dev_ids)
-                ):
-                    return WriteResult("unchanged", None)
-                return WriteResult("refused", "folder-exists")
+        existing = _existing_folder_result(folders, folder_id, target_path, {my_id, *peers})
+        if existing is not None:
+            return existing
 
         for entry in folders:
             raw_p = entry.get("path")
             if not isinstance(raw_p, str) or not raw_p.strip():
                 continue
-            cand_path = _expand_folder_path(raw_p.strip())
+            cand_path = _writer_path(raw_p.strip())
+            if cand_path is None:
+                return WriteResult("error", "path-unreadable")
             if (
                 cand_path == target_path
                 or target_path.is_relative_to(cand_path)
@@ -1475,7 +1507,9 @@ class SyncthingWriter:
                 raw_p = entry.get("path")
                 if not isinstance(raw_p, str) or not raw_p.strip():
                     break
-                cand_path = _expand_folder_path(raw_p.strip())
+                cand_path = _writer_path(raw_p.strip())
+                if cand_path is None:
+                    return WriteResult("error", "path-unreadable")
                 _, opt_problems = _extract_options(entry)
                 if cand_path == target_path and not opt_problems:
                     return WriteResult("ok", None)
@@ -1517,6 +1551,18 @@ class SyncthingWriter:
             return dev_err or WriteResult("error", "bad-response")
         if not any(d.get("deviceID") == device_id for d in devices):
             return WriteResult("refused", "device-not-configured")
+
+        target_path = _writer_path(path)
+        if target_path is None:
+            return WriteResult("error", "path-unreadable")
+        folders, folder_error = self._get_list(
+            endpoint, "/rest/config/folders", timeout=per_req_timeout, deadline=deadline
+        )
+        if folder_error is not None or folders is None:
+            return folder_error or WriteResult("error", "bad-response")
+        existing = _existing_folder_result(folders, folder_id, target_path, {my_id, device_id})
+        if existing is not None:
+            return existing
 
         query = urllib.parse.urlencode({"device": device_id})
         out, pending, cause = _get_json(
@@ -1717,11 +1763,14 @@ class SyncthingWriter:
             return WriteResult("unchanged", None)
 
         raw_path = default_entry.get("path")
-        stock_resolved = stock_default_folder_path().resolve(strict=False)
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return WriteResult("refused", "default-folder-in-use")
+        stock_resolved = _writer_path(stock_default_folder_path())
+        candidate_path = _writer_path(raw_path.strip())
+        if stock_resolved is None or candidate_path is None:
+            return WriteResult("error", "path-unreadable")
         if (
-            not isinstance(raw_path, str)
-            or not raw_path.strip()
-            or _expand_folder_path(raw_path.strip()) != stock_resolved
+            candidate_path != stock_resolved
             or _stock_default_problem(default_entry, my_id) is not None
         ):
             return WriteResult("refused", "default-folder-in-use")

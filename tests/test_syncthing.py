@@ -754,10 +754,21 @@ def test_classify_config_offline_stopped_variants(fake_syncthing, isolated_home)
     [
         "default_no_folders",
         "default_stock_empty",
+        "default_stock_marker_file",
+        "default_stock_marker_dir",
+        "default_stock_marker_and_ds_store",
         "pre_second_device",
+        "pre_unnamed_device",
         "pre_extra_folder",
+        "pre_default_other_path",
         "pre_stock_shared",
+        "pre_stock_shared_unconfigured",
         "pre_stock_non_empty",
+        "pre_stock_subdir",
+        "pre_stock_stignore",
+        "pre_stock_stversions",
+        "pre_stock_symlink_stfolder",
+        "pre_stock_extra_in_stfolder",
     ],
 )
 def test_rest_and_offline_classification_agree(fake_syncthing, isolated_home, shape):
@@ -769,11 +780,25 @@ def test_rest_and_offline_classification_agree(fake_syncthing, isolated_home, sh
 
     if shape == "default_no_folders":
         fake_syncthing.set_shape(devices=(), folders=())
-    elif shape == "default_stock_empty":
+    elif shape.startswith("default_stock"):
+        if shape == "default_stock_marker_file":
+            stock_dir.mkdir(parents=True)
+            (stock_dir / ".stfolder").touch()
+        elif shape in ("default_stock_marker_dir", "default_stock_marker_and_ds_store"):
+            marker = stock_dir / ".stfolder"
+            marker.mkdir(parents=True)
+            (marker / "syncthing-folder-abc123.txt").write_text("marker", encoding="utf-8")
+            if shape == "default_stock_marker_and_ds_store":
+                (stock_dir / ".DS_Store").touch()
         fake_syncthing.set_shape(devices=(), folders=[fake_syncthing.stock_folder(stock_dir)])
-    elif shape == "pre_second_device":
+    elif shape in ("pre_second_device", "pre_unnamed_device"):
         fake_syncthing.set_shape(
-            devices=[{"deviceID": fake_syncthing.peer_id, "name": "linux-b"}],
+            devices=[
+                {
+                    "deviceID": fake_syncthing.peer_id,
+                    "name": "linux-b" if shape == "pre_second_device" else "",
+                }
+            ],
             folders=(),
         )
     elif shape == "pre_extra_folder":
@@ -781,14 +806,36 @@ def test_rest_and_offline_classification_agree(fake_syncthing, isolated_home, sh
             devices=(),
             folders=[{"id": "notes", "label": "Notes", "path": str(isolated_home / "notes")}],
         )
-    elif shape == "pre_stock_shared":
+    elif shape == "pre_default_other_path":
         fake_syncthing.set_shape(
-            devices=[{"deviceID": fake_syncthing.peer_id, "name": "linux-b"}],
+            folders=[fake_syncthing.stock_folder(isolated_home / "other-default")]
+        )
+    elif shape in ("pre_stock_shared", "pre_stock_shared_unconfigured"):
+        fake_syncthing.set_shape(
+            devices=[{"deviceID": fake_syncthing.peer_id, "name": "linux-b"}]
+            if shape == "pre_stock_shared"
+            else [],
             folders=[fake_syncthing.stock_folder(stock_dir, shared_with=[fake_syncthing.peer_id])],
         )
-    elif shape == "pre_stock_non_empty":
+    else:
         stock_dir.mkdir(parents=True, exist_ok=True)
-        (stock_dir / "data.txt").write_text("content\n", encoding="utf-8")
+        if shape == "pre_stock_non_empty":
+            (stock_dir / "data.txt").write_text("content\n", encoding="utf-8")
+        elif shape == "pre_stock_subdir":
+            (stock_dir / "mind-meld").mkdir()
+        elif shape == "pre_stock_stignore":
+            (stock_dir / ".stignore").touch()
+        elif shape == "pre_stock_stversions":
+            (stock_dir / ".stversions").mkdir()
+        elif shape == "pre_stock_symlink_stfolder":
+            real_marker = isolated_home / "real-marker"
+            real_marker.mkdir()
+            (stock_dir / ".stfolder").symlink_to(real_marker)
+        elif shape == "pre_stock_extra_in_stfolder":
+            (stock_dir / ".stfolder").mkdir()
+            (stock_dir / ".stfolder" / "extra.txt").touch()
+        else:
+            raise AssertionError(shape)
         fake_syncthing.set_shape(devices=(), folders=[fake_syncthing.stock_folder(stock_dir)])
 
     rest_res = syncthing.classify_config(sanitize=safety.safe_terminal_str)
