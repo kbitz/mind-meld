@@ -42,6 +42,7 @@ EXTRACTED = [
     "pullflow",
     "initflow",
     "sourceflow",
+    "devicesflow",
     "host_registry",
     "rootprobes",
     "syncthing",
@@ -1305,6 +1306,11 @@ SOURCEFLOW_DEFINITIONS = frozenset(
 )
 SOURCE_SHELLS = frozenset("disable_source enable_source reconfigure_sources sources".split())
 
+# Track 119A: `mm devices` lives in devicesflow.py; the `@app.command()`
+# shell (`devices`) stays in cli.py.
+DEVICESFLOW_DEFINITIONS = frozenset({"devices"})
+DEVICES_SHELLS = frozenset({"devices"})
+
 
 def _top_level_definitions(source: str) -> set[str]:
     names = set()
@@ -1349,10 +1355,12 @@ def _unqualified_owner_calls(
         owners.update(dict.fromkeys(INIT_CORE_DEFINITIONS, "core"))
         owners.update(dict.fromkeys(INITFLOW_DEFINITIONS, "initflow"))
         owners.update(dict.fromkeys(SOURCEFLOW_DEFINITIONS, "sourceflow"))
+        owners.update(dict.fromkeys(DEVICESFLOW_DEFINITIONS, "devicesflow"))
     owners.update(dict.fromkeys(PULLFLOW_DEFINITIONS, "pullflow"))
     tree = ast.parse(source)
     module_aliases = {
-        name: name for name in ("core", "statusflow", "pullflow", "initflow", "sourceflow")
+        name: name
+        for name in ("core", "statusflow", "pullflow", "initflow", "sourceflow", "devicesflow")
     }
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -1515,6 +1523,18 @@ def test_sourceflow_single_ownership_and_qualified_calls():
     assert len(SOURCEFLOW_DEFINITIONS) == 7
 
 
+def test_devicesflow_single_ownership_and_qualified_calls():
+    inventories = {"cli": {"devices"}, "devicesflow": DEVICESFLOW_DEFINITIONS}
+    for module, expected in inventories.items():
+        source = (SRC / f"{module}.py").read_text()
+        assert _top_level_definitions(source) & DEVICESFLOW_DEFINITIONS == expected, (
+            f"{module}: expected owner inventory {expected}"
+        )
+        assert _unqualified_owner_calls(source, module) == []
+    assert _top_level_definitions((SRC / "cli.py").read_text()) >= DEVICES_SHELLS
+    assert len(DEVICESFLOW_DEFINITIONS) == 1
+
+
 def test_pull_test_consumers_use_qualified_owner_names():
     offenders = {}
     for path in Path(__file__).resolve().parent.rglob("*.py"):
@@ -1554,7 +1574,9 @@ def test_owner_call_gate_rejects_dead_aliases(source, consumer, flags):
     assert bool(_unqualified_owner_calls(source, consumer)) is flags
 
 
-@pytest.mark.parametrize("forbidden", ["statusflow", "pullflow", "initflow", "sourceflow"])
+@pytest.mark.parametrize(
+    "forbidden", ["statusflow", "pullflow", "initflow", "sourceflow", "devicesflow"]
+)
 def test_core_does_not_import_statusflow(forbidden):
     tree = ast.parse((SRC / "core.py").read_text())
     for node in ast.walk(tree):
@@ -1599,6 +1621,20 @@ def test_sourceflow_import_does_not_register_cli():
             sys.executable,
             "-c",
             "import sys; from mind_meld import sourceflow; "
+            "assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_devicesflow_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import devicesflow; "
             "assert 'mind_meld.cli' not in sys.modules",
         ],
         capture_output=True,

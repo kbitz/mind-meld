@@ -9639,6 +9639,7 @@ def test_read_only_policy62():
         cli_module.pullflow,
         initflow,
         cli_module.sourceflow,
+        cli_module.devicesflow,
     ):
         _check_read_only_policy62(Path(module.__file__).read_text())
     for function in (cli_module.core._get_config, core._maybe_prompt_migration):
