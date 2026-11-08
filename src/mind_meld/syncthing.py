@@ -1,15 +1,21 @@
-"""Read-only local Syncthing configuration discovery, REST client and folder lint.
+"""Local Syncthing discovery, REST client, folder lint, default-config check and gated writer.
 
-Leaf module: standard library only, never imports from ``mind_meld`` and never
-mutates Syncthing's configuration or state.
+Leaf module: standard library only and never imports from ``mind_meld``.
+``read_state`` and ``classify_config`` send only ``GET`` (``classify_config``
+falls back to reading ``config.xml`` when the API is unreachable). Only
+``SyncthingWriter`` writes, only through ``_WRITE_ROUTES``, and only with a
+``ManagedRecord`` that matches the live local device.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import http.client
 import io
 import json
 import os
+import re
 import socket
 import ssl
 import stat
@@ -17,6 +23,7 @@ import sys
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -27,6 +34,11 @@ _MAX_RESPONSE_BYTES = 4 * 1024 * 1024  # 4 MiB ceiling per REST response
 _DEFAULT_STIGNORE_LINE = "(?d)tmp*.tmp"
 _AUTH_HEADER = "X-API-" + "Key"
 _UNSPECIFIED_HOSTS = frozenset({"", "0.0.0.0", "::", "[::]"})
+_LUHN32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+_DEVICE_ID_RE = re.compile(r"^[A-Z2-7]{7}(-[A-Z2-7]{7}){7}\Z")
+_FOLDER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+STOCK_DEFAULT_FOLDER_ID = "default"
 
 # (option name, wanted display value, reason)
 FOLDER_OPTIONS: tuple[tuple[str, str, str], ...] = (
@@ -35,6 +47,22 @@ FOLDER_OPTIONS: tuple[tuple[str, str, str], ...] = (
     ("maxConflicts", "not 0", "0 deletes losing conflict copies silently"),
     ("ignorePerms", "false", "mode 0600 on synced files must survive"),
     ("order", "alphabetic", "blobs under data/ arrive before the manifests/ that name them"),
+)
+
+_MM_FOLDER_VALUES: dict[str, Any] = {
+    "type": "sendreceive",
+    "versioning": {"type": ""},
+    "maxConflicts": 10,
+    "ignorePerms": False,
+    "order": "alphabetic",
+}
+
+_WRITE_ROUTES: tuple[tuple[str, str], ...] = (
+    ("POST", "/rest/config/folders"),
+    ("POST", "/rest/config/devices"),
+    ("PATCH", "/rest/config/folders/{id}"),
+    ("PATCH", "/rest/config/devices/{id}"),
+    ("DELETE", "/rest/config/folders/default"),
 )
 
 
@@ -85,8 +113,8 @@ def config_dirs() -> list[Path]:
     return dirs
 
 
-def _discover_config() -> tuple[str, Path | None, bool, str | None, str | None]:
-    """Return ``(status, config_dir, use_tls, raw_address, credential)``."""
+def _load_config() -> tuple[str, Path | None, bool, str | None, str | None, ET.Element | None]:
+    """Return ``(status, config_dir, use_tls, raw_address, credential, root)``."""
     for cand_dir in config_dirs():
         cfg_path = cand_dir / "config.xml"
         try:
@@ -94,22 +122,22 @@ def _discover_config() -> tuple[str, Path | None, bool, str | None, str | None]:
         except FileNotFoundError:
             continue
         except OSError:
-            return ("config-unreadable", cand_dir, False, None, None)
+            return ("config-unreadable", cand_dir, False, None, None, None)
         if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_CONFIG_BYTES:
-            return ("config-unreadable", cand_dir, False, None, None)
+            return ("config-unreadable", cand_dir, False, None, None, None)
         try:
             raw_bytes = cfg_path.read_bytes()
         except OSError:
-            return ("config-unreadable", cand_dir, False, None, None)
+            return ("config-unreadable", cand_dir, False, None, None, None)
         if len(raw_bytes) > _MAX_CONFIG_BYTES:
-            return ("config-unreadable", cand_dir, False, None, None)
+            return ("config-unreadable", cand_dir, False, None, None, None)
         try:
             root = ET.fromstring(raw_bytes.decode("utf-8", errors="strict"))
         except (UnicodeDecodeError, ET.ParseError):
-            return ("config-unreadable", cand_dir, False, None, None)
+            return ("config-unreadable", cand_dir, False, None, None, None)
         gui = root.find("gui")
         if gui is None:
-            return ("config-unreadable", cand_dir, False, None, None)
+            return ("config-unreadable", cand_dir, False, None, None, None)
         tls_attr = (gui.attrib.get("tls") or "").strip().lower()
         use_tls = tls_attr == "true"
         addr_elem = gui.find("address")
@@ -117,9 +145,15 @@ def _discover_config() -> tuple[str, Path | None, bool, str | None, str | None]:
         address = (addr_elem.text or "").strip() if addr_elem is not None else ""
         header_val = (hdr_elem.text or "").strip() if hdr_elem is not None else ""
         if not address or not header_val:
-            return ("config-unreadable", cand_dir, use_tls, None, None)
-        return ("ok", cand_dir, use_tls, address, header_val)
-    return ("not-found", None, False, None, None)
+            return ("config-unreadable", cand_dir, use_tls, None, None, None)
+        return ("ok", cand_dir, use_tls, address, header_val, root)
+    return ("not-found", None, False, None, None, None)
+
+
+def _discover_config() -> tuple[str, Path | None, bool, str | None, str | None]:
+    """Return ``(status, config_dir, use_tls, raw_address, credential)``."""
+    status, cand_dir, use_tls, address, header_val, _ = _load_config()
+    return (status, cand_dir, use_tls, address, header_val)
 
 
 def _normalize_address(raw_address: str) -> str | None:
@@ -684,3 +718,1076 @@ def _read_state_inner(
         problems=tuple(problems),
         stignore=st_state,
     )
+
+
+@dataclass(frozen=True)
+class _Endpoint:
+    config_dir: Path
+    norm_addr: str
+    header_val: str = field(repr=False)
+    tls_context: ssl.SSLContext | None = field(repr=False)
+
+
+def _open_endpoint() -> tuple[_Endpoint | None, str, str | None, Path | None, ET.Element | None]:
+    """Open local Syncthing endpoint metadata: ``(endpoint, reach, cause, config_dir, root)``."""
+    disc_state, cfg_dir, use_tls, raw_addr, header_val, root = _load_config()
+    if disc_state == "not-found" or cfg_dir is None:
+        return (None, "not-found", None, None, None)
+    if disc_state != "ok" or raw_addr is None or header_val is None or root is None:
+        return (None, "config-unreadable", None, cfg_dir, None)
+    norm_addr = _normalize_address(raw_addr)
+    if norm_addr is None:
+        return (None, "address-unsupported", None, cfg_dir, root)
+    try:
+        tls_context = _build_tls_context(cfg_dir, use_tls=use_tls)
+    except (OSError, ssl.SSLError):
+        return (None, "unreachable", "tls", cfg_dir, root)
+    return (
+        _Endpoint(
+            config_dir=cfg_dir,
+            norm_addr=norm_addr,
+            header_val=header_val,
+            tls_context=tls_context,
+        ),
+        "ok",
+        None,
+        cfg_dir,
+        root,
+    )
+
+
+def is_device_id(value: object) -> bool:
+    """Return whether ``value`` is a canonical Syncthing device ID."""
+    return isinstance(value, str) and bool(_DEVICE_ID_RE.fullmatch(value))
+
+
+def stock_default_folder_path() -> Path:
+    """Return Syncthing's stock Default Folder path (``~/Sync``) at call time."""
+    return Path.home() / "Sync"
+
+
+def _folder_is_empty(path: Path) -> bool:
+    """Return whether ``path`` is absent or holds only ``.stfolder`` and ``.DS_Store``."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode):
+        return False
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.name == ".DS_Store":
+                    st = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(st.st_mode):
+                        return False
+                elif entry.name == ".stfolder":
+                    st = entry.stat(follow_symlinks=False)
+                    if stat.S_ISREG(st.st_mode):
+                        if st.st_size != 0:
+                            return False
+                    elif stat.S_ISDIR(st.st_mode):
+                        with os.scandir(entry.path) as sub_it:
+                            for sub in sub_it:
+                                if not (
+                                    sub.name.startswith("syncthing-folder-")
+                                    and sub.name.endswith(".txt")
+                                    and len(sub.name) > len("syncthing-folder-.txt")
+                                ):
+                                    return False
+                                sub_st = sub.stat(follow_symlinks=False)
+                                if not stat.S_ISREG(sub_st.st_mode):
+                                    return False
+                    else:
+                        return False
+                else:
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def _folder_device_ids(folder: dict[str, Any]) -> list[str] | None:
+    """Extract every device ID, or return ``None`` when sharing cannot be read."""
+    raw_devs = folder.get("devices")
+    if not isinstance(raw_devs, list):
+        return None
+    out: list[str] = []
+    for dev in raw_devs:
+        if isinstance(dev, dict):
+            did = dev.get("deviceID")
+        elif isinstance(dev, str):
+            did = dev
+        else:
+            did = None
+        if not isinstance(did, str) or not did.strip():
+            return None
+        out.append(did.strip())
+    return out
+
+
+def _stock_default_problem(folder: dict[str, Any], my_id: str | None) -> str | None:
+    """Return ``"shared"``, ``"not-empty"`` or ``None`` for the stock Default Folder."""
+    device_ids = _folder_device_ids(folder)
+    if device_ids is None:
+        return "shared"  # An unreadable sharing list cannot prove the folder is unshared.
+    for did in device_ids:
+        if my_id is None or did != my_id:
+            return "shared"
+    raw_path = folder.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return "not-empty"
+    if not _folder_is_empty(Path(raw_path.strip()).expanduser()):
+        return "not-empty"
+    return None
+
+
+@dataclass(frozen=True)
+class PreExisting:
+    """One sanitized reason a Syncthing configuration is pre-existing."""
+
+    kind: str
+    name: str
+    why: str
+
+
+@dataclass(frozen=True)
+class ManagedRecord:
+    """Proof that mm found the default Syncthing configuration on this machine."""
+
+    device_id: str
+
+
+@dataclass(frozen=True)
+class ConfigCheck:
+    """Result of classifying local Syncthing configuration."""
+
+    state: str
+    source: str | None = None
+    reach: str = "ok"
+    cause: str | None = None
+    reasons: tuple[PreExisting, ...] = ()
+    local_device_id: str | None = field(default=None, repr=False)
+
+    def managed_record(self) -> ManagedRecord:
+        if (
+            self.state != "default"
+            or self.source != "rest"
+            or not isinstance(self.local_device_id, str)
+            or not self.local_device_id
+        ):
+            raise ValueError("ManagedRecord requires a live REST default configuration")
+        return ManagedRecord(device_id=self.local_device_id)
+
+
+def _classify_shapes(
+    local_id: str | None,
+    devices: list[dict[str, Any]],
+    folders: list[dict[str, Any]],
+    sanitize: Callable[[str], str],
+) -> tuple[PreExisting, ...]:
+    """Classify REST or offline device and folder shapes with one shared rule."""
+    reasons: list[PreExisting] = []
+    for dev in devices:
+        dev_id = (dev.get("deviceID") or "").strip()
+        if local_id is not None and dev_id == local_id:
+            continue
+        raw_name = dev.get("name")
+        name_str = raw_name if isinstance(raw_name, str) else ""
+        reasons.append(PreExisting("device", sanitize(name_str) or "", "paired"))
+
+    stock_resolved = stock_default_folder_path().resolve(strict=False)
+    for folder in folders:
+        fid = (folder.get("id") or "").strip()
+        raw_label = folder.get("label")
+        label_str = raw_label if isinstance(raw_label, str) and raw_label else fid
+        raw_path = folder.get("path")
+        path_str = raw_path.strip() if isinstance(raw_path, str) else ""
+        is_stock = False
+        if fid == STOCK_DEFAULT_FOLDER_ID and path_str:
+            try:
+                is_stock = _expand_folder_path(path_str) == stock_resolved
+            except OSError:
+                is_stock = False
+        if is_stock:
+            why = _stock_default_problem(folder, local_id)
+            if why is not None:
+                reasons.append(PreExisting("folder", sanitize(label_str) or "", why))
+        else:
+            reasons.append(PreExisting("folder", sanitize(label_str) or "", "folder"))
+    return tuple(reasons)
+
+
+def _config_shapes(
+    root: ET.Element,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """Convert direct ``<device>`` and ``<folder>`` children of ``<configuration>``."""
+    if root.tag != "configuration":
+        return None
+    devices: list[dict[str, Any]] = []
+    for dev_el in root.findall("device"):
+        dev_id = (dev_el.get("id") or "").strip()
+        if not dev_id:
+            return None
+        dev_name = dev_el.get("name") or ""
+        devices.append({"deviceID": dev_id, "name": dev_name})
+    if not devices:
+        return None
+
+    folders: list[dict[str, Any]] = []
+    for fld_el in root.findall("folder"):
+        fld_id = (fld_el.get("id") or "").strip()
+        fld_path = (fld_el.get("path") or "").strip()
+        if not fld_id or not fld_path:
+            return None
+        fld_label = fld_el.get("label") or ""
+        fld_devs: list[dict[str, str]] = []
+        for fdev_el in fld_el.findall("device"):
+            fdev_id = (fdev_el.get("id") or "").strip()
+            if not fdev_id:
+                return None
+            fld_devs.append({"deviceID": fdev_id})
+        folders.append(
+            {
+                "id": fld_id,
+                "label": fld_label,
+                "path": fld_path,
+                "devices": fld_devs,
+            }
+        )
+    return (devices, folders)
+
+
+def _luhn32(block: str) -> str:
+    """Compute Syncthing's Luhn-32 check character for ``block``."""
+    factor = 1
+    total = 0
+    for ch in block:
+        code = _LUHN32_ALPHABET.index(ch)
+        addend = factor * code
+        factor = 2 if factor == 1 else 1
+        addend = (addend // 32) + (addend % 32)
+        total += addend
+    rem = total % 32
+    check = (32 - rem) % 32
+    return _LUHN32_ALPHABET[check]
+
+
+def _device_id_from_cert(config_dir: Path) -> str | None:
+    """Derive this machine's Syncthing device ID from public ``cert.pem``."""
+    try:
+        cert_path = config_dir / "cert.pem"
+        info = cert_path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_CONFIG_BYTES:
+            return None
+        raw_bytes = cert_path.read_bytes()
+        if len(raw_bytes) > _MAX_CONFIG_BYTES:
+            return None
+        pem_text = raw_bytes.decode("ascii", errors="strict")
+        der = ssl.PEM_cert_to_DER_cert(pem_text)
+        if not der:
+            return None
+        digest = hashlib.sha256(der).digest()
+        b32 = base64.b32encode(digest).decode("ascii").rstrip("=")
+        if len(b32) != 52:
+            return None
+        with_check = "".join(
+            b32[idx : idx + 13] + _luhn32(b32[idx : idx + 13]) for idx in range(0, 52, 13)
+        )
+        return "-".join(with_check[idx : idx + 7] for idx in range(0, 56, 7))
+    except Exception:
+        return None
+
+
+def _identity_files_present() -> bool:
+    """Check by ``lstat`` only whether ``cert.pem`` or ``key.pem`` exists in any candidate dir."""
+    for cand_dir in config_dirs():
+        for fname in ("cert.pem", "key.pem"):
+            try:
+                (cand_dir / fname).lstat()
+                return True
+            except OSError:
+                continue
+    return False
+
+
+def classify_config(
+    *,
+    sanitize: Callable[[str], str],
+    timeout: float = 2.0,
+    budget: float = 5.0,
+) -> ConfigCheck:
+    """Classify local Syncthing configuration over REST or offline ``config.xml``."""
+    try:
+        return _classify_config_inner(sanitize=sanitize, timeout=timeout, budget=budget)
+    except Exception:
+        return ConfigCheck(state="unknown", source=None, reach="error", cause="bad-response")
+
+
+def _classify_config_inner(
+    *,
+    sanitize: Callable[[str], str],
+    timeout: float,
+    budget: float,
+) -> ConfigCheck:
+    endpoint, reach, cause, cfg_dir, root = _open_endpoint()
+    if reach == "not-found":
+        if _identity_files_present():
+            return ConfigCheck(
+                state="unknown",
+                source=None,
+                reach="not-found",
+                cause="config-missing",
+            )
+        return ConfigCheck(state="no-config", source=None, reach="not-found", cause=None)
+    if reach == "config-unreadable":
+        return ConfigCheck(
+            state="unknown",
+            source=None,
+            reach="config-unreadable",
+            cause="config-unreadable",
+        )
+
+    if endpoint is not None:
+        deadline = time.monotonic() + max(0.0, float(budget))
+        per_req_timeout = max(0.01, float(timeout))
+
+        out1, sys_status, cause1 = _get_json(
+            endpoint.norm_addr,
+            "/rest/system/status",
+            header_val=endpoint.header_val,
+            tls_context=endpoint.tls_context,
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        if out1 == "unreachable":
+            reach, cause = "unreachable", cause1
+        elif out1 == "unauthorized":
+            return ConfigCheck(state="unknown", source=None, reach="unauthorized", cause=cause1)
+        elif out1 != "ok" or not isinstance(sys_status, dict):
+            return ConfigCheck(
+                state="unknown",
+                source=None,
+                reach="error",
+                cause=cause1 or "bad-response",
+            )
+        else:
+            raw_my_id = sys_status.get("myID")
+            my_id = raw_my_id.strip() if isinstance(raw_my_id, str) else ""
+            if not my_id:
+                return ConfigCheck(
+                    state="unknown", source=None, reach="error", cause="bad-response"
+                )
+
+            out2, cfg_devices, cause2 = _get_json(
+                endpoint.norm_addr,
+                "/rest/config/devices",
+                header_val=endpoint.header_val,
+                tls_context=endpoint.tls_context,
+                timeout=per_req_timeout,
+                deadline=deadline,
+            )
+            if out2 == "unreachable":
+                reach, cause = "unreachable", cause2
+            elif out2 == "unauthorized":
+                return ConfigCheck(state="unknown", source=None, reach="unauthorized", cause=cause2)
+            elif out2 != "ok" or not isinstance(cfg_devices, list):
+                return ConfigCheck(
+                    state="unknown",
+                    source=None,
+                    reach="error",
+                    cause=cause2 or "bad-response",
+                )
+            else:
+                for entry in cfg_devices:
+                    if (
+                        not isinstance(entry, dict)
+                        or not isinstance(entry.get("deviceID"), str)
+                        or not entry["deviceID"].strip()
+                    ):
+                        return ConfigCheck(
+                            state="unknown",
+                            source=None,
+                            reach="error",
+                            cause="bad-response",
+                        )
+
+                out3, cfg_folders, cause3 = _get_json(
+                    endpoint.norm_addr,
+                    "/rest/config/folders",
+                    header_val=endpoint.header_val,
+                    tls_context=endpoint.tls_context,
+                    timeout=per_req_timeout,
+                    deadline=deadline,
+                )
+                if out3 == "unreachable":
+                    reach, cause = "unreachable", cause3
+                elif out3 == "unauthorized":
+                    return ConfigCheck(
+                        state="unknown", source=None, reach="unauthorized", cause=cause3
+                    )
+                elif out3 != "ok" or not isinstance(cfg_folders, list):
+                    return ConfigCheck(
+                        state="unknown",
+                        source=None,
+                        reach="error",
+                        cause=cause3 or "bad-response",
+                    )
+                else:
+                    for entry in cfg_folders:
+                        if (
+                            not isinstance(entry, dict)
+                            or not isinstance(entry.get("id"), str)
+                            or not entry["id"].strip()
+                            or not isinstance(entry.get("path"), str)
+                            or not entry["path"].strip()
+                            or _folder_device_ids(entry) is None
+                        ):
+                            return ConfigCheck(
+                                state="unknown",
+                                source=None,
+                                reach="error",
+                                cause="bad-response",
+                            )
+                    reasons = _classify_shapes(my_id, cfg_devices, cfg_folders, sanitize)
+                    return ConfigCheck(
+                        state="pre-existing" if reasons else "default",
+                        source="rest",
+                        reach="ok",
+                        cause=None,
+                        reasons=reasons,
+                        local_device_id=my_id,
+                    )
+
+    # Offline fallback when REST is unreachable or GUI address is unsupported
+    if root is None:
+        return ConfigCheck(state="unknown", source=None, reach=reach, cause="bad-config")
+    shapes = _config_shapes(root)
+    if shapes is None:
+        return ConfigCheck(state="unknown", source=None, reach=reach, cause="bad-config")
+    devices, folders = shapes
+    if len(devices) == 1:
+        offline_local_id: str | None = devices[0]["deviceID"]
+    else:
+        cert_id = _device_id_from_cert(cfg_dir) if cfg_dir is not None else None
+        offline_local_id = (
+            cert_id
+            if cert_id is not None and any(d["deviceID"] == cert_id for d in devices)
+            else None
+        )
+    reasons = _classify_shapes(offline_local_id, devices, folders, sanitize)
+    return ConfigCheck(
+        state="pre-existing" if reasons else "default",
+        source="config",
+        reach=reach,
+        cause=cause,
+        reasons=reasons,
+        local_device_id=None,
+    )
+
+
+def _write_route_ok(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is one of the 5 allowlisted write routes."""
+    if not isinstance(method, str) or not isinstance(path, str):
+        return False
+    if "?" in path or "#" in path:
+        return False
+    for allowed_method, route in _WRITE_ROUTES:
+        if method != allowed_method:
+            continue
+        if not route.endswith("/{id}"):
+            if path == route:
+                return True
+            continue
+        prefix = route.removesuffix("{id}")
+        if not path.startswith(prefix):
+            continue
+        segment = path[len(prefix) :]
+        if not segment or "/" in segment:
+            return False
+        if route == "/rest/config/devices/{id}":
+            return is_device_id(segment)
+        return bool(_FOLDER_ID_RE.fullmatch(urllib.parse.unquote(segment)))
+    return False
+
+
+def _send_json(
+    endpoint: _Endpoint,
+    method: str,
+    path: str,
+    body: Any,
+    *,
+    timeout: float,
+    deadline: float,
+) -> tuple[str, str | None]:
+    """Send one allowlisted non-GET JSON request to local Syncthing."""
+    if not _write_route_ok(method, path):
+        raise ValueError(f"Disallowed Syncthing write route: {method} {path}")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return ("unreachable", "timeout")
+    req_timeout = min(timeout, remaining)
+    split = urllib.parse.urlsplit(f"http://{endpoint.norm_addr}")
+    host = split.hostname or "127.0.0.1"
+    port = split.port or 8384
+    if endpoint.tls_context is not None:
+        conn: http.client.HTTPConnection = http.client.HTTPSConnection(
+            host, port, timeout=req_timeout, context=endpoint.tls_context
+        )
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=req_timeout)
+    conn.response_class = partial(
+        _DeadlineResponse, deadline=min(deadline, time.monotonic() + req_timeout)
+    )
+    headers: dict[str, str] = {
+        _AUTH_HEADER: endpoint.header_val,
+        "Connection": "close",
+    }
+    payload_bytes: bytes | None = None
+    if method != "DELETE" and body is not None:
+        payload_bytes = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "application/json"
+    try:
+        conn.request(method, path, body=payload_bytes, headers=headers)
+        resp = conn.getresponse()
+        status = resp.status
+        resp.read(_MAX_RESPONSE_BYTES + 1)
+    except ssl.SSLError:
+        return ("unreachable", "tls")
+    except TimeoutError:
+        return ("unreachable", "timeout")
+    except (OSError, http.client.HTTPException):
+        return ("unreachable", "refused")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if status == 200:
+        return ("ok", None)
+    if 300 <= status < 400:
+        return ("unreachable", "redirect")
+    if status in (401, 403):
+        return ("unauthorized", f"http-{status}")
+    return ("error", f"http-{status}")
+
+
+@dataclass(frozen=True)
+class WriteResult:
+    """Outcome of a gated Syncthing write operation."""
+
+    outcome: str
+    cause: str | None = None
+
+
+@dataclass(frozen=True)
+class PendingDevice:
+    """Pending device offer; values are raw and peer-controlled — sanitize before display."""
+
+    device_id: str
+    name: str
+    address: str
+    time: str
+
+
+@dataclass(frozen=True)
+class PendingDevices:
+    """Result of reading pending devices from Syncthing."""
+
+    outcome: str
+    cause: str | None = None
+    devices: tuple[PendingDevice, ...] = ()
+
+
+def _writer_path(path: str | Path) -> Path | None:
+    """Resolve a writer path without exposing filesystem errors to its caller."""
+    try:
+        return Path(path).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _existing_folder_result(
+    folders: list[dict[str, Any]],
+    folder_id: str,
+    target_path: Path,
+    required_devices: set[str],
+) -> WriteResult | None:
+    """Check a configured folder without creating it or requiring a pending offer."""
+    for entry in folders:
+        if entry.get("id") != folder_id:
+            continue
+        raw_path = entry.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return WriteResult("refused", "folder-exists")
+        candidate_path = _writer_path(raw_path.strip())
+        if candidate_path is None:
+            return WriteResult("error", "path-unreadable")
+        device_ids = _folder_device_ids(entry)
+        if device_ids is None:
+            return WriteResult("error", "bad-response")
+        _, problems = _extract_options(entry)
+        if candidate_path == target_path and not problems and required_devices.issubset(device_ids):
+            return WriteResult("unchanged")
+        return WriteResult("refused", "folder-exists")
+    return None
+
+
+class SyncthingWriter:
+    """Gated Syncthing REST writer limited to O2.2 and O2.3 operations."""
+
+    def __init__(
+        self,
+        record: ManagedRecord | None,
+        *,
+        timeout: float = 2.0,
+        budget: float = 5.0,
+    ) -> None:
+        self._record = record
+        self._timeout = timeout
+        self._budget = budget
+
+    def _begin(
+        self,
+    ) -> tuple[_Endpoint | None, str | None, float, float, WriteResult | None]:
+        deadline = time.monotonic() + max(0.0, float(self._budget))
+        per_req_timeout = max(0.01, float(self._timeout))
+        if not isinstance(self._record, ManagedRecord) or not is_device_id(self._record.device_id):
+            return (
+                None,
+                None,
+                per_req_timeout,
+                deadline,
+                WriteResult("refused", "not-managed"),
+            )
+        endpoint, reach, cause, _, _ = _open_endpoint()
+        if endpoint is None:
+            return (
+                None,
+                None,
+                per_req_timeout,
+                deadline,
+                WriteResult(reach, cause),
+            )
+        # http.client includes invalid header bytes in its ValueError. Validate
+        # before the gate's GET as well as every later write using this endpoint.
+        try:
+            endpoint.header_val.encode("latin-1")
+        except UnicodeEncodeError:
+            return (None, None, per_req_timeout, deadline, WriteResult("config-unreadable"))
+        if "\r" in endpoint.header_val or "\n" in endpoint.header_val:
+            return (None, None, per_req_timeout, deadline, WriteResult("config-unreadable"))
+        out, sys_status, req_cause = _get_json(
+            endpoint.norm_addr,
+            "/rest/system/status",
+            header_val=endpoint.header_val,
+            tls_context=endpoint.tls_context,
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        if out in ("unreachable", "unauthorized", "error"):
+            return (None, None, per_req_timeout, deadline, WriteResult(out, req_cause))
+        if out != "ok" or not isinstance(sys_status, dict):
+            return (
+                None,
+                None,
+                per_req_timeout,
+                deadline,
+                WriteResult("error", req_cause or "bad-response"),
+            )
+        raw_my_id = sys_status.get("myID")
+        my_id = raw_my_id.strip() if isinstance(raw_my_id, str) else ""
+        if not my_id:
+            return (
+                None,
+                None,
+                per_req_timeout,
+                deadline,
+                WriteResult("error", "bad-response"),
+            )
+        if my_id != self._record.device_id:
+            return (
+                None,
+                None,
+                per_req_timeout,
+                deadline,
+                WriteResult("refused", "not-managed"),
+            )
+        return (endpoint, my_id, per_req_timeout, deadline, None)
+
+    def _get_list(
+        self,
+        endpoint: _Endpoint,
+        path: str,
+        *,
+        timeout: float,
+        deadline: float,
+    ) -> tuple[list[dict[str, Any]] | None, WriteResult | None]:
+        out, data, cause = _get_json(
+            endpoint.norm_addr,
+            path,
+            header_val=endpoint.header_val,
+            tls_context=endpoint.tls_context,
+            timeout=timeout,
+            deadline=deadline,
+        )
+        if out in ("unreachable", "unauthorized", "error"):
+            return (None, WriteResult(out, cause))
+        if out != "ok" or not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+            return (None, WriteResult("error", cause or "bad-response"))
+        return (data, None)
+
+    def _create(
+        self,
+        endpoint: _Endpoint,
+        my_id: str,
+        folder_id: str,
+        label: str,
+        path: str | Path,
+        *,
+        peers: tuple[str, ...],
+        timeout: float,
+        deadline: float,
+    ) -> WriteResult:
+        if not isinstance(folder_id, str) or not _FOLDER_ID_RE.fullmatch(folder_id):
+            return WriteResult("refused", "bad-folder-id")
+        target_path = _writer_path(path)
+        if target_path is None:
+            return WriteResult("error", "path-unreadable")
+        folders, err = self._get_list(
+            endpoint, "/rest/config/folders", timeout=timeout, deadline=deadline
+        )
+        if err is not None or folders is None:
+            return err or WriteResult("error", "bad-response")
+
+        existing = _existing_folder_result(folders, folder_id, target_path, {my_id, *peers})
+        if existing is not None:
+            return existing
+
+        for entry in folders:
+            raw_p = entry.get("path")
+            if not isinstance(raw_p, str) or not raw_p.strip():
+                continue
+            cand_path = _writer_path(raw_p.strip())
+            if cand_path is None:
+                return WriteResult("error", "path-unreadable")
+            if (
+                cand_path == target_path
+                or target_path.is_relative_to(cand_path)
+                or cand_path.is_relative_to(target_path)
+            ):
+                return WriteResult("refused", "path-overlap")
+
+        post_body: dict[str, Any] = {
+            "id": folder_id,
+            "label": label,
+            "path": str(target_path),
+            "paused": False,
+            "devices": [{"deviceID": my_id}, *({"deviceID": pid} for pid in peers)],
+            **_MM_FOLDER_VALUES,
+        }
+        w_out, w_cause = _send_json(
+            endpoint,
+            "POST",
+            "/rest/config/folders",
+            post_body,
+            timeout=timeout,
+            deadline=deadline,
+        )
+        if w_out != "ok":
+            return WriteResult(w_out, w_cause)
+
+        folders_after, err2 = self._get_list(
+            endpoint, "/rest/config/folders", timeout=timeout, deadline=deadline
+        )
+        if err2 is not None or folders_after is None:
+            return err2 or WriteResult("error", "bad-response")
+        for entry in folders_after:
+            if entry.get("id") == folder_id:
+                raw_p = entry.get("path")
+                if not isinstance(raw_p, str) or not raw_p.strip():
+                    break
+                cand_path = _writer_path(raw_p.strip())
+                if cand_path is None:
+                    return WriteResult("error", "path-unreadable")
+                _, opt_problems = _extract_options(entry)
+                if cand_path == target_path and not opt_problems:
+                    return WriteResult("ok", None)
+                break
+        return WriteResult("error", "options-not-applied")
+
+    def create_folder(self, folder_id: str, label: str, path: str | Path) -> WriteResult:
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            return err or WriteResult("refused", "not-managed")
+        return self._create(
+            endpoint,
+            my_id,
+            folder_id,
+            label,
+            path,
+            peers=(),
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+
+    def accept_folder_offer(
+        self, folder_id: str, device_id: str, label: str, path: str | Path
+    ) -> WriteResult:
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            return err or WriteResult("refused", "not-managed")
+        if not isinstance(folder_id, str) or not _FOLDER_ID_RE.fullmatch(folder_id):
+            return WriteResult("refused", "bad-folder-id")
+        if not is_device_id(device_id):
+            return WriteResult("refused", "bad-device-id")
+        if device_id == my_id:
+            return WriteResult("refused", "own-device")
+
+        devices, dev_err = self._get_list(
+            endpoint, "/rest/config/devices", timeout=per_req_timeout, deadline=deadline
+        )
+        if dev_err is not None or devices is None:
+            return dev_err or WriteResult("error", "bad-response")
+        if not any(d.get("deviceID") == device_id for d in devices):
+            return WriteResult("refused", "device-not-configured")
+
+        target_path = _writer_path(path)
+        if target_path is None:
+            return WriteResult("error", "path-unreadable")
+        folders, folder_error = self._get_list(
+            endpoint, "/rest/config/folders", timeout=per_req_timeout, deadline=deadline
+        )
+        if folder_error is not None or folders is None:
+            return folder_error or WriteResult("error", "bad-response")
+        existing = _existing_folder_result(folders, folder_id, target_path, {my_id, device_id})
+        if existing is not None:
+            return existing
+
+        query = urllib.parse.urlencode({"device": device_id})
+        out, pending, cause = _get_json(
+            endpoint.norm_addr,
+            f"/rest/cluster/pending/folders?{query}",
+            header_val=endpoint.header_val,
+            tls_context=endpoint.tls_context,
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        if out in ("unreachable", "unauthorized", "error"):
+            return WriteResult(out, cause)
+        if out != "ok" or not isinstance(pending, dict):
+            return WriteResult("error", cause or "bad-response")
+
+        folder_entry = pending.get(folder_id)
+        offered_by = folder_entry.get("offeredBy") if isinstance(folder_entry, dict) else None
+        peer_offer = offered_by.get(device_id) if isinstance(offered_by, dict) else None
+        if not isinstance(peer_offer, dict):
+            return WriteResult("refused", "no-offer")
+        if bool(peer_offer.get("receiveEncrypted")) or bool(peer_offer.get("remoteEncrypted")):
+            return WriteResult("refused", "encrypted-offer")
+
+        return self._create(
+            endpoint,
+            my_id,
+            folder_id,
+            label,
+            path,
+            peers=(device_id,),
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+
+    def add_device(self, device_id: str, name: str = "") -> WriteResult:
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            return err or WriteResult("refused", "not-managed")
+        if not is_device_id(device_id):
+            return WriteResult("refused", "bad-device-id")
+        if device_id == my_id:
+            return WriteResult("refused", "own-device")
+
+        devices, dev_err = self._get_list(
+            endpoint, "/rest/config/devices", timeout=per_req_timeout, deadline=deadline
+        )
+        if dev_err is not None or devices is None:
+            return dev_err or WriteResult("error", "bad-response")
+        if any(d.get("deviceID") == device_id for d in devices):
+            return WriteResult("unchanged", None)
+
+        post_body = {
+            "deviceID": device_id,
+            "name": name,
+            "addresses": ["dynamic"],
+            "introducer": False,
+            "autoAcceptFolders": False,
+            "paused": False,
+        }
+        w_out, w_cause = _send_json(
+            endpoint,
+            "POST",
+            "/rest/config/devices",
+            post_body,
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        return WriteResult(w_out, w_cause)
+
+    def share_folder(self, folder_id: str, device_id: str) -> WriteResult:
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            return err or WriteResult("refused", "not-managed")
+        if not isinstance(folder_id, str) or not _FOLDER_ID_RE.fullmatch(folder_id):
+            return WriteResult("refused", "bad-folder-id")
+        if not is_device_id(device_id):
+            return WriteResult("refused", "bad-device-id")
+        if device_id == my_id:
+            return WriteResult("refused", "own-device")
+
+        folders, fld_err = self._get_list(
+            endpoint, "/rest/config/folders", timeout=per_req_timeout, deadline=deadline
+        )
+        if fld_err is not None or folders is None:
+            return fld_err or WriteResult("error", "bad-response")
+        target_folder = next((f for f in folders if f.get("id") == folder_id), None)
+        if target_folder is None:
+            return WriteResult("refused", "no-folder")
+        _, opt_problems = _extract_options(target_folder)
+        if opt_problems:
+            return WriteResult("refused", "not-mm-folder")
+
+        devices, dev_err = self._get_list(
+            endpoint, "/rest/config/devices", timeout=per_req_timeout, deadline=deadline
+        )
+        if dev_err is not None or devices is None:
+            return dev_err or WriteResult("error", "bad-response")
+        if not any(d.get("deviceID") == device_id for d in devices):
+            return WriteResult("refused", "device-not-configured")
+
+        device_ids = _folder_device_ids(target_folder)
+        if device_ids is None:
+            return WriteResult("error", "bad-response")
+        if device_id in device_ids:
+            return WriteResult("unchanged", None)
+        existing_entries = target_folder.get("devices")
+        if not isinstance(existing_entries, list):
+            return WriteResult("error", "bad-response")
+
+        quoted_id = urllib.parse.quote(folder_id, safe="")
+        patch_body = {"devices": [*existing_entries, {"deviceID": device_id}]}
+        w_out, w_cause = _send_json(
+            endpoint,
+            "PATCH",
+            f"/rest/config/folders/{quoted_id}",
+            patch_body,
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        return WriteResult(w_out, w_cause)
+
+    def pending_devices(self) -> PendingDevices:
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            res = err or WriteResult("refused", "not-managed")
+            return PendingDevices(res.outcome, res.cause, ())
+
+        out, data, cause = _get_json(
+            endpoint.norm_addr,
+            "/rest/cluster/pending/devices",
+            header_val=endpoint.header_val,
+            tls_context=endpoint.tls_context,
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        if out in ("unreachable", "unauthorized", "error"):
+            return PendingDevices(out, cause, ())
+        if out != "ok" or not isinstance(data, dict):
+            return PendingDevices("error", cause or "bad-response", ())
+
+        items: list[PendingDevice] = []
+        for dev_id, info in data.items():
+            if not is_device_id(dev_id) or not isinstance(info, dict):
+                continue
+            raw_name = info.get("name")
+            raw_addr = info.get("address")
+            raw_time = info.get("time")
+            items.append(
+                PendingDevice(
+                    device_id=dev_id,
+                    name=raw_name if isinstance(raw_name, str) else "",
+                    address=raw_addr if isinstance(raw_addr, str) else "",
+                    time=raw_time if isinstance(raw_time, str) else "",
+                )
+            )
+        items.sort(key=lambda d: d.device_id)
+        return PendingDevices("ok", None, tuple(items))
+
+    def mark_introducer(self, device_id: str) -> WriteResult:
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            return err or WriteResult("refused", "not-managed")
+        if not is_device_id(device_id):
+            return WriteResult("refused", "bad-device-id")
+        if device_id == my_id:
+            return WriteResult("refused", "own-device")
+
+        devices, dev_err = self._get_list(
+            endpoint, "/rest/config/devices", timeout=per_req_timeout, deadline=deadline
+        )
+        if dev_err is not None or devices is None:
+            return dev_err or WriteResult("error", "bad-response")
+        target_dev = next((d for d in devices if d.get("deviceID") == device_id), None)
+        if target_dev is None:
+            return WriteResult("refused", "device-not-configured")
+        if target_dev.get("introducer") is True:
+            return WriteResult("unchanged", None)
+
+        w_out, w_cause = _send_json(
+            endpoint,
+            "PATCH",
+            f"/rest/config/devices/{device_id}",
+            {"introducer": True},
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        return WriteResult(w_out, w_cause)
+
+    def remove_default_folder(self) -> WriteResult:
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            return err or WriteResult("refused", "not-managed")
+
+        folders, fld_err = self._get_list(
+            endpoint, "/rest/config/folders", timeout=per_req_timeout, deadline=deadline
+        )
+        if fld_err is not None or folders is None:
+            return fld_err or WriteResult("error", "bad-response")
+        default_entry = next((f for f in folders if f.get("id") == STOCK_DEFAULT_FOLDER_ID), None)
+        if default_entry is None:
+            return WriteResult("unchanged", None)
+
+        raw_path = default_entry.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return WriteResult("refused", "default-folder-in-use")
+        stock_resolved = _writer_path(stock_default_folder_path())
+        candidate_path = _writer_path(raw_path.strip())
+        if stock_resolved is None or candidate_path is None:
+            return WriteResult("error", "path-unreadable")
+        if (
+            candidate_path != stock_resolved
+            or _stock_default_problem(default_entry, my_id) is not None
+        ):
+            return WriteResult("refused", "default-folder-in-use")
+
+        w_out, w_cause = _send_json(
+            endpoint,
+            "DELETE",
+            "/rest/config/folders/default",
+            None,
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        return WriteResult(w_out, w_cause)

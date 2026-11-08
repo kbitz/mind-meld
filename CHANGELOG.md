@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.25] - 2026-11-07
+
+Syncthing setup classifies default configurations and gates writes, with safe handling of malformed folder device lists, retries, and failures.
+
+### Added
+
+- Default Syncthing configurations are classified, and setup writes are gated on that classification.
+
+### Fixed
+
+- Malformed Syncthing folder device lists are rejected.
+- Syncthing setup retries and failures are handled safely.
+
 ## [1.12.24] - 2026-11-07
 
 Cursor-only repositories leave discovery, with a 90-day recapture window from this upgrade.
