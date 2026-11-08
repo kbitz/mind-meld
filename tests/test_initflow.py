@@ -754,8 +754,9 @@ def test_managed_join_refuses_populated_new_share_before_any_write(
     assert _tree(storage) == before
 
 
+@pytest.mark.parametrize("unreadable_folders", [False, True])
 def test_managed_new_fleet_refuses_accepted_share_waiting_for_header(
-    env, fake_syncthing, tmp_path, monkeypatch
+    env, fake_syncthing, tmp_path, monkeypatch, unreadable_folders
 ):
     storage, _backend = env
     _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
@@ -766,11 +767,25 @@ def test_managed_new_fleet_refuses_accepted_share_waiting_for_header(
     assert joined.exit_code == 1
     before = _tree(storage)
     writes = list(fake_syncthing.bodies)
+    if unreadable_folders:
+        real_read_state = syncthing.read_state
+
+        def transient_unreadable_folders(*args, **kwargs):
+            configured = fake_syncthing.responses["/rest/config/folders"]
+            fake_syncthing.responses["/rest/config/folders"] = {}
+            try:
+                return real_read_state(*args, **kwargs)
+            finally:
+                # A writer's later read recovers, so it cannot provide the
+                # missing proof that this bootstrap target is local-only.
+                fake_syncthing.responses["/rest/config/folders"] = configured
+
+        monkeypatch.setattr(syncthing, "read_state", transient_unreadable_folders)
 
     result, text = _new_fleet(f"{storage}\nMac B\npw\npw\n{SOURCES_CLAUDE_ONLY}")
 
     assert result.exit_code == 1, result.output
-    assert "already shared" in text
+    assert ("could not check Syncthing" if unreadable_folders else "already shared") in text
     assert fake_syncthing.bodies == writes
     assert not config.CONFIG_PATH.exists()
     assert _tree(storage) == before

@@ -225,7 +225,7 @@ def _is_inside_stock_default_folder(full_path: Path) -> bool:
 def _read_syncthing_state_or_stop(full_path: Path) -> syncthing.SyncthingState:
     """Do not mistake an unreadable setup for an unconfigured folder."""
     state = syncthing.read_state(full_path)
-    if state.state != "ok":
+    if state.state != "ok" or (state.folder_path is None and "no-folder" not in state.problems):
         core._error(
             "init: could not check Syncthing's folder setup "
             f"({safe_terminal_str(state.state)}/{safe_terminal_str(state.cause or 'unknown')}). "
