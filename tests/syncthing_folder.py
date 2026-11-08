@@ -23,12 +23,24 @@ reappear during a retry.
 
 from __future__ import annotations
 
+import datetime
 import http.server
 import json
+import os
+import shutil
+import ssl
 import threading
-from collections.abc import Callable
+import time
+import urllib.parse
+import xml.sax.saxutils as saxutils
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from mind_meld.storage.local import LocalBackend
 
@@ -131,10 +143,85 @@ FAKE_PEER_SYNCTHING_ID = "PEERBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBB
 FAKE_PEER2_SYNCTHING_ID = "PEERCCC-CCCCCCC-CCCCCCC-CCCCCCC-CCCCCCC-CCCCCCC-CCCCCCC-CCCCCCC"
 
 
+def make_syncthing_like_certificate(
+    directory: Path, *, common_name: str = "syncthing"
+) -> tuple[Path, Path]:
+    """Generate a Syncthing-shaped ECDSA P-256 certificate and private file."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    priv = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Syncthing"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Automatically Generated"),
+        ]
+    )
+    not_before = datetime.datetime.now(datetime.timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    not_after = not_before + datetime.timedelta(days=365)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(priv.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(common_name)]),
+            critical=False,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage(
+                [ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]
+            ),
+            critical=False,
+        )
+        .add_extension(
+            x509.BasicConstraints(ca=False, path_length=None),
+            critical=True,
+        )
+        .sign(priv, hashes.SHA256())
+    )
+    cert_path = directory / "cert.pem"
+    priv_path = directory / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    priv_path.write_bytes(
+        priv.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return (cert_path, priv_path)
+
+
 class FakeSyncthing:
     """In-process fake Syncthing REST server and ``config.xml`` fixture (Track 92A)."""
 
-    def __init__(self, config_dir: Path, storage_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        config_dir: Path,
+        storage_path: Path | None = None,
+        *,
+        tls_cert: tuple[Path, Path] | None = None,
+    ) -> None:
         self.config_dir = Path(config_dir)
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.config_dir / "config.xml"
@@ -146,8 +233,13 @@ class FakeSyncthing:
         self.peer_id = FAKE_PEER_SYNCTHING_ID
         self.peer2_id = FAKE_PEER2_SYNCTHING_ID
         self.requests: list[tuple[str, str, dict[str, str]]] = []
+        self.bodies: list[tuple[str, str, Any]] = []
         self.responses: dict[str, Any] = {}
+        self.write_responses: dict[tuple[str, str], Any] = {}
+        self.apply_writes: bool = True
+        self.on_write: Callable[[str, str, Any], None] | None = None
         self.holds: dict[str, threading.Event] = {}
+        self.delays: dict[str, float] = {}
         self._lock = threading.Lock()
 
         outer = self
@@ -156,28 +248,7 @@ class FakeSyncthing:
             def log_message(self, format: str, *args: Any) -> None:
                 return
 
-            def _handle(self) -> None:
-                headers = {k: v for k, v in self.headers.items()}
-                with outer._lock:
-                    outer.requests.append((self.command, self.path, headers))
-                    hold_event = outer.holds.get(self.path) or outer.holds.get("*")
-                if hold_event is not None:
-                    hold_event.wait(timeout=5.0)
-                auth_header = headers.get("X-API-Key") or headers.get("x-api-key")
-                if auth_header != outer.gui_value:
-                    self.send_response(403)
-                    self.send_header("Content-Type", "text/plain")
-                    self.end_headers()
-                    self.wfile.write(b"CSRF Error")
-                    return
-                with outer._lock:
-                    spec = outer.responses.get(self.path)
-                    if spec is None and "?" in self.path:
-                        spec = outer.responses.get(self.path.split("?", 1)[0])
-                if spec is None:
-                    self.send_response(404)
-                    self.end_headers()
-                    return
+            def _send_spec(self, spec: Any) -> None:
                 if isinstance(spec, int):
                     self.send_response(spec)
                     self.end_headers()
@@ -205,19 +276,174 @@ class FakeSyncthing:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _handle(self) -> None:
+                headers = {k: v for k, v in self.headers.items()}
+                parsed_body: Any = None
+                if self.command != "GET":
+                    clen = int(
+                        headers.get("Content-Length") or headers.get("content-length") or "0"
+                    )
+                    raw_body = self.rfile.read(clen) if clen > 0 else b""
+                    if raw_body:
+                        try:
+                            parsed_body = json.loads(raw_body.decode("utf-8"))
+                        except Exception:
+                            parsed_body = raw_body
+                with outer._lock:
+                    outer.requests.append((self.command, self.path, headers))
+                    if self.command != "GET":
+                        outer.bodies.append((self.command, self.path, parsed_body))
+                    hold_event = outer.holds.get(self.path) or outer.holds.get("*")
+                    delay_sec = outer.delays.get(self.path) or outer.delays.get("*") or 0.0
+                if hold_event is not None:
+                    hold_event.wait(timeout=5.0)
+                if delay_sec > 0:
+                    time.sleep(delay_sec)
+                auth_header = headers.get("X-API-Key") or headers.get("x-api-key")
+                if auth_header != outer.gui_value:
+                    self.send_response(403)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(b"CSRF Error")
+                    return
+                if self.command != "GET":
+                    with outer._lock:
+                        w_spec = outer.write_responses.get((self.command, self.path))
+                    if w_spec is not None:
+                        self._send_spec(w_spec)
+                        return
+                    if outer.apply_writes:
+                        code = outer._apply_write_locked(self.command, self.path, parsed_body)
+                        self._send_spec((code, b""))
+                        return
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                with outer._lock:
+                    spec = outer.responses.get(self.path)
+                    if spec is None and "?" in self.path:
+                        spec = outer.responses.get(self.path.split("?", 1)[0])
+                if spec is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self._send_spec(spec)
+
             def do_GET(self) -> None:
                 self._handle()
 
             def do_POST(self) -> None:
                 self._handle()
 
+            def do_PATCH(self) -> None:
+                self._handle()
+
+            def do_DELETE(self) -> None:
+                self._handle()
+
+            def do_PUT(self) -> None:
+                self._handle()
+
         self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port: int = self._server.server_port
         self.address = f"127.0.0.1:{self.port}"
+        if tls_cert is not None:
+            cert_file, priv_file = tls_cert
+            shutil.copyfile(cert_file, self.config_dir / "https-cert.pem")
+            srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            srv_ctx.load_cert_chain(os.fspath(cert_file), os.fspath(priv_file))
+            self._server.socket = srv_ctx.wrap_socket(self._server.socket, server_side=True)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
-        self.write_config()
+        if tls_cert is not None:
+            self.write_config(tls=True)
+        else:
+            self.write_config()
         self.set_folder(self.storage_path)
+
+    def _apply_write_locked(self, method: str, path: str, parsed_body: Any) -> int:
+        with self._lock:
+            if method == "PUT":
+                return 405
+            if method == "POST" and path == "/rest/config/folders":
+                if not isinstance(parsed_body, dict) or not parsed_body.get("id"):
+                    return 400
+                folders = list(self.responses.get("/rest/config/folders") or [])
+                fid = parsed_body["id"]
+                replaced = False
+                for idx, item in enumerate(folders):
+                    if isinstance(item, dict) and item.get("id") == fid:
+                        folders[idx] = dict(parsed_body)
+                        replaced = True
+                        break
+                if not replaced:
+                    folders.append(dict(parsed_body))
+                self.responses["/rest/config/folders"] = folders
+                if self.on_write is not None:
+                    self.on_write(method, path, parsed_body)
+                return 200
+            if method == "POST" and path == "/rest/config/devices":
+                if not isinstance(parsed_body, dict) or not parsed_body.get("deviceID"):
+                    return 400
+                devices = list(self.responses.get("/rest/config/devices") or [])
+                did = parsed_body["deviceID"]
+                replaced = False
+                for idx, item in enumerate(devices):
+                    if isinstance(item, dict) and item.get("deviceID") == did:
+                        devices[idx] = dict(parsed_body)
+                        replaced = True
+                        break
+                if not replaced:
+                    devices.append(dict(parsed_body))
+                self.responses["/rest/config/devices"] = devices
+                if self.on_write is not None:
+                    self.on_write(method, path, parsed_body)
+                return 200
+            if method == "PATCH" and path.startswith("/rest/config/folders/"):
+                if not isinstance(parsed_body, dict):
+                    return 400
+                target_id = urllib.parse.unquote(path[len("/rest/config/folders/") :])
+                folders = list(self.responses.get("/rest/config/folders") or [])
+                for idx, item in enumerate(folders):
+                    if isinstance(item, dict) and item.get("id") == target_id:
+                        merged = dict(item)
+                        merged.update(parsed_body)
+                        folders[idx] = merged
+                        self.responses["/rest/config/folders"] = folders
+                        if self.on_write is not None:
+                            self.on_write(method, path, parsed_body)
+                        return 200
+                return 404
+            if method == "PATCH" and path.startswith("/rest/config/devices/"):
+                if not isinstance(parsed_body, dict):
+                    return 400
+                target_id = urllib.parse.unquote(path[len("/rest/config/devices/") :])
+                devices = list(self.responses.get("/rest/config/devices") or [])
+                for idx, item in enumerate(devices):
+                    if isinstance(item, dict) and item.get("deviceID") == target_id:
+                        merged = dict(item)
+                        merged.update(parsed_body)
+                        devices[idx] = merged
+                        self.responses["/rest/config/devices"] = devices
+                        if self.on_write is not None:
+                            self.on_write(method, path, parsed_body)
+                        return 200
+                return 404
+            if method == "DELETE" and path.startswith("/rest/config/folders/"):
+                target_id = urllib.parse.unquote(path[len("/rest/config/folders/") :])
+                folders = list(self.responses.get("/rest/config/folders") or [])
+                kept = [
+                    item
+                    for item in folders
+                    if not (isinstance(item, dict) and item.get("id") == target_id)
+                ]
+                if len(kept) == len(folders):
+                    return 400
+                self.responses["/rest/config/folders"] = kept
+                if self.on_write is not None:
+                    self.on_write(method, path, parsed_body)
+                return 200
+            return 404
 
     def write_config(
         self,
@@ -225,21 +451,109 @@ class FakeSyncthing:
         address: str | None = None,
         tls: bool = False,
         gui_value: str | None = None,
+        devices: Iterable[dict[str, Any]] | None = None,
+        folders: Iterable[dict[str, Any]] | None = None,
+        defaults: bool = False,
     ) -> Path:
         addr = self.address if address is None else address
         cred = self.gui_value if gui_value is None else gui_value
         tls_str = "true" if tls else "false"
-        xml = (
-            '<configuration version="37">\n'
-            f'  <gui enabled="true" tls="{tls_str}">\n'
-            f"    <address>{addr}</address>\n"
-            f"    <apikey>{cred}</apikey>\n"
-            "  </gui>\n"
-            "</configuration>\n"
-        )
+        if devices is None and folders is None and not defaults:
+            xml = (
+                '<configuration version="37">\n'
+                f'  <gui enabled="true" tls="{tls_str}">\n'
+                f"    <address>{addr}</address>\n"
+                f"    <apikey>{cred}</apikey>\n"
+                "  </gui>\n"
+                "</configuration>\n"
+            )
+        else:
+            lines = [
+                '<configuration version="37">',
+                f'  <gui enabled="true" tls="{tls_str}">',
+                f"    <address>{addr}</address>",
+                f"    <apikey>{cred}</apikey>",
+                "  </gui>",
+            ]
+            dev_rows = [{"deviceID": self.my_id, "name": "mac-a"}, *(devices or ())]
+            for dev in dev_rows:
+                did = saxutils.quoteattr(str(dev.get("deviceID", "")))
+                dname = saxutils.quoteattr(str(dev.get("name", "")))
+                lines.append(f"  <device id={did} name={dname}></device>")
+            for fld in folders or ():
+                fid = saxutils.quoteattr(str(fld.get("id", "")))
+                flabel = saxutils.quoteattr(str(fld.get("label", "")))
+                fpath = saxutils.quoteattr(str(fld.get("path", "")))
+                lines.append(f"  <folder id={fid} label={flabel} path={fpath}>")
+                for fdev in fld.get("devices") or ():
+                    fdev_id = fdev.get("deviceID", "") if isinstance(fdev, dict) else str(fdev)
+                    lines.append(f"    <device id={saxutils.quoteattr(str(fdev_id))}></device>")
+                lines.append("  </folder>")
+            if defaults:
+                lines.extend(
+                    [
+                        "  <defaults>",
+                        '    <folder id="default" label="Template Folder" path="~">',
+                        f'      <device id="{self.peer_id}"></device>',
+                        "    </folder>",
+                        f'    <device id="{self.peer2_id}" name="template-dev"></device>',
+                        "  </defaults>",
+                    ]
+                )
+            lines.append("</configuration>\n")
+            xml = "\n".join(lines)
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(xml, encoding="utf-8")
         return self.config_path
+
+    def set_config(
+        self,
+        *,
+        devices: Iterable[dict[str, Any]] = (),
+        folders: Iterable[dict[str, Any]] = (),
+    ) -> None:
+        cfg_devices = [{"deviceID": self.my_id, "name": "mac-a"}, *devices]
+        cfg_folders = list(folders)
+        with self._lock:
+            self.responses["/rest/system/status"] = {"myID": self.my_id}
+            self.responses["/rest/config/devices"] = cfg_devices
+            self.responses["/rest/config/folders"] = cfg_folders
+
+    def set_shape(
+        self,
+        *,
+        devices: Iterable[dict[str, Any]] = (),
+        folders: Iterable[dict[str, Any]] = (),
+        defaults: bool = False,
+    ) -> None:
+        dev_list = list(devices)
+        fld_list = list(folders)
+        self.set_config(devices=dev_list, folders=fld_list)
+        self.write_config(devices=dev_list, folders=fld_list, defaults=defaults)
+
+    def stock_folder(
+        self,
+        path: Path | str,
+        *,
+        shared_with: Iterable[str] = (),
+        label: str = "Default Folder",
+    ) -> dict[str, Any]:
+        return {
+            "id": "default",
+            "label": label,
+            "path": str(path),
+            "type": "sendreceive",
+            "paused": False,
+            "ignorePerms": False,
+            "order": "alphabetic",
+            "maxConflicts": 10,
+            "versioning": {"type": "", "params": {}},
+            "devices": [{"deviceID": self.my_id}, *({"deviceID": d} for d in shared_with)],
+        }
+
+    def delay(self, path: str, seconds: float) -> None:
+        with self._lock:
+            self.delays[path] = seconds
 
     def set_folder(
         self,
