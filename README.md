@@ -24,6 +24,31 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Git history rewritten to remove machine names (Track 121A):** `git fetch` reporting
+`(forced update)` for `main` is only an example symptom — any clone or worktree made before the
+rewrite is affected, whether or not it saw that message:
+
+```bash
+[ "$(git rev-parse refs/tags/v1.12.29)" = "$(git ls-remote origin refs/tags/v1.12.29 | cut -f1)" ] || echo "made before the history rewrite: re-clone"
+```
+
+Both sides use raw tag ref ids, so lightweight and annotated tags both work; a failed or empty
+`ls-remote` means "cannot tell, retry online", not "old clone". The history from an early commit
+(the first changed commit) on has new ids after removing machine names, while every branch and tag
+keeps its name. Make a fresh clone for every other clone and worktree rather than rebase, merge or
+pull, moving unpushed work across as patches (`git format-patch` in the old clone, `git am` in the
+new one; see [Re-cloning after the history rewrite](#re-cloning-after-the-history-rewrite)) before
+deleting the old clone. Never push from a pre-rewrite clone, because that brings the old history
+back. `pipx` installs from `@latest` or from a tag need no action: names still resolve, and an
+install made before the rewrite holds the same code. Do not run `mm recapture` over days before the
+rewrite for this repository (keep recapture windows shorter than the days since the rewrite,
+overriding the older notes' recapture advice for that period): capture walks commits since each
+machine's own last push and deduplicates on `(remote, sha)`, so a commit one machine published under
+its old id and another machine, a 30-day `mm init` backfill, a `mm recapture`, or a late-publishing
+old clone publishes under its new id counts twice in `retro-fleet` until `mm gc` reaps event files
+90 days after their day (after interactive pushes that upload changes; an old clone that publishes
+late extends the period, so 90 days is when reaping becomes possible, not a guaranteed end).
+
 **Cursor support removed (Tracks 114A–116A):** `mm cursor-agent`,
 `mm capture-cursor-usage`, the `cursor` source alias for `mm enable-source` /
 `mm disable-source`, the Cursor usage reader, the Cursor git-root discovery prober, and
@@ -2554,6 +2579,78 @@ mm --show-completion         # prints it instead, if you would rather install it
 `~/.zfunc/_mm` on zsh, `~/.bashrc` on bash — and on zsh it also enables
 `compinit`. Use `--show-completion` if you would rather place the script
 yourself.
+
+### Re-cloning after the history rewrite
+
+Run steps 1–4 in every worktree of the old clone before moving the clone aside:
+
+1. **List worktrees, stashes and branches with unpushed commits:**
+
+   ```bash
+   git worktree list
+   git stash list
+   git branch -vv
+   ```
+
+2. **Take the old base for each branch.** That is the value `origin/main` had before the forced
+   update (`git reflog show --format='%H %gs' origin/main | awk '/forced-update/{getline; print $1; exit}'`);
+   use local `main` instead if it was never updated, and check that
+   `git rev-list --count "$base"..<branch>` counts only your own commits:
+
+   ```bash
+   base=$(git reflog show --format='%H %gs' origin/main | awk '/forced-update/{getline; print $1; exit}')
+   [ -n "$base" ] || base=$(git rev-parse main)
+   git rev-list --count "$base"..<branch>
+   ```
+
+3. **Export each branch outside the clone.** Export patches with
+   `git format-patch "$base"..<branch> -o ../mm-patches/<branch>`, and for a branch with merge
+   commits also run `git diff --binary "$base" <branch> > ../mm-patches/<branch>.diff`:
+
+   ```bash
+   git format-patch "$base"..<branch> -o ../mm-patches/<branch>
+   git diff --binary "$base" <branch> > ../mm-patches/<branch>.diff
+   ```
+
+4. **Save uncommitted, staged, stashed and untracked or ignored local state** —
+   `git diff --binary`, `git diff --cached --binary`, `git stash show -p stash@{n}` for each
+   stash, and copies of the untracked or ignored local state you want (for example `.gstack/`):
+
+   ```bash
+   mkdir -p ../mm-patches/local
+   git diff --binary > ../mm-patches/local/unstaged.diff
+   git diff --cached --binary > ../mm-patches/local/staged.diff
+   git stash show -p stash@{n} > ../mm-patches/local/stash-n.patch
+   ```
+
+5. **Move the old clone aside and clone to the same path** so `[retro] repo_roots` pins and
+   discovery still match:
+
+   ```bash
+   mv /path/to/mind-meld /path/to/mind-meld.old
+   git clone https://github.com/kbitz/mind-meld.git /path/to/mind-meld
+   cd /path/to/mind-meld
+   ```
+
+6. **Replay each branch in the new clone.** For each branch, run
+   `git switch -c <branch> origin/main` and then `git am ../mm-patches/<branch>/*.patch`
+   (`git am --continue` after resolving a conflict, or `git am --abort` to back out); for a
+   merge-bearing branch, run `git apply --index ../mm-patches/<branch>.diff` instead, then restore
+   any saved local state:
+
+   ```bash
+   git switch -c <branch> origin/main
+   git am ../mm-patches/<branch>/*.patch
+   # Or, for a merge-bearing branch:
+   git apply --index ../mm-patches/<branch>.diff
+   ```
+
+7. **Verify each branch before deleting the old clone.** `git rev-parse <branch>^{tree}` in the
+   new clone must equal the old clone's tree for that branch; only then delete the old clone:
+
+   ```bash
+   [ "$(git rev-parse <branch>^{tree})" = "$(git -C /path/to/mind-meld.old rev-parse <branch>^{tree})" ] && echo "tree matches"
+   ```
 
 ## Uninstalling
 
