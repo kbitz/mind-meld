@@ -109,21 +109,6 @@ done < "{serve}"
 """
         _make_fake_script(self.sysbin / "curl", "curl", logic)
 
-    def install_venv_python(self) -> None:
-        venv_bin = self.venvs / "mind-meld" / "bin"
-        venv_bin.mkdir(parents=True, exist_ok=True)
-        _make_fake_script(
-            venv_bin / "python",
-            "venv-python",
-            """\
-if [ "${MM_TEST_SYNCTHING_CHECK_EXIT:-0}" != "0" ]; then
-  exit "${MM_TEST_SYNCTHING_CHECK_EXIT}"
-fi
-printf '%s\\n' "${MM_TEST_SYNCTHING_CHECK:-pre-existing ok}"
-exit 0
-""",
-        )
-
     def install_systemctl(self) -> None:
         _make_fake_script(
             self.sysbin / "systemctl",

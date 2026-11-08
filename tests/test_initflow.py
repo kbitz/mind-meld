@@ -717,6 +717,17 @@ def test_managed_new_fleet_rerun_after_header_failure_does_not_duplicate_folder(
     ]
     assert not (storage / "mm-crypto-init").exists()
 
+    # Plain init cannot wait for a peer to deliver a header to a local-only
+    # folder. It must explain how to resume the interrupted first-machine setup.
+    writes = list(fake_syncthing.bodies)
+    joined, joined_text = _run(f"{storage}\n")
+    assert joined.exit_code == 1, joined.output
+    assert "no peer" in joined_text
+    assert joined_text.endswith("Run: mm init --new-fleet")
+    assert "Syncthing has accepted" not in joined_text
+    assert fake_syncthing.bodies == writes
+    assert not config.CONFIG_PATH.exists()
+
     second, text = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
     assert second.exit_code == 0, second.output
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
@@ -725,6 +736,35 @@ def test_managed_new_fleet_rerun_after_header_failure_does_not_duplicate_folder(
     ]
     assert (storage / "mm-crypto-init").is_file()
     assert my_id in text
+
+
+@pytest.mark.parametrize("new_fleet", [False, True])
+def test_managed_rerun_changed_path_explains_existing_folder_recovery(
+    env, fake_syncthing, tmp_path, monkeypatch, new_fleet
+):
+    storage, _backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
+    }
+    first, _text = _run(f"{storage}\n{peer_id}\n")
+    assert first.exit_code == 1
+    writes = list(fake_syncthing.bodies)
+    other_path = tmp_path / "different-folder"
+
+    result, text = (
+        _new_fleet(f"{other_path}\nMac B\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+        if new_fleet
+        else _run(f"{other_path}\n{peer_id}\n")
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "Syncthing's GUI" in text
+    assert "configured path" in text
+    assert text.endswith("Run: mm init --new-fleet" if new_fleet else "Run: mm init")
+    assert fake_syncthing.bodies == writes
+    assert not config.CONFIG_PATH.exists()
+    assert not other_path.exists()
 
 
 @pytest.mark.parametrize("contents", ["plaintext", "foreign-fleet", "in-flight"])

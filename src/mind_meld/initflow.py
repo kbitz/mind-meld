@@ -192,6 +192,7 @@ def _require_syncthing(
     """Stop with a targeted remedy when a Syncthing write did not succeed."""
     if result.outcome in ("ok", "unchanged"):
         return
+    rerun_cmd = "mm init --new-fleet" if new_fleet else "mm init"
     if result.outcome in ("unreachable", "not-found"):
         core._error(
             "init: Syncthing stopped answering while mm was setting it up "
@@ -199,12 +200,24 @@ def _require_syncthing(
             f"Run: {_syncthing_start_command()}"
         )
     if result.outcome == "refused" and result.cause == "default-folder-in-use":
-        rerun_cmd = "mm init --new-fleet" if new_fleet else "mm init"
         core._error(
             "init: Syncthing's Default Folder at ~/Sync holds files or is shared, "
             "and mm's folder would sit inside it. Earlier setup changes remain. "
             "A rerun continues from where it stopped. "
             f"Choose a storage path outside ~/Sync, then run '{rerun_cmd}' again."
+        )
+    if result.outcome == "refused" and result.cause == "folder-exists":
+        core._error(
+            "init: Syncthing already has a mind-meld folder with a different setup. "
+            "Check its configured path, required options and shared devices in "
+            f'Syncthing\'s GUI (README "{SYNCTHING_GUIDE_HEADING}"), then use that path. '
+            f"Run: {rerun_cmd}"
+        )
+    if result.outcome == "refused" and result.cause == "path-overlap":
+        core._error(
+            "init: the chosen path overlaps another configured Syncthing folder. "
+            "Check the folder paths in Syncthing's GUI and choose a non-overlapping path. "
+            f"Run: {rerun_cmd}"
         )
     out_s = safe_terminal_str(result.outcome)
     cause_s = safe_terminal_str(result.cause or "unknown")
@@ -304,8 +317,8 @@ def _read_fleet_device_id(local_id: str | None) -> str:
     return candidate
 
 
-def _managed_join(setup: _SyncthingSetup, full_path: Path) -> None:
-    """Add the fleet device as introducer and accept the fleet folder offer."""
+def _managed_join(setup: _SyncthingSetup, full_path: Path) -> bool | None:
+    """Accept the fleet folder and report whether it has peers, when known."""
     assert setup.record is not None
     resolved_target = full_path.expanduser().resolve()
     st = _read_syncthing_state_or_stop(full_path)
@@ -314,7 +327,7 @@ def _managed_join(setup: _SyncthingSetup, full_path: Path) -> None:
         and st.folder_id == _config_module.SYNCTHING_FOLDER_ID
         and st.folder_path == resolved_target
     ):
-        return
+        return st.total_peers > 0 if st.total_peers is not None else None
     fleet_id = _read_fleet_device_id(setup.local_id)
     # Accepting the offer starts bidirectional sync immediately. A new target
     # must not publish unrelated plaintext or combine two fleets before the
@@ -353,6 +366,7 @@ def _managed_join(setup: _SyncthingSetup, full_path: Path) -> None:
             "Syncthing, then run 'mm init' here again."
         )
     _require_syncthing(offer_res, "accept the fleet folder offer")
+    return True
 
 
 @dataclass(frozen=True)
@@ -437,7 +451,9 @@ def _refuse_new_fleet(path: Path, folder: _Folder) -> None:
     )
 
 
-def _stop_for_missing_header(path: Path, folder: _Folder, *, accepted: bool = False) -> None:
+def _stop_for_missing_header(
+    path: Path, folder: _Folder, *, accepted: bool = False, local_only: bool = False
+) -> None:
     """Plain `mm init` found no key header: say why and what to do; write nothing."""
     where = safe_terminal_str(path)
     first_machine = (
@@ -447,7 +463,13 @@ def _stop_for_missing_header(path: Path, folder: _Folder, *, accepted: bool = Fa
     )
     if folder.error is not None:
         _unreadable_folder(path, folder.error)
-    if accepted and not folder.in_flight and not folder.fleet and not folder.other:
+    if local_only and folder.accepts_new_fleet:
+        what = (
+            f"Syncthing's folder at {where} has no peer and no key header "
+            "(mm-crypto-init), so nothing can deliver one. Nothing was written. "
+            "To finish starting this fleet, Run: mm init --new-fleet"
+        )
+    elif accepted and not folder.in_flight and not folder.fleet and not folder.other:
         what = (
             f"Syncthing has accepted the fleet folder at {where}, but the key header "
             "(mm-crypto-init) has not arrived yet. No device entry, config or key "
@@ -929,8 +951,9 @@ def init(new_fleet: bool = False) -> str | None:
         _unreadable_folder(full_path, folder.error)
     if new_fleet and not folder.accepts_new_fleet:
         _refuse_new_fleet(full_path, folder)
+    accepted_share = None
     if not new_fleet and setup.record is not None:
-        _managed_join(setup, full_path)
+        accepted_share = _managed_join(setup, full_path)
         folder = _classify_folder(full_path)
         if folder.error is not None:
             _unreadable_folder(full_path, folder.error)
@@ -953,7 +976,9 @@ def init(new_fleet: bool = False) -> str | None:
             f"For non-destructive recovery, see {NEWER_STORAGE_URL}."
         )
     if not new_fleet and fetch.status == "missing":
-        _stop_for_missing_header(full_path, folder, accepted=setup.record is not None)
+        _stop_for_missing_header(
+            full_path, folder, accepted=accepted_share is True, local_only=accepted_share is False
+        )
     if new_fleet and fetch.status != "missing":
         _refuse_new_fleet(full_path, _classify_folder(full_path))
 
