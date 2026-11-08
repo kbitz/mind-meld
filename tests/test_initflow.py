@@ -502,7 +502,7 @@ def test_a_configured_machine_declining_re_init_changes_nothing(env):
     result, text = _run(f"y\n{storage}\nn\n")
     assert result.exit_code == 0, result.output
     assert "orphaning existing device" in text
-    assert "Nothing changed." in text
+    assert "Device registration cancelled." in text
     assert config.CONFIG_PATH.read_bytes() == saved
     assert len(_device_keys(backend)) == 2
 
@@ -725,6 +725,95 @@ def test_managed_new_fleet_rerun_after_header_failure_does_not_duplicate_folder(
     ]
     assert (storage / "mm-crypto-init").is_file()
     assert my_id in text
+
+
+@pytest.mark.parametrize("contents", ["plaintext", "foreign-fleet", "in-flight"])
+def test_managed_join_refuses_populated_new_share_before_any_write(
+    env, fake_syncthing, tmp_path, monkeypatch, contents
+):
+    storage, backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    if contents == "plaintext":
+        (storage / "notes.txt").write_text("private notes")
+    elif contents == "foreign-fleet":
+        _populate(backend)
+    else:
+        (storage / ".syncthing.notes.tmp").write_text("partial content")
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
+    }
+    before = _tree(storage)
+
+    result, text = _run(f"{storage}\n{peer_id}\n")
+
+    assert result.exit_code == 1, result.output
+    assert "Choose an empty storage folder" in text
+    assert fake_syncthing.bodies == []
+    assert not config.syncthing_record_path().exists()
+    assert not config.CONFIG_PATH.exists()
+    assert _tree(storage) == before
+
+
+def test_managed_new_fleet_refuses_accepted_share_waiting_for_header(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    storage, _backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
+    }
+    joined, _text = _run(f"{storage}\n{peer_id}\n")
+    assert joined.exit_code == 1
+    before = _tree(storage)
+    writes = list(fake_syncthing.bodies)
+
+    result, text = _new_fleet(f"{storage}\nMac B\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 1, result.output
+    assert "already shared" in text
+    assert fake_syncthing.bodies == writes
+    assert not config.CONFIG_PATH.exists()
+    assert _tree(storage) == before
+
+
+@pytest.mark.parametrize("new_fleet", [False, True])
+def test_managed_setup_state_failure_stops_before_writes(
+    env, fake_syncthing, tmp_path, monkeypatch, new_fleet
+):
+    storage, _backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses["/rest/system/connections"] = 500
+    before = _tree(storage)
+    result, text = (
+        _new_fleet(f"{storage}\nMac B\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+        if new_fleet
+        else _run(f"{storage}\n{peer_id}\n")
+    )
+    assert result.exit_code == 1, result.output
+    assert text.endswith("Run: mm diag")
+    assert fake_syncthing.bodies == []
+    assert not config.syncthing_record_path().exists()
+    assert not config.CONFIG_PATH.exists()
+    assert _tree(storage) == before
+
+
+@pytest.mark.parametrize("error_type", [OSError, StorageError])
+def test_managed_record_write_failure_stops_before_syncthing_writes(
+    env, fake_syncthing, tmp_path, monkeypatch, error_type
+):
+    storage, _backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+
+    def fail_write(*args, **kwargs):
+        raise error_type("record publication failed")
+
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", fail_write)
+    result, text = _run(f"{storage}\n{peer_id}\n")
+    assert result.exit_code == 1, result.output
+    assert "could not record that mm manages Syncthing" in text
+    assert fake_syncthing.bodies == []
+    assert not config.syncthing_record_path().exists()
+    assert not config.CONFIG_PATH.exists()
 
 
 def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(

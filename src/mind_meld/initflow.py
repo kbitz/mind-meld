@@ -173,8 +173,10 @@ def _save_syncthing_record_or_stop(setup: _SyncthingSetup) -> None:
         return
     try:
         _config_module.save_syncthing_record(setup.record.device_id)
-    except (OSError, ConfigError) as e:
-        cause = os_error_cause(e) if isinstance(e, OSError) else safe_terminal_str(e)
+    except (OSError, StorageError, ConfigError) as e:
+        cause = (
+            os_error_cause(e) if isinstance(e, (OSError, StorageError)) else safe_terminal_str(e)
+        )
         core._error(
             f"init: could not record that mm manages Syncthing here ({cause}). "
             "Nothing else was written. Fix that, then run 'mm init' again."
@@ -200,7 +202,7 @@ def _require_syncthing(
         rerun_cmd = "mm init --new-fleet" if new_fleet else "mm init"
         core._error(
             "init: Syncthing's Default Folder at ~/Sync holds files or is shared, "
-            "and mm's folder would sit inside it. Nothing else was changed. "
+            "and mm's folder would sit inside it. Earlier setup changes remain. "
             "A rerun continues from where it stopped. "
             f"Choose a storage path outside ~/Sync, then run '{rerun_cmd}' again."
         )
@@ -220,9 +222,29 @@ def _is_inside_stock_default_folder(full_path: Path) -> bool:
     return target == stock or target.is_relative_to(stock)
 
 
+def _read_syncthing_state_or_stop(full_path: Path) -> syncthing.SyncthingState:
+    """Do not mistake an unreadable setup for an unconfigured folder."""
+    state = syncthing.read_state(full_path)
+    if state.state != "ok":
+        core._error(
+            "init: could not check Syncthing's folder setup "
+            f"({safe_terminal_str(state.state)}/{safe_terminal_str(state.cause or 'unknown')}). "
+            "Nothing was written. Keep the same storage path and check Syncthing. Run: mm diag"
+        )
+    return state
+
+
 def _managed_new_fleet_folder(setup: _SyncthingSetup, full_path: Path) -> None:
     """Create mm's Syncthing folder on the managed `--new-fleet` path."""
     assert setup.record is not None
+    state = _read_syncthing_state_or_stop(full_path)
+    if state.folder_path == full_path.expanduser().resolve() and state.total_peers != 0:
+        core._error(
+            "init: this Syncthing folder is already shared, or its peer membership "
+            "could not be verified. Creating a new fleet here could replace the "
+            "existing fleet's key header. Nothing was written. Wait for Syncthing "
+            "to deliver the key header, then run 'mm init' without --new-fleet."
+        )
     _save_syncthing_record_or_stop(setup)
     writer = syncthing.SyncthingWriter(setup.record)
     if _is_inside_stock_default_folder(full_path):
@@ -286,7 +308,7 @@ def _managed_join(setup: _SyncthingSetup, full_path: Path) -> None:
     """Add the fleet device as introducer and accept the fleet folder offer."""
     assert setup.record is not None
     resolved_target = full_path.expanduser().resolve()
-    st = syncthing.read_state(full_path)
+    st = _read_syncthing_state_or_stop(full_path)
     if (
         st.state == "ok"
         and st.folder_id == _config_module.SYNCTHING_FOLDER_ID
@@ -294,6 +316,18 @@ def _managed_join(setup: _SyncthingSetup, full_path: Path) -> None:
     ):
         return
     fleet_id = _read_fleet_device_id(setup.local_id)
+    # Accepting the offer starts bidirectional sync immediately. A new target
+    # must not publish unrelated plaintext or combine two fleets before the
+    # arriving header can be verified. Already-configured reruns return above.
+    folder = _classify_folder(full_path)
+    if folder.error is not None:
+        _unreadable_folder(full_path, folder.error)
+    if not folder.accepts_new_fleet:
+        core._error(
+            f"init: cannot share {safe_terminal_str(full_path)} with the fleet because "
+            f"it already contains {_entry_names(folder.blockers)}. Nothing was written. "
+            "Choose an empty storage folder, then run 'mm init' again."
+        )
     _save_syncthing_record_or_stop(setup)
     writer = syncthing.SyncthingWriter(setup.record)
     _require_syncthing(writer.add_device(fleet_id), "add the fleet device")
@@ -553,7 +587,7 @@ def _init_storage_guard(
         f"old device entry will no longer push or pull. Proceed?"
     )
     if not typer.confirm(msg, default=False):
-        console.print("Nothing changed.")
+        console.print("Device registration cancelled.")
         raise typer.Exit()
 
 
