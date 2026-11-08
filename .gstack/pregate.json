@@ -8,8 +8,6 @@
     ],
     "docs/roadmap-future.md": [],
     "docs/SPEC.md": [],
-    "docs/designs/host-parity.md": [],
-    "docs/designs/cross-model-memory.md": [],
     "tests/fixtures/cli_surface_1_x.json": [],
     "tests/fixtures/host_sessions/agy/CONTRACT.md": [
       "tests/test_agy_usage.py"
