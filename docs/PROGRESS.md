@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.25 | 2026-11-07 | Syncthing setup classifies default configurations and gates writes, with safe handling of malformed folder device lists, retries, and failures. |
 | 1.12.24 | 2026-11-07 | Cursor-only repositories leave discovery, with a 90-day recapture window from this upgrade. |
 | 1.12.23 | 2026-11-07 | Removes the retired Cursor usage reader, and retro-fleet instructions drop Cursor. |
 | 1.12.22 | 2026-11-07 | Removes mm cursor-agent, Cursor's hook command, and Cursor usage consent, and published Cursor usage stops counting after the next push. |
