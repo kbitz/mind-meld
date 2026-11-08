@@ -170,11 +170,13 @@ def _stop_partial(
             f"devices approve: Syncthing added {id_s} but did not confirm marking it as "
             f"introducer or sharing the fleet folder with it ({out_s}/{cause_s})."
         )
-    else:
+    elif written == "introducer":
         prefix = (
             f"devices approve: Syncthing added {id_s} and marked it as introducer, "
             f"but did not confirm sharing the fleet folder with it ({out_s}/{cause_s})."
         )
+    else:
+        raise ValueError(f"unknown approval step {written!r}")
     if outcome in ("not-found", "unreachable"):
         core._error(
             f"{prefix} Start Syncthing, then run 'mm devices approve {id_s}' "

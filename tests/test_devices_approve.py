@@ -455,6 +455,105 @@ def test_approve_add_rejected_by_syncthing_reports_unconfirmed_and_rerun_approve
 
 
 @pytest.mark.parametrize(
+    "result,expected",
+    [
+        (("not-found", None), "Syncthing is not running on this machine"),
+        (("refused", "not-managed"), "mm does not manage Syncthing on this machine"),
+    ],
+)
+def test_approve_add_stopped_before_sending_changes_nothing(
+    fake_syncthing, tmp_path, monkeypatch, result, expected
+):
+    _my_id, _peer_id, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_id: {"name": "joining-box"}
+    }
+    monkeypatch.setattr(
+        syncthing.SyncthingWriter,
+        "add_device",
+        lambda self, device_id, name="": syncthing.WriteResult(*result),
+    )
+
+    res = runner.invoke(app, ["devices", "approve", joining_id])
+
+    assert res.exit_code == 1
+    text = " ".join(res.output.split())
+    assert expected in text
+    assert "did not confirm" not in text
+    assert fake_syncthing.bodies == []
+    assert joining_id in fake_syncthing.responses["/rest/cluster/pending/devices"]
+
+
+@pytest.mark.parametrize("preset_introducer", [False, True])
+@pytest.mark.parametrize("failing", ["mark_introducer", "share_folder"])
+def test_approve_resume_write_failure_reports_unconfirmed_step_and_rerun_finishes(
+    fake_syncthing, tmp_path, monkeypatch, preset_introducer, failing
+):
+    my_id, peer_id, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    # A half-finished approval: configured in add_device's shape, not pending,
+    # not sharing the fleet folder; introducer already set or not.
+    fake_syncthing.responses["/rest/config/devices"].append(
+        {
+            "deviceID": joining_id,
+            "name": "",
+            "addresses": ["dynamic"],
+            "introducer": preset_introducer,
+            "autoAcceptFolders": False,
+            "paused": False,
+        }
+    )
+
+    with monkeypatch.context() as broken:
+        broken.setattr(
+            syncthing.SyncthingWriter,
+            failing,
+            lambda self, *args: syncthing.WriteResult("error", "http-500"),
+        )
+        first = runner.invoke(app, ["devices", "approve", joining_id])
+
+    assert first.exit_code == 1
+    text1 = " ".join(first.output.split())
+    if failing == "mark_introducer":
+        assert (
+            f"devices approve: Syncthing added {joining_id} but did not confirm marking it as "
+            "introducer or sharing the fleet folder with it (error/http-500)."
+        ) in text1
+    else:
+        assert (
+            f"devices approve: Syncthing added {joining_id} and marked it as introducer, "
+            "but did not confirm sharing the fleet folder with it (error/http-500)."
+        ) in text1
+    assert f"run 'mm devices approve {joining_id}' again to finish" in text1
+    assert text1.endswith("Run: mm diag")
+    assert not any(m == "POST" for m, _p, _b in fake_syncthing.bodies)
+
+    fake_syncthing.bodies.clear()
+    second = runner.invoke(app, ["devices", "approve", joining_id])
+
+    assert second.exit_code == 0, second.output
+    folder_patch = (
+        "PATCH",
+        "/rest/config/folders/mind-meld",
+        {"devices": [{"deviceID": my_id}, {"deviceID": peer_id}, {"deviceID": joining_id}]},
+    )
+    if preset_introducer or failing == "share_folder":
+        assert second.output.startswith(
+            f"Finished approving {joining_id}: shared the fleet folder with it "
+            "(it was already added and marked as introducer)."
+        )
+        assert fake_syncthing.bodies == [folder_patch]
+    else:
+        assert second.output.startswith(
+            f"Finished approving {joining_id}: marked it as introducer and shared the "
+            "fleet folder with it (it was already added)."
+        )
+        assert fake_syncthing.bodies == [
+            ("PATCH", f"/rest/config/devices/{joining_id}", {"introducer": True}),
+            folder_patch,
+        ]
+
+
+@pytest.mark.parametrize(
     "field,value",
     [
         ("paused", True),
@@ -658,33 +757,63 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
         "share_folder",
         "accept_folder_offer",
     }
+    raw_writes = {"_send_json", "_WRITE_ROUTES"}
+    entry_points = {
+        ("devicesflow", "approve"),
+        ("initflow", "_managed_join"),
+        ("initflow", "init"),
+    }
     call_sites: set[tuple[str, str]] = set()
+    entry_refs: set[tuple[str, str, str]] = set()
     for path in sorted(src_root.rglob("*.py")):
         rel = str(path.relative_to(src_root))
-        if rel == "syncthing.py":
-            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-        for node in ast.walk(tree):
-            # Every reference, not only a direct call, anywhere in the module
-            # (class methods and module scope included): an alias such as
-            # `m = writer.add_device` or `getattr(writer, "add_device")` counts.
-            if not (
-                (isinstance(node, ast.Attribute) and node.attr in pairing_methods)
-                or (isinstance(node, ast.Constant) and node.value in pairing_methods)
-            ):
-                continue
+
+        def scope_of(node, parents=parents):
             scope: list[str] = []
             cur = node
             while cur in parents:
                 cur = parents[cur]
                 if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     scope.append(cur.name)
-            call_sites.add((rel, ".".join(reversed(scope)) or "<module>"))
+            return ".".join(reversed(scope)) or "<module>"
+
+        for node in ast.walk(tree):
+            # Every reference, not only a direct call, anywhere in the module
+            # (class methods and module scope included): an alias such as
+            # `m = writer.add_device` or `getattr(writer, "add_device")` counts.
+            pairing = (isinstance(node, ast.Attribute) and node.attr in pairing_methods) or (
+                isinstance(node, ast.Constant) and node.value in pairing_methods
+            )
+            raw = (isinstance(node, ast.Name) and node.id in raw_writes) or (
+                isinstance(node, ast.Attribute) and node.attr in raw_writes
+            )
+            if pairing or raw:
+                where = scope_of(node)
+                # Inside the writer module only SyncthingWriter's own methods may
+                # name a pairing operation; its send helpers own the raw routes.
+                if rel == "syncthing.py" and (raw or where.split(".")[0] == "SyncthingWriter"):
+                    continue
+                call_sites.add((rel, where))
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and (node.value.id, node.attr) in entry_points
+            ):
+                entry_refs.add((rel, scope_of(node), f"{node.value.id}.{node.attr}"))
+            elif isinstance(node, ast.Name) and node.id == "_managed_join":
+                entry_refs.add((rel, scope_of(node), "initflow._managed_join"))
 
     assert call_sites == {
         ("devicesflow.py", "approve"),
         ("initflow.py", "_managed_join"),
+    }
+    # The two pairing paths are reachable only from their own commands.
+    assert entry_refs == {
+        ("cli.py", "devices_approve", "devicesflow.approve"),
+        ("cli.py", "init", "initflow.init"),
+        ("initflow.py", "init", "initflow._managed_join"),
     }
 
     cli_tree = ast.parse((src_root / "cli.py").read_text(encoding="utf-8"))
