@@ -765,7 +765,8 @@ INCONCLUSIVE. They are unstarted trials, not 48 failed observations. The
 72-hour campaign never began and is not reported exhausted. Correct answers,
 an enabled feature or protocol tests cannot fill those missing observations.
 
-[tests/test_memory_contract.py](../../tests/test_memory_contract.py) supplies a
+`tests/test_memory_contract.py` (retired on 2026-11-08; see the note in the
+[Codex memory contract](codex-memory-contract.md)) supplied a
 tests-only conformance boundary for F1–F4, E1–E4, H1–H4 and 16 further
 engineering groups, 28 groups in all. It uses owned synthetic stores, permanent retirement, distinct user
 authority/completeness references and atomic accepted snapshots through the
@@ -784,7 +785,8 @@ published recipes with a placeholder. The contract's
 review, and its [known model limits](codex-memory-contract.md#known-limits)
 list what it deliberately left for the follow-ons.
 
-The [structural fixtures](../../tests/fixtures/host_memories/codex/) contain
+The structural fixtures (`tests/fixtures/host_memories/codex/`, retired with the
+suite on 2026-11-08) contained
 measured DDL and fixed synthetic rows with closed value allowlists, exact-build
 pins and sanitized evidence handles. No native memory bodies, database/WAL/SHM
 files or authentication material are committed. The separately opted-in
