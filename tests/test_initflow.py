@@ -871,6 +871,59 @@ def test_managed_record_write_failure_stops_before_syncthing_writes(
     assert not config.CONFIG_PATH.exists()
 
 
+@pytest.mark.parametrize(
+    "option,invalid_value",
+    [
+        ("type", "receiveonly"),
+        ("versioning", {"type": "simple"}),
+        ("maxConflicts", 0),
+        ("ignorePerms", True),
+        ("order", "random"),
+    ],
+)
+@pytest.mark.parametrize("missing", [False, True])
+def test_managed_join_rerun_refuses_invalid_or_missing_folder_option(
+    env, fake_syncthing, tmp_path, monkeypatch, option, invalid_value, missing
+):
+    storage, backend = env
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    (storage / ".stignore").unlink(missing_ok=True)
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
+    }
+    accepted, accepted_text = _run(f"{storage}\n{peer_id}\n")
+    assert accepted.exit_code == 1, accepted.output
+    assert "Syncthing has accepted the fleet folder" in accepted_text
+
+    # Delivery finishes after the owner changes one option in Syncthing's GUI.
+    # Retrying must not enroll this machine with the unsafe folder setup.
+    _populate(backend)
+    configured = next(
+        folder
+        for folder in fake_syncthing.responses["/rest/config/folders"]
+        if folder["id"] == "mind-meld"
+    )
+    if missing:
+        del configured[option]
+    else:
+        configured[option] = invalid_value
+    writes = list(fake_syncthing.bodies)
+    before = _tree(storage)
+    record_before = config.syncthing_record_path().read_bytes()
+
+    result, text = _run(f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 1, result.output
+    assert "Syncthing's GUI" in text
+    assert text.endswith("Run: mm init")
+    assert "Device name" not in text
+    assert fake_syncthing.bodies == writes
+    assert _tree(storage) == before
+    assert config.syncthing_record_path().read_bytes() == record_before
+    assert not config.CONFIG_PATH.exists()
+    assert not (storage / ".stignore").exists()
+
+
 def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     env, fake_syncthing, tmp_path, monkeypatch
 ):

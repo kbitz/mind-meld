@@ -47,6 +47,8 @@ Managed setup stops before writes when `syncthing.read_state` cannot establish t
 
 A newly shared managed join target must be empty or contain only `_BOOKKEEPING_NAMES`; plaintext, another fleet, and in-flight files all stop before record or REST mutations. An already configured `mind-meld` folder at the exact resolved target skips this guard, so delivered fleet content remains joinable on reruns. Owner-managed paths keep their existing behavior.
 
+An exact-folder managed join retry still validates every `FOLDER_OPTIONS` value through `option_is_ok`; invalid or missing options stop with the existing GUI reconciliation remedy before further prompts or writes. Missing `.stignore` remains allowed because the verified join installs it later.
+
 The missing-header stop on the managed join follows Syncthing writes and `syncthing.toml`, and still writes no mm storage folder, `config.toml`, device entry, keyring item, key header (`mm-crypto-init`) or `.stignore`.
 
 **Pytest default stub:** `tests/conftest.py` defines an autouse fixture `_default_init_syncthing` that patches `initflow._check_syncthing` to return a silent owner-managed `_SyncthingSetup(record=None, local_id=None, persisted=False)`. Opt out in a test by requesting the `fake_syncthing` fixture or the no-op `real_syncthing_gate` fixture.

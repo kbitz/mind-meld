@@ -327,6 +327,13 @@ def _managed_join(setup: _SyncthingSetup, full_path: Path) -> bool | None:
         and st.folder_id == _config_module.SYNCTHING_FOLDER_ID
         and st.folder_path == resolved_target
     ):
+        if any(
+            not syncthing.option_is_ok(name, st.options.get(name))
+            for name, _, _ in syncthing.FOLDER_OPTIONS
+        ):
+            _require_syncthing(
+                syncthing.WriteResult("refused", "folder-exists"), "reuse the fleet folder"
+            )
         return st.total_peers > 0 if st.total_peers is not None else None
     fleet_id = _read_fleet_device_id(setup.local_id)
     # Accepting the offer starts bidirectional sync immediately. A new target
