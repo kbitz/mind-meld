@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.27] - 2026-11-08
+
+The test suite is smaller and faster: about 8,785 tests instead of 11,388, with the same protection, and an unused manifest helper is gone.
+
+### Changed
+
+- The test suite collects about 8,785 tests instead of 11,388 and runs faster. Duplicate tests were retired where a stronger test already proves the same behavior, and large parameter grids were folded into fewer cases.
+- The docs-routing checks no longer re-parse the same files for every citation and link.
+
+### Removed
+
+- The tests-only Codex memory-contract suite from Track 68A. Its design is superseded by cross-model memory.
+- `manifest.read_and_hash`, which nothing in Mind Meld called.
+
 ## [1.12.26] - 2026-11-08
 
 Init sets up default Syncthing configurations, saves that setup while a join waits, and recovers from partial setup.
