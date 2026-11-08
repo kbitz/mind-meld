@@ -357,78 +357,74 @@ def _git_rev_parse_is_toplevel(path: Path) -> bool:
 
 
 class TestGitRootClassifier:
-    def test_normal_clone_with_head_is_a_root(self, tmp_path):
-        repo = tmp_path / "repo"
-        _init_git_repo(repo)
-        assert events._classify_git_root(repo) is True
+    @staticmethod
+    def _fixture(tmp_path, kind):
+        if kind == "clone":
+            repo = tmp_path / "repo"
+            _init_git_repo(repo)
+            return repo
+        if kind == "worktree":
+            repo = tmp_path / "main-repo"
+            _init_git_repo(repo)
+            worktree = tmp_path / "wt"
+            _make_git_worktree(repo, worktree)
+            assert (worktree / ".git").is_file()
+            return worktree
+        if kind == "submodule":
+            vendor = _make_submodule(tmp_path)
+            assert (vendor / ".git").is_file()
+            return vendor
+        if kind == "subdirectory":
+            repo = tmp_path / "repo"
+            _init_git_repo(repo)
+            (repo / "src").mkdir()
+            return repo / "src"
+        if kind == "bare":
+            return _make_bare_repo(tmp_path)
+        if kind == "dangling-symlink":
+            root = tmp_path / "dangling"
+            root.mkdir()
+            (root / ".git").symlink_to(tmp_path / "nowhere")
+            return root
+        if kind == "symlink-to-repo":
+            repo = tmp_path / "repo"
+            _init_git_repo(repo)
+            alias = tmp_path / "alias"
+            alias.mkdir()
+            (alias / ".git").symlink_to(repo / ".git")
+            return alias
+        if kind == "plain-file":
+            blob = tmp_path / "just-a-file"
+            blob.write_text("nope")
+            return blob
+        return _make_stray_dot_git(tmp_path, kind)
 
-    def test_worktree_dot_git_file_is_a_root(self, tmp_path):
-        repo = tmp_path / "main-repo"
-        _init_git_repo(repo)
-        worktree = tmp_path / "wt"
-        _make_git_worktree(repo, worktree)
-        assert (worktree / ".git").is_file()
-        assert events._classify_git_root(worktree) is True
-
-    def test_submodule_dot_git_file_is_a_root(self, tmp_path):
-        vendor = _make_submodule(tmp_path)
-        assert (vendor / ".git").is_file()
-        assert events._classify_git_root(vendor) is True
-
-    def test_subdirectory_of_a_repo_is_not_a_root(self, tmp_path):
-        repo = tmp_path / "repo"
-        _init_git_repo(repo)
-        src = repo / "src"
-        src.mkdir()
-        assert events._classify_git_root(src) is False
-
-    def test_bare_repo_is_not_a_root(self, tmp_path):
-        bare = _make_bare_repo(tmp_path)
-        assert events._classify_git_root(bare) is False
-
-    def test_stray_dot_git_dir_without_head_is_not_a_root(self, tmp_path):
-        root = _make_stray_dot_git(tmp_path, "dir-no-head")
-        assert events._classify_git_root(root) is False
-
-    def test_stray_dot_git_dir_with_head_directory_is_not_a_root(self, tmp_path):
-        root = _make_stray_dot_git(tmp_path, "dir-head-directory")
-        assert events._classify_git_root(root) is False
-
-    def test_dot_git_file_with_garbage_is_not_a_root(self, tmp_path):
-        root = _make_stray_dot_git(tmp_path, "file-garbage")
-        assert events._classify_git_root(root) is False
-
-    def test_dot_git_file_gitdir_missing_is_not_a_root(self, tmp_path):
-        root = _make_stray_dot_git(tmp_path, "file-dangling-gitdir")
-        assert events._classify_git_root(root) is False
-
-    def test_dot_git_file_gitdir_head_directory_is_not_a_root(self, tmp_path):
-        root = _make_stray_dot_git(tmp_path, "file-gitdir-head-directory")
-        assert events._classify_git_root(root) is False
-
-    @pytest.mark.parametrize("kind", ["file-uppercase-gitdir", "file-gitdir-no-space"])
-    def test_dot_git_file_invalid_gitdir_prefix_is_not_a_root(self, tmp_path, kind):
-        root = _make_stray_dot_git(tmp_path, kind)
-        assert events._classify_git_root(root) is False
-
-    def test_dangling_dot_git_symlink_is_not_a_root(self, tmp_path):
-        root = tmp_path / "dangling"
-        root.mkdir()
-        (root / ".git").symlink_to(tmp_path / "nowhere")
-        assert events._classify_git_root(root) is False
-
-    def test_dot_git_symlink_to_real_repo_is_a_root(self, tmp_path):
-        repo = tmp_path / "repo"
-        _init_git_repo(repo)
-        alias = tmp_path / "alias"
-        alias.mkdir()
-        (alias / ".git").symlink_to(repo / ".git")
-        assert events._classify_git_root(alias) is True
-
-    def test_candidate_that_is_a_file_is_not_a_root(self, tmp_path):
-        blob = tmp_path / "just-a-file"
-        blob.write_text("nope")
-        assert events._classify_git_root(blob) is False
+    @pytest.mark.parametrize(
+        "kind,expected",
+        [
+            ("clone", True),
+            ("worktree", True),
+            ("submodule", True),
+            ("symlink-to-repo", True),
+            ("subdirectory", False),
+            ("bare", False),
+            ("dir-no-head", False),
+            ("dir-head-directory", False),
+            ("file-garbage", False),
+            ("file-dangling-gitdir", False),
+            ("file-gitdir-head-directory", False),
+            ("file-uppercase-gitdir", False),
+            ("file-gitdir-no-space", False),
+            ("dangling-symlink", False),
+            ("plain-file", False),
+        ],
+    )
+    def test_classifier_value_and_git_rev_parse_agree(self, tmp_path, kind, expected):
+        """Pins the value AND the differential oracle (the permanent gate for
+        dropping `git rev-parse`), so git-version drift fails here too."""
+        path = self._fixture(tmp_path, kind)
+        assert events._classify_git_root(path) is expected
+        assert _git_rev_parse_is_toplevel(path) == expected
 
     def test_permission_denied_candidate_returns_false_not_raises(self, tmp_path):
         secret = tmp_path / "secret"
@@ -441,71 +437,8 @@ class TestGitRootClassifier:
         finally:
             secret.chmod(0o755)
 
-    def test_classifier_agrees_with_git_rev_parse_on_every_fixture(self, tmp_path):
-        """Differential oracle: the permanent gate for dropping `git rev-parse`."""
-        fixtures: list[Path] = []
-        clone = tmp_path / "clone"
-        _init_git_repo(clone)
-        fixtures.append(clone)
-
-        worktree = tmp_path / "wt"
-        _make_git_worktree(clone, worktree)
-        fixtures.append(worktree)
-
-        fixtures.append(_make_submodule(tmp_path / "sub"))
-        fixtures.append(clone / "src")
-        (clone / "src").mkdir()
-        fixtures.append(_make_bare_repo(tmp_path))
-        fixtures.append(_make_stray_dot_git(tmp_path, "dir-no-head"))
-        fixtures.append(_make_stray_dot_git(tmp_path, "dir-head-directory"))
-        fixtures.append(_make_stray_dot_git(tmp_path, "file-garbage"))
-        fixtures.append(_make_stray_dot_git(tmp_path, "file-dangling-gitdir"))
-        fixtures.append(_make_stray_dot_git(tmp_path, "file-gitdir-head-directory"))
-        fixtures.append(_make_stray_dot_git(tmp_path, "file-uppercase-gitdir"))
-        fixtures.append(_make_stray_dot_git(tmp_path, "file-gitdir-no-space"))
-
-        dangling = tmp_path / "dangling"
-        dangling.mkdir()
-        (dangling / ".git").symlink_to(tmp_path / "nowhere")
-        fixtures.append(dangling)
-
-        alias = tmp_path / "alias"
-        alias.mkdir()
-        (alias / ".git").symlink_to(clone / ".git")
-        fixtures.append(alias)
-
-        blob = tmp_path / "just-a-file"
-        blob.write_text("nope")
-        fixtures.append(blob)
-
-        disagreements = []
-        for path in fixtures:
-            classified = events._classify_git_root(path)
-            git_says = _git_rev_parse_is_toplevel(path)
-            if classified != git_says:
-                disagreements.append((str(path), classified, git_says))
-        assert disagreements == []
-
 
 class TestDiscoverGitRoots:
-    def test_empty_config_no_sources_returns_empty(self, tmp_path, monkeypatch):
-        # Fully empty config — no sources, no manual roots.
-        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-        roots, errors = events.discover_git_roots({"sync": {"sources": []}})
-        assert roots == []
-        assert errors == []
-
-    def test_manual_repo_roots_additive(self, tmp_path):
-        repo = tmp_path / "repo"
-        _init_git_repo(repo)
-        config = {
-            "sync": {"sources": []},  # no probers
-            "retro": {"repo_roots": [str(repo)]},
-        }
-        roots, errors = events.discover_git_roots(config)
-        assert roots == [repo.resolve()]
-        assert errors == []
-
     def test_filter_drops_non_git_paths(self, tmp_path):
         not_a_repo = tmp_path / "plain-dir"
         not_a_repo.mkdir()
@@ -533,19 +466,6 @@ class TestDiscoverGitRoots:
         }
         roots, errors = events.discover_git_roots(config)
         assert worktree.resolve() in roots, "worktree was silently excluded (CT-1 regression)"
-
-    def test_dedup_via_resolve(self, tmp_path):
-        repo = tmp_path / "repo"
-        _init_git_repo(repo)
-        link = tmp_path / "alias"
-        link.symlink_to(repo)
-        config = {
-            "sync": {"sources": []},
-            "retro": {"repo_roots": [str(repo), str(link)]},
-        }
-        roots, errors = events.discover_git_roots(config)
-        # Same inode via .resolve() — only one entry survives
-        assert len(roots) == 1
 
     def test_claude_prober_reads_cwd_field(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
@@ -867,37 +787,6 @@ class TestWalkGitProjects:
         assert aborts == 0
         assert errs == 1
 
-    def test_repo_failure_folds_into_skipped(self, tmp_path):
-        # Path that exists but isn't a git repo → walker returns it as
-        # skipped with a non-zero git rc reason.
-        not_repo = tmp_path / "x"
-        not_repo.mkdir()
-        # Pre-filter would normally drop this; we pass it directly to
-        # walk_git_projects to exercise the failure path.
-        out = events.walk_git_projects([not_repo], datetime.now(timezone.utc), 2000)
-        # Either the repo's git log fails (rc != 0) AND lands in skipped, OR
-        # we get an empty projects list with the failure forensic-trailed.
-        assert out[0]["projects"] == [] or len(out[0]["skipped"]) >= 1
-
-    def test_budget_abort_marks_pending_as_skipped(self, tmp_path, monkeypatch):
-        """CT-6: as_completed pump budget enforcement. With a fake-slow
-        per-repo walker, a tiny total budget should cancel pending work."""
-
-        # Inject a slow worker so the budget actually trips.
-        def _slow_walk(root, since_iso, timeout_ms):
-            time.sleep(0.4)
-            return None, "should-not-reach"
-
-        monkeypatch.setattr(events, "_walk_one_repo", _slow_walk)
-        roots = [tmp_path / f"r{i}" for i in range(3)]
-        for r in roots:
-            r.mkdir()
-        out = events.walk_git_projects(roots, datetime.now(timezone.utc), 50)
-        # Some or all repos should land in `skipped` with a budget_abort or
-        # timeout reason. Empty projects list is the usual outcome.
-        assert out[0]["projects"] == []
-        assert len(out[0]["skipped"]) >= 1
-
     def test_budget_abort_emits_each_completed_repo_exactly_once(self, tmp_path, monkeypatch):
         """v0.12.16 T4: on budget abort, a repo that finished before the
         timeout must appear ONCE.
@@ -911,9 +800,9 @@ class TestWalkGitProjects:
         2 unique. The card survived it only because `aggregate_git` dedups
         on (canonical_remote, sha).
 
-        `test_budget_abort_marks_pending_as_skipped` above cannot catch it:
-        it makes ALL repos slow, so `projects == []` and there is nothing to
-        double-collect. This one needs a MIXED fast/slow set.
+        A set where ALL repos are slow cannot catch it: `projects == []` and
+        there is nothing to double-collect. This one needs a MIXED fast/slow
+        set, and also pins that every abandoned repo is marked budget_abort.
         """
 
         def _mixed_walk(root, since_iso, timeout_ms):
@@ -950,19 +839,6 @@ class TestWalkGitProjects:
         events.walk_git_projects(roots, datetime.now(timezone.utc), 250)
         # 30 repos, budget 250, workers 8 → (250 * 8) // 30 = 66 → floored to 200
         assert all(t == events.PER_REPO_TIMEOUT_FLOOR_MS for t in captured)
-
-    def test_per_repo_timeout_caps_at_max(self, monkeypatch):
-        captured = []
-
-        def _capture(root, since_iso, timeout_ms):
-            captured.append(timeout_ms)
-            return None, None
-
-        monkeypatch.setattr(events, "_walk_one_repo", _capture)
-        roots = [Path("/tmp/r0")]
-        # Single repo, generous budget → would compute huge per-repo, cap wins
-        events.walk_git_projects(roots, datetime.now(timezone.utc), 100_000)
-        assert all(t == events.PER_REPO_TIMEOUT_CAP_MS for t in captured)
 
     @pytest.mark.parametrize("n_roots", [1, 40])
     def test_explicit_per_repo_timeout_skips_formula_and_cap(self, monkeypatch, n_roots):

@@ -113,10 +113,10 @@ class TestGstackIncludeNarrowing94A:
         assert not _gstack_default_excluded94a(rel)
 
     @pytest.mark.parametrize("directory", GSTACK_ARTIFACT_DIRS94A)
-    @pytest.mark.parametrize("extension", GSTACK_DOCUMENT_EXTENSIONS94A)
-    def test_artifact_dir_admits_every_document_type_at_any_depth(self, directory, extension):
-        assert not _gstack_default_excluded94a(f"projects/acme/{directory}/a.{extension}")
-        assert not _gstack_default_excluded94a(f"projects/acme/{directory}/one/two/a.{extension}")
+    def test_artifact_dir_admits_every_document_type_at_any_depth(self, directory):
+        for extension in GSTACK_DOCUMENT_EXTENSIONS94A:
+            for rel in (f"{directory}/a.{extension}", f"{directory}/one/two/a.{extension}"):
+                assert not _gstack_default_excluded94a(f"projects/acme/{rel}"), rel
 
     @pytest.mark.parametrize("directory", GSTACK_ARTIFACT_DIRS94A)
     def test_artifact_dir_rejects_non_document_types(self, directory):

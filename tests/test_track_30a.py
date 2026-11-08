@@ -72,6 +72,18 @@ class TestCaptureAdvancesCursor:
                 },
                 True,
             ),
+            # Walk skips (budget aborts, no-commit repos) never hold the cursor:
+            # holding on a walk abort wedges unattended autopush.
+            (
+                {
+                    "discovery": "complete",
+                    "skipped": [
+                        {"path": "/r1", "reason": events.WALK_SKIP_BUDGET_ABORT},
+                        {"path": "/r2", "reason": events.WALK_SKIP_NO_COMMITS},
+                    ],
+                },
+                True,
+            ),
         ],
     )
     def test_truth_table(self, payload, advances):
@@ -228,27 +240,6 @@ class TestResolvePushCursor:
         for earlier, later in zip(cursors, cursors[1:]):
             assert later >= earlier
         assert all(c >= floor - timedelta(seconds=5) for c in cursors)
-
-
-def test_cursor_predicate_does_not_reference_walk_skips() -> None:
-    src = Path("src/mind_meld/events.py").read_text(encoding="utf-8")
-    start = src.index("def capture_advances_cursor")
-    end = src.index("\ndef ", start + 1)
-    body = src[start:end]
-    forbidden = (
-        "budget_abort",
-        "walk_errors",
-        "walk_budget_aborts",
-        "WALK_SKIP",
-        "skipped",
-        "no_commits",
-    )
-    for needle in forbidden:
-        assert needle not in body, (
-            f"{needle!r} in capture_advances_cursor would hold the cursor on a "
-            "walk abort and wedge unattended autopush. Git-walk cost is monotone "
-            "in cursor age (48.6 ms @1d → 251.3 ms @30d vs a 250 ms budget)."
-        )
 
 
 def test_cursor_scan_matches_retention() -> None:

@@ -336,9 +336,9 @@ class TestRealStateWriteGuard:
     @pytest.mark.parametrize("protocol", ["ordinary", "durable"])
     @pytest.mark.parametrize("exists", [False, True])
     def test_rmw_refuses_before_parent_open_mode_or_context_entry(
-        self, protocol, exists, synthetic_state_root, forbid_fs_mutations
+        self, protocol, exists, writer_state_root, forbid_fs_mutations
     ):
-        path = synthetic_state_root / "parent" / "state.json"
+        path = writer_state_root / "parent" / "state.json"
         if exists:
             path.parent.mkdir(parents=True, mode=0o750)
             path.write_bytes(b'{"keep":1}')

@@ -927,10 +927,10 @@ a durable manifest remain unverified premises.
 descriptor ownership/closure is not proven by temp-unlink assertions. Owner:
 fsutil maintainer; a bounded descriptor-count/fd-validity fault probe must
 establish a leak before filing a repair. No such defect is claimed here.
-Existing `tests/test_fsutil.py:TestAtomicWriteBytes`, `TestFsyncFd`, `TestFsyncDir`
-and `tests/test_memory_contract.py:test_C2_real_atomic_helper_failure_reopens_actual_coherent_bytes`
-retain phase/mode/platform and four-fault readback/stale-refusal coverage. C2 is
-a tests-only model, not production caller or cloud qualification. Review found
+Existing `tests/test_fsutil.py:TestAtomicWriteBytes`, `TestFsyncFd` and `TestFsyncDir`
+retain phase/mode/platform and four-fault readback coverage. Track 68A's
+tests-only C2 model, which replayed those faults against its own reference
+adapter, was retired on 2026-11-08 with the rest of that suite. Review found
 one concrete missing assertion: the fallback test now covers all three
 documented `F_FULLFSYNC` errnos, so on Darwin (where they are distinct)
 narrowing that tuple fails a test.

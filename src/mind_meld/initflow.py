@@ -1042,7 +1042,8 @@ def init(new_fleet: bool = False) -> str | None:
     # and orphaned. This is benign: running plain `mm init` now joins the
     # header this machine wrote, the same passphrase verifies against it, and
     # the second attempt finishes cleanly. No data loss, just a storage-side
-    # breadcrumb. See TestInitFlow::test_first_device_refuse_all_is_recoverable.
+    # breadcrumb. See tests/test_initflow.py::
+    # test_new_fleet_every_source_declined_is_recoverable_by_plain_init.
     sources = _prompt_sources()
     # mm-internal sources (mm-events) auto-include and don't count toward
     # the user-intent guard — a config with only mm-internal sources is

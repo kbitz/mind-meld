@@ -1,6 +1,14 @@
 # Codex memory source contract
 
 Contract version 1 · Track 68A · measured 2026-10-01 · **NO QUALIFIED ROUTE**.
+
+> **Retired 2026-11-08.** The tests-only suite this record describes
+> (`tests/test_memory_contract.py`, its reference `MemoryAdapter` and the
+> `tests/fixtures/host_memories/codex/` fixtures) was deleted after a test-value
+> audit: it protected no shipped behavior, and cross-model memory (O9)
+> supersedes this design. The recipes, receipts and series below are a
+> historical record; they no longer run. Any future Codex memory route
+> requalifies from scratch.
 Qualification owner: Track 68A implementer. Karl owns genuine user enrollment.
 This contract covers the exact measured builds below. Protocol evidence from
 the tests-only model does not qualify native recall or shipped transport.
@@ -62,9 +70,9 @@ no native FAIL or PASS. Evidence class is separately `preflight`, `protocol` or
 | Isolated CLI home | Credential-free initialization reported the verified disposable home; account null, auth required; no auth file created | Structural preflight observed, credentialed lifecycle unsupported in current authorization |
 | Actual isolated Conductor binding | Bundled skill provides no proven per-workspace memory-home binding; public settings/agent docs returned HTTP 403 | Unproven; stop dependent Conductor trials, preserve their gate |
 | User authority | No enrolled, target-bound outside-agent channel exists in this workspace | The model treats any channel name other than its test-user value as non-authority; no live channel was tested; promotion blocked |
-| mm consumer | Tests-only `MemoryAdapter`, JSON delivery frame and multiline renderer exist | No real startup carrier, host delivery or user-authority qualification; no automatic fallback selection |
+| mm consumer | Tests-only `MemoryAdapter`, JSON delivery frame and multiline renderer existed (retired 2026-11-08) | No real startup carrier, host delivery or user-authority qualification; no automatic fallback selection |
 
-Schema fixture: [tests/fixtures/host_memories/codex/](../../tests/fixtures/host_memories/codex/),
+Schema fixture: `tests/fixtures/host_memories/codex/` (retired 2026-11-08),
 exact CLI/app-server 0.159.2, Conductor 0.89.2. `schema.ddl` SHA-256:
 `686274cd5a1e7c0cb4ba34883903071f53711085aeb5566fca09274213eafdd8`.
 The measured DDL, merged from the three store files above, includes three
@@ -453,7 +461,7 @@ fills it.
 This run qualifies neither: **NO QUALIFIED ROUTE**. No failed native gate is
 waived by the reference model.
 
-Receiving consumer today: only the disposable tests-only `MemoryAdapter`.
+Receiving consumer: none. The disposable tests-only `MemoryAdapter` was retired on 2026-11-08.
 Candidate mm footprint: leaf export/recall consumers, narrow CLI/status/diag
 hooks, persistent project/origin identity and permanent retirement storage,
 plus a static startup retrieval instruction through the user-approved shared

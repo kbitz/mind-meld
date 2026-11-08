@@ -1637,18 +1637,6 @@ def hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def read_and_hash(path: Path) -> tuple[bytes, str]:
-    """Read entire file into memory and SHA-256 hash it in one shot.
-
-    Returns (file_bytes, hex_digest). This avoids the race condition where
-    hash_file() and a later read_bytes() could see different content if
-    the file is modified between the two reads.
-    """
-    data = path.read_bytes()
-    digest = hashlib.sha256(data).hexdigest()
-    return data, digest
-
-
 def _dir_is_policy_skipped(rel_dir: str, skip_prefixes: list[str] | None) -> bool:
     """True only for proven directory-level selection exclusions, never file globs."""
     if not rel_dir:

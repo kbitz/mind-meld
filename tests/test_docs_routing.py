@@ -21,6 +21,7 @@ comment, which is why those tests strip comments before asserting.
 from __future__ import annotations
 
 import ast
+import functools
 import os
 import re
 import stat
@@ -125,10 +126,17 @@ def test_exact_case_check_runs_before_symlinks_resolve() -> None:
     assert not _exists_exact(ROOT / "docs" / "Invariants" / "README.md")
 
 
-def _heading_anchors(path: Path) -> set[str]:
+def _heading_anchors(path: Path) -> frozenset[str]:
     """GitHub's anchors for `path`: heading slugs, numbered the way
     github-slugger numbers repeats, plus explicit `<a id>` / `<a name>`."""
-    tokens = _MARKDOWN.parse(path.read_text(encoding="utf-8"))
+    return _heading_anchors_in(path.read_text(encoding="utf-8"))
+
+
+@functools.cache
+def _heading_anchors_in(source: str) -> frozenset[str]:
+    """Keyed on the text, not the path, so an edited file is never stale.
+    The link gate asks for the same target's anchors once per link."""
+    tokens = _MARKDOWN.parse(source)
     occurrences: dict[str, int] = {}
     anchors: set[str] = set()
     for i, token in enumerate(tokens):
@@ -141,10 +149,10 @@ def _heading_anchors(path: Path) -> set[str]:
                 slug = f"{base}-{occurrences[base]}"
             occurrences[slug] = 0
             anchors.add(slug)
-    for token in _markdown_tokens(path.read_text(encoding="utf-8")):
+    for token in _markdown_tokens(source):
         if token.type in ("html_block", "html_inline"):
             anchors.update(_HTML_ANCHOR.findall(token.content))
-    return anchors
+    return frozenset(anchors)
 
 
 # Generator-owned or frozen files (ROADMAP, roadmap-future/shipped, PROGRESS,
@@ -423,10 +431,16 @@ _OBSOLETE_ROUTING_CITATIONS: dict[tuple[str, str], str] = {
 }
 
 
-def _defined_names(path: Path) -> set[str]:
+def _defined_names(path: Path) -> frozenset[str]:
     """Every top-level def/class/assignment in `path`, plus its dotted attrs."""
+    return _defined_names_in(path.read_text(encoding="utf-8"))
+
+
+@functools.cache
+def _defined_names_in(source: str) -> frozenset[str]:
+    """Keyed on the source text: the citation gates ask once per citation."""
     names: set[str] = set()
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(source)
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
@@ -447,10 +461,10 @@ def _defined_names(path: Path) -> set[str]:
             names.update(t.id for t in node.targets if isinstance(t, ast.Name))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names.add(node.target.id)
-    return names
+    return frozenset(names)
 
 
-def _imported_names(path: Path) -> set[str]:
+def _imported_names(path: Path) -> frozenset[str]:
     """Names `path` merely IMPORTS. Deliberately kept apart from definitions.
 
     Counting these as definitions is what made the first version of this gate
@@ -459,12 +473,17 @@ def _imported_names(path: Path) -> set[str]:
     `console` and `safe_str`, so a routing row that kept citing `cli.py:` for
     any of them passed green even though every one of them moved.
     """
+    return _imported_names_in(path.read_text(encoding="utf-8"))
+
+
+@functools.cache
+def _imported_names_in(source: str) -> frozenset[str]:
     names: set[str] = set()
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(source)
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             names.update(a.asname or a.name.split(".")[0] for a in node.names)
-    return names
+    return frozenset(names)
 
 
 def _routing_citations() -> list[tuple[str, str]]:
@@ -584,9 +603,9 @@ def test_every_routing_row_resolves_at_least_one_symbol() -> None:
     """A row that cites a `.py` file must yield a citation the gate can check.
 
     Without this, a row written in the "symbol plus prose in one chunk" shape
-    is silently unverified: `test_routing_citation_resolves` is parametrized
-    over what the parser FOUND, so a row it found nothing in simply generates
-    no test case and the suite still goes green.
+    is silently unverified: `test_routing_citation_resolves` checks only
+    what the parser FOUND, so a row it found nothing in is simply never
+    checked and the suite still goes green.
     """
     text = ROUTING_MD.read_text(encoding="utf-8")
     unparsed = []
@@ -615,34 +634,58 @@ def test_every_routing_row_resolves_at_least_one_symbol() -> None:
     )
 
 
-@pytest.mark.parametrize("fname,symbol", _routing_citations())
-def test_routing_citation_resolves(fname: str, symbol: str) -> None:
-    """Every `<file>.py:<symbol>` in the table names a real definition."""
-    assert (fname, symbol) not in _OBSOLETE_ROUTING_CITATIONS, (
-        f"{ROUTING_MD_REL} routes to {fname}:{symbol}; "
-        f"cite {_OBSOLETE_ROUTING_CITATIONS[(fname, symbol)]}"
-    )
+def _citation_problem(label: str, missing: str, fname: str, symbol: str) -> str | None:
+    """Why `fname:symbol`, cited by `label`, does not resolve; None when it does.
+
+    `missing` is how the message spells the file when it does not exist."""
+    replacement = _OBSOLETE_ROUTING_CITATIONS.get((fname, symbol))
+    if replacement is not None:
+        return f"{label} routes to {fname}:{symbol}; cite {replacement}"
     candidates = [SRC / fname, SRC / "skills" / "retro_fleet" / Path(fname).name]
     path = next((c for c in candidates if c.exists()), None)
-    assert path is not None, f"{ROUTING_MD_REL} routes to {fname}, which does not exist"
+    if path is None:
+        return f"{label} routes to {missing}, which does not exist"
 
     if symbol.endswith("*"):  # wildcard family, e.g. `_ensure_retro_skill_link*`
         stem = symbol.rstrip("*")
-        assert any(n.startswith(stem) for n in _defined_names(path)), (
-            f"{ROUTING_MD_REL} routes {fname}:{symbol} but nothing there starts with {stem!r}"
-        )
-        return
+        if any(n.startswith(stem) for n in _defined_names(path)):
+            return None
+        return f"{label} routes {fname}:{symbol} but nothing there starts with {stem!r}"
     if symbol in _defined_names(path):
-        return
+        return None
     hint = (
         " — it is only IMPORTED there, so it lives somewhere else now"
         if symbol in _imported_names(path)
         else ""
     )
-    raise AssertionError(
-        f"{ROUTING_MD_REL} routes {fname}:{symbol}, which is not defined there{hint}. "
+    return (
+        f"{label} routes {fname}:{symbol}, which is not defined there{hint}. "
         f"The symbol moved, or the row is stale."
     )
+
+
+def test_citation_problem_names_each_failure_shape() -> None:
+    """The aggregate gates below are only as good as this classifier."""
+    assert _citation_problem("t.md", "cli.py", "cli.py", "app") is None
+    assert _citation_problem("t.md", "cli.py", "cli.py", "_push_*") is None
+    assert "does not exist" in _citation_problem("t.md", "nope.py", "nope.py", "x")
+    assert "nothing there starts with" in _citation_problem("t.md", "cli.py", "cli.py", "zz_*")
+    assert "not defined there" in _citation_problem("t.md", "cli.py", "cli.py", "zz_missing")
+    obsolete = next(iter(_OBSOLETE_ROUTING_CITATIONS), None)
+    if obsolete is not None:
+        assert "; cite " in _citation_problem("t.md", obsolete[0], *obsolete)
+
+
+def test_routing_citation_resolves() -> None:
+    """Every `<file>.py:<symbol>` in the table names a real definition.
+
+    One test lists every broken citation, instead of one test per citation."""
+    broken = [
+        problem
+        for fname, symbol in _routing_citations()
+        if (problem := _citation_problem(str(ROUTING_MD_REL), fname, fname, symbol))
+    ]
+    assert broken == [], "\n".join(broken)
 
 
 def test_todos_inbox_keeps_its_heading() -> None:
@@ -1044,8 +1087,7 @@ def test_invariant_docs_have_citations() -> None:
     assert len(_invariant_citations()) > 30
 
 
-@pytest.mark.parametrize("doc,fname,symbol", _invariant_citations())
-def test_invariant_doc_citation_resolves(doc: str, fname: str, symbol: str) -> None:
+def test_invariant_doc_citation_resolves() -> None:
     """Each invariant doc's own "Read BEFORE editing" list must resolve too.
 
     The routing table routes an agent to the right DOC; that doc's first lines
@@ -1056,30 +1098,12 @@ def test_invariant_doc_citation_resolves(doc: str, fname: str, symbol: str) -> N
     gate that only read the routing table could not see any of it — an agent would be
     routed correctly and then sent straight back to the wrong file.
     """
-    assert (fname, symbol) not in _OBSOLETE_ROUTING_CITATIONS, (
-        f"{doc} routes to {fname}:{symbol}; cite {_OBSOLETE_ROUTING_CITATIONS[(fname, symbol)]}"
-    )
-    candidates = [SRC / fname, SRC / "skills" / "retro_fleet" / Path(fname).name]
-    path = next((c for c in candidates if c.exists()), None)
-    assert path is not None, f"{doc} routes to src/mind_meld/{fname}, which does not exist"
-
-    if symbol.endswith("*"):
-        stem = symbol.rstrip("*")
-        assert any(n.startswith(stem) for n in _defined_names(path)), (
-            f"{doc} routes {fname}:{symbol} but nothing there starts with {stem!r}"
-        )
-        return
-    if symbol in _defined_names(path):
-        return
-    hint = (
-        " — it is only IMPORTED there, so it lives somewhere else now"
-        if symbol in _imported_names(path)
-        else ""
-    )
-    raise AssertionError(
-        f"{doc} routes {fname}:{symbol}, which is not defined there{hint}. "
-        f"The symbol moved, or the row is stale."
-    )
+    broken = [
+        problem
+        for doc, fname, symbol in _invariant_citations()
+        if (problem := _citation_problem(doc, f"src/mind_meld/{fname}", fname, symbol))
+    ]
+    assert broken == [], "\n".join(broken)
 
 
 _DIAG_JSON_TOP_LEVEL = (

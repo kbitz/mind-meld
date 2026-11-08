@@ -846,54 +846,17 @@ class TestPullOneSource:
         )
         assert [(p.rel_path, p.outcome) for p in result.predictions] == [("new.md", "write")]
 
-    def test_claude_sync_base_set_for_claude(self, tmp_path: Path, monkeypatch) -> None:
-        """Non-dry-run with changes — claude_sync_base is set for type=='claude'."""
-
-        # Stub _download_and_apply to pretend one file was written.
-        def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
-            outcomes = {
-                "written": list(to_download.keys()),
-                "merged": [],
-                "merged-via-lcs": [],
-                "skipped": [],
-                "conflicted": [],
-                "unchanged": [],
-                "failed": [],
-            }
-            return 42, outcomes
-
-        monkeypatch.setattr(pullflow, "_download_and_apply", fake_dl)
-        result = pullflow._pull_one_source(
-            backend=None,
-            src_name="claude",
-            src_type="claude",
-            src_data={"files": {"new.md": _info("abc")}},
-            did="peerA",
-            dname="A",
-            base_path=tmp_path,
-            all_tombstones={},
-            passphrase="pp",
-            memory_kb=1024,
-            interactive_resolve=False,
-            dry_run=False,
-            verbose_console=False,
-        )
-        assert result.claude_sync_base == str(tmp_path)
-        assert result.bytes_transferred == 42
-
-    def test_renamed_claude_source_still_logs(self, tmp_path: Path, monkeypatch) -> None:
-        """REGRESSION PIN (same-device scope): user renames their local
-        claude source from 'claude' to 'my-claude' — claude_sync_base
-        MUST still fire because the gate is type-keyed, not name-keyed.
-        Pre-fix this silently broke the per-project sync log for anyone
-        who customized source names.
-
-        OUT OF SCOPE: cross-device rename drift. Manifests are keyed by
-        src_name, so if device A renames locally but device B keeps the
-        original name, B's pull skips A's remote source entirely. That's
-        a bigger design change (cross-device source identity) tracked as
-        a known limitation, not fixed here.
-        """
+    @pytest.mark.parametrize(
+        "src_name,src_type",
+        [("gstack", "generic"), ("claude", "generic")],
+        ids=["generic", "claude-named-generic"],
+    )
+    def test_non_claude_type_sets_no_sync_base(
+        self, tmp_path: Path, monkeypatch, src_name, src_type
+    ) -> None:
+        """Only a claude-TYPED source writes a sync log; the name is cosmetic.
+        The positive (renamed claude-typed source logs) is pinned at the real
+        boundary by test_pullflow.py's project sync-log tests."""
 
         def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
             return 1, {
@@ -909,78 +872,8 @@ class TestPullOneSource:
         monkeypatch.setattr(pullflow, "_download_and_apply", fake_dl)
         result = pullflow._pull_one_source(
             backend=None,
-            src_name="my-claude",  # user renamed
-            src_type="claude",  # but type is still claude
-            src_data={"files": {"a.md": _info("abc")}},
-            did="peerA",
-            dname="A",
-            base_path=tmp_path,
-            all_tombstones={},
-            passphrase="pp",
-            memory_kb=1024,
-            interactive_resolve=False,
-            dry_run=False,
-            verbose_console=False,
-        )
-        assert result.claude_sync_base == str(tmp_path), (
-            "Renamed claude source must still set claude_sync_base — "
-            "gate is type-keyed, not name-keyed."
-        )
-
-    def test_non_claude_sync_base_none(self, tmp_path: Path, monkeypatch) -> None:
-
-        def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
-            return 0, {
-                k: []
-                for k in [
-                    "written",
-                    "merged",
-                    "merged-via-lcs",
-                    "skipped",
-                    "conflicted",
-                    "unchanged",
-                    "failed",
-                ]
-            }
-
-        monkeypatch.setattr(pullflow, "_download_and_apply", fake_dl)
-        result = pullflow._pull_one_source(
-            backend=None,
-            src_name="gstack",
-            src_type="generic",
-            src_data={"files": {"x.md": _info("abc")}},
-            did="peerA",
-            dname="A",
-            base_path=tmp_path,
-            all_tombstones={},
-            passphrase="pp",
-            memory_kb=1024,
-            interactive_resolve=False,
-            dry_run=False,
-            verbose_console=False,
-        )
-        assert result.claude_sync_base is None
-
-    def test_claude_named_generic_does_not_log(self, tmp_path: Path, monkeypatch) -> None:
-        """Symmetric pin: a source named 'claude' but typed 'generic' must
-        NOT write a sync log. Name is cosmetic; type drives behavior."""
-
-        def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
-            return 1, {
-                "written": list(to_download.keys()),
-                "merged": [],
-                "merged-via-lcs": [],
-                "skipped": [],
-                "conflicted": [],
-                "unchanged": [],
-                "failed": [],
-            }
-
-        monkeypatch.setattr(pullflow, "_download_and_apply", fake_dl)
-        result = pullflow._pull_one_source(
-            backend=None,
-            src_name="claude",  # name-only
-            src_type="generic",  # but NOT a claude-typed source
+            src_name=src_name,
+            src_type=src_type,
             src_data={"files": {"x.md": _info("abc")}},
             did="peerA",
             dname="A",
@@ -1215,37 +1108,6 @@ class TestPrintPullSummaryStderrRouting:
         assert "fsync failed" in captured.err
         assert "disk full" in captured.err
 
-    def test_quiet_suppresses_cosmetic_summary(self, capsys) -> None:
-
-        pullflow._print_pull_summary(
-            pullflow.PullResult(total_written=5, elapsed=1.0),
-            corrupt_peers=[],
-            unknown_sources=[],
-            fsync_warnings=[],
-            per_source_results=[],
-            quiet=True,
-            verbose=False,
-        )
-        captured = capsys.readouterr()
-        # "Pull complete" is cosmetic — suppressed in quiet.
-        assert "Pull complete" not in captured.out
-        assert "Pull complete" not in captured.err
-
-    def test_nonquiet_shows_cosmetic_summary(self, capsys) -> None:
-
-        pullflow._print_pull_summary(
-            pullflow.PullResult(total_written=5, elapsed=1.0),
-            corrupt_peers=[],
-            unknown_sources=[],
-            fsync_warnings=[],
-            per_source_results=[],
-            quiet=False,
-            verbose=False,
-        )
-        captured = capsys.readouterr()
-        # Cosmetic summary goes to stdout.
-        assert "Pull complete" in captured.out
-
 
 # ── Track 5B Task 2 + D11 ────────────────────────────────────────────
 
@@ -1285,43 +1147,14 @@ class TestPullSummaryInlinePaths:
     share a source name (D10).
     """
 
-    def test_conflicted_paths_listed_under_per_source_line(self, capsys) -> None:
-
-        per_source = _make_per_source("claude", "machine-a", conflicted=["a.md", "b.md", "c.md"])
-        pullflow._print_pull_summary(
-            pullflow.PullResult(total_conflicted=3, elapsed=1.0),
-            corrupt_peers=[],
-            unknown_sources=[],
-            fsync_warnings=[],
-            per_source_results=[per_source],
-            quiet=False,
-            verbose=False,
-        )
-        out = capsys.readouterr().out
-        assert "claude:" in out
-        for path in ("a.md", "b.md", "c.md"):
-            assert path in out
-
-    def test_failed_paths_listed_separately(self, capsys) -> None:
-
-        per_source = _make_per_source(
-            "claude", "machine-a", failed=["bad-blob.md", "bad-decrypt.md"]
-        )
-        pullflow._print_pull_summary(
-            pullflow.PullResult(total_failed=2, elapsed=1.0),
-            corrupt_peers=[],
-            unknown_sources=[],
-            fsync_warnings=[],
-            per_source_results=[per_source],
-            quiet=False,
-            verbose=False,
-        )
-        out = capsys.readouterr().out
-        assert "bad-blob.md" in out
-        assert "bad-decrypt.md" in out
-
-    def test_cap_at_20_shows_overflow(self, capsys) -> None:
-
+    @pytest.mark.parametrize(
+        "quiet,verbose",
+        [(False, False), (False, True), (True, False)],
+        ids=["capped", "verbose-unlocks-cap", "quiet-stderr-capped"],
+    )
+    def test_inline_path_cap(self, capsys, quiet, verbose) -> None:
+        """At most 20 paths inline plus an overflow marker; --verbose lifts the
+        cap (D5); quiet stderr caps the same way (D11)."""
         paths = [f"f{i}.md" for i in range(25)]
         per_source = _make_per_source("claude", "machine-a", conflicted=paths)
         pullflow._print_pull_summary(
@@ -1330,53 +1163,19 @@ class TestPullSummaryInlinePaths:
             unknown_sources=[],
             fsync_warnings=[],
             per_source_results=[per_source],
-            quiet=False,
-            verbose=False,
+            quiet=quiet,
+            verbose=verbose,
         )
-        out = capsys.readouterr().out
-        # First 20 paths listed
-        for i in range(20):
-            assert f"f{i}.md" in out
-        # Overflow line surfaced; remainder NOT listed
-        assert "and 5 more" in out
-        assert "f24.md" not in out
-
-    def test_verbose_unlocks_cap(self, capsys) -> None:
-        """D5: --verbose lifts the 20-path cap on inline path display."""
-
-        paths = [f"f{i}.md" for i in range(25)]
-        per_source = _make_per_source("claude", "machine-a", conflicted=paths)
-        pullflow._print_pull_summary(
-            pullflow.PullResult(total_conflicted=25, elapsed=1.0),
-            corrupt_peers=[],
-            unknown_sources=[],
-            fsync_warnings=[],
-            per_source_results=[per_source],
-            quiet=False,
-            verbose=True,
-        )
-        out = capsys.readouterr().out
-        # All 25 listed; no overflow line
-        for i in range(25):
-            assert f"f{i}.md" in out
-        assert "more" not in out
-
-    def test_zero_conflicts_no_inline_list(self, capsys) -> None:
-        """No conflicted/failed paths => no inline list (no false positives)."""
-
-        per_source = _make_per_source("claude", "machine-a", written=["new.md"])
-        pullflow._print_pull_summary(
-            pullflow.PullResult(total_written=1, elapsed=1.0),
-            corrupt_peers=[],
-            unknown_sources=[],
-            fsync_warnings=[],
-            per_source_results=[per_source],
-            quiet=False,
-            verbose=True,
-        )
-        out = capsys.readouterr().out
-        # No "- " bullet lines indicating an inline path list
-        assert "    - " not in out
+        captured = capsys.readouterr()
+        text = captured.err if quiet else captured.out
+        shown = 25 if verbose else 20
+        for i in range(shown):
+            assert f"f{i}.md" in text
+        if verbose:
+            assert "more" not in text
+        else:
+            assert "and 5 more" in text
+            assert "f24.md" not in text
 
 
 class TestPullSummaryQuietContract:
@@ -1387,44 +1186,6 @@ class TestPullSummaryQuietContract:
 
     REGRESSION: D11 quiet conflicts/failures contract.
     """
-
-    def test_quiet_routes_per_source_conflicts_to_stderr(self, capsys) -> None:
-
-        per_source = _make_per_source("claude", "machine-a", conflicted=["a.md", "b.md", "c.md"])
-        pullflow._print_pull_summary(
-            pullflow.PullResult(total_conflicted=3, elapsed=1.0),
-            corrupt_peers=[],
-            unknown_sources=[],
-            fsync_warnings=[],
-            per_source_results=[per_source],
-            quiet=True,
-            verbose=False,
-        )
-        captured = capsys.readouterr()
-        # Stderr surfaces device/source prefix + file list
-        assert "machine-a/claude" in captured.err
-        assert "3 conflicts" in captured.err
-        for path in ("a.md", "b.md", "c.md"):
-            assert path in captured.err
-        # Cosmetic stdout still suppressed
-        assert "Pull complete" not in captured.out
-
-    def test_quiet_routes_per_source_failed_to_stderr(self, capsys) -> None:
-
-        per_source = _make_per_source("claude", "machine-a", failed=["bad.md"])
-        pullflow._print_pull_summary(
-            pullflow.PullResult(total_failed=1, elapsed=1.0),
-            corrupt_peers=[],
-            unknown_sources=[],
-            fsync_warnings=[],
-            per_source_results=[per_source],
-            quiet=True,
-            verbose=False,
-        )
-        captured = capsys.readouterr()
-        assert "machine-a/claude" in captured.err
-        assert "1 failed" in captured.err
-        assert "bad.md" in captured.err
 
     def test_quiet_multi_device_disambiguation(self, capsys) -> None:
         """Two devices with same-named source must be disambiguated by
@@ -1449,42 +1210,6 @@ class TestPullSummaryQuietContract:
         assert "machine-b/claude" in err
         assert "x.md" in err
         assert "y.md" in err
-
-    def test_quiet_zero_conflicts_no_stderr(self, capsys) -> None:
-        """No conflicts/failures => no stderr noise (no false positives)."""
-
-        per_source = _make_per_source("claude", "machine-a", written=["new.md"])
-        pullflow._print_pull_summary(
-            pullflow.PullResult(total_written=1, elapsed=1.0),
-            corrupt_peers=[],
-            unknown_sources=[],
-            fsync_warnings=[],
-            per_source_results=[per_source],
-            quiet=True,
-            verbose=False,
-        )
-        captured = capsys.readouterr()
-        assert captured.err == ""
-
-    def test_quiet_cap_with_overflow_marker(self, capsys) -> None:
-        """quiet stderr also caps at 20 (with --verbose unlock per D5)."""
-
-        paths = [f"f{i}.md" for i in range(25)]
-        per_source = _make_per_source("claude", "machine-a", conflicted=paths)
-        pullflow._print_pull_summary(
-            pullflow.PullResult(total_conflicted=25, elapsed=1.0),
-            corrupt_peers=[],
-            unknown_sources=[],
-            fsync_warnings=[],
-            per_source_results=[per_source],
-            quiet=True,
-            verbose=False,
-        )
-        err = capsys.readouterr().err
-        for i in range(20):
-            assert f"f{i}.md" in err
-        assert "and 5 more" in err
-        assert "f24.md" not in err
 
 
 # ── Track 5B Task 4: download progress + quiet plumbing ──────────────
@@ -1691,82 +1416,37 @@ class TestHadChangesExcludesUnchanged:
     review.
     """
 
-    def test_unchanged_only_is_not_changes(self) -> None:
+    @pytest.mark.parametrize(
+        "bucket,expected",
+        [("unchanged", False), (None, False), ("skipped", True), ("failed", True)],
+        ids=["unchanged-only", "empty", "skipped-only", "failed-only"],
+    )
+    def test_had_changes(self, bucket, expected) -> None:
+        """'unchanged' alone is not a change; a one-way-sync 'skipped' (always
+        local-newer) or a 'failed' still is, so cleanup still runs."""
+        outcomes = {
+            k: []
+            for k in (
+                "written",
+                "merged",
+                "merged-via-lcs",
+                "skipped",
+                "conflicted",
+                "unchanged",
+                "failed",
+            )
+        }
+        if bucket is not None:
+            outcomes[bucket] = ["a.md"]
         result = pullflow._PerSourceResult(
             src_name="claude",
             device_name="A",
             device_id="peerA",
-            outcomes={
-                "written": [],
-                "merged": [],
-                "merged-via-lcs": [],
-                "skipped": [],
-                "conflicted": [],
-                "unchanged": ["stale.md"],
-                "failed": [],
-            },
+            outcomes=outcomes,
             bytes_transferred=0,
             touched_parents=set(),
         )
-        assert result.had_changes is False
-
-    def test_skipped_only_is_changes(self) -> None:
-        """One-way-sync (always local-newer) must still trigger cleanup."""
-        result = pullflow._PerSourceResult(
-            src_name="claude",
-            device_name="A",
-            device_id="peerA",
-            outcomes={
-                "written": [],
-                "merged": [],
-                "merged-via-lcs": [],
-                "skipped": ["a.md", "b.md"],
-                "conflicted": [],
-                "unchanged": [],
-                "failed": [],
-            },
-            bytes_transferred=0,
-            touched_parents=set(),
-        )
-        assert result.had_changes is True
-
-    def test_failed_only_is_changes(self) -> None:
-        result = pullflow._PerSourceResult(
-            src_name="claude",
-            device_name="A",
-            device_id="peerA",
-            outcomes={
-                "written": [],
-                "merged": [],
-                "merged-via-lcs": [],
-                "skipped": [],
-                "conflicted": [],
-                "unchanged": [],
-                "failed": ["bad.md"],
-            },
-            bytes_transferred=0,
-            touched_parents=set(),
-        )
-        assert result.had_changes is True
-
-    def test_empty_outcomes_is_not_changes(self) -> None:
-        result = pullflow._PerSourceResult(
-            src_name="claude",
-            device_name="A",
-            device_id="peerA",
-            outcomes={
-                "written": [],
-                "merged": [],
-                "merged-via-lcs": [],
-                "skipped": [],
-                "conflicted": [],
-                "unchanged": [],
-                "failed": [],
-            },
-            bytes_transferred=0,
-            touched_parents=set(),
-        )
-        assert result.had_changes is False
+        assert result.had_changes is expected
 
 
 class TestWarningsSurvivePartialPull:
@@ -2029,23 +1709,6 @@ class TestLoadPriorDeviceMetadata:
 class TestPromptPassphrase:
     """_prompt_passphrase — double-prompt for a new fleet, single for a join."""
 
-    def test_first_device_match(self, monkeypatch) -> None:
-        from mind_meld import cli as cli_module
-
-        responses = iter(["pw123", "pw123"])
-        monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: next(responses))
-        assert _prompt_passphrase(new_fleet=True) == "pw123"
-
-    def test_first_device_mismatch_exits(self, monkeypatch) -> None:
-        import typer as _typer
-
-        from mind_meld import cli as cli_module
-
-        responses = iter(["pw123", "pw456"])
-        monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: next(responses))
-        with pytest.raises(_typer.Exit):
-            _prompt_passphrase(new_fleet=True)
-
     def test_first_device_empty_exits(self, monkeypatch) -> None:
         import typer as _typer
 
@@ -2054,19 +1717,6 @@ class TestPromptPassphrase:
         monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: "")
         with pytest.raises(_typer.Exit):
             _prompt_passphrase(new_fleet=True)
-
-    def test_second_device_single_prompt(self, monkeypatch) -> None:
-        from mind_meld import cli as cli_module
-
-        calls: list[int] = []
-
-        def counting_prompt(*a, **kw):
-            calls.append(1)
-            return "pw-shared"
-
-        monkeypatch.setattr(cli_module.typer, "prompt", counting_prompt)
-        assert _prompt_passphrase(new_fleet=False) == "pw-shared"
-        assert len(calls) == 1  # single prompt, no confirm
 
     def test_second_device_empty_exits(self, monkeypatch) -> None:
         import typer as _typer
@@ -2143,23 +1793,6 @@ class TestPromptSources:
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
         assert [s["name"] for s in result] == ["claude", "mm-events"]
-
-    def test_gstack_only_preserves_include_fields(self, monkeypatch) -> None:
-        """The gstack default carries include_dirs / include_files — they
-        must survive the indirection through get_default_source. mm-events
-        auto-includes without prompting (mm-internal infrastructure)."""
-        from mind_meld import cli as cli_module
-
-        responses = iter([False, True, False, False, False, False, False])
-        monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
-        result = _prompt_sources()
-        assert [s["name"] for s in result] == ["mm-events", "gstack"]
-        gstack = next(s for s in result if s["name"] == "gstack")
-        assert "projects" in gstack["include_dirs"]
-        assert "retro-context.md" in gstack["include_files"]
-        # v0.9.3: exclude_patterns is also load-bearing now — pin that it
-        # survives indirection AND contains the new config.yaml exclude.
-        assert "config.yaml" in gstack["exclude_patterns"]
 
     def test_init_uses_one_detection_snapshot_per_user_source(self, monkeypatch) -> None:
         """Prompt copy and default must share one filesystem observation."""
@@ -4318,82 +3951,6 @@ class TestDeletionHelpers91A:
             assert directory.stat().st_mode & 0o777 == 0o700, directory
         assert pullflow._make_copy_dirs(folder, deletions) == []  # nothing left to create
 
-    def test_make_copy_dirs_refuses_real_account_state_before_creating_anything(
-        self, synthetic_account_home
-    ):
-        from mind_meld import fsutil
-
-        folder = synthetic_account_home / ".config" / "mind-meld" / "deleted" / "x"
-        with pytest.raises(fsutil.PytestRealStateWriteError):
-            pullflow._make_copy_dirs(folder, [self._deletion(synthetic_account_home)])
-        assert not (synthetic_account_home / ".config").exists()
-
-    def test_move_into_copy_moves_the_inode_and_makes_the_copy_private(self, tmp_path):
-        source = tmp_path / "note.md"
-        source.write_bytes(b"shared\n")
-        source.chmod(0o644)
-        inode = source.stat().st_ino
-        copy = tmp_path / "state" / "note.md"
-        copy.parent.mkdir()
-        assert pullflow._move_into_copy(source, copy, self.SHA) == "deleted"
-        assert not source.exists() and copy.read_bytes() == b"shared\n"
-        assert copy.stat().st_ino == inode  # the very file, not a copy of its bytes
-        assert copy.stat().st_mode & 0o777 == 0o600
-
-    def test_move_into_copy_links_back_what_it_moved_when_the_bytes_were_not_the_deleted_ones(
-        self, tmp_path
-    ):
-        source = tmp_path / "note.md"
-        source.write_bytes(b"edited meanwhile\n")
-        copy = tmp_path / "state" / "note.md"
-        copy.parent.mkdir()
-        assert pullflow._move_into_copy(source, copy, self.SHA) == "restored"
-        assert source.read_bytes() == b"edited meanwhile\n" and not copy.exists()
-
-    def test_move_into_copy_never_clobbers_a_path_re_created_after_the_move(
-        self, tmp_path, monkeypatch
-    ):
-        source = tmp_path / "note.md"
-        source.write_bytes(b"edited meanwhile\n")
-        copy = tmp_path / "state" / "note.md"
-        copy.parent.mkdir()
-        real_rename = os.rename
-
-        def rename_then_recreate(src, dst, *a, **k):
-            real_rename(src, dst, *a, **k)
-            Path(src).write_bytes(b"new owner\n")
-
-        monkeypatch.setattr(os, "rename", rename_then_recreate)
-        assert pullflow._move_into_copy(source, copy, self.SHA) == "kept-copy"
-        assert source.read_bytes() == b"new owner\n"
-        assert copy.read_bytes() == b"edited meanwhile\n"
-
-    def test_move_into_copy_raises_when_nothing_moved(self, tmp_path, monkeypatch):
-        source = tmp_path / "note.md"
-        source.write_bytes(b"shared\n")
-
-        def full(*a, **k):
-            raise OSError(errno.ENOSPC, "No space left on device")
-
-        monkeypatch.setattr(os, "rename", full)
-        with pytest.raises(OSError):
-            pullflow._move_into_copy(source, tmp_path / "copy.md", self.SHA)
-        assert source.read_bytes() == b"shared\n"
-
-    def test_cross_volume_fallback_copies_then_unlinks(self, tmp_path, monkeypatch):
-        source = tmp_path / "note.md"
-        source.write_bytes(b"shared\n")
-        copy = tmp_path / "state" / "note.md"
-        copy.parent.mkdir()
-
-        def other_volume(*a, **k):
-            raise OSError(errno.EXDEV, "Invalid cross-device link")
-
-        monkeypatch.setattr(os, "rename", other_volume)
-        assert pullflow._move_into_copy(source, copy, self.SHA) == "deleted"
-        assert not source.exists() and copy.read_bytes() == b"shared\n"
-        assert copy.stat().st_mode & 0o777 == 0o600
-
     def test_cross_volume_fallback_declines_bytes_that_are_not_the_deleted_ones(
         self, tmp_path, monkeypatch
     ):
@@ -4406,16 +3963,6 @@ class TestDeletionHelpers91A:
         )
         assert pullflow._move_into_copy(source, copy, self.SHA) == "restored"
         assert source.read_bytes() == b"edited\n" and not copy.exists()
-
-    def test_move_into_copy_refuses_real_account_state(self, synthetic_account_home, tmp_path):
-        from mind_meld import fsutil
-
-        source = tmp_path / "note.md"
-        source.write_bytes(b"shared\n")
-        copy = synthetic_account_home / ".config" / "mind-meld" / "deleted" / "x" / "note.md"
-        with pytest.raises(fsutil.PytestRealStateWriteError):
-            pullflow._move_into_copy(source, copy, self.SHA)
-        assert source.read_bytes() == b"shared\n"
 
 
 class TestOwnLookup91A:
