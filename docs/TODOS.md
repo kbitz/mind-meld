@@ -44,6 +44,37 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Writer HTTPS transport
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Exercise successful and certificate-rejected writes over loopback HTTPS; existing TLS tests cover GET only.
+- **Hypothesis (untested):** extend the existing writer integration cases; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/syncthing.py
+- **Evidence:** coverage audit at 4bff8f5; no failure reproduced.
+- **Context:** /review-and-prep, branch mmm/347df673, 2026-11-08; trigger is the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Malformed writer config lists
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Exercise malformed folder/device list responses in SyncthingWriter._get_list and assert safe refusal without writes.
+- **Hypothesis (untested):** extend the existing writer integration cases; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/syncthing.py
+- **Evidence:** coverage audit at 4bff8f5; no failure reproduced.
+- **Context:** /review-and-prep, branch mmm/347df673, 2026-11-08; trigger is the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Post-write verification read failures
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Exercise a failed verification GET and a missing folder after POST; current test covers returned option mismatch.
+- **Hypothesis (untested):** extend the existing writer integration cases; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/syncthing.py
+- **Evidence:** coverage audit at 4bff8f5; no failure reproduced.
+- **Context:** /review-and-prep, branch mmm/347df673, 2026-11-08; trigger is the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-07 (no cutover: per-machine move and Syncthing setup)
