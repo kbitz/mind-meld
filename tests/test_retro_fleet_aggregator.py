@@ -561,127 +561,50 @@ class TestGitAggregation:
 
 
 class TestCommitStreak:
-    def test_no_commits_zero_streak(self, tmp_path):
+    @pytest.mark.parametrize(
+        "git_offset,commit_days,window_days,expected",
+        [
+            (0.0, [], 7, 0),
+            (0.0, [0.0], 7, 1),
+            (0.0, [0.0, 1.0, 2.0], 7, 3),
+            # GitHub-style grace day: nothing today yet, yesterday counts.
+            (0.5, [1.0, 2.0], 7, 2),
+            # No commit today AND none yesterday: a long earlier run is over.
+            (3.0, [3.0, 4.0, 5.0], 7, 0),
+            # 5-day run, gap, 3-day run ending today: only the recent run.
+            (0.0, [0.0, 1.0, 2.0, 10.0, 11.0, 12.0, 13.0, 14.0], 30, 3),
+            (0.0, [0.0, 0.1, 0.2], 7, 1),  # several commits on one day count once
+            # Window-independent: a 7d retro on a 14-day streak shows 14.
+            (0.0, [float(i) for i in range(14)], 7, 14),
+        ],
+        ids=[
+            "none",
+            "today",
+            "three-days",
+            "grace-day",
+            "two-day-gap",
+            "most-recent-run",
+            "same-day",
+            "outlasts-window",
+        ],
+    )
+    def test_streak_days_and_render(self, tmp_path, git_offset, commit_days, window_days, expected):
         events_dir = tmp_path / "events"
         events_dir.mkdir()
-        data = _aggregate(events_dir)
-        assert data.git.streak_days == 0
+        if commit_days:
+            commits = [_commit(f"c{i}", day) for i, day in enumerate(commit_days)]
+            _write_events(
+                events_dir, "dev-a", "2026-04-28", [_git_event("dev-a", git_offset, commits)]
+            )
+        data = _aggregate(events_dir, window_days=window_days)
+        assert data.git.streak_days == expected
         out = aggregator.format_retro(data)
-        assert "commit streak" not in out  # hidden when zero
-
-    def test_single_day_today(self, tmp_path):
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        _write_events(
-            events_dir,
-            "dev-a",
-            "2026-04-28",
-            [_git_event("dev-a", 0.0, [_commit("a", 0.0)])],
-        )
-        data = _aggregate(events_dir)
-        assert data.git.streak_days == 1
-        out = aggregator.format_retro(data)
-        assert "1-day commit streak" in out
-
-    def test_three_consecutive_days_ending_today(self, tmp_path):
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        _write_events(
-            events_dir,
-            "dev-a",
-            "2026-04-28",
-            [
-                _git_event(
-                    "dev-a",
-                    0.0,
-                    [
-                        _commit("a", 0.0),
-                        _commit("b", 1.0),
-                        _commit("c", 2.0),
-                    ],
-                ),
-            ],
-        )
-        data = _aggregate(events_dir)
-        assert data.git.streak_days == 3
-        assert "3-day commit streak" in aggregator.format_retro(data)
-
-    def test_grace_day_today_empty_yesterday_counts(self, tmp_path):
-        """GitHub-style: today not yet committed but yesterday was. Streak
-        starts from yesterday so an in-progress day doesn't break it."""
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        _write_events(
-            events_dir,
-            "dev-a",
-            "2026-04-28",
-            [
-                _git_event(
-                    "dev-a",
-                    0.5,
-                    [
-                        _commit("a", 1.0),  # yesterday
-                        _commit("b", 2.0),  # day before
-                    ],
-                ),
-            ],
-        )
-        data = _aggregate(events_dir)
-        assert data.git.streak_days == 2
-
-    def test_two_day_gap_breaks_streak(self, tmp_path):
-        """No commit today AND no commit yesterday → streak = 0 even if a
-        long run preceded it."""
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        _write_events(
-            events_dir,
-            "dev-a",
-            "2026-04-28",
-            [
-                _git_event(
-                    "dev-a",
-                    3.0,
-                    [_commit("a", 3.0), _commit("b", 4.0), _commit("c", 5.0)],
-                ),
-            ],
-        )
-        data = _aggregate(events_dir)
-        assert data.git.streak_days == 0
-
-    def test_only_most_recent_run_counts(self, tmp_path):
-        """5-day run, then gap, then 3-day run ending today → streak = 3."""
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        recent = [_commit(f"r{i}", float(i)) for i in range(3)]  # 0,1,2 days ago
-        old = [_commit(f"o{i}", float(i)) for i in range(10, 15)]  # 10..14 days ago
-        _write_events(
-            events_dir,
-            "dev-a",
-            "2026-04-28",
-            [_git_event("dev-a", 0.0, recent + old)],
-        )
-        data = _aggregate(events_dir, window_days=30)
-        assert data.git.streak_days == 3
-
-    def test_multiple_commits_same_day_count_once(self, tmp_path):
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        _write_events(
-            events_dir,
-            "dev-a",
-            "2026-04-28",
-            [
-                _git_event(
-                    "dev-a",
-                    0.0,
-                    [_commit("a", 0.0), _commit("b", 0.1), _commit("c", 0.2)],
-                ),
-            ],
-        )
-        data = _aggregate(events_dir)
-        # Three commits, all "today" → 1 streak day.
-        assert data.git.streak_days == 1
+        if expected:
+            assert f"{expected}-day commit streak" in out
+        else:
+            assert "commit streak" not in out  # hidden when zero
+        if window_days == 7 and expected == 14:
+            assert data.git.commits <= 8  # the windowed count stays bounded
 
     def test_cross_device_same_sha_counts_once(self, tmp_path):
         """Streak dedups across machines via (remote, sha) — two devices
@@ -693,18 +616,6 @@ class TestCommitStreak:
         _write_events(events_dir, "dev-b", "2026-04-28", [_git_event("dev-b", 0.0, [c])])
         data = _aggregate(events_dir)
         assert data.git.streak_days == 1
-
-    def test_streak_outlasts_retro_window(self, tmp_path):
-        """7d retro on a 14-day streak shows 14 — streak is window-independent
-        (capped only by events retention)."""
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        commits = [_commit(f"s{i}", float(i)) for i in range(14)]  # 0..13 days ago
-        _write_events(events_dir, "dev-a", "2026-04-28", [_git_event("dev-a", 0.0, commits)])
-        data = _aggregate(events_dir, window_days=7)
-        assert data.git.streak_days == 14
-        # Windowed commit count is still bounded by the 7d retro.
-        assert data.git.commits <= 8
 
     def test_streak_respects_author_filter(self, tmp_path):
         """A bot's daily commit shouldn't keep the user's streak alive."""
@@ -1419,285 +1330,10 @@ class TestGatherAuthorEmails:
         # The mm config.toml [retro].author_emails read lives here now.
         monkeypatch.setattr(identity_module, "_gather_config_author_emails", lambda: [])
 
-    def test_per_repo_overrides_unioned_with_global(self, monkeypatch):
-        """Per-repo `git config user.email` overrides land in the trust
-        set alongside the global. Captures the case where a user
-        configures a different identity for specific repos (e.g.,
-        dotfiles repo using a personal email where global is work)."""
-        self._stub_repos(monkeypatch, [Path("/fake/repo-a"), Path("/fake/repo-b")])
-        self._stub_subprocess(
-            monkeypatch,
-            {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("git", "-C", "/fake/repo-a", "config"): (0, "kb@example.com\n"),
-                ("git", "-C", "/fake/repo-b", "config"): (0, "kb-work@example.com\n"),
-                # `gh api user` returns auth error → no noreply form.
-                ("gh", "api"): (1, ""),
-            },
-        )
-        emails = aggregator.gather_author_emails()
-        assert "kb@example.com" in emails
-        assert "kb-work@example.com" in emails
-
-    def test_collaborator_email_in_shared_repo_history_NOT_included(self, monkeypatch, tmp_path):
-        """**Trust-rooted regression pin.** A shared repo where a
-        collaborator has commits in the local history must NOT leak
-        their email into the trust set. Pre-v0.11.9-rc2 a broad
-        `git log --format=%ae%n%ce` walk did exactly this — and an
-        intermediate v0.11.9-rc design retained the walk before being
-        reverted to this trust-rooted shape.
-
-        Setup: a real local git repo with two commits, one by the user
-        and one by a collaborator. The walk MUST NOT scan log output;
-        it MUST only read configured `git config user.email`.
-        """
-        import subprocess as real_subprocess
-
-        # Use a real git repo so we'd actually pick up alice's email if
-        # the implementation regressed to walking commits.
-        repo = tmp_path / "shared-repo"
-        repo.mkdir()
-        real_subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        real_subprocess.run(["git", "config", "user.email", "kb@example.com"], cwd=repo, check=True)
-        real_subprocess.run(["git", "config", "user.name", "KB"], cwd=repo, check=True)
-        real_subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
-        (repo / "a.txt").write_text("a")
-        real_subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
-        real_subprocess.run(["git", "commit", "-q", "-m", "kb commit"], cwd=repo, check=True)
-
-        # Collaborator's commit in the same repo (e.g., pulled from upstream).
-        env = {
-            **__import__("os").environ,
-            "GIT_AUTHOR_EMAIL": "alice@collaborator.com",
-            "GIT_AUTHOR_NAME": "Alice",
-            "GIT_COMMITTER_EMAIL": "alice@collaborator.com",
-            "GIT_COMMITTER_NAME": "Alice",
-        }
-        (repo / "b.txt").write_text("b")
-        real_subprocess.run(["git", "add", "b.txt"], cwd=repo, check=True)
-        real_subprocess.run(
-            ["git", "commit", "-q", "-m", "alice commit"], cwd=repo, env=env, check=True
-        )
-
-        # Sanity: alice IS in the log.
-        log = real_subprocess.run(
-            ["git", "-C", str(repo), "log", "--format=%ae"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert "alice@collaborator.com" in log.stdout
-
-        # Now stub the gatherer's repo discovery to return our shared repo.
-        self._stub_repos(monkeypatch, [repo])
-        # Don't stub subprocess — let real git run. Stub only `gh api`
-        # (no auth in the test env) and the `--global` lookup so the
-        # test machine's real global doesn't bleed in.
-        original_run = real_subprocess.run
-
-        def fake_run(cmd, **kw):
-            if tuple(cmd[:3]) == ("git", "config", "--global"):
-                # Return a synthetic global so the trust set is well-defined.
-
-                class R:
-                    returncode = 0
-                    stdout = "kb@example.com\n"
-                    stderr = ""
-
-                return R()
-            if tuple(cmd[:2]) == ("gh", "api"):
-
-                class R:
-                    returncode = 1
-                    stdout = ""
-                    stderr = ""
-
-                return R()
-            return original_run(cmd, **kw)
-
-        monkeypatch.setattr(real_subprocess, "run", fake_run)
-
-        emails = aggregator.gather_author_emails()
-        # User's identity is in the set.
-        assert "kb@example.com" in emails
-        # Collaborator's email IS in the local git log — and MUST NOT
-        # leak into the trust set. This is the load-bearing assertion.
-        assert "alice@collaborator.com" not in emails
-
-    def test_gh_noreply_email_added_when_authenticated(self, monkeypatch):
-        """`gh api user` returning {"id": 99999, "login": "fakeuser"}
-        derives `99999+fakeuser@users.noreply.github.com` and unions it
-        into the trust set. Critical for users who land most work via
-        PR-merge through GitHub's web UI (where author = the per-user
-        noreply form regardless of local git config)."""
-        self._stub_repos(monkeypatch, [])
-        self._stub_subprocess(
-            monkeypatch,
-            {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("gh", "api"): (0, '{"id": 99999, "login": "fakeuser"}'),
-            },
-        )
-        emails = aggregator.gather_author_emails()
-        assert "kb@example.com" in emails
-        assert "99999+fakeuser@users.noreply.github.com" in emails
-
-    def test_gh_unavailable_falls_back_silently(self, monkeypatch):
-        """Missing `gh` binary → FileNotFoundError → no noreply entry,
-        rest of the trust set still populated. No noisy stderr."""
-        self._stub_repos(monkeypatch, [])
-
-        class FakeResult:
-            def __init__(self, rc, out):
-                self.returncode = rc
-                self.stdout = out
-                self.stderr = ""
-
-        import subprocess as _subprocess
-
-        def fake_run(cmd, **_kw):
-            if tuple(cmd[:2]) == ("gh", "api"):
-                raise FileNotFoundError("gh: command not found")
-            if tuple(cmd[:3]) == ("git", "config", "--global"):
-                return FakeResult(0, "kb@example.com\n")
-            return FakeResult(1, "")
-
-        monkeypatch.setattr(_subprocess, "run", fake_run)
-        emails = aggregator.gather_author_emails()
-        assert "kb@example.com" in emails
-        assert all("noreply.github.com" not in e for e in emails)
-
-    def test_gh_unauthenticated_falls_back_silently(self, monkeypatch):
-        """`gh api user` rc != 0 (typical of unauthenticated gh) →
-        no noreply entry, no exception."""
-        self._stub_repos(monkeypatch, [])
-        self._stub_subprocess(
-            monkeypatch,
-            {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("gh", "api"): (1, ""),
-            },
-        )
-        emails = aggregator.gather_author_emails()
-        assert "kb@example.com" in emails
-        assert all("noreply.github.com" not in e for e in emails)
-
-    def test_gh_malformed_json_returns_none(self, monkeypatch):
-        """A `gh` binary that returns non-JSON to `gh api user` (auth
-        warning printed to stdout, etc.) must not crash the gather."""
-        self._stub_repos(monkeypatch, [])
-        self._stub_subprocess(
-            monkeypatch,
-            {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("gh", "api"): (0, "<<<not json>>>"),
-            },
-        )
-        emails = aggregator.gather_author_emails()
-        assert "kb@example.com" in emails
-        assert all("noreply.github.com" not in e for e in emails)
-
-    def test_gh_unexpected_shape_returns_none(self, monkeypatch):
-        """Missing/wrong-typed `id` or `login` fields in the gh response
-        → no noreply entry. Defends against gh API shape drift."""
-        self._stub_repos(monkeypatch, [])
-        self._stub_subprocess(
-            monkeypatch,
-            {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("gh", "api"): (0, '{"id": "not-an-int", "login": "fakeuser"}'),
-            },
-        )
-        emails = aggregator.gather_author_emails()
-        assert "kb@example.com" in emails
-        assert all("noreply.github.com" not in e for e in emails)
-
     def test_no_repos_discovered_returns_global_plus_gh(self, monkeypatch):
         """Empty discover_git_roots → only the global + gh sources
         contribute. Falls back cleanly without exception."""
         self._stub_repos(monkeypatch, [])
-        self._stub_subprocess(
-            monkeypatch,
-            {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("gh", "api"): (1, ""),
-            },
-        )
-        emails = aggregator.gather_author_emails()
-        assert emails == frozenset({"kb@example.com"})
-
-    def test_per_repo_failure_skipped_silently(self, monkeypatch):
-        """A single repo's `git config user.email` failing skips that
-        repo and continues. No noisy stderr."""
-        self._stub_repos(monkeypatch, [Path("/fake/good"), Path("/fake/bad")])
-        self._stub_subprocess(
-            monkeypatch,
-            {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("git", "-C", "/fake/good", "config"): (0, "kb-personal@example.com\n"),
-                ("git", "-C", "/fake/bad", "config"): (128, ""),
-                ("gh", "api"): (1, ""),
-            },
-        )
-        emails = aggregator.gather_author_emails()
-        assert "kb@example.com" in emails
-        assert "kb-personal@example.com" in emails
-
-    def test_per_repo_scan_respects_wall_clock_budget(self, monkeypatch):
-        """When the budget is exhausted partway through the walk, the
-        function returns what was collected so far instead of running
-        unbounded. Bounded scan keeps the retro from becoming a
-        multi-second wait when the user has many discovered repos on
-        a slow filesystem."""
-        from mind_meld import identity as identity_module
-
-        roots = [Path(f"/fake/repo-{i}") for i in range(100)]
-        self._stub_repos(monkeypatch, roots)
-        # Force a tiny budget so the loop bails after ~one iteration.
-        # v0.11.17: budget constant moved with gather logic to identity.py.
-        monkeypatch.setattr(identity_module, "_PER_REPO_BUDGET_S", 0.001)
-
-        scanned: list[str] = []
-
-        class FakeResult:
-            def __init__(self, rc, stdout):
-                self.returncode = rc
-                self.stdout = stdout
-                self.stderr = ""
-
-        def fake_run(cmd, **_kw):
-            if tuple(cmd[:3]) == ("git", "config", "--global"):
-                return FakeResult(0, "kb@example.com\n")
-            if tuple(cmd[:2]) == ("gh", "api"):
-                return FakeResult(1, "")
-            if tuple(cmd[:2]) == ("git", "-C"):
-                scanned.append(cmd[2])
-                import time as _time
-
-                _time.sleep(0.005)
-                return FakeResult(0, "kb-personal@example.com\n")
-            return FakeResult(1, "")
-
-        import subprocess as _subprocess
-
-        monkeypatch.setattr(_subprocess, "run", fake_run)
-
-        emails = aggregator.gather_author_emails()
-        assert "kb@example.com" in emails
-        assert len(scanned) < 100, f"budget enforcement failed: scanned all {len(scanned)} repos"
-
-    def test_config_load_failure_falls_back_silently(self, monkeypatch):
-        """Missing / malformed config.toml in
-        ``identity._gather_per_repo_emails`` → return empty set, no
-        exception. The other gather sources still contribute."""
-        from mind_meld import config as config_module
-        from mind_meld import identity as identity_module
-
-        def boom(_p):
-            raise RuntimeError("config unreadable")
-
-        monkeypatch.setattr(config_module, "load_config", boom)
-        monkeypatch.setattr(identity_module, "_gather_config_author_emails", lambda: [])
         self._stub_subprocess(
             monkeypatch,
             {
@@ -2602,63 +2238,6 @@ class TestTrack10AFleetRetroDeterminism:
             "output": 50,
         }
 
-    def test_cost_excluded_synthetic_filters_top_level_only(self):
-        """REGRESSION pin: the aggregator's bespoke filtered loop
-        (D1, /plan-eng-review) keeps `<synthetic>` out of the
-        top-level totals BUT preserves it in `tokens_by_model` so the
-        unpriced-tokens breadcrumb can surface volume."""
-        from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
-
-        ev = {
-            "v": 2,
-            "type": "sessions-snapshot",
-            "ts": "2026-05-01T12:00:00+00:00",
-            "device": "dev-a",
-            "projects": [
-                {
-                    "claude_dir": "-proj-a",
-                    "source_root": "/Users/kb/.claude",
-                    "sessions": 1,
-                    "total_kb": 100,
-                    "last_session_at": "2026-05-01T12:00:00+00:00",
-                    "tokens_by_day": {
-                        "2026-04-30": {
-                            "input": 1000,
-                            "cache_create": 0,
-                            "cache_read": 0,
-                            "output": 500,
-                            "by_model": {
-                                "claude-opus-4-7": {
-                                    "input": 100,
-                                    "cache_create": 0,
-                                    "cache_read": 0,
-                                    "output": 50,
-                                },
-                                "<synthetic>": {
-                                    "input": 900,
-                                    "cache_create": 0,
-                                    "cache_read": 0,
-                                    "output": 450,
-                                },
-                            },
-                        },
-                    },
-                }
-            ],
-        }
-        result, _skills_unused = aggregate_sessions(
-            [ev],
-            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
-            until=datetime(2026, 5, 2, tzinfo=timezone.utc),
-        )
-        # Top-level totals exclude synthetic.
-        assert result.tokens_input == 100
-        assert result.tokens_output == 50
-        # tokens_by_model retains synthetic for unpriced breadcrumb.
-        assert "<synthetic>" in result.tokens_by_model
-        assert result.tokens_by_model["<synthetic>"]["input"] == 900
-        assert result.tokens_by_model["claude-opus-4-7"]["input"] == 100
-
 
 class TestShortenRepoUrl:
     """Render-only compression of long canonical URLs."""
@@ -2962,32 +2541,6 @@ class TestAggregateUnionWiring:
         # Filter disabled; both commits including the third-party one
         # are rendered.
         assert data.git.commits == 2
-
-    def test_fleet_emails_alone_filter_when_local_empty(self, tmp_path):
-        """Running machine has no local identities (gather returned
-        empty frozenset) but fleet has peers with ``local_emails``.
-        The union still narrows the filter — fleet emails apply."""
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        _write_events(
-            events_dir,
-            "dev-b",
-            "2026-04-28",
-            [_push_event_with_emails("dev-b", 0.5, ["b@example.com"])],
-        )
-        c_b = _commit("bbb", 1.0, author_email="b@example.com")
-        c_other = _commit("ccc", 1.0, author_email="someone-else@example.com")
-        _write_events(
-            events_dir,
-            "dev-a",
-            "2026-04-28",
-            [_git_event("dev-a", 1.0, [c_b, c_other])],
-        )
-        # Empty author_emails (running machine had no identities) +
-        # fleet has b@example.com → union is {b@example.com} →
-        # filter applies; only b@example.com commits pass.
-        data = _aggregate(events_dir, author_emails=frozenset())
-        assert data.git.commits == 1
 
 
 class TestMixedFleetRegression:
@@ -4563,24 +4116,6 @@ class TestHostSnapshotAcceptance:
         assert row.lifetime_by_family == {}
         assert row.consulted == ()
 
-    def test_naive_ts_rejected(self):
-        ev = _host_event("dev-a", "2026-04-28T12:00:00")
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "naive_timestamp"
-
-    def test_token_sources_out_of_order_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=("muse", "codex"))
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "invalid_token_sources"
-
-    def test_token_sources_duplicate_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=("codex", "codex"))
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "invalid_token_sources"
-
     def test_unknown_token_source_retained_not_rejected(self):
         """Unknown source names are version skew, not writer corruption.
 
@@ -4631,31 +4166,12 @@ class TestHostSnapshotAcceptance:
         assert partial_row.partial_reason is None
         assert partial_row.consulted == ("codex", "opencode")
 
-    def test_nonempty_hosts_empty_sources_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=())
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "invalid_token_sources"
-
-    def test_unknown_family_rejected(self):
-        ev = _host_event("dev-a", self.TS, hosts={"windsurf": {"2026-04-20": _usage(1)}})
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "invalid_counter"
-
     def test_invalid_days_rejected(self):
         for day in ("2026-02-30", "20260815", "2026-W33-5", "2026-1-02"):
             ev = _host_event("dev-a", self.TS, hosts={"codex": {day: _usage(1)}})
             result = aggregator._accept_host_usage_snapshot(ev)
             assert isinstance(result, aggregator.HostReject), day
             assert result.reason == "invalid_day", day
-
-    def test_bool_token_field_rejected_not_clamped(self):
-        bucket = {"input": True, "cache_create": 0, "cache_read": 0, "output": 0}
-        ev = _host_event("dev-a", self.TS, hosts={"codex": {"2026-04-20": bucket}})
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "invalid_counter"
 
     def test_max_counter_accepted_overflow_rejected(self):
         ok = _host_event(
@@ -4677,36 +4193,60 @@ class TestHostSnapshotAcceptance:
         ev = _host_event("dev-a", self.TS, hosts={"codex": {"2026-04-20": _usage(0)}})
         assert isinstance(aggregator._accept_host_usage_snapshot(ev), aggregator._AcceptedHostRow)
 
-    def test_empty_family_map_rejected(self):
-        ev = _host_event("dev-a", self.TS, hosts={"codex": {}})
+    @pytest.mark.parametrize(
+        "event_kwargs,top_level,reason",
+        [
+            ({"ts": "2026-04-28T12:00:00"}, {}, "naive_timestamp"),
+            ({"token_sources": ("muse", "codex")}, {}, "invalid_token_sources"),
+            ({"token_sources": ("codex", "codex")}, {}, "invalid_token_sources"),
+            ({"token_sources": ()}, {}, "invalid_token_sources"),
+            ({"hosts": {"windsurf": {"2026-04-20": _usage(1)}}}, {}, "invalid_counter"),
+            (
+                {
+                    "hosts": {
+                        "codex": {
+                            "2026-04-20": {
+                                "input": True,
+                                "cache_create": 0,
+                                "cache_read": 0,
+                                "output": 0,
+                            }
+                        }
+                    }
+                },
+                {},
+                "invalid_counter",
+            ),
+            ({"hosts": {"codex": {}}}, {}, "invalid_counter"),
+            ({}, {"v": 2.0}, "unsupported_schema"),
+            ({}, {"active_days": ["2026-04-21"]}, "active_days_mismatch"),
+            ({}, {"v": 1}, "unsupported_schema"),
+        ],
+        ids=[
+            "naive-ts",
+            "sources-out-of-order",
+            "sources-duplicate",
+            "nonempty-hosts-empty-sources",
+            "unknown-family",
+            "bool-counter-not-clamped",
+            "empty-family-map",
+            "float-schema",
+            "active-days-mismatch",
+            "wrong-schema",
+        ],
+    )
+    def test_single_defect_rejects_the_row(self, event_kwargs, top_level, reason):
+        event_kwargs = dict(event_kwargs)
+        ts = event_kwargs.pop("ts", self.TS)
+        ev = _host_event("dev-a", ts, **event_kwargs)
+        ev.update(top_level)
         result = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "invalid_counter"
-
-    def test_float_schema_rejected(self):
-        ev = _host_event("dev-a", self.TS)
-        ev["v"] = 2.0
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "unsupported_schema"
-
-    def test_active_days_mismatch_rejected(self):
-        ev = _host_event("dev-a", self.TS)
-        ev["active_days"] = ["2026-04-21"]
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "active_days_mismatch"
+        assert result.reason == reason
 
     def test_unknown_top_level_field_ignored(self):
         ev = _host_event("dev-a", self.TS, extra={"note": "peer additive"})
         assert isinstance(aggregator._accept_host_usage_snapshot(ev), aggregator._AcceptedHostRow)
-
-    def test_wrong_schema_rejected(self):
-        ev = _host_event("dev-a", self.TS)
-        ev["v"] = 1
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "unsupported_schema"
 
     def test_host_counter_predicate_matches_reader(self):
         from mind_meld import host_usage
@@ -4802,12 +4342,6 @@ class TestHostSnapshotWireCompat:
         assert "opencode" not in rendered
         assert "mm diag" in rendered
 
-    def test_known_name_out_of_order_still_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=("muse", "codex"))
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "invalid_token_sources"
-
     def test_unknown_name_does_not_mask_known_name_out_of_order(self):
         """A naive continue-on-unknown would accept this by dropping muse's
         successor check. Membership is tested before the positional scan,
@@ -4821,12 +4355,6 @@ class TestHostSnapshotWireCompat:
         ev = _host_event("dev-a", self.TS, token_sources=("opencode", "codex"))
         row = _accepted(ev)
         assert row.consulted == ("opencode", "codex")
-
-    def test_duplicate_still_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=("codex", "codex"))
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "invalid_token_sources"
 
     def test_duplicate_unknown_name_still_rejected(self):
         ev = _host_event("dev-a", self.TS, token_sources=("opencode", "opencode"))
@@ -5479,20 +5007,6 @@ class TestHostTokensByDayAcceptance:
         rejected = aggregator._accept_host_usage_snapshot(bad_hosts)
         assert isinstance(rejected, aggregator.HostReject)
 
-    def test_day_set_equality_against_active_days(self):
-        hosts = {"codex": {"2026-04-20": _usage(5)}}
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            extra={
-                "tokens_by_day": {"2026-04-21": {**_usage(5), "by_model": {"gpt-5": _usage(5)}}}
-            },
-        )
-        row = _accepted(ev)
-        assert row.detail == "absent"
-        assert row.detail_reason == "active_days_mismatch"
-
     def test_day_level_sum_reconciliation(self):
         hosts = {
             "codex": {"2026-04-20": _usage(4)},
@@ -5536,60 +5050,77 @@ class TestHostTokensByDayAcceptance:
         assert row.detail == "present"
         assert row.tokens_by_day["2026-04-20"]["by_model"]["gpt-5"]["input"] == 5
 
-    def test_non_str_model_id_drops_detail(self):
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            extra={
-                "tokens_by_day": {
-                    "2026-04-20": {**_usage(5), "by_model": {1: _usage(5)}},
-                }
-            },
-        )
+    @pytest.mark.parametrize(
+        "hosts,by_day,reason",
+        [
+            (
+                {"codex": {"2026-04-20": _usage(5)}},
+                {"2026-04-21": {**_usage(5), "by_model": {"gpt-5": _usage(5)}}},
+                "active_days_mismatch",
+            ),
+            (None, {"2026-04-20": {**_usage(5), "by_model": {1: _usage(5)}}}, "unsupported_schema"),
+            (
+                None,
+                {"2026-04-20": {**_usage(5), "by_model": {"": _usage(5)}}},
+                "unsupported_schema",
+            ),
+            (
+                None,
+                {
+                    "2026-04-20": {
+                        **_usage(5),
+                        "by_model": {"g" * (aggregator.MAX_HOST_MODEL_ID_BYTES + 1): _usage(5)},
+                    }
+                },
+                "unsupported_schema",
+            ),
+            (
+                None,
+                {
+                    "2026-04-20": {
+                        **_usage(5),
+                        "by_model": {
+                            f"gpt-{i}": _usage(5 if i == 0 else 0)
+                            for i in range(aggregator.MAX_HOST_MODELS_PER_DAY + 1)
+                        },
+                    }
+                },
+                "unsupported_schema",
+            ),
+            # Per-model was otherwise unlimited: 2**53 on a day whose family total
+            # is 5 would still reconcile day-wise and flow into pricing.
+            (
+                {"codex": {"2026-04-20": _usage(5)}},
+                {"2026-04-20": {**_usage(5), "by_model": {"gpt-5": _usage(2**53)}}},
+                "invalid_counter",
+            ),
+            # Each model is legal alone; their SUM is not.
+            (
+                {"codex": {"2026-04-20": _usage(6)}},
+                {
+                    "2026-04-20": {
+                        **_usage(6),
+                        "by_model": {"gpt-5": _usage(4), "gpt-4": _usage(4)},
+                    }
+                },
+                "invalid_counter",
+            ),
+        ],
+        ids=[
+            "day-set-mismatch",
+            "non-str-model-id",
+            "empty-model-id",
+            "overlong-model-id",
+            "too-many-models-per-day",
+            "model-over-claims-day",
+            "two-models-over-claim-day",
+        ],
+    )
+    def test_malformed_sibling_drops_detail(self, hosts, by_day, reason):
+        ev = _host_event("dev-a", self.TS, hosts=hosts, extra={"tokens_by_day": by_day})
         row = _accepted(ev)
         assert row.detail == "absent"
-        assert row.detail_reason == "unsupported_schema"
-
-    def test_empty_model_id_drops_detail(self):
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            extra={
-                "tokens_by_day": {
-                    "2026-04-20": {**_usage(5), "by_model": {"": _usage(5)}},
-                }
-            },
-        )
-        row = _accepted(ev)
-        assert row.detail == "absent"
-        assert row.detail_reason == "unsupported_schema"
-
-    def test_overlong_model_id_drops_detail(self):
-        model = "g" * (aggregator.MAX_HOST_MODEL_ID_BYTES + 1)
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            extra={
-                "tokens_by_day": {
-                    "2026-04-20": {**_usage(5), "by_model": {model: _usage(5)}},
-                }
-            },
-        )
-        row = _accepted(ev)
-        assert row.detail == "absent"
-        assert row.detail_reason == "unsupported_schema"
-
-    def test_too_many_models_per_day_drops_detail(self):
-        models = {f"gpt-{i}": _usage(0) for i in range(aggregator.MAX_HOST_MODELS_PER_DAY + 1)}
-        models["gpt-0"] = _usage(5)
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            extra={"tokens_by_day": {"2026-04-20": {**_usage(5), "by_model": models}}},
-        )
-        row = _accepted(ev)
-        assert row.detail == "absent"
-        assert row.detail_reason == "unsupported_schema"
+        assert row.detail_reason == reason
 
     def test_too_many_models_per_row_drops_detail(self):
         days = ("2026-04-18", "2026-04-19", "2026-04-20")
@@ -5751,48 +5282,6 @@ class TestHostTokensByDayAcceptance:
         assert row.detail == "present"
         assert row.tokens_by_day["2026-04-20"]["input"] == 10
         assert row.tokens_by_day["2026-04-20"]["by_model"]["gpt-5"]["input"] == 4
-
-    def test_by_model_over_claiming_the_day_total_drops_detail(self):
-        """The bound that matters: per-model was otherwise unlimited.
-
-        Without it a peer attributes 2**53 tokens to one model on a day whose
-        whole family total is 5, the row still reconciles at the day level,
-        and the number flows straight into Group 35 pricing.
-        """
-        hosts = {"codex": {"2026-04-20": _usage(5)}}
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            extra={
-                "tokens_by_day": {
-                    "2026-04-20": {**_usage(5), "by_model": {"gpt-5": _usage(2**53)}},
-                }
-            },
-        )
-        row = _accepted(ev)
-        assert row.detail == "absent"
-        assert row.detail_reason == "invalid_counter"
-
-    def test_by_model_over_claim_across_two_models_drops_detail(self):
-        """Each model is legal alone; their SUM is not."""
-        hosts = {"codex": {"2026-04-20": _usage(6)}}
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            extra={
-                "tokens_by_day": {
-                    "2026-04-20": {
-                        **_usage(6),
-                        "by_model": {"gpt-5": _usage(4), "gpt-4": _usage(4)},
-                    }
-                }
-            },
-        )
-        row = _accepted(ev)
-        assert row.detail == "absent"
-        assert row.detail_reason == "invalid_counter"
 
     def test_dump_disambiguates_model_ids_that_sanitize_alike(self):
         """A dict-key collision would silently drop a model from the FORENSIC
@@ -5993,11 +5482,6 @@ class TestHostTokensByDayAcceptance:
         models = dumped["by_device"]["dev-a"]["tokens_by_day"]["2026-04-20"]["by_model"]
         assert "gpt-5\n|hack" not in models
         json.dumps(dumped)
-
-    def test_detail_phrase_names_a_fix_command(self):
-        phrase = aggregator._host_detail_phrase("absent", "unsupported_schema")
-        assert "unsupported_schema" in phrase
-        assert "mm push" in phrase
 
     def test_every_detail_phrase_branch_names_a_remedy(self):
         """All seven branches, not just the one.

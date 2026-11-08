@@ -292,6 +292,54 @@ class TestGatherSources:
         emails = identity.refresh_identity_cache(force=True)
         assert all("noreply" not in e for e in emails)
 
+    def test_gh_unauthenticated_adds_no_noreply(self, monkeypatch):
+        """`gh api user` rc != 0 (typical of unauthenticated gh): no noreply entry."""
+        _stub_repos(monkeypatch, [])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("gh", "api"): (1, ""),
+            },
+        )
+        emails = identity.refresh_identity_cache(force=True)
+        assert "kb@example.com" in emails
+        assert all("noreply" not in e for e in emails)
+
+    def test_per_repo_failure_skipped_silently(self, monkeypatch):
+        """One repo's `git config user.email` failing skips that repo only."""
+        _stub_repos(monkeypatch, [Path("/fake/good"), Path("/fake/bad")])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "-C", "/fake/good", "config"): (0, "kb-personal@example.com\n"),
+                ("git", "-C", "/fake/bad", "config"): (128, ""),
+                ("gh", "api"): (1, ""),
+            },
+        )
+        emails = identity.refresh_identity_cache(force=True)
+        assert "kb@example.com" in emails
+        assert "kb-personal@example.com" in emails
+
+    def test_config_load_failure_falls_back_to_other_sources(self, monkeypatch):
+        """An unreadable config.toml drops only the per-repo walk; global stays."""
+        from mind_meld import config as config_module
+
+        def boom(_p):
+            raise RuntimeError("config unreadable")
+
+        monkeypatch.setattr(config_module, "load_config", boom)
+        monkeypatch.setattr(identity, "_gather_config_author_emails", lambda: [])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("gh", "api"): (1, ""),
+            },
+        )
+        assert set(identity.refresh_identity_cache(force=True)) == {"kb@example.com"}
+
     def test_gh_string_encoded_uid_accepted(self, monkeypatch):
         """v0.11.19: GitHub Enterprise instances may return ``id`` as a
         decimal-digit string (large numeric values that would otherwise
