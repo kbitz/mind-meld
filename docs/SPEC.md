@@ -190,7 +190,10 @@ device ID on each side; every fleet machine links to every other.
    runs one mm command with the new machine's pasted device ID (for example
    `mm devices approve <device-id>`). mm accepts only an exact match among
    Syncthing's pending devices, then adds the device and shares the fleet
-   folder; it never accepts a device on its own. The two paired machines mark
+   folder; it never accepts a device on its own. Besides that exact match, it
+   only finishes an approval mm started on an earlier run: a device that
+   exactly matches the pasted ID, has the shape mm's add step writes and does
+   not yet share the fleet folder. The two paired machines mark
    each other as Syncthing introducers, so every machine where mm manages
    Syncthing connects to every other with no further step. On a fleet
    machine where the owner manages Syncthing, the owner approves the new

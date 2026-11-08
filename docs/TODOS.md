@@ -212,6 +212,12 @@ here by hand, use the H3 form.
 - **Context:** Filed by /review-and-prep on branch mmm/999957e9 at 252cf98 (2026-11-08).
 - **Effort:** ? (user triages in /roadmap)
 
+### [manual:files=src/mind_meld/skills/retro_fleet/aggregator.py] Unpriced Cursor-era Grok rows get an upgrade remedy that cannot fix them
+- **Why:** Cursor-era Grok rows in `retro-fleet` (`grok-4.7-fast` and effort-suffixed model ids) stay unpriced, and the `unpriced_models` note tells the owner to "Upgrade mm on the machine rendering this report", a remedy that does not fit them.
+- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py, the `unpriced_models` note's remedy
+- **Context:** Track 116A plan decision d4; Karl approved logging it (2026-11-08). Revisit trigger: the next Track touching retro-fleet's unpriced-model notes or Grok pricing, or an owner report of the misleading remedy.
+- **Effort:** ? (user triages in /roadmap)
+
 
 ## Drain records
 
