@@ -32,6 +32,7 @@ from mind_meld import (
     safety,
     sidecar,
     statedb,
+    syncthing,
     updateprogress,
     upgrade,
 )
@@ -2048,6 +2049,52 @@ def _source_path_is_detected(source: dict[str, Any]) -> bool:
 
         return root.exists() or _host_usage.agy_sessions_root().exists()
     return root.exists()
+
+
+SYNCTHING_GUIDE_HEADING = "Configuring Syncthing yourself"
+
+
+def _syncthing_start_command(platform: str | None = None) -> str:
+    """Return the platform command that starts Syncthing at login."""
+    target = sys.platform if platform is None else platform
+    if target == "darwin":
+        return "brew services start syncthing"
+    return "systemctl --user enable --now syncthing.service"
+
+
+def _has_valid_device_id_check_digits(device_id: str) -> bool:
+    """Return True when every 14-char group of ``device_id`` passes Luhn-32."""
+    compact = "".join(device_id.split("-"))
+    if len(compact) != 56:
+        return False
+    for offset in range(0, 56, 14):
+        chunk = compact[offset : offset + 14]
+        try:
+            expected = syncthing._luhn32(chunk[:13])
+        except ValueError:
+            return False
+        if chunk[13] != expected:
+            return False
+    return True
+
+
+def _normalize_device_id(raw: str) -> str:
+    """Trim, upper-case and hyphenate a 56-character dashless Syncthing device ID."""
+    candidate = raw.strip().upper()
+    if "-" not in candidate and len(candidate) == 56:
+        candidate = "-".join(candidate[i : i + 7] for i in range(0, 56, 7))
+    return candidate
+
+
+def _device_id_problem(candidate: str, local_id: str | None) -> str | None:
+    """Return the validation failure reason for a normalized device ID, or None."""
+    if not syncthing.is_device_id(candidate):
+        return "expected 8 groups of 7 base32 characters"
+    if not _has_valid_device_id_check_digits(candidate):
+        return "check digit mismatch"
+    if local_id is not None and candidate == local_id:
+        return "that is this machine's own device ID"
+    return None
 
 
 def _compute_recommended_excludes_diff(

@@ -9548,6 +9548,7 @@ COMMAND_INTENTS62 = {
         "push",
         "pull",
         "gc",
+        "devices approve",
         "disable-source",
         "enable-source",
         "reconfigure-sources",
@@ -9569,21 +9570,29 @@ COMMAND_INTENTS62 = {
 
 def _check_command_intents62(application, prefix=""):
     found = set()
-    for command in application.registered_commands:
-        name = prefix + (command.name or command.callback.__name__.replace("_", "-"))
+
+    def _check_one(name, callback):
         message = (
             f"{name}: update COMMAND_INTENTS62 with an intent and preview lock allowance "
             "(lock/none), or a reasoned exemption; see docs/invariants/sync.md"
         )
         assert name in COMMAND_INTENTS62, message
-        params = inspect.signature(command.callback).parameters
+        params = inspect.signature(callback).parameters
         preview = "dry_run" in params or any(
             "--dry-run" in (getattr(p.default, "param_decls", ()) or ()) for p in params.values()
         )
         assert preview == (COMMAND_INTENTS62[name][1] is not None), message
         found.add(name)
+
+    for command in application.registered_commands:
+        name = prefix + (command.name or command.callback.__name__.replace("_", "-"))
+        _check_one(name, command.callback)
     for group in application.registered_groups:
-        found |= _check_command_intents62(group.typer_instance, prefix + group.name + " ")
+        group_name = prefix + group.name
+        cb = group.typer_instance.registered_callback
+        if cb is not None and cb.invoke_without_command:
+            _check_one(group_name, cb.callback)
+        found |= _check_command_intents62(group.typer_instance, group_name + " ")
     return found
 
 
@@ -9639,6 +9648,7 @@ def test_read_only_policy62():
         cli_module.pullflow,
         initflow,
         cli_module.sourceflow,
+        cli_module.devicesflow,
     ):
         _check_read_only_policy62(Path(module.__file__).read_text())
     for function in (cli_module.core._get_config, core._maybe_prompt_migration):

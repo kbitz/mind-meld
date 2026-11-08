@@ -2,6 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.28] - 2026-11-08
+
+You can approve a joining machine onto the fleet.
+
+### Added
+
+- mm devices approve takes a device id, adds that joining machine to the fleet folder, and exits 0 when the device already shares it.
+
+### Fixed
+
+- mm devices approve reports a Syncthing config write that was not confirmed, instead of treating it as done.
+
 ## [1.12.27] - 2026-11-08
 
 The test suite is smaller and faster: about 8,785 tests instead of 11,388, with the same protection, and an unused manifest helper is gone.

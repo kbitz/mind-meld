@@ -42,6 +42,7 @@ EXTRACTED = [
     "pullflow",
     "initflow",
     "sourceflow",
+    "devicesflow",
     "host_registry",
     "rootprobes",
     "syncthing",
@@ -946,7 +947,7 @@ def test_dash_m_entrypoint(argv: list[str]) -> None:
 
 
 def test_command_set_is_unchanged_by_the_decomposition() -> None:
-    """Every @app.command() shell stays registered in cli.py.
+    """Every @app.command() shell and command group stays registered in cli.py.
 
     Name-set equality is weaker than dispatch (it misses broken callbacks), but
     it is the cheap pin that catches a command whose decorator moved out with
@@ -959,7 +960,6 @@ def test_command_set_is_unchanged_by_the_decomposition() -> None:
         "autopull",
         "autopush",
         "conflicts",
-        "devices",
         "diag",
         "diff",
         "disable-source",
@@ -981,6 +981,14 @@ def test_command_set_is_unchanged_by_the_decomposition() -> None:
         "status",
         "update",
     }
+    assert {g.name for g in app.registered_groups} == {"devices"}
+    devices_group = app.registered_groups[0].typer_instance
+    assert devices_group is not None
+    assert {
+        c.name or c.callback.__name__.rstrip("_") for c in devices_group.registered_commands
+    } == {"approve"}
+    assert devices_group.registered_callback is not None
+    assert devices_group.registered_callback.invoke_without_command is True
 
 
 def test_statedb_import_allowlist():
@@ -1254,8 +1262,13 @@ STATUSFLOW_DEFINITIONS = frozenset(
 # stays as 86A left it.
 INIT_CORE_DEFINITIONS = frozenset(
     """
+    SYNCTHING_GUIDE_HEADING
+    _device_id_problem
+    _has_valid_device_id_check_digits
+    _normalize_device_id
     _prompt_source_toggle
     _source_path_is_detected
+    _syncthing_start_command
     """.split()
 )
 
@@ -1305,6 +1318,21 @@ SOURCEFLOW_DEFINITIONS = frozenset(
 )
 SOURCE_SHELLS = frozenset("disable_source enable_source reconfigure_sources sources".split())
 
+# Track 119A: `mm devices` and `mm devices approve` live in devicesflow.py;
+# the Typer group callback (`devices`) and subcommand (`devices_approve`)
+# shells stay in cli.py.
+DEVICESFLOW_DEFINITIONS = frozenset(
+    """
+    _stop_bad_device_id
+    _stop_not_managed
+    _stop_partial
+    _stop_unchanged
+    approve
+    devices
+    """.split()
+)
+DEVICES_SHELLS = frozenset("devices devices_approve".split())
+
 
 def _top_level_definitions(source: str) -> set[str]:
     names = set()
@@ -1349,10 +1377,12 @@ def _unqualified_owner_calls(
         owners.update(dict.fromkeys(INIT_CORE_DEFINITIONS, "core"))
         owners.update(dict.fromkeys(INITFLOW_DEFINITIONS, "initflow"))
         owners.update(dict.fromkeys(SOURCEFLOW_DEFINITIONS, "sourceflow"))
+        owners.update(dict.fromkeys(DEVICESFLOW_DEFINITIONS, "devicesflow"))
     owners.update(dict.fromkeys(PULLFLOW_DEFINITIONS, "pullflow"))
     tree = ast.parse(source)
     module_aliases = {
-        name: name for name in ("core", "statusflow", "pullflow", "initflow", "sourceflow")
+        name: name
+        for name in ("core", "statusflow", "pullflow", "initflow", "sourceflow", "devicesflow")
     }
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -1500,7 +1530,7 @@ def test_init_single_ownership_and_qualified_calls():
             f"{module}: expected owner inventory {expected}"
         )
         assert _unqualified_owner_calls(source, module) == []
-    assert len(INIT_CORE_DEFINITIONS) == 2
+    assert len(INIT_CORE_DEFINITIONS) == 7
     assert len(INITFLOW_DEFINITIONS) == 26
 
 
@@ -1513,6 +1543,18 @@ def test_sourceflow_single_ownership_and_qualified_calls():
         )
         assert _unqualified_owner_calls(source, module) == []
     assert len(SOURCEFLOW_DEFINITIONS) == 7
+
+
+def test_devicesflow_single_ownership_and_qualified_calls():
+    inventories = {"cli": {"devices"}, "devicesflow": DEVICESFLOW_DEFINITIONS}
+    for module, expected in inventories.items():
+        source = (SRC / f"{module}.py").read_text()
+        assert _top_level_definitions(source) & DEVICESFLOW_DEFINITIONS == expected, (
+            f"{module}: expected owner inventory {expected}"
+        )
+        assert _unqualified_owner_calls(source, module) == []
+    assert _top_level_definitions((SRC / "cli.py").read_text()) >= DEVICES_SHELLS
+    assert len(DEVICESFLOW_DEFINITIONS) == 6
 
 
 def test_pull_test_consumers_use_qualified_owner_names():
@@ -1554,7 +1596,9 @@ def test_owner_call_gate_rejects_dead_aliases(source, consumer, flags):
     assert bool(_unqualified_owner_calls(source, consumer)) is flags
 
 
-@pytest.mark.parametrize("forbidden", ["statusflow", "pullflow", "initflow", "sourceflow"])
+@pytest.mark.parametrize(
+    "forbidden", ["statusflow", "pullflow", "initflow", "sourceflow", "devicesflow"]
+)
 def test_core_does_not_import_statusflow(forbidden):
     tree = ast.parse((SRC / "core.py").read_text())
     for node in ast.walk(tree):
@@ -1599,6 +1643,20 @@ def test_sourceflow_import_does_not_register_cli():
             sys.executable,
             "-c",
             "import sys; from mind_meld import sourceflow; "
+            "assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_devicesflow_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import devicesflow; "
             "assert 'mind_meld.cli' not in sys.modules",
         ],
         capture_output=True,

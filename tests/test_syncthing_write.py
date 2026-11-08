@@ -32,6 +32,8 @@ def _call_op(writer: syncthing.SyncthingWriter, op_name: str, peer_id: str, fold
         return writer.share_folder("mind-meld", peer_id)
     if op_name == "pending_devices":
         return writer.pending_devices()
+    if op_name == "approval_state":
+        return writer.approval_state("mind-meld", peer_id)
     if op_name == "mark_introducer":
         return writer.mark_introducer(peer_id)
     if op_name == "remove_default_folder":
@@ -45,6 +47,7 @@ _ALL_OPS = (
     "add_device",
     "share_folder",
     "pending_devices",
+    "approval_state",
     "mark_introducer",
     "remove_default_folder",
 )
@@ -765,3 +768,161 @@ def test_scripted_o2_flows_and_credential_never_exposed(fake_syncthing, isolated
     captured = capsys.readouterr()
     assert fake_syncthing.gui_value not in captured.out
     assert fake_syncthing.gui_value not in captured.err
+
+
+def test_approval_state_fields_and_get_only(fake_syncthing, isolated_home):
+    writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(fake_syncthing.my_id))
+    target = isolated_home / "Sync" / "mind-meld"
+
+    # Validation refusals send no config GETs and no writes
+    assert writer.approval_state("../bad", fake_syncthing.peer_id) == syncthing.ApprovalState(
+        "refused", "bad-folder-id"
+    )
+    assert writer.approval_state("mind-meld", "not-valid") == syncthing.ApprovalState(
+        "refused", "bad-device-id"
+    )
+    assert writer.approval_state("mind-meld", fake_syncthing.my_id) == syncthing.ApprovalState(
+        "refused", "own-device"
+    )
+    assert fake_syncthing.bodies == []
+
+    # Missing folder and unconfigured device
+    fake_syncthing.set_config(devices=(), folders=())
+    assert writer.approval_state("mind-meld", fake_syncthing.peer_id) == syncthing.ApprovalState(
+        outcome="ok",
+        cause=None,
+        folder="missing",
+        configured=False,
+        introducer=False,
+        shared=False,
+        writer_shape=False,
+    )
+
+    # Not-mm folder (bad option)
+    bad_folder = {**fake_syncthing.stock_folder(target), "id": "mind-meld", "order": "random"}
+    fake_syncthing.set_config(devices=(), folders=[bad_folder])
+    assert writer.approval_state("mind-meld", fake_syncthing.peer_id) == syncthing.ApprovalState(
+        outcome="ok",
+        cause=None,
+        folder="not-mm",
+        configured=False,
+        introducer=False,
+        shared=False,
+        writer_shape=False,
+    )
+
+    # Malformed folder device list -> error / bad-response
+    malformed_folder = {
+        **fake_syncthing.stock_folder(target),
+        "id": "mind-meld",
+        "devices": [123],
+    }
+    fake_syncthing.set_config(devices=(), folders=[malformed_folder])
+    assert writer.approval_state("mind-meld", fake_syncthing.peer_id) == syncthing.ApprovalState(
+        "error", "bad-response"
+    )
+    assert fake_syncthing.bodies == []
+
+    # Configured via add_device -> writer_shape True, introducer False, shared False
+    ok_folder = {**fake_syncthing.stock_folder(target), "id": "mind-meld"}
+    fake_syncthing.set_config(devices=(), folders=[ok_folder])
+    assert writer.add_device(fake_syncthing.peer_id, "linux-b") == syncthing.WriteResult("ok", None)
+    fake_syncthing.bodies.clear()
+    assert writer.approval_state("mind-meld", fake_syncthing.peer_id) == syncthing.ApprovalState(
+        outcome="ok",
+        cause=None,
+        folder="ok",
+        configured=True,
+        introducer=False,
+        shared=False,
+        writer_shape=True,
+    )
+    assert fake_syncthing.bodies == []
+
+    # After mark_introducer -> introducer True, writer_shape still True
+    assert writer.mark_introducer(fake_syncthing.peer_id) == syncthing.WriteResult("ok", None)
+    fake_syncthing.bodies.clear()
+    assert writer.approval_state("mind-meld", fake_syncthing.peer_id) == syncthing.ApprovalState(
+        outcome="ok",
+        cause=None,
+        folder="ok",
+        configured=True,
+        introducer=True,
+        shared=False,
+        writer_shape=True,
+    )
+    assert fake_syncthing.bodies == []
+
+    # After share_folder -> shared True
+    assert writer.share_folder("mind-meld", fake_syncthing.peer_id) == syncthing.WriteResult(
+        "ok", None
+    )
+    fake_syncthing.bodies.clear()
+    assert writer.approval_state("mind-meld", fake_syncthing.peer_id) == syncthing.ApprovalState(
+        outcome="ok",
+        cause=None,
+        folder="ok",
+        configured=True,
+        introducer=True,
+        shared=True,
+        writer_shape=True,
+    )
+    assert fake_syncthing.bodies == []
+
+    # writer_shape False for each non-writer deviation
+    base_dev = {
+        "deviceID": fake_syncthing.peer_id,
+        "name": "linux-b",
+        "addresses": ["dynamic"],
+        "introducer": False,
+        "autoAcceptFolders": False,
+        "paused": False,
+    }
+    for override in (
+        {"paused": True},
+        {"autoAcceptFolders": True},
+        {"addresses": ["tcp://192.0.2.1:22000"]},
+        {"introducedBy": fake_syncthing.peer2_id},
+    ):
+        fake_syncthing.set_config(devices=[{**base_dev, **override}], folders=[ok_folder])
+        state = writer.approval_state("mind-meld", fake_syncthing.peer_id)
+        assert state.outcome == "ok"
+        assert state.configured is True
+        assert state.writer_shape is False, override
+    assert fake_syncthing.bodies == []
+
+
+def test_standin_drops_pending_device_on_add_and_stop_after_restarts(fake_syncthing, isolated_home):
+    target = isolated_home / "Sync" / "mind-meld"
+    ok_folder = {**fake_syncthing.stock_folder(target), "id": "mind-meld"}
+    fake_syncthing.set_config(devices=(), folders=[ok_folder])
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        fake_syncthing.peer_id: {
+            "name": "linux-b",
+            "address": "192.0.2.4:22000",
+            "time": "2026-11-08T03:00:00Z",
+        }
+    }
+    fake_syncthing.stop_after("POST", "/rest/config/devices")
+
+    writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(fake_syncthing.my_id))
+    assert writer.add_device(fake_syncthing.peer_id) == syncthing.WriteResult("ok", None)
+    assert fake_syncthing.responses["/rest/cluster/pending/devices"] == {}
+
+    reqs_after_add = list(fake_syncthing.requests)
+    bodies_after_add = list(fake_syncthing.bodies)
+
+    # Next writer call fails as unreachable and records no request or body
+    assert writer.mark_introducer(fake_syncthing.peer_id) == syncthing.WriteResult(
+        "unreachable", "refused"
+    )
+    assert fake_syncthing.requests == reqs_after_add
+    assert fake_syncthing.bodies == bodies_after_add
+
+    # Restarting serves the applied state on the same port
+    fake_syncthing.start()
+    state = writer.approval_state("mind-meld", fake_syncthing.peer_id)
+    assert state.outcome == "ok"
+    assert state.configured is True
+    assert state.writer_shape is True
+    assert state.introducer is False
