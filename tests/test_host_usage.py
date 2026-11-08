@@ -3586,43 +3586,44 @@ def test_reducer_ordered_identity_against_frozen_oracle(shape):
     assert _ordered_reduction(hu, entries) == _ordered_reduction(oracle, entries), _ORACLE_RULE
 
 
-@pytest.mark.parametrize("seed", range(200))
-def test_seeded_lineages_match_frozen_oracle(seed):
-    rng = random.Random(seed)
-    entries = []
-    for lineage in range(rng.randint(1, 4)):
-        states = []
-        total = [0, 0, 0, 0]
-        for _ in range(rng.randint(3, 15)):
-            delta = [rng.randint(0, 100), 0, rng.randint(0, 10), rng.randint(0, 20)]
-            if rng.random() < 0.2:
-                delta = [0, 0, 0, 0]
-            total = [a + b for a, b in zip(total, delta)]
-            states.append([rng.randrange(2), total, rng.randrange(2), rng.randrange(3), delta])
-        for branch in range(rng.randint(2, 5)):
-            cut = rng.randint(1, len(states))
-            selected = states[:cut]
-            if rng.random() < 0.5:  # resumed suffix, linked through turn ids
-                selected = states[cut - 1 :]
-            if rng.random() < 0.5:  # fork with divergent tail
-                last = selected[-1][1]
-                selected = selected + [
-                    [1, [last[0] + 31, last[1], last[2] + 2, last[3] + 5], 1, 2, None]
-                ]
-            if rng.random() < 0.5:  # repeated final reading / turn boundary re-emission
-                selected = selected + [selected[-1]]
-            entry = _oracle_entry(selected, lineage * 10 + branch)
-            entry["turn_ids"] = [f"lineage-{lineage}-a", f"lineage-{lineage}-b", "unused"]
-            entries.append(entry)
-    rng.shuffle(entries)
-    for entry in entries:
-        assert json.dumps(codex_host._validated_entry(entry)) == json.dumps(
-            oracle._validated_entry(entry)
-        ), (seed, _ORACLE_RULE)
-    assert _ordered_reduction(hu, entries) == _ordered_reduction(oracle, entries), (
-        seed,
-        _ORACLE_RULE,
-    )
+def test_seeded_lineages_match_frozen_oracle():
+    """200 seeded lineages; every assertion message names its seed."""
+    for seed in range(200):
+        rng = random.Random(seed)
+        entries = []
+        for lineage in range(rng.randint(1, 4)):
+            states = []
+            total = [0, 0, 0, 0]
+            for _ in range(rng.randint(3, 15)):
+                delta = [rng.randint(0, 100), 0, rng.randint(0, 10), rng.randint(0, 20)]
+                if rng.random() < 0.2:
+                    delta = [0, 0, 0, 0]
+                total = [a + b for a, b in zip(total, delta)]
+                states.append([rng.randrange(2), total, rng.randrange(2), rng.randrange(3), delta])
+            for branch in range(rng.randint(2, 5)):
+                cut = rng.randint(1, len(states))
+                selected = states[:cut]
+                if rng.random() < 0.5:  # resumed suffix, linked through turn ids
+                    selected = states[cut - 1 :]
+                if rng.random() < 0.5:  # fork with divergent tail
+                    last = selected[-1][1]
+                    selected = selected + [
+                        [1, [last[0] + 31, last[1], last[2] + 2, last[3] + 5], 1, 2, None]
+                    ]
+                if rng.random() < 0.5:  # repeated final reading / turn boundary re-emission
+                    selected = selected + [selected[-1]]
+                entry = _oracle_entry(selected, lineage * 10 + branch)
+                entry["turn_ids"] = [f"lineage-{lineage}-a", f"lineage-{lineage}-b", "unused"]
+                entries.append(entry)
+        rng.shuffle(entries)
+        for entry in entries:
+            assert json.dumps(codex_host._validated_entry(entry)) == json.dumps(
+                oracle._validated_entry(entry)
+            ), (seed, _ORACLE_RULE)
+        assert _ordered_reduction(hu, entries) == _ordered_reduction(oracle, entries), (
+            seed,
+            _ORACLE_RULE,
+        )
 
 
 def test_validator_tamper_corpus_matches_frozen_oracle():
