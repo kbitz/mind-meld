@@ -2880,3 +2880,82 @@ class TestGrokSourceAndConsent109A:
         migrated = load_config(path)
         assert [s["name"] for s in migrated["sync"]["sources"]] == ["claude", "grok"]
         assert migrated["sync"]["disabled_sources"] == ["opencode"]
+
+
+class TestSyncthingRecord118A:
+    """Track 118A: Syncthing management record in syncthing.toml."""
+
+    VALID_ID = "AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA"
+
+    def test_constants_and_record_path_follow_patched_config_path(self, tmp_path, monkeypatch):
+        from mind_meld import config as config_module
+
+        assert config_module.SYNCTHING_FOLDER_ID == "mind-meld"
+        assert config_module.SYNCTHING_FOLDER_LABEL == "Mind Meld"
+
+        custom_cfg = tmp_path / "custom-dir" / "config.toml"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", custom_cfg)
+        assert config_module.syncthing_record_path() == custom_cfg.parent / "syncthing.toml"
+
+    def test_absent_returns_none_and_round_trip_writes_0600(self, tmp_path, monkeypatch):
+        import stat
+
+        from mind_meld import config as config_module
+
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "cfg" / "config.toml")
+        assert config_module.load_syncthing_record() is None
+
+        config_module.save_syncthing_record(self.VALID_ID)
+        rec_path = config_module.syncthing_record_path()
+        assert rec_path.is_file()
+        assert stat.S_IMODE(rec_path.stat().st_mode) == 0o600
+        assert config_module.load_syncthing_record() == self.VALID_ID
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            b"[syncthing\nbroken",
+            b'syncthing = "not-a-table"\n',
+            b"[other]\nx = 1\n",
+            b'[syncthing]\nother = "value"\n',
+            b'[syncthing]\nmanaged_device_id = "not-a-device-id"\n',
+            b"[syncthing]\nmanaged_device_id = 123\n",
+        ],
+    )
+    def test_invalid_record_raises_config_error_naming_path(self, tmp_path, monkeypatch, raw):
+        from mind_meld import config as config_module
+
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "config.toml")
+        rec_path = config_module.syncthing_record_path()
+        rec_path.write_bytes(raw)
+        with pytest.raises(ConfigError) as exc_info:
+            config_module.load_syncthing_record()
+        assert str(rec_path) in str(exc_info.value)
+
+    @pytest.mark.parametrize("bad_id", ["", "not-an-id", "aaaaaaa-" * 7 + "aaaaaaa", 123])
+    def test_save_refuses_bad_id_before_writing_anything(self, tmp_path, monkeypatch, bad_id):
+        from mind_meld import config as config_module
+
+        cfg_dir = tmp_path / "uncreated"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_dir / "config.toml")
+        with pytest.raises(ConfigError):
+            config_module.save_syncthing_record(bad_id)  # type: ignore[arg-type]
+        assert not cfg_dir.exists()
+
+    def test_save_refuses_protected_root(
+        self, synthetic_account_home, monkeypatch, forbid_fs_mutations
+    ):
+        from mind_meld import config as config_module
+        from mind_meld import fsutil
+
+        root = synthetic_account_home / ".config/mind-meld"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", root / "config.toml")
+        destination = config_module.syncthing_record_path()
+        assert destination == root / "syncthing.toml"
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            fsutil.refuse_real_state_write_under_pytest(destination)
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            config_module.save_syncthing_record(self.VALID_ID)
+        assert calls == []
+        assert not root.exists()

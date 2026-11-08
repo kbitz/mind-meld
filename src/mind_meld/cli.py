@@ -641,10 +641,11 @@ def _upload_mtime_matches(accepted_iso: str, advertised: str) -> bool:
 
 def _init_needs_terminal() -> None:
     core._error(
-        "mm init needs a terminal: it asks for the storage path, device name, passphrase "
-        "and sources, so the owner must run it in an interactive shell. Anything it "
-        "already wrote stays. If a key header was written, running 'mm init' again "
-        "in a terminal continues from it. Otherwise retry your original command in a terminal."
+        "mm init needs a terminal: it asks for the storage path, fleet Syncthing device ID, "
+        "device name, passphrase and sources, so the owner must run it in an interactive "
+        "shell. Anything it already wrote stays. If a key header was written, running "
+        "'mm init' again in a terminal continues from it. Otherwise retry your original "
+        "command in a terminal."
     )
 
 
@@ -654,23 +655,34 @@ def init(
         False,
         "--new-fleet",
         help=(
-            "Create the fleet's key header (mm-crypto-init) in an empty folder. Only the "
-            "fleet's first machine uses this; every other machine runs plain 'mm init'."
+            "Create the fleet's Syncthing folder (on a default Syncthing configuration) and "
+            "key header (mm-crypto-init) in an empty folder. Only the fleet's first machine "
+            "uses this; every other machine runs plain 'mm init'."
         ),
     ),
 ) -> None:
     """Join this machine to the fleet's synced store, or start a new fleet.
 
-    The storage path is the root of a Syncthing folder shared by every machine.
-    Plain 'mm init' joins: it needs the fleet's key header (mm-crypto-init) in
-    that folder. If the header has not arrived it stops and writes nothing; wait
-    for Syncthing to finish delivering, then run it again. Once your passphrase
-    verifies, it registers this device, saves config and pulls.
+    Checks Syncthing's configuration first. If Syncthing is not running, it stops
+    and writes nothing, printing the command to start it. On a pre-existing
+    Syncthing configuration it changes nothing in Syncthing and points to README
+    "Configuring Syncthing yourself".
 
-    'mm init --new-fleet' is for the fleet's first machine only. It needs an
-    empty folder, writes .stignore with mm's temporary-file pattern and creates
-    the key header. Then run 'mm push', share the folder in Syncthing and run
-    'mm init' on the other machines.
+    On a default Syncthing configuration, 'mm init --new-fleet' records that mm
+    manages Syncthing here, creates the 'mind-meld' folder at the storage path
+    (removing the unshared empty stock Default Folder first when nested inside
+    ~/Sync), writes .stignore, creates the key header (mm-crypto-init) and prints
+    this machine's Syncthing device ID. Then run 'mm push' here and 'mm init' on
+    each other machine.
+
+    Plain 'mm init' joins: on a default Syncthing configuration it asks for a
+    fleet machine's Syncthing device ID, adds that device as introducer, prints
+    this machine's device ID and 'mm devices approve <id>' to run on the fleet
+    machine, accepts the 'mind-meld' folder offer once shared, and waits until
+    Syncthing delivers mm-crypto-init (if the header has not arrived it stops and
+    writes nothing to the Mind Meld store; it never creates a key header). Once
+    your passphrase verifies, it writes .stignore, registers this device, saves
+    config and pulls.
 
     Running init again on a configured machine asks before it replaces this
     device's entry.

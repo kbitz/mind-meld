@@ -5563,7 +5563,7 @@ class TestInitReInitGuard:
         # Answer 'y' to the overwrite prompt, 'n' to the orphan prompt.
         result = runner.invoke(app, ["init"], input=f"y\n{storage}\nn\n")
         assert result.exit_code == 0  # typer.Exit() without code is 0
-        assert "Nothing changed." in result.output
+        assert "Device registration cancelled." in result.output
         assert cfg.read_bytes() == saved
         assert sorted(backend.list_keys("devices/")) == devices_before
 

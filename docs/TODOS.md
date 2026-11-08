@@ -44,6 +44,66 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Unsupported Syncthing GUI address during init
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Owner-managed classification is tested through REST, but the unsupported-address/offline pre-existing branch lacks an init integration case.
+- **Hypothesis (untested):** assert this classification continues without Syncthing writes; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py, `_check_syncthing`
+- **Evidence:** PR #291 coverage audit at 81504a4; required classification tests exist and no failure was reproduced.
+- **Context:** /review-and-prep, 2026-11-08. Revisit on the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Init routing of Syncthing writer failures
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Init covers successful writes and folder-exists recovery, but not every transport, path-overlap and generic refusal result returned by the writer.
+- **Hypothesis (untested):** extend the error table at the init boundary and assert a controlled stop with its fixing command; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py, `_require_syncthing`
+- **Evidence:** PR #291 coverage audit at 81504a4; lower-level writer failures are tested and no init failure was reproduced.
+- **Context:** /review-and-prep, 2026-11-08. Revisit on the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Managed join ignore-file write failure
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Successful managed-join ignore-file ordering is covered; an ignore-file write failure before registration lacks a direct join test.
+- **Hypothesis (untested):** inject the write failure after passphrase verification and assert no registration or config write; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py, `init`
+- **Evidence:** PR #291 coverage audit at 81504a4; new-fleet ignore failures are covered and no managed-join defect was reproduced.
+- **Context:** /review-and-prep, 2026-11-08. Revisit on the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Malformed managed record at init
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Record parsing is tested, but init's controlled stop for a malformed management record lacks a direct integration assertion.
+- **Hypothesis (untested):** verify init stops before prompts or writes when the record loader raises ConfigError; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py, `_check_syncthing`
+- **Evidence:** Track 118A outside review and source audit; no failure reproduced.
+- **Context:** /review-and-prep, branch mmm/c58912d3 at 30dd2b5, 2026-11-08. Revisit on the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Stale management record on default Syncthing
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The stale-record test covers owner-managed configuration, but not replacing a stale ID when the live configuration is default.
+- **Hypothesis (untested):** assert the current local device ID is recorded before the first managed write; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py, `_check_syncthing` and `_save_syncthing_record_or_stop`
+- **Evidence:** Track 118A outside review and source audit; no failure reproduced.
+- **Context:** /review-and-prep, branch mmm/c58912d3 at 30dd2b5, 2026-11-08. Revisit on the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Managed join default-folder refusal
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The writer's default-folder protection is covered, but the managed join's handling of a default-folder-in-use refusal lacks a direct integration assertion.
+- **Hypothesis (untested):** simulate the stock folder becoming occupied or shared after classification, then assert the join stops without accepting the offer; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py, `_managed_join` and `_require_syncthing`
+- **Evidence:** Track 118A outside review and source audit; no failure reproduced.
+- **Context:** /review-and-prep, branch mmm/c58912d3 at 30dd2b5, 2026-11-08. Revisit on the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Writer HTTPS transport
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Exercise successful and certificate-rejected writes over loopback HTTPS; existing TLS tests cover GET only.
