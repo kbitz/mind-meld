@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.29] - 2026-11-08
+
+Moving a machine keeps files that were excluded from its share.
+
+### Changed
+
+- Files excluded from a machine's Syncthing share stay on that machine when it is moved.
+
 ## [1.12.28] - 2026-11-08
 
 You can approve a joining machine onto the fleet.

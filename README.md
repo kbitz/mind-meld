@@ -562,7 +562,7 @@ not prove host usage was captured or published.
 
 ## Quick Start
 
-The storage path is the root of a Syncthing folder shared by every machine (`~/Sync/mind-meld` by default). On a machine where Syncthing has its default configuration, `mm init` sets Syncthing up for you; on a machine that already has its own Syncthing configuration, `mm init` leaves Syncthing alone and points you to [Configuring Syncthing yourself](#configuring-syncthing-yourself). A fleet still on iCloud Drive moves to Syncthing with the [cutover runbook](#moving-the-fleet-from-icloud-drive-to-syncthing-cutover-runbook); iCloud Drive is not supported after cutover ([docs/SPEC.md](docs/SPEC.md)). One block per role:
+The storage path is the root of a Syncthing folder shared by every machine (`~/Sync/mind-meld` by default). On a machine where Syncthing has its default configuration, `mm init` sets Syncthing up for you; on a machine that already has its own Syncthing configuration, `mm init` leaves Syncthing alone and points you to [Configuring Syncthing yourself](#configuring-syncthing-yourself). A Mac still on iCloud Drive moves to Syncthing with [Moving a machine from iCloud Drive to Syncthing](#moving-a-machine-from-icloud-drive-to-syncthing); iCloud Drive is not supported once the last Mac has moved ([docs/SPEC.md](docs/SPEC.md)). One block per role:
 
 ```bash
 # First machine of a new fleet (empty folder):
@@ -592,7 +592,7 @@ See [Status verdicts](#status-verdicts) to interpret `mm status` after your firs
 
 ## Setting up another machine
 
-To add another Mac or an Arch-based Linux machine to a Syncthing fleet (a fleet still on iCloud Drive moves first with the [cutover runbook](#moving-the-fleet-from-icloud-drive-to-syncthing-cutover-runbook)):
+To add another Mac or an Arch-based Linux machine to a Syncthing fleet (for a Mac moving off iCloud Drive, see [Moving a machine from iCloud Drive to Syncthing](#moving-a-machine-from-icloud-drive-to-syncthing)):
 
 1. Run the bootstrap script from [Install](#install) on the new machine. On a default Syncthing configuration it starts Syncthing at login (`brew services start syncthing` on macOS, or `systemctl --user enable --now syncthing.service` on Arch-based Linux).
 2. On Linux, install `libsecret` and `gnome-keyring` and unlock the login keyring in your desktop session before hooks run (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)).
@@ -650,166 +650,26 @@ mm discovers Syncthing's local `config.xml` and talks to its local REST API with
 
 Status reports Syncthing's folder state and needed-file count independently: queued files do not mean it is actively syncing. It says `up to date` only when the folder is idle and both needed files and pull errors are known to be zero. Positive pull-error counts direct you to `mm diag`, which also displays the count; `mm diag --json` retains an unknown count as `syncthing.pull_errors: null`.
 
-## Moving the fleet from iCloud Drive to Syncthing (cutover runbook)
+## Moving a machine from iCloud Drive to Syncthing
 
-Use this one-time runbook to move an existing 1.x fleet from iCloud Drive into `~/Sync/mind-meld` and bring Arch-based Linux machines into the fleet without running `mm init --new-fleet` or re-keying.
+Each Mac moves on its own schedule, with no migration tool ([docs/SPEC.md](docs/SPEC.md)). The first machine on Syncthing — whether a moving Mac or a Linux machine — starts the fleet with `mm init --new-fleet`; every later machine joins with `mm init` and the pairing and approval steps in [Setting up another machine](#setting-up-another-machine). Linux machines were never on iCloud Drive and simply join.
 
-### Machine roles
+On a moving Mac, close all agent sessions and keep them closed through the final push below (the `# Mind Meld` hooks call `mm`):
 
-| Role | What it does in this runbook |
-|---|---|
-| **The store Mac** | The active Mac that holds the iCloud Drive store and copies it into `~/Sync/mind-meld` (steps 1–4, 7, 9). |
-| **Another Mac** | Any other Mac in `mm devices` that stays in the fleet (steps 1, 2, 5, 7) — or, if dead, is retired in step 8. |
-| **The first Linux machine** | The first Arch-based Linux machine joining the fleet (steps 6, 7). |
-| **The second Linux machine** | The second Arch-based Linux machine joining the fleet after the first finishes (steps 6, 7). |
+1. Copy `~/.config/mind-meld/config.toml` first, for example `cp -n ~/.config/mind-meld/config.toml ~/.config/mind-meld/config.icloud.toml`. Keep that original copy when resuming a move. `mm init` writes a new `~/.config/mind-meld/config.toml` from scratch, so settings changed by hand (such as `[upgrade] auto_install`, exclusions or disabled sources) and the old iCloud `storage.path` survive only in that copy. If you use custom exclusions, also back up the excluded local files outside every sync source: init pulls before you can restore those settings, so it can change those files.
+2. Run `pipx uninstall mind-meld`.
+3. Move this machine's iCloud-era usage log (`~/.local/share/mind-meld/events`) out of the `mm-events` source before `mm init`, for example `mv ~/.local/share/mind-meld/events ~/mind-meld-icloud-events`, so the Syncthing fleet never receives the iCloud store's usage records (the iCloud folder still holds them).
+4. Run the bootstrap script from [Install](#install).
+5. Run `mm init --new-fleet` (if this Mac is the first machine in the Syncthing fleet) or `mm init` (if joining an existing one), and answer yes when it asks to overwrite the existing config and, when joining, to create a new device entry (the old entry stays in the iCloud store). At the source prompts, decline any sources that were disabled in the old config.
+6. Re-apply any hand-set settings from the copied config, restore any excluded local files from their backup after restoring the exclusions, then run `mm push`.
 
-Confirm the current roster with `mm devices`. When looking up a machine in JSON output (`device_id`, `device_name`, `last_seen`, `last_seen_version`, `is_self`), match the exact `device_name`, never a substring (`device_name` defaults to the hostname recorded at `mm init`):
+If init stops while waiting for the share or after saving the new config, resume at step 5, then step 6. Do not repeat steps 1–3: keep the original iCloud config and event-log backup, and leave any newly captured Syncthing events in place.
 
-```bash
-mm devices --format=json | jq -r '.[] | select(.device_name == "<device-name>")'
-```
+What stays in the home: the agent files (Claude memory, Codex skills, gstack state and the other enabled sources) and `mm`'s local state in `~/.config/mind-meld` (the pull ledger and the 30-day recovery copies). On the join they merge by the pull rules: identical files match; a file this machine has not changed since its last iCloud sync takes the fleet's version only when that version was built on it; a fleet version this machine already moved past is skipped without a copy; `MEMORY.md` and `.jsonl` files merge; any other file that differs keeps this machine's bytes, and the fleet's version is saved beside it as a `.sync-conflict-*` copy for `mm resolve` (or, when it is older and carries no sync history, stays on the machine that has it); the join deletes nothing. See [Handling conflicts](#handling-conflicts).
 
-`mm` does not carry `~/.mmm/`; mmm-factory moves with its own tool (see [docs/SPEC.md#factory-handover](docs/SPEC.md#factory-handover)).
+A Mac not yet moved keeps syncing over iCloud Drive with any other Macs still there. The two stores exchange nothing until a machine moves: a change made on a moved machine reaches a Mac still on iCloud Drive only when that Mac moves, and the reverse. `retro-fleet` on Syncthing does not import the iCloud store's usage history; init can still capture recent activity again from this machine's local git and agent records.
 
-### Optional rehearsal (before step 1)
-
-You can run a time-boxed rehearsal between **a Linux machine** (for example, a laptop) and **a Mac** using a throwaway Syncthing folder (for example `~/Sync/mm-rehearsal`). Set your own time box before starting.
-
-In each rehearsal shell on the Mac and on the Linux machine, isolate `HOME`, force `keyring` onto its fail backend, and set a throwaway passphrase in the environment:
-
-```bash
-export HOME="$(mktemp -d)"
-export PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring
-export MINDMELD_PASSPHRASE="rehearsal-throwaway-passphrase"
-rehearsal_store="$HOME/Sync/mm-rehearsal"
-mkdir -p "$HOME/.gstack/analytics"
-printf 'Rehearsal folder: %s\n' "$rehearsal_store"
-```
-
-**Why all three environment variables are required:** `mm init` writes the passphrase to the single `service=mind-meld`, `username=passphrase` item in macOS Keychain or Linux Secret Service, which a temporary `HOME` does not isolate. Without `PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring`, a throwaway `mm init` overwrites your real fleet's passphrase in Keychain or Secret Service. With `keyring.backends.fail.Keyring`, `set_password` raises `NoKeyringError` (a `KeyringError`), so `mm init` prints `No keyring available. Set MINDMELD_PASSPHRASE environment variable instead.` without touching your real keyring, and `get_passphrase` falls through to `MINDMELD_PASSPHRASE`.
-
-Use the **absolute path printed on each machine** for both its `mm init` storage prompt and its Syncthing GUI Folder Path. The paths differ between machines. Do not enter `~/Sync/mm-rehearsal` in the GUI: the running Syncthing service uses your real home, while this shell uses a temporary home. Keep the service running in its normal environment. The empty `gstack` tree above must exist before initialization; at each successful init's source prompts, explicitly enable **gstack** and decline other user-facing sources.
-
-1. **On the Mac (rehearsal shell):** create the empty throwaway folder (`mkdir -p "$rehearsal_store"`) and run `mm init --new-fleet`, giving the printed absolute path and the throwaway passphrase. Share that exact folder with the Linux machine in Syncthing.
-2. **On the Linux machine (rehearsal shell), before accepting/delivering the folder in Syncthing:** run plain `mm init` against its printed absolute path and confirm it stops and writes nothing because `mm-crypto-init` is not present yet.
-3. **On the Linux machine (rehearsal shell), after accepting the share at its printed absolute path and waiting for delivery:** write `(?d)tmp*.tmp` to `"$rehearsal_store/.stignore"`, then rerun `mm init` with the same throwaway passphrase, enable **gstack**, and confirm it joins and pulls.
-4. **Both machines (rehearsal shells):** confirm `mm sources` lists `gstack`, create a small file under `"$HOME/.gstack/analytics/"` on one machine, `mm push` there, wait for Syncthing delivery, and `mm pull` on the other. Check that the same file arrives. With a temporary `HOME`, `mm status` may report that Syncthing was not found. On Linux, inherited `XDG_CONFIG_HOME` or `XDG_STATE_HOME` can still point discovery at the real service. Either inspection result is compatible with the rehearsal; verify the file's delivery, not a particular Syncthing-discovery result.
-5. **Tear down:** remove the rehearsal folder share from Syncthing on both machines before deleting either temporary directory. Delete only the two recorded temporary homes (each contains its rehearsal store), then close both rehearsal shells so the temporary environment cannot affect real fleet commands.
-
-### Cutover steps
-
-1. **Every active machine (the store Mac and any other active Mac): update `mm`, in any order.**
-   Run `mm update` and check `mm --version`. `mm devices` shows each machine's `last_seen_version` at its last push. There has been no fleet upgrade order since v1.12.0 ([Upgrading](#upgrading)), **except** that any machine at **0.14.18 or older** must update *before* its next attended `mm push` or `mm gc`, or stay off (beside a manifest conflict copy, its GC can read the older copy as a peer's whole manifest and delete blobs only the newer manifest references). Below v1.3.0 there is no `mm update`; run:
-
-   ```bash
-   pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
-   ```
-
-   Every active machine must be on the current release before cutover ([docs/SPEC.md](docs/SPEC.md)). Ensure Syncthing 2.1 or newer is installed and started on each active Mac ([Install](#install); `brew services start syncthing`).
-
-2. **Every active Mac (the store Mac and any other active Mac): push once, then stop hooks.**
-   Run `mm push` on each active Mac and record its `Last Push` from `mm devices`. Then remove the `# Mind Meld` hook block (`mm autopull` / `mm autopush`) from each agent's global instructions (`~/.claude/CLAUDE.md`, and the Codex equivalent if used), the same method as the incident runbook ([Recovering a deleted file](#recovering-a-deleted-file)). Quit existing agent sessions: they may retain the old hook instructions in context. Keep agents and other sync-source writers stopped until that machine completes its path switch. After the **copy in step 3 starts**, run **no `mm` command** on a Mac until its `storage.path` points at `~/Sync/mind-meld`: any push to the iCloud Drive store after the copy is lost.
-
-3. **The store Mac: pull, download all iCloud files locally, and copy the store into `~/Sync/mind-meld`.**
-   On **the store Mac**, wait until `mm devices` shows every active Mac's recorded step-2 `Last Push`; an older timestamp means iCloud delivery has not finished. Check `storage.path` in `~/.config/mind-meld/config.toml` for the iCloud store path. In Finder, make iCloud Drive download every file in that folder locally (**Download Now** on the folder, and wait until no cloud-download icon remains). Run `mm pull` and `mm status`; stop if a peer is still pending or the pull reports an error. Then copy — **never `mv` or move in Finder** — the store into an absent or empty `~/Sync/mind-meld`, preserving file modes, and verify the copy with `diff -rq`. Replace `<absolute-iCloud-store-path>` below with the full path beginning with `/`; a `~` pasted inside quotes will not expand:
-
-   ```bash
-   mkdir -p ~/Sync/mind-meld
-   cp -pR "<absolute-iCloud-store-path>/." ~/Sync/mind-meld/
-   diff -rq "<absolute-iCloud-store-path>" ~/Sync/mind-meld
-   ```
-
-   **Proceed only if the copy succeeds and `diff -rq` exits 0 with no output.** On any error or difference, stop and repair the copy before switching paths. (Moving the folder out of iCloud Drive removes it from every Mac on iCloud immediately, leaving no fallback.) Before Syncthing shares the folder, write `mm`'s temporary-file rule into `~/Sync/mind-meld/.stignore` — the cutover never runs `mm init --new-fleet`, and Syncthing does not sync `.stignore`:
-
-   ```bash
-   printf '(?d)tmp*.tmp\n' >> ~/Sync/mind-meld/.stignore
-   ```
-
-4. **The store Mac: point `storage.path` at `~/Sync/mind-meld`, share the folder in Syncthing, and restore hooks.**
-   On **the store Mac**, edit `~/.config/mind-meld/config.toml` so `[storage]` points at the new folder:
-
-   ```toml
-   [storage]
-   path = "~/Sync/mind-meld"
-   ```
-
-   Because `mm-crypto-init` moved with the store copy, the `root_salt_fp` drift check in `config.toml` still matches. Confirm with:
-
-   ```bash
-   mm status
-   mm pull --dry-run
-   ```
-
-   Then add `~/Sync/mind-meld` in Syncthing as its own folder with folder ID `mind-meld` and all five [Syncthing folder options](#syncthing-folder-options), put the `# Mind Meld` hook block back in `~/.claude/CLAUDE.md` (and Codex instructions if used), and run `mm push`.
-
-5. **Another Mac (any other Mac that stays in the fleet): pair, switch `storage.path`, and restore hooks.**
-   On **another Mac** that stays active:
-   - Pair with the store Mac ([Pairing machines in Syncthing](#pairing-machines-in-syncthing)) and accept the folder at `~/Sync/mind-meld` with the [Syncthing folder options](#syncthing-folder-options).
-   - Write `(?d)tmp*.tmp` into `~/Sync/mind-meld/.stignore`:
-
-     ```bash
-     printf '(?d)tmp*.tmp\n' >> ~/Sync/mind-meld/.stignore
-     ```
-
-   - Wait until Syncthing reports the folder `Up to Date`.
-   - Edit `storage.path` in `~/.config/mind-meld/config.toml` to `"~/Sync/mind-meld"` (do **not** run `mm init`; this Mac is already registered).
-   - Run `mm pull`, then `mm push`, and put the `# Mind Meld` hook block back.
-
-6. **Linux machines, one at a time: the first Linux machine, then the second Linux machine.**
-   Complete every step below on **the first Linux machine** before starting **the second Linux machine**:
-   - Run the bootstrap script ([Install](#install)) and start Syncthing:
-
-     ```bash
-     systemctl --user enable --now syncthing.service
-     ```
-
-   - Pair with the store Mac (and with the other Linux machine once both are in) in Syncthing ([Pairing machines in Syncthing](#pairing-machines-in-syncthing)), and accept the shared folder at `~/Sync/mind-meld` with the [Syncthing folder options](#syncthing-folder-options).
-   - Write `(?d)tmp*.tmp` into `~/Sync/mind-meld/.stignore`:
-
-     ```bash
-     printf '(?d)tmp*.tmp\n' >> ~/Sync/mind-meld/.stignore
-     ```
-
-   - Wait until Syncthing reports `~/Sync/mind-meld` is `Up to Date`.
-   - Install `libsecret` and `gnome-keyring` (`sudo pacman -S --needed libsecret gnome-keyring`) and unlock the login keyring in your desktop session ([Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)).
-   - Run Claude Code once so `~/.claude` exists.
-   - Run `mm init`, accept `~/Sync/mind-meld`, and enter the fleet passphrase. It verifies the passphrase against `mm-crypto-init`, registers this machine, and pulls. (If `mm-crypto-init` has not arrived yet, it stops and writes nothing; rerun `mm init` once Syncthing delivers it.)
-   - Run `mm push`. Confirm the desktop lookup route works: `secret-tool lookup service mind-meld username passphrase >/dev/null`. If it offers an unlock dialog, unlock and record the result; if the collection is already unlocked, record that the dialog was not exercised.
-   - Confirm Secret Service is unlocked before adding the `# Mind Meld` hook block:
-
-     ```bash
-     mm diag --json | jq -r .keyring.secret_service   # must print: unlocked
-     ```
-
-7. **Owner checks at cutover (the store Mac, any other active Mac, the first Linux machine, and the second Linux machine).**
-   - **(a) Deletion-preview, recovery, and `--verbose` flush-timing check (Track 91A):**
-     Run the [two-machine deletion and recovery recipe](#track-91a-deletion-recipe) between **the store Mac** and **the first Linux machine** in both roles (store Mac → first Linux machine, then first Linux machine → store Mac), and **Mac to Mac** as well (between the store Mac and another active Mac) if `mm devices` still lists a second active Mac. Record:
-     - Each command's outcome line against the comment in the recipe.
-     - On each receiving machine, the `flushed N files in X.XXs` line from `mm pull --verbose`.
-     - The `~/.config/mind-meld/deleted/<stamp>` recovery folder named by the deletion pull.
-     - That the deleted file returns on the follower (`Pull: 1 file applied.`) after restoring it on the origin machine that deleted it (`cp -n`) and running `mm push` there ([Recovering a deleted file](#recovering-a-deleted-file)).
-     File any difference as a bug.
-   - **(b) Live Syncthing 2.1+ inspection and stopped-daemon checks (Track 92A), on every active machine:**
-     1. Record `syncthing --version` (2.1 or newer).
-     2. Run `syncthing paths` in the normal shell environment to locate Syncthing's configuration directory, using the same custom `--home` or `--config`/`--data` options as its service if configured. Set `cfg_dir` to that absolute directory and hash `config.xml` **before the inspection commands below**; do not use `mm diag` to obtain the baseline path:
-
-        ```bash
-        cfg_dir="<absolute-Syncthing-config-directory>"
-        shasum -a 256 "$cfg_dir/config.xml"
-        ```
-
-     3. Run `mm status` and `mm diag`. Record `state`, `folder_state`, `options`, `problems`, and `stignore` from `mm diag --json | jq .syncthing`. Confirm its home-relative `config_dir` identifies the directory hashed above.
-     4. Hash `"$cfg_dir/config.xml"` again with `shasum -a 256` and confirm it is unchanged.
-     5. Stop Syncthing (`brew services stop syncthing` on macOS, or `systemctl --user stop syncthing.service` on Linux). Confirm `mm status` exits `0` and prints `Syncthing: not reachable at <address> (<reason>)`, and confirm `mm diag --json | jq -r .syncthing.state` prints `unreachable`.
-     6. Start Syncthing again (`brew services start syncthing` or `systemctl --user start syncthing.service`).
-     7. File any endpoint or field difference seen as a bug.
-   - **Where to record:** these checks supply the O1/O2 owner observation evidence required by [docs/SPEC.md](docs/SPEC.md) (recorded in `PROGRESS.md` with the owner's confirmation).
-
-8. **Retire any dead machine that will not come across.**
-   Follow [Retiring a dead machine](#retiring-a-dead-machine): confirm no machine at **1.7.1 or older** can run, find the dead machine's `device_id` with `mm devices --format=json | jq -r '.[] | select(.device_name == "<device-name>")'`, and move its `devices/<id>.json` aside (`mkdir -p ~/mm-retired && mv ~/Sync/mind-meld/devices/<id>.json ~/mm-retired/`). **Never** delete `manifests/<id>/` or `data/<id>/`.
-
-9. **Last step (on the store Mac): delete the iCloud Drive folder.**
-   Keep all active machines online and pause edits while checking convergence. Wait for Syncthing to show the shared folder `Up to Date` on every machine, then run `mm pull` on each and resolve any reported pending peer work, conflicts, or errors. Push any changes produced by those pulls, wait for delivery, and pull again as needed. On each machine, require `mm status` to show no pending peer work as well as `In sync with this device's last push.` ([Status verdicts](#status-verdicts)), and `mm devices` to show each active machine's `Last Push` after the move. The opening status line alone compares local files with this machine's own push; it does not prove peer changes were applied. Only after all these checks pass, delete the old iCloud Drive `mind-meld` folder on **one Mac only** (iCloud removes it across your Macs).
+Once the last Mac has moved, delete the old iCloud folder (its path is `storage.path` in the copied config) on one Mac only: iCloud Drive removes it across your Macs. You can then delete the copied config and the moved event log too.
 
 ## Project memory across machines
 
@@ -1917,8 +1777,8 @@ secret-tool lookup service mind-meld username passphrase >/dev/null
 
 (CI's live keyring test checks `secret-tool store` attribute parity and the
 locked-collection skip against a real `gnome-keyring-daemon`; the desktop
-unlock dialog that `secret-tool lookup` may open remains to be confirmed on the Linux
-machines during step 6 of the [cutover runbook](#moving-the-fleet-from-icloud-drive-to-syncthing-cutover-runbook); an already-unlocked lookup does not test the dialog.) Durable fixes so hooks stop depending on
+unlock dialog that `secret-tool lookup` may open remains to be confirmed on each Linux
+machine when it joins ([Setting up another machine](#setting-up-another-machine)); an already-unlocked lookup does not test the dialog.) Durable fixes so hooks stop depending on
 a manual unlock: turn desktop autologin off so PAM unlocks the keyring at
 login (keeps the keyring encrypted), or use a blank-password login keyring,
 as Omarchy may install. A blank password stores **every** secret in the login
