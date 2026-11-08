@@ -3032,9 +3032,13 @@ def diag(
 
 # ── devices ───────────────────────────────────────────────────────────
 
+devices_app = typer.Typer()
+app.add_typer(devices_app, name="devices")
 
-@app.command()
+
+@devices_app.callback(invoke_without_command=True)
 def devices(
+    ctx: typer.Context,
     fmt: str = typer.Option(
         "table",
         "--format",
@@ -3042,7 +3046,7 @@ def devices(
         case_sensitive=False,
     ),
 ) -> None:
-    """List all registered devices.
+    """List all registered devices, or approve a joining machine (`approve`).
 
     ``--format=json`` emits a single JSON array on stdout. Each entry has the
     keys ``device_id``, ``device_name``, ``last_seen``, ``last_seen_version``;
@@ -3050,7 +3054,26 @@ def devices(
     table-rendering convention). Empty fleet renders as ``[]``. Stable contract
     for the Group 8 retro-fleet skill's ``mm devices --format=json`` consumer.
     """
+    if ctx.invoked_subcommand is not None:
+        return
     devicesflow.devices(fmt)
+
+
+@devices_app.command("approve")
+def devices_approve(
+    device_id: str = typer.Argument(
+        ...,
+        help="The new machine's Syncthing device ID, as its 'mm init' printed it.",
+    ),
+) -> None:
+    """Approve a joining machine by its Syncthing device ID on an mm-managed fleet machine.
+
+    Requires an exact match among Syncthing's pending devices, then adds the
+    device, marks it as introducer, and shares the fleet folder with it. A rerun
+    finishes an earlier half-finished approval. Never automatic; owner-managed
+    machines approve by hand in Syncthing's GUI.
+    """
+    devicesflow.approve(device_id)
 
 
 # ── diff ──────────────────────────────────────────────────────────────

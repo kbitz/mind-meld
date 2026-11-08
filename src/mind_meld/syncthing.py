@@ -1303,6 +1303,19 @@ class PendingDevices:
     devices: tuple[PendingDevice, ...] = ()
 
 
+@dataclass(frozen=True)
+class ApprovalState:
+    """Gated GET-only snapshot of a device's pairing and folder-sharing state."""
+
+    outcome: str
+    cause: str | None = None
+    folder: str = "unknown"
+    configured: bool = False
+    introducer: bool = False
+    shared: bool = False
+    writer_shape: bool = False
+
+
 def _writer_path(path: str | Path) -> Path | None:
     """Resolve a writer path without exposing filesystem errors to its caller."""
     try:
@@ -1724,6 +1737,68 @@ class SyncthingWriter:
             )
         items.sort(key=lambda d: d.device_id)
         return PendingDevices("ok", None, tuple(items))
+
+    def approval_state(self, folder_id: str, device_id: str) -> ApprovalState:
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            res = err or WriteResult("refused", "not-managed")
+            return ApprovalState(res.outcome, res.cause)
+        if not isinstance(folder_id, str) or not _FOLDER_ID_RE.fullmatch(folder_id):
+            return ApprovalState("refused", "bad-folder-id")
+        if not is_device_id(device_id):
+            return ApprovalState("refused", "bad-device-id")
+        if device_id == my_id:
+            return ApprovalState("refused", "own-device")
+
+        devices, dev_err = self._get_list(
+            endpoint, "/rest/config/devices", timeout=per_req_timeout, deadline=deadline
+        )
+        if dev_err is not None or devices is None:
+            res = dev_err or WriteResult("error", "bad-response")
+            return ApprovalState(res.outcome, res.cause)
+        folders, fld_err = self._get_list(
+            endpoint, "/rest/config/folders", timeout=per_req_timeout, deadline=deadline
+        )
+        if fld_err is not None or folders is None:
+            res = fld_err or WriteResult("error", "bad-response")
+            return ApprovalState(res.outcome, res.cause)
+
+        target_folder = next((f for f in folders if f.get("id") == folder_id), None)
+        if target_folder is None:
+            folder_state = "missing"
+            shared = False
+        else:
+            device_ids = _folder_device_ids(target_folder)
+            if device_ids is None:
+                return ApprovalState("error", "bad-response")
+            _, opt_problems = _extract_options(target_folder)
+            folder_state = "not-mm" if opt_problems else "ok"
+            shared = device_id in device_ids
+
+        target_dev = next((d for d in devices if d.get("deviceID") == device_id), None)
+        if target_dev is None:
+            configured = False
+            introducer = False
+            writer_shape = False
+        else:
+            configured = True
+            introducer = target_dev.get("introducer") is True
+            introduced_by = target_dev.get("introducedBy")
+            writer_shape = (
+                target_dev.get("addresses") == ["dynamic"]
+                and target_dev.get("autoAcceptFolders") is False
+                and target_dev.get("paused") is False
+                and (introduced_by is None or introduced_by == "")
+            )
+        return ApprovalState(
+            outcome="ok",
+            cause=None,
+            folder=folder_state,
+            configured=configured,
+            introducer=introducer,
+            shared=shared,
+            writer_shape=writer_shape,
+        )
 
     def mark_introducer(self, device_id: str) -> WriteResult:
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()

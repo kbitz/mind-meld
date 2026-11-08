@@ -240,6 +240,8 @@ class FakeSyncthing:
         self.on_write: Callable[[str, str, Any], None] | None = None
         self.holds: dict[str, threading.Event] = {}
         self.delays: dict[str, float] = {}
+        self.stopped: bool = False
+        self._stop_after: tuple[str, str] | None = None
         self._lock = threading.Lock()
 
         outer = self
@@ -277,6 +279,10 @@ class FakeSyncthing:
                 self.wfile.write(body)
 
             def _handle(self) -> None:
+                with outer._lock:
+                    if outer.stopped:
+                        self.close_connection = True
+                        return
                 headers = {k: v for k, v in self.headers.items()}
                 parsed_body: Any = None
                 if self.command != "GET":
@@ -315,6 +321,10 @@ class FakeSyncthing:
                     if outer.apply_writes:
                         code = outer._apply_write_locked(self.command, self.path, parsed_body)
                         self._send_spec((code, b""))
+                        with outer._lock:
+                            if outer._stop_after == (self.command, self.path):
+                                outer.stopped = True
+                                outer._stop_after = None
                         return
                     self.send_response(404)
                     self.end_headers()
@@ -412,6 +422,9 @@ class FakeSyncthing:
                 if not replaced:
                     devices.append(dict(parsed_body))
                 self.responses["/rest/config/devices"] = devices
+                pending_devs = self.responses.get("/rest/cluster/pending/devices")
+                if isinstance(pending_devs, dict):
+                    pending_devs.pop(did, None)
                 if self.on_write is not None:
                     self.on_write(method, path, parsed_body)
                 return 200
@@ -636,6 +649,15 @@ class FakeSyncthing:
         with self._lock:
             self.holds[path] = event
         return event
+
+    def stop_after(self, method: str, path: str) -> None:
+        with self._lock:
+            self._stop_after = (method, path)
+
+    def start(self) -> None:
+        with self._lock:
+            self.stopped = False
+            self._stop_after = None
 
     def close(self) -> None:
         with self._lock:

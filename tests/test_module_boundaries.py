@@ -947,7 +947,7 @@ def test_dash_m_entrypoint(argv: list[str]) -> None:
 
 
 def test_command_set_is_unchanged_by_the_decomposition() -> None:
-    """Every @app.command() shell stays registered in cli.py.
+    """Every @app.command() shell and command group stays registered in cli.py.
 
     Name-set equality is weaker than dispatch (it misses broken callbacks), but
     it is the cheap pin that catches a command whose decorator moved out with
@@ -960,7 +960,6 @@ def test_command_set_is_unchanged_by_the_decomposition() -> None:
         "autopull",
         "autopush",
         "conflicts",
-        "devices",
         "diag",
         "diff",
         "disable-source",
@@ -982,6 +981,14 @@ def test_command_set_is_unchanged_by_the_decomposition() -> None:
         "status",
         "update",
     }
+    assert {g.name for g in app.registered_groups} == {"devices"}
+    devices_group = app.registered_groups[0].typer_instance
+    assert devices_group is not None
+    assert {
+        c.name or c.callback.__name__.rstrip("_") for c in devices_group.registered_commands
+    } == {"approve"}
+    assert devices_group.registered_callback is not None
+    assert devices_group.registered_callback.invoke_without_command is True
 
 
 def test_statedb_import_allowlist():
@@ -1311,10 +1318,20 @@ SOURCEFLOW_DEFINITIONS = frozenset(
 )
 SOURCE_SHELLS = frozenset("disable_source enable_source reconfigure_sources sources".split())
 
-# Track 119A: `mm devices` lives in devicesflow.py; the `@app.command()`
-# shell (`devices`) stays in cli.py.
-DEVICESFLOW_DEFINITIONS = frozenset({"devices"})
-DEVICES_SHELLS = frozenset({"devices"})
+# Track 119A: `mm devices` and `mm devices approve` live in devicesflow.py;
+# the Typer group callback (`devices`) and subcommand (`devices_approve`)
+# shells stay in cli.py.
+DEVICESFLOW_DEFINITIONS = frozenset(
+    """
+    _stop_bad_device_id
+    _stop_not_managed
+    _stop_partial
+    _stop_unchanged
+    approve
+    devices
+    """.split()
+)
+DEVICES_SHELLS = frozenset("devices devices_approve".split())
 
 
 def _top_level_definitions(source: str) -> set[str]:
@@ -1537,7 +1554,7 @@ def test_devicesflow_single_ownership_and_qualified_calls():
         )
         assert _unqualified_owner_calls(source, module) == []
     assert _top_level_definitions((SRC / "cli.py").read_text()) >= DEVICES_SHELLS
-    assert len(DEVICESFLOW_DEFINITIONS) == 1
+    assert len(DEVICESFLOW_DEFINITIONS) == 6
 
 
 def test_pull_test_consumers_use_qualified_owner_names():
