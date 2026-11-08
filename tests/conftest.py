@@ -74,51 +74,70 @@ def synthetic_account_home(monkeypatch, tmp_path):
     return account
 
 
-@pytest.fixture(
-    params=(
-        ".config/mind-meld",
-        "Library/Mobile Documents/com~apple~CloudDocs/mind-meld",
-        "Sync/mind-meld",
-        ".local/share/mind-meld",
-        ".claude",
-        ".codex",
-        ".grok",
-        ".gstack",
-        ".gstack-extend",
-        ".local/share/muse",
-        ".gemini/config",
-        ".gemini/antigravity-cli",
-        "configured-storage",
-        "configured-source",
-    ),
-    ids=(
-        "config",
-        "icloud",
-        "syncthing",
-        "events",
-        "claude",
-        "codex",
-        "grok",
-        "gstack",
-        "gstack-extend",
-        "muse",
-        "agy-config",
-        "agy-cli",
-        "configured-storage",
-        "configured-source",
-    ),
+_STATE_ROOTS = (
+    ".config/mind-meld",
+    "Library/Mobile Documents/com~apple~CloudDocs/mind-meld",
+    "Sync/mind-meld",
+    ".local/share/mind-meld",
+    ".claude",
+    ".codex",
+    ".grok",
+    ".gstack",
+    ".gstack-extend",
+    ".local/share/muse",
+    ".gemini/config",
+    ".gemini/antigravity-cli",
+    "configured-storage",
+    "configured-source",
 )
-def synthetic_state_root(request, synthetic_account_home):
-    if request.param.startswith("configured-"):
+_STATE_ROOT_IDS = (
+    "config",
+    "icloud",
+    "syncthing",
+    "events",
+    "claude",
+    "codex",
+    "grok",
+    "gstack",
+    "gstack-extend",
+    "muse",
+    "agy-config",
+    "agy-cli",
+    "configured-storage",
+    "configured-source",
+)
+
+
+def _make_state_root(name, account):
+    if name.startswith("configured-"):
         import json
 
-        root = synthetic_account_home / request.param
-        config = synthetic_account_home / ".config/mind-meld/config.toml"
+        root = account / name
+        config = account / ".config/mind-meld/config.toml"
         config.parent.mkdir(parents=True)
-        prefix = "[storage]\n" if request.param == "configured-storage" else "[[sync.sources]]\n"
+        prefix = "[storage]\n" if name == "configured-storage" else "[[sync.sources]]\n"
         config.write_text(prefix + "path=" + json.dumps(str(root)))
         return root
-    return synthetic_account_home / request.param
+    return account / name
+
+
+@pytest.fixture(params=_STATE_ROOTS, ids=_STATE_ROOT_IDS)
+def synthetic_state_root(request, synthetic_account_home):
+    """Every protected root: for tests of the guard's root classification."""
+    return _make_state_root(request.param, synthetic_account_home)
+
+
+@pytest.fixture(params=(".claude", "configured-storage"), ids=("claude", "configured-storage"))
+def writer_state_root(request, synthetic_account_home):
+    """One built-in root and one real-config root: one per inventory branch.
+
+    A writer or helper refuses (or mutates first) the same way whichever root
+    matched, so writer and helper refusal tests use these two. Keep every-root
+    classification on `synthetic_state_root` tests such as
+    `TestRealStateWriteGuard::test_account_roots_and_normalized_paths`; a new
+    protected root belongs in `_STATE_ROOTS`, not in this fixture.
+    """
+    return _make_state_root(request.param, synthetic_account_home)
 
 
 @pytest.fixture

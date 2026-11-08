@@ -799,9 +799,9 @@ class TestRealStateWriteGuard:
     @pytest.mark.parametrize("helper", ["atomic", "append", "strict-append", "spool"])
     @pytest.mark.parametrize("exists", [False, True])
     def test_helpers_refuse_before_first_mutation(
-        self, helper, exists, synthetic_state_root, forbid_fs_mutations
+        self, helper, exists, writer_state_root, forbid_fs_mutations
     ):
-        root = synthetic_state_root
+        root = writer_state_root
         path = root / "parent" / "sentinel"
         if exists:
             path.parent.mkdir(parents=True, mode=0o750)
@@ -1740,12 +1740,12 @@ def raw_writer_exists(request):
 
 @pytest.fixture
 def raw_writer_refusal(
-    synthetic_state_root, synthetic_account_home, monkeypatch, tmp_path, forbid_fs_mutations
+    writer_state_root, synthetic_account_home, monkeypatch, tmp_path, forbid_fs_mutations
 ):
     def check(writer, exists):
-        path, invoke = _raw_writer_case(writer, synthetic_state_root, monkeypatch, tmp_path, exists)
+        path, invoke = _raw_writer_case(writer, writer_state_root, monkeypatch, tmp_path, exists)
         _assert_synthetic_destination(path, synthetic_account_home)
-        before = _tree_bytes_modes(synthetic_state_root)
+        before = _tree_bytes_modes(writer_state_root)
         calls = forbid_fs_mutations()
         with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
             invoke()
@@ -1753,7 +1753,7 @@ def raw_writer_refusal(
         guarded = path / ".stignore" if writer == "init_storage" else path
         _assert_guard_diagnostic(caught.value, guarded, "protected account-state path")
         assert calls == [], f"denied mutation attempts: {calls!r}"
-        assert _tree_bytes_modes(synthetic_state_root) == before
+        assert _tree_bytes_modes(writer_state_root) == before
 
     return check
 
