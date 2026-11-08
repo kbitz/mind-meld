@@ -285,8 +285,9 @@ ls ~/.claude/projects/*widgets*/memory
 **`mm init --new-fleet` and the new default storage path (Track 89A):** only
 `mm init --new-fleet` creates the fleet's key header (`mm-crypto-init`), and only
 in an empty folder; plain `mm init` joins, and when the header has not arrived
-it stops without writing anything, so a machine that joins before Syncthing
-has delivered the folder can no longer start a second fleet. On a join,
+it stops before registering the mm device or writing to the Mind Meld store.
+Managed Syncthing setup and its local record may already be saved, but a
+machine joining before delivery can no longer start a second fleet. On a join,
 `mm init` now also runs the first `mm pull` with the passphrase you just typed.
 The first machine of a brand-new fleet therefore needs `--new-fleet`; the
 typed `BRICK` override is gone. The default storage path is now
