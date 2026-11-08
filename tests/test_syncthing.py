@@ -520,6 +520,55 @@ def test_classify_config_rest_fresh_default_and_managed_record(fake_syncthing, i
 
 
 @pytest.mark.parametrize(
+    "device_fields",
+    [
+        {},
+        {"devices": None},
+        {"devices": {}},
+        {"devices": [123]},
+        {"devices": [{}]},
+        {"devices": [{"deviceID": 123}]},
+        {"devices": [{"deviceID": ""}]},
+        {"devices": [" \t"]},
+        {"devices": ["local-id", {"deviceID": 123}]},
+    ],
+)
+def test_classify_config_malformed_folder_devices_cannot_mint_record(
+    fake_syncthing, isolated_home, device_fields
+):
+    folder = fake_syncthing.stock_folder(isolated_home / "Sync")
+    del folder["devices"]
+    folder.update(device_fields)
+    if isinstance(folder.get("devices"), list):
+        folder["devices"] = [
+            fake_syncthing.my_id if entry == "local-id" else entry for entry in folder["devices"]
+        ]
+    fake_syncthing.set_config(folders=[folder])
+    result = syncthing.classify_config(sanitize=safety.safe_terminal_str)
+    assert result == syncthing.ConfigCheck("unknown", reach="error", cause="bad-response")
+    with pytest.raises(ValueError):
+        result.managed_record()
+
+
+@pytest.mark.parametrize("device_form", ["empty", "string", "dict"])
+def test_valid_unshared_folder_devices_still_allow_default_and_removal(
+    fake_syncthing, isolated_home, device_form
+):
+    folder = fake_syncthing.stock_folder(isolated_home / "Sync")
+    folder["devices"] = {
+        "empty": [],
+        "string": [fake_syncthing.my_id],
+        "dict": [{"deviceID": fake_syncthing.my_id}],
+    }[device_form]
+    fake_syncthing.set_config(folders=[folder])
+    check = syncthing.classify_config(sanitize=safety.safe_terminal_str)
+    assert check.state == "default"
+    writer = syncthing.SyncthingWriter(check.managed_record())
+    assert writer.remove_default_folder() == syncthing.WriteResult("ok")
+    assert fake_syncthing.bodies == [("DELETE", "/rest/config/folders/default", None)]
+
+
+@pytest.mark.parametrize(
     "shape",
     ["absent", "stfolder_dir", "stfolder_empty_file", "stfolder_and_ds_store"],
 )
@@ -602,7 +651,14 @@ def test_classify_config_rest_pre_existing_shapes(fake_syncthing, isolated_home,
         devices = [{"deviceID": fake_syncthing.peer_id, "name": ""}]
         expected = (syncthing.PreExisting("device", "", "paired"),)
     elif kind == "mm_folder":
-        folders = [{"id": "mind-meld", "label": "Mind Meld", "path": str(stock_dir / "mind-meld")}]
+        folders = [
+            {
+                "id": "mind-meld",
+                "label": "Mind Meld",
+                "path": str(stock_dir / "mind-meld"),
+                "devices": [],
+            }
+        ]
         expected = (syncthing.PreExisting("folder", "Mind Meld", "folder"),)
     elif kind == "default_non_stock_path":
         folders = [fake_syncthing.stock_folder(tmp_path / "other-default")]
@@ -657,7 +713,14 @@ def test_classify_config_sanitizes_every_name_on_rest_and_offline(fake_syncthing
     raw_esc = "peer\x1b]0;x\x07name"
     fake_syncthing.set_config(
         devices=[{"deviceID": fake_syncthing.peer_id, "name": raw_esc}],
-        folders=[{"id": "custom", "label": "lbl\x1b[31m", "path": str(isolated_home / "custom")}],
+        folders=[
+            {
+                "id": "custom",
+                "label": "lbl\x1b[31m",
+                "path": str(isolated_home / "custom"),
+                "devices": [],
+            }
+        ],
     )
     rest_check = syncthing.classify_config(sanitize=rec_rest)
     assert seen_rest == [raw_esc, "lbl\x1b[31m"]
@@ -675,7 +738,14 @@ def test_classify_config_sanitizes_every_name_on_rest_and_offline(fake_syncthing
     fake_syncthing.my_id = derived_id
     fake_syncthing.set_shape(
         devices=[{"deviceID": fake_syncthing.peer_id, "name": raw_c1}],
-        folders=[{"id": "custom", "label": "lbl\u009b", "path": str(isolated_home / "custom")}],
+        folders=[
+            {
+                "id": "custom",
+                "label": "lbl\u009b",
+                "path": str(isolated_home / "custom"),
+                "devices": [],
+            }
+        ],
     )
     fake_syncthing.close()
 
@@ -804,7 +874,14 @@ def test_rest_and_offline_classification_agree(fake_syncthing, isolated_home, sh
     elif shape == "pre_extra_folder":
         fake_syncthing.set_shape(
             devices=(),
-            folders=[{"id": "notes", "label": "Notes", "path": str(isolated_home / "notes")}],
+            folders=[
+                {
+                    "id": "notes",
+                    "label": "Notes",
+                    "path": str(isolated_home / "notes"),
+                    "devices": [],
+                }
+            ],
         )
     elif shape == "pre_default_other_path":
         fake_syncthing.set_shape(

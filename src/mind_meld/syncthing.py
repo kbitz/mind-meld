@@ -809,11 +809,11 @@ def _folder_is_empty(path: Path) -> bool:
     return True
 
 
-def _folder_device_ids(folder: dict[str, Any]) -> list[str]:
-    """Extract stripped device IDs from a folder dict's ``devices`` entry."""
+def _folder_device_ids(folder: dict[str, Any]) -> list[str] | None:
+    """Extract every device ID, or return ``None`` when sharing cannot be read."""
     raw_devs = folder.get("devices")
     if not isinstance(raw_devs, list):
-        return []
+        return None
     out: list[str] = []
     for dev in raw_devs:
         if isinstance(dev, dict):
@@ -822,14 +822,18 @@ def _folder_device_ids(folder: dict[str, Any]) -> list[str]:
             did = dev
         else:
             did = None
-        if isinstance(did, str) and did.strip():
-            out.append(did.strip())
+        if not isinstance(did, str) or not did.strip():
+            return None
+        out.append(did.strip())
     return out
 
 
 def _stock_default_problem(folder: dict[str, Any], my_id: str | None) -> str | None:
     """Return ``"shared"``, ``"not-empty"`` or ``None`` for the stock Default Folder."""
-    for did in _folder_device_ids(folder):
+    device_ids = _folder_device_ids(folder)
+    if device_ids is None:
+        return "shared"  # An unreadable sharing list cannot prove the folder is unshared.
+    for did in device_ids:
         if my_id is None or did != my_id:
             return "shared"
     raw_path = folder.get("path")
@@ -1139,6 +1143,7 @@ def _classify_config_inner(
                             or not entry["id"].strip()
                             or not isinstance(entry.get("path"), str)
                             or not entry["path"].strip()
+                            or _folder_device_ids(entry) is None
                         ):
                             return ConfigCheck(
                                 state="unknown",
@@ -1322,12 +1327,11 @@ def _existing_folder_result(
         candidate_path = _writer_path(raw_path.strip())
         if candidate_path is None:
             return WriteResult("error", "path-unreadable")
+        device_ids = _folder_device_ids(entry)
+        if device_ids is None:
+            return WriteResult("error", "bad-response")
         _, problems = _extract_options(entry)
-        if (
-            candidate_path == target_path
-            and not problems
-            and required_devices.issubset(_folder_device_ids(entry))
-        ):
+        if candidate_path == target_path and not problems and required_devices.issubset(device_ids):
             return WriteResult("unchanged")
         return WriteResult("refused", "folder-exists")
     return None
@@ -1663,7 +1667,10 @@ class SyncthingWriter:
         if not any(d.get("deviceID") == device_id for d in devices):
             return WriteResult("refused", "device-not-configured")
 
-        if device_id in _folder_device_ids(target_folder):
+        device_ids = _folder_device_ids(target_folder)
+        if device_ids is None:
+            return WriteResult("error", "bad-response")
+        if device_id in device_ids:
             return WriteResult("unchanged", None)
         existing_entries = target_folder.get("devices")
         if not isinstance(existing_entries, list):

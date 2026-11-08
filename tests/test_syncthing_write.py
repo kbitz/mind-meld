@@ -79,6 +79,48 @@ def test_offline_default_cannot_supply_managed_record(fake_syncthing, isolated_h
         check.managed_record()
 
 
+@pytest.mark.parametrize(
+    "device_fields",
+    [
+        {},
+        {"devices": None},
+        {"devices": {}},
+        {"devices": [123]},
+        {"devices": [{}]},
+        {"devices": [{"deviceID": 123}]},
+        {"devices": [{"deviceID": ""}]},
+        {"devices": [" \t"]},
+        {"devices": ["local-id", {"deviceID": 123}]},
+    ],
+)
+@pytest.mark.parametrize(
+    "op_name", ["create_folder", "accept_folder_offer", "share_folder", "remove_default_folder"]
+)
+def test_writer_malformed_folder_devices_never_authorize_a_write(
+    fake_syncthing, isolated_home, device_fields, op_name
+):
+    target = isolated_home / "Sync"
+    folder = fake_syncthing.stock_folder(target)
+    if op_name != "remove_default_folder":
+        folder["id"] = "mind-meld"
+    del folder["devices"]
+    folder.update(device_fields)
+    if isinstance(folder.get("devices"), list):
+        folder["devices"] = [
+            fake_syncthing.my_id if entry == "local-id" else entry for entry in folder["devices"]
+        ]
+    fake_syncthing.set_config(devices=[{"deviceID": fake_syncthing.peer_id}], folders=[folder])
+    writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(fake_syncthing.my_id))
+    result = _call_op(writer, op_name, fake_syncthing.peer_id, target)
+    expected = (
+        syncthing.WriteResult("refused", "default-folder-in-use")
+        if op_name == "remove_default_folder"
+        else syncthing.WriteResult("error", "bad-response")
+    )
+    assert result == expected
+    assert fake_syncthing.bodies == []
+
+
 @pytest.mark.parametrize("op_name", _ALL_OPS)
 def test_writer_refuses_mismatched_managed_record_after_single_status_get(
     fake_syncthing, isolated_home, op_name
