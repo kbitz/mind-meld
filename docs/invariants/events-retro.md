@@ -509,13 +509,12 @@ changes or is imported** (`test_events_imports_no_host_usage_reader`,
 read for its directory alone.
 
 **Registry order and gates.** Canonical precedence is `manual`, `claude`, then
-`rootprobes.PROBERS`: `paseo`, `mmm`, `agy`, `muse`, `cursor`, `codex`. Manual roots
+`rootprobes.PROBERS`: `paseo`, `mmm`, `agy`, `muse`, `codex`. Manual roots
 always run first. A fresh automatic pass uses that order; an incomplete pass resumes
 with later probers so a cold corpus cannot starve them. Duplicate roots use the
 first matching prober in canonical order, regardless of resume order. A provider runs under the
 consent its usage reader uses: its enabled sync source (`codex`, `muse`, `agy`; an
-implicit config adds `codex` when `~/.codex` exists, as `get_sources` does), or for
-Cursor `[retro] cursor_host_usage = true` (read directly in `events._enabled_root_probers` until Track 116A). A
+implicit config adds `codex` when `~/.codex` exists, as `get_sources` does). A
 tool runs when its record exists (`rootprobes.installed`): `~/.paseo/projects/projects.json`,
 `~/.mmm/items/`. gstack has no prober (census: `repo-mode.json`, `timeline.jsonl` and
 `learnings.jsonl` carry no directory).
@@ -526,8 +525,6 @@ no symlink, regular files only):
 | Prober | Record | Key | Unit and stamp |
 |---|---|---|---|
 | `codex` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, `archived_sessions/rollout-YYYY-MM-DD*.jsonl` first record, a `session_meta` | `payload.cwd` | live day directory `[dir mtime_ns]`; archived date group `[count, name digest]` |
-| `cursor` | `~/.cursor/acp-sessions/<id>/meta.json` | `cwd` | `acp/<id>`, immutable |
-| `cursor` | Conductor `cursor-sdk-store/<id>/agents.ndjson`; `index.db` `agents` | `cwd`; `workspace_ref` | `[mtime_ns, size]`; lstat of db, `-wal` and `-journal` |
 | `muse` | `~/.local/share/muse/sessions/YYYY/MM/DD/<session>/session.jsonl`, first 16 records | `payload.record.workspace_root` or `payload.record.command.session_metadata.workspace_root` | session, immutable |
 | `agy` | `~/.gemini/antigravity-cli/conversation_summaries.db` | `workspace_uris` (`file://` URIs, percent-decoded) | lstat of db, `-wal` and `-journal` |
 | `paseo` | `~/.paseo/projects/projects.json` | every item's `rootPath`, archived included | `[mtime_ns, size]` |
@@ -535,11 +532,10 @@ no symlink, regular files only):
 
 Recorded and not read: Codex `session_index.jsonl`, `state_5.sqlite` and Muse
 `session-index.db` (a versioned, undocumented schema and a WAL read cost more than
-the plain files they duplicate), Cursor `projects/*/repo.json` (`id` only), Paseo
+the plain files they duplicate), Paseo
 `workspaces.json`, gstack-extend `projects.json`.
 
-**Credential neighbours are never opened:** Cursor `projects/*` (`mcp-auth.json`) and
-`chats/*/*/store.db`, `~/.gemini/antigravity-cli/antigravity-oauth-token`,
+**Credential neighbours are never opened:** `~/.gemini/antigravity-cli/antigravity-oauth-token`,
 `~/.paseo/config.json`. Nothing lists those directories either. A new prober names
 its record files exactly; `test_credential_neighbours_are_never_opened` spies on
 `open`, `os.open`, `os.scandir` and `sqlite3.connect`. SQLite follows the
@@ -566,7 +562,7 @@ stat fields, the directory mtime observed before listing, and the next metadata-
 Completed directory steps are reused instead of reopening a costly prefix.
 Archived Codex memo entries use that snapshot's mtime, so a directory changed
 during a partial listing cannot make old names look current.
-Cursor store stamps use `listing_stores`. `_probe_host_records` holds a complete
+`_probe_host_records` holds a complete
 `unit_listing` through its reading round, tracks `attempted_units`, and rotates
 `unit_after` so unfinished immutable records cannot starve unread units.
 `unit_remaining` acknowledges each unit after one attempt; `round_incomplete`
@@ -581,7 +577,7 @@ the deadline not expired; it re-lists, prunes and orders as usual, and skips eve
 already attempted in this call (a local map of key to the stamp it was read at, nothing
 persisted). That attempt counts for the closing round too. Every interrupted read is a
 deadline cut and the closing round runs only before the deadline, so a cleanly read record
-with nothing to cache (an immutable Cursor ACP `meta.json` naming no directory) does not
+with nothing to cache (an immutable record naming no directory) does not
 hold it open; a skipped unit whose fresh stamp differs from the one it was read at keeps
 the round incomplete, so discovery never reads complete over a record it can see changed
 (the next push reads it). A unit is therefore still
@@ -589,10 +585,10 @@ attempted at most once per call, and a reader that never finishes cannot loop. A
 deadline-cut round or listing returns cached roots incomplete as before. Partial listings
 never prune old units. Their names identify host records, not working directories.
 
-Large Codex groups and Cursor `agents.ndjson` files resume within a unit:
+Large Codex groups resume within a unit:
 `state.pending_units[key] = {"stamp": stamp, "reader": {}, "roots": []}`.
 `_probe_host_records` accumulates only classified roots; the reader owns its
-cursor (`after`, the last Codex filename, or `offset`, the Cursor byte offset).
+cursor (`after`, the last Codex filename).
 Stamp changes reset this progress. Codex's reader also keeps `waiting` filenames
 for empty or unfinished first records and a `retry` flag; `retry_after` resumes a
 retry round across deadlines so early unfinished files cannot starve later ones.
@@ -600,9 +596,8 @@ After a Codex unit's initial scan, `scan_complete` drops its directory listing
 snapshot and retries only `waiting` filenames; a changed unit stamp resets it.
 It attempts each file at most once per push, continues to later files, and retains progress for the next
 push even after a complete pass. Pending metadata alone is not a deadline error.
-Muse streams that end before their 16-record scan finds metadata, and Cursor ACP
-records without a cwd, are retried rather than frozen as empty immutable units.
-Codex and Cursor streams acknowledge a filename or byte offset only after the
+Muse streams that end before their 16-record scan finds metadata are retried rather than frozen as empty immutable units.
+Codex streams acknowledge a filename only after the
 generic consumer has classified that record's cwd (including a negative result).
 An interrupted record is replayed; an acknowledged prefix is not. Small atomic
 JSON/SQLite results retain a numeric `classified` position in the pending unit;
@@ -635,13 +630,13 @@ validation or authorize cursor retirement. Claude keeps its existing
 indexed-refresh/completeness contract.
 
 **Measured cost (Track 106A, 2026-11-03, one Mac, 4,097 live and 2,991 archived Codex
-rollouts, 1,091 Cursor units, 422 Claude projects).** Replaying persisted passes on a
+rollouts, 1,091 units of a prober Track 116A removed, 422 Claude projects).** Replaying persisted passes on a
 scratch copy of the cache at 100 ms: every pass `exceeded`, roots alternating 24 and 6,
 because the resume marker alternated Codex-first passes (`manual, codex` only; Codex
 spent the whole 100 ms, about 20 ms per cold unit, retiring 2 to 3 of 135 units) with
-Claude-first passes (Claude 6 to 17 ms, Cursor 12 to 68 ms, Codex never reached). The
-markers persisted and were never reset: Cursor's remainder fell 630, 491, 292 and Codex's
-135, 133, 131, 128. An unbounded cold pass cost 2.5 to 2.8 s (Codex 1.9 to 2.6 s, Cursor
+Claude-first passes (Claude 6 to 17 ms, that retired prober 12 to 68 ms, Codex never reached). The
+markers persisted and were never reset: that retired prober's remainder fell 630, 491, 292 and Codex's
+135, 133, 131, 128. An unbounded cold pass cost 2.5 to 2.8 s (Codex 1.9 to 2.6 s, that retired prober
 0.1 to 0.5 s) and its closing pass 0.1 to 0.4 s; a warm pass costs 0.07 to 0.14 s. Reading
 every repository-local email over 24 to 27 roots took 1.0 to 1.7 s of the 5 s gather
 budget. Classification of 6,720 cwd strings (706 distinct) is a candidate memo, declined
@@ -724,7 +719,7 @@ that distinction backwards silently under-reports the fleet.
 Grok, Muse and Antigravity to their source names. Grok selection uses the separate
 `grok_consented` verdict from `config.grok_usage_consented`, which also supports
 usage-only consent; Codex, Muse and Antigravity require their source enabled.
-Unknown inbound names (retired `opencode`, `cursor`,
+Unknown inbound names (retired reader names
 or a future reader) are retained by the aggregator, not listed here.
 `_default_host_readers(sources, *, grok_consented=...)` returns only those.
 A user who declined the `codex` source does not get `~/.codex/sessions`
@@ -849,14 +844,9 @@ walker never opens `sessions/`; the usage reader is a separate consented walk
 of `session.jsonl` only. Muse gets no `AgentRow` (it discovers `~/.claude/skills`).
 
 `HOST_READER_DIAGS` dispatches each reader to its own diagnostic and readiness
-predicate, including status, recapture's reminder and diag JSON. Track 114A
-unhooked Cursor's CLI wrapper, hook, source alias and reader selection; Track
-115A deleted the Cursor reader, SQLite adapter, spool, hook helpers and registry
-entries (`ACTIVE_HOST_READERS`, `HOST_USAGE_TOKEN_SOURCES`, `WARMABLE_HOST_READERS`,
-`HOST_READER_DIAGS`, and `tests/fixtures/host_sessions/cursor/`).
-Older published `host-usage-snapshot` rows that name `cursor` in `token_sources`,
-`partial_sources`, or `degraded_sources` remain readable as-is without migration;
-`aggregator._cursor_acp_gap_notes` and Cursor Grok pricing remain until Track 116A.
+predicate, including status, recapture's reminder and diag JSON.
+Older published `host-usage-snapshot` rows naming a retired reader in `token_sources`,
+`partial_sources`, or `degraded_sources` stay readable as they are, with no migration.
 (Track 110A restored the Grok reader's slot; see the Grok Build section below.)
 
 **First-success carve-out (Track 21A) — retired from sweep policy in Track 31A.**
@@ -1606,8 +1596,7 @@ capture default when neither key is set). Invalid config still stops ordinary sy
 
 **Same-family day collisions still sum.** Historically Codex and OpenCode
 classified GPT models into the same canonical `codex` family, so two readers
-could return the same `(family, UTC day)` bucket, as did Grok Build and the
-retired Cursor reader for the `grok` family. The merge sums
+could return the same `(family, UTC day)` bucket. The merge sums
 `token_usage.merge_usage_bucket` at every level — a shallow update would drop
 whichever reader landed first. The same rule applies one level down
 on `(day, model)` in `tokens_by_day`. `_merge_warm_retry_capture` fuses both
@@ -2200,7 +2189,7 @@ Pinned by `test_host_usage.py::TestCodexArchivedRollouts`.
 
 **Track 101A: a slow reader no longer starves the others (2026-11-02).** On the
 owner's Mac the attended sweep (500 ms) always expired inside Codex, so
-Antigravity and Cursor got the 50 ms grace for 100 to 236 ms reads and the warm
+Antigravity and the other readers got the 50 ms grace for 100 to 236 ms reads and the warm
 retry spent its half-capture phase on Codex while Antigravity's retry got 50 ms
 (`last_deadline_allotted_ms` 50). T1's read-only probe (pipx 1.12.3 interpreter,
 a copy of `host-tokens.json`, counts and timings only): the warm Codex read is
@@ -3466,36 +3455,24 @@ field is 0.17x list at the documented API unit of 1e10 ticks/USD. Never
 decode it or use a census-calibrated constant to infer request tiers.
 `grok-build-0.1` is a different SKU and a name trap.
 
-**Cursor Grok 4.7 list-rate basis (67A / 109B).** The exact `grok-4.7` alias maps
-to its own family card, $2 input / $0.50 cache read / $6 output per MTok; long
-context is $4 / $1 / $12 when a REQUEST exceeds 256k input. Per-turn aggregates
-cannot recover that tier, so the standard-speed estimate is a floor. Cursor's
-2026-11-05 access date is separate from xAI's (`PRICING_CURSOR_LAST_UPDATED`);
-https://cursor.com/docs/models-and-pricing and
-https://cursor.com/docs/models/grok-4-7 are its sources. The dollar column is a
-list-rate equivalent, **not spend** on the censused Cursor Ultra subscription.
-Included usage and on-demand charges cannot be reconstructed from these counters.
+**Grok 4.7 list-rate basis on xAI (67A / 109B / 116A).** The exact `grok-4.7` card is
+$2 input / $0.50 cache read / $0 cache write / $6 output per MTok; when a request's
+prompt reaches 200k tokens all its tokens pay $4 / $1 / $0 / $12, a tier per-turn
+aggregates cannot recover, so the estimate is a floor. `grok-4.7-build` aliases in
+`PRICING_FAMILY_BY_MODEL` onto `grok-4.7`. `GROK_47_MODEL_IDS` is those two ids
+(`frozenset({"grok-4.7", "grok-4.7-build"})`), in `VERIFIED_MODEL_IDS`, dated by
+`PRICING_XAI_LAST_UPDATED` (https://docs.x.ai/developers/models/grok-4.7). Retained
+`grok-4.7-fast` and effort ids are unpriced. The dollar column is a list-rate
+equivalent, **not subscription spend**. Included usage and on-demand charges cannot
+be reconstructed from these counters.
 
-`params.fast == true` on normalized Grok 4.7 becomes **grok-4.7-fast**, which
-Track 109B prices as its own pseudo-id card in `VENDOR_FAMILY_TIERS` ($4 input /
-$1 cache read / $0 cache create / $12 output per MTok, 2x standard) and
-`VENDOR_LONG_CONTEXT_TIERS` ($6 / $1.50 / $0 / $18, 3x standard), ending 1.2.0's
-unpriced-Fast policy. Effort (`low`, `medium`, `high`, `xhigh`) has no separate
-rate. Every other Grok 4.7 id normalizes by dropping its suffix: the flat ids
-`grok-4.7-(low|medium|high|xhigh)` and `grok-4.7-build` alias in
-`PRICING_FAMILY_BY_MODEL` onto `grok-4.7`, and the effort ids' `-fast` variants
-onto `grok-4.7-fast`. All eleven Grok 4.7 ids (`GROK_47_MODEL_IDS`) are in
-`VERIFIED_MODEL_IDS` dated by `PRICING_CURSOR_LAST_UPDATED`. `_long_context_cause`
-chooses its lead only from the models that produced a detail (in-window tokens
-and a bundled long-context card): when any of them is in
-`GROK_47_MODEL_IDS`, Fast-only, flat-id and `grok-4.7-build` rows emit the
-"Per-turn totals cannot recover the per-request context tier" cause, while
-`grok-4.6-build` alone keeps the Grok Build log-limit cause. A zero-token
-Grok 4.7 id never changes another model's lead; a locally overridden one keeps
-its detail and sets the lead like any other. Fast-only and mixed
-rows both render `≥` / `cost_floor` with Fast cost included. Nonzero cache writes
-remain a labelled unknown and suppress any at-most claim. Adding auto/composer
-families remains deferred in TODOS.
+`_long_context_cause` chooses its lead only from the models that produced a detail
+(in-window tokens and a bundled long-context card): when any of them is in
+`GROK_47_MODEL_IDS`, rows emit the "Per-turn totals cannot recover the per-request
+context tier" cause, while `grok-4.6-build` alone keeps the Grok Build log-limit
+cause. A zero-token Grok 4.7 id never changes another model's lead; a locally
+overridden one keeps its detail and sets the lead like any other. Nonzero cache
+writes remain a labelled unknown and suppress any at-most claim.
 
 **Other vendors' context assumptions.** Codex's observed 258,400-token window
 cannot reach OpenAI's >272K prompt threshold: 20,955 events across 789
@@ -3507,8 +3484,7 @@ host delivery and model-scoped at-most contract remain in force, with the
 details carried by `cost_floor` in `MM_HEALTH`.
 
 Provenance is per vendor. Anthropic uses `PRICING_LAST_UPDATED`
-(2026-09-14), OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-10-27), Cursor
-`PRICING_CURSOR_LAST_UPDATED` (2026-11-05), xAI `PRICING_XAI_LAST_UPDATED`
+(2026-09-14), OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-10-27), xAI `PRICING_XAI_LAST_UPDATED`
 (2026-11-05), Google `PRICING_GOOGLE_LAST_UPDATED` (2026-10-22), and Muse
 `PRICING_MUSE_LAST_UPDATED` (2026-10-27), with Muse's source in
 `PRICING_MUSE_SOURCE_URL` (https://dev.meta.ai/docs/pricing-rate-limits).
@@ -3536,11 +3512,10 @@ skewed writing clock must not pin an override or suppress refresh). IDs match
 Active cached cards precede `PRICING`, curated vendor aliases, Claude family
 fallback and positional vendor fallback. A `VERIFIED_MODEL_IDS` member's
 cached card is active only when its date is **on or after**
-`_builtin_verified_date(model)`, mapped across all six vendors. Other valid
+`_builtin_verified_date(model)`, mapped across all five vendors. Other valid
 cached cards are active without that gate. For Grok aliases
 (`_GROK_OVERRIDE_CARD_BY_MODEL`, Track 111B), a cached card for `grok-4.7`
-reaches the flat effort ids and `grok-4.7-build`, one for `grok-4.7-fast`
-reaches the effort ids' `-fast` variants, and one for `grok-4.6` reaches
+reaches `grok-4.7-build`, and one for `grok-4.6` reaches
 `grok-4.6-build`; that alias-reached card is active only when it passes the
 date gate of both the alias id and the card id, and an active exact-id card
 takes precedence. Other curated aliases and positional vendor fallback stay
@@ -3579,7 +3554,7 @@ To reset the overlay, remove the selected cache file while no pricing update
 is running, then rerun: bundled rates and verification dates apply again.
 
 `MM_HEALTH.pricing.effective_verified_date` is
-`max(min(all six bundled vendor dates), cache.verified_date)`.
+`max(min(all five bundled vendor dates), cache.verified_date)`.
 `unpriced_model_ids` and `unverified_model_ids` are sorted active in-window
 model IDs; override-grammar IDs are emitted as exact pricing-cache keys, and
 IDs outside that grammar are sanitized diagnostic strings. Excluded cost
@@ -3673,7 +3648,7 @@ nobody saw it. The load-bearing signals are the rendered ones — the `≥`
 marker and its `MM_HEALTH` issue.
 
 **Invariant 5 — bundled dates are provenance; refresh is a skill action.**
-`PRICING_LAST_UPDATED` and the five other vendor dates describe checked
+`PRICING_LAST_UPDATED` and the four other vendor dates describe checked
 bundled cards. The CLI makes no network request. The seven-day/new-model
 `refresh_due` signal asks the skill to consult official docs; it is neither
 a billing guarantee nor a warning that age alone proves a wrong price.
@@ -3984,7 +3959,7 @@ retired before v1.11.8; its record shapes, census and the reasons for the source
   Autopush never warms; the attended push warms a Grok `deadline` like the other warmable readers.
 - **Wire slot.** `grok` occupies its pre-v1.11.8 slot: `ACTIVE_HOST_READERS`,
   `HOST_USAGE_TOKEN_SOURCES` and `HOST_READER_DIAGS` read `("codex", "grok", "muse",
-  "agy")` after Track 115A removed `"cursor"`, because retained rows from mm 1.11.7 and earlier list `grok` before `muse` and
+  "agy")`, because retained rows from mm 1.11.7 and earlier list `grok` before `muse` and
   `aggregator._token_sources_subsequence` rejects a known name out of order. Peers that predate
   this release show `grok` as an unknown or retired reader in coverage notes but still count the
   family.

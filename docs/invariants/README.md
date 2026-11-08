@@ -26,7 +26,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `config.py` | `config.toml` load/validate/save, `DEFAULT_SOURCES`, exclude patterns, (64A) the five-state `usage_capture_readiness` verdict and its shared `usage_capture_remedy` text |
 | `devices.py` | Device registry, short-id generation and lookup |
 | `events.py` | mm-events log: git-root discovery, git/session walkers, budgets; (61A) shared day scan and publication projection; (64A) size- and origin-guarded `write_push_event` (`EventAppendSkipped`, `GIT_SNAPSHOT_ORIGIN_INIT`) |
-| `rootprobes.py` | (102A) Leaf: the host-record probers for git-root discovery (`RootProber`, `PROBERS`, `installed`, `_discovery_home`): units, stamps and readers for the records that name a working directory (Codex rollouts' `session_meta`, Cursor ACP and Conductor stores, Muse sessions, Antigravity summaries, Paseo's project list, mmm items); the generic index and registry hook live in `events.py` (`_probe_host_records`); standard library + `token_usage` only, never a usage reader |
+| `rootprobes.py` | (102A) Leaf: the host-record probers for git-root discovery (`RootProber`, `PROBERS`, `installed`, `_discovery_home`): units, stamps and readers for the records that name a working directory (Codex rollouts' `session_meta`, Muse sessions, Antigravity summaries, Paseo's project list, mmm items); the generic index and registry hook live in `events.py` (`_probe_host_records`); standard library + `token_usage` only, never a usage reader |
 | `token_usage.py` | Session-jsonl walker, token + skill caches, bundled pricing and local pricing-cache overlay, incremental resume |
 | `host_usage.py` | Shared host-usage reader kit (types, reducer, fingerprint, standing-reason and timing carry, inclusive counter normalization), plus the Muse (`session.jsonl` `model_completed` events, source-gated) and Antigravity (`~/.gemini/antigravity-cli/conversations/<cid>.db` SQLite conversation steps, source-gated) standalone usage readers, strict host-family classifier, and isolated host-token caches |
 | `host_registry.py` | (84A) Host-usage reader registry and dispatch (`HOST_READER_DIAGS`, `HostReaderDiag`, `reader_usage_diag`, `reader_cache_cold`, `warm_host_cache_inline`); resolves reader and diagnostic callables on their owner modules at call time |
@@ -198,8 +198,8 @@ The single `_pytest_refused_roots` inventory protects:
 
 - Four account trees: `.config/mind-meld`, `.local/share/mind-meld`,
   `Library/Mobile Documents/com~apple~CloudDocs/mind-meld`, `Sync/mind-meld`.
-- Nine agent trees: `.claude`, `.codex`, `.grok`, `.gstack`, `.gstack-extend`,
-  `.cursor`, `.local/share/muse`, `.gemini/config`, `.gemini/antigravity-cli`.
+- Eight agent trees: `.claude`, `.codex`, `.grok`, `.gstack`, `.gstack-extend`,
+  `.local/share/muse`, `.gemini/config`, `.gemini/antigravity-cli`.
 - `storage.path`, every explicit `sync.sources[i].path` (including disabled
   sources), and legacy `sync.claude_dir` from the **real account config**
   `<account-home>/.config/mind-meld/config.toml`.

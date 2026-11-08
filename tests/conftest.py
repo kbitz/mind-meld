@@ -85,7 +85,6 @@ def synthetic_account_home(monkeypatch, tmp_path):
         ".grok",
         ".gstack",
         ".gstack-extend",
-        ".cursor",
         ".local/share/muse",
         ".gemini/config",
         ".gemini/antigravity-cli",
@@ -102,7 +101,6 @@ def synthetic_account_home(monkeypatch, tmp_path):
         "grok",
         "gstack",
         "gstack-extend",
-        "cursor",
         "muse",
         "agy-config",
         "agy-cli",
@@ -291,7 +289,7 @@ def _isolate_git_capture_cache(monkeypatch, tmp_path):
             else Path.home() / ".claude" / "projects"
         ),
     )
-    # Track 102A: the host-record probers read Codex, Cursor, Muse, Antigravity,
+    # Track 102A: the host-record probers read Codex, Muse, Antigravity,
     # Paseo and mmm records under this home, exactly as `_claude_projects_dir`
     # does for Claude. HOME is not moved suite-wide (see the isolation fixtures
     # below), so redirect the one patch point instead.

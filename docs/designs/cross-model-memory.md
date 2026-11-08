@@ -41,7 +41,7 @@ Observed on 2026-10-29 with codex-cli 0.164.0 on one Mac (read-only):
 2. **"Search, don't read" pointers.** Static instruction files carry a few
    lines telling each agent where the other agents' memories are and to search
    them, never to load them whole: the owner's shared `AGENTS.md` (read by
-   Codex, Cursor and Antigravity) and `CLAUDE.md`. The owner approves
+   Codex and Antigravity) and `CLAUDE.md`. The owner approves
    installing them once. mm never writes pointers into generated memory files
    (`MEMORY.md`, `memory_summary.md`); their native writers own them.
    - Claude to the others: Claude project memory under
@@ -61,7 +61,7 @@ Observed on 2026-10-29 with codex-cli 0.164.0 on one Mac (read-only):
 
 Out of scope: feeding foreign files into Codex's own consolidation
 (`rollout_summaries/` ingestion), writing into any host's native store,
-syncing a search index, and Cursor's own memory store.
+and syncing a search index.
 
 ## Qualification
 

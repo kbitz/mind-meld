@@ -24,36 +24,29 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
-**Cursor usage reader removed (Track 115A):** mm no longer reads Cursor usage.
-Its private leftovers under `~/.config/mind-meld/` — `cursor-host-tokens.json`,
-`cursor-host-tokens.json.lock`, `cursor-standalone-spool.jsonl` and
-`cursor-standalone-spool.jsonl.merging` — are no longer read and can be deleted.
-Older published `host-usage-snapshot` rows that name `cursor` remain unchanged,
-with no migration; `mm retro-fleet` labels a failed or incomplete Cursor read on
-those rows `unknown/retired reader`. A last attended-attempt record written by
-mm 1.12.21 or older that names Cursor shows `record corrupt — the next attended
-mm push rewrites it` until that push.
-
-**Cursor CLI wrapper, hook and usage consent removed (Track 114A):** `mm cursor-agent`,
-`mm capture-cursor-usage`, and the `cursor` source alias for `mm enable-source` /
-`mm disable-source` are removed, and `mm push`, `mm status` and `mm diag` no longer
-select or report the Cursor usage reader. Scripts and aliases that ran
-`mm cursor-agent ...` must call `cursor-agent ...` directly; the old command now exits 2
-without starting Cursor. On any machine where `mm enable-source cursor` was run earlier,
-delete the `stop` hook entry whose command is `mm capture-cursor-usage` from
-`~/.cursor/hooks.json` and keep your other hooks; until you do, Cursor runs that missing
-command after every turn. Published Cursor rows are not migrated: `retro-fleet` counts
-only each machine's latest snapshot, so a machine with another consented host reader replaces
-its earlier snapshot on the next push that captures host usage, while a machine with no
-consented host readers skips pre-push attended host capture on a converged `mm push` and
-replaces its earlier snapshot with an empty `host-usage-snapshot` (`token_sources: []`) on
-its next push with content/identity changes or `mm autopush` (or until its earlier row ages
-past the 90-day retention window). Usage capture ignores a
-leftover `[retro] cursor_host_usage` key in `~/.config/mind-meld/config.toml`, but while
-it is `true`, git-root discovery still reads Cursor's session metadata
-(`~/.cursor/acp-sessions`) and Conductor's Cursor store, including its `index.db`, until a
-later release removes that prober. Delete the key to stop it: `mm disable-source cursor`
-no longer changes it, even with `--force`.
+**Cursor support removed (Tracks 114A–116A):** `mm cursor-agent`, `mm capture-cursor-usage`,
+the `cursor` source alias for `mm enable-source` / `mm disable-source`, the Cursor usage
+reader, the Cursor git-root discovery prober, and Cursor pricing provenance are removed.
+Scripts and aliases that ran `mm cursor-agent ...` must call `cursor-agent ...` directly;
+the old command now exits 2 without starting Cursor. On any machine where
+`mm enable-source cursor` was run earlier, delete the `stop` hook entry whose command is
+`mm capture-cursor-usage` from `~/.cursor/hooks.json` and keep your other hooks; until you
+do, Cursor runs that missing command after every turn. Leftover private files under
+`~/.config/mind-meld/` (`cursor-host-tokens.json`, `cursor-host-tokens.json.lock`,
+`cursor-standalone-spool.jsonl`, `cursor-standalone-spool.jsonl.merging`) and any
+`[retro] cursor_host_usage` key in `~/.config/mind-meld/config.toml` are ignored and can
+be deleted; git-root discovery drops any cached `cursor` prober state on its next complete
+pass. Older published `host-usage-snapshot` rows that name `cursor` remain unchanged, with
+no migration: `mm retro-fleet` labels a failed or incomplete Cursor read on those rows
+`unknown/retired reader`, and counts retained `grok-4.7-fast` or effort-suffixed tokens in
+the Grok row as unpriced while `grok-4.7` and `grok-4.7-build` stay priced from xAI's
+rates. A machine with another consented host reader replaces its earlier snapshot on the
+next push that captures host usage, while a machine with no consented host readers skips
+pre-push attended host capture on a converged `mm push` and replaces its earlier snapshot
+with an empty `host-usage-snapshot` (`token_sources: []`) on its next push with
+content/identity changes or `mm autopush` (or until its earlier row ages past the 90-day
+retention window). A last attended-attempt record written by mm 1.12.21 or older that names
+Cursor shows `record corrupt — the next attended mm push rewrites it` until that push.
 
 **Grok Build `memory-v2/` sync (Track 111A):** on machines where the `grok` source is
 already enabled, the first `mm push` after upgrading publishes existing topic
@@ -77,8 +70,8 @@ source's `exclude_patterns`; to stop
 Grok sync and usage capture, run `mm disable-source grok`. See
 [Grok Build](#grok-build) for the scope, configuration and handoff walkthrough.
 
-**Git-root discovery finishes across attended pushes (Track 106A):** a cold Codex and
-Cursor index used to need more pushes than discovery's 100 ms attended budget could
+**Git-root discovery finishes across attended pushes (Track 106A):** a cold Codex
+index used to need more pushes than discovery's 100 ms attended budget could
 give, so the retro cursor stayed held. An attended `mm push` now gives discovery
 1,500 ms (inside the capture budget's tail share); autopush keeps 50 ms and init
 keeps 100 ms. Progress persists between pushes and a finished provider is never
@@ -95,7 +88,7 @@ finds for the first time, need `mm recapture <window>`.
 
 **Git-root discovery reads more records (Track 102A):** besides Claude Code's project
 logs, discovery now finds repositories from the working directories recorded by Codex
-(rollouts), Cursor (ACP and Conductor sessions; needs `[retro] cursor_host_usage = true`),
+(rollouts),
 Muse and Antigravity when those providers are enabled, and from Paseo's project list and
 the mmm factory's items when they are installed. `mm diag` names the source of each root.
 After updating, run `mm push` until `mm diag` shows discovery `complete` (see the
@@ -107,7 +100,7 @@ Pins in `[retro] repo_roots` for repositories these sources now name can be remo
 host-usage default (`host_usage_interactive_budget_ms`) rises from 500 ms to 3,000 ms,
 host reads (sweep plus inline warm) now get up to three fifths of `capture_budget_ms`
 (half before), and each later attended reader keeps a reserve of up to 300 ms, so a
-slow Codex read can no longer take Antigravity's, Cursor's or Muse's. Autopush is
+slow Codex read can no longer take Antigravity's or Muse's. Autopush is
 unchanged at 250 ms and never warms. If you pinned `host_usage_interactive_budget_ms`
 in `~/.config/mind-meld/config.toml` as a workaround, remove that line and run
 `mm push`; the measured reader timings fit the new default. Live verification
@@ -1540,9 +1533,9 @@ An agent with no priceable model shows `—`, never a confident `$0`. A priced m
 
 `--dump-host-usage` carries the per-machine inputs (`tokens_by_day` and coverage); bundled rates and any local pricing overrides are not in the dump.
 
-**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-10-27 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); Cursor `PRICING_CURSOR_LAST_UPDATED` = 2026-11-05 ([pricing](https://cursor.com/docs/models-and-pricing), [Grok 4.7](https://cursor.com/docs/models/grok-4-7)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-11-05 ([grok-4.7 rates](https://docs.x.ai/developers/models/grok-4.7), [grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-10-22 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-10-27 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The `/retro-fleet` skill can check vendor docs and supply local overrides before rendering its second pass.
+**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-10-27 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-11-05 ([grok-4.7 rates](https://docs.x.ai/developers/models/grok-4.7), [grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-10-22 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-10-27 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The `/retro-fleet` skill can check vendor docs and supply local overrides before rendering its second pass.
 
-**Pricing refresh and local overrides.** `MM_HEALTH.pricing.refresh_due` asks the skill to check prices when verification is more than seven days behind the report's UTC end date, or an active in-window model is unverified (including a priced family extrapolation). `effective_verified_date` is the newer of the oldest of all six bundled vendor dates and the cache's top-level `verified_date`. `unpriced_model_ids` and `unverified_model_ids` identify the models needing attention; `cached_model_ids` lists active overrides. Zero-volume and cost-excluded models do not trigger a model refresh.
+**Pricing refresh and local overrides.** `MM_HEALTH.pricing.refresh_due` asks the skill to check prices when verification is more than seven days behind the report's UTC end date, or an active in-window model is unverified (including a priced family extrapolation). `effective_verified_date` is the newer of the oldest of all five bundled vendor dates and the cache's top-level `verified_date`. `unpriced_model_ids` and `unverified_model_ids` identify the models needing attention; `cached_model_ids` lists active overrides. Zero-volume and cost-excluded models do not trigger a model refresh.
 
 After checking official vendor docs, supply repeatable overrides in **USD per million tokens**, ordered **input, cache read, cache create, output**:
 
@@ -1554,9 +1547,8 @@ mm retro-fleet 7d --set-model-price 'gpt-6.1-sol=2.00,0.10,2.50,10.00'
 
 Overrides live only on this machine in `~/.config/mind-meld/pricing-cache.json` (override the location with `MM_PRICING_CACHE_PATH`); they never sync. The version-1 JSON cache holds a `models` map of four rates and a `verified_date` per model, plus the optional whole-table `verified_date`. Built-in verified IDs accept an override dated on or after their vendor's bundled date; other valid cached cards take precedence over family fallback and count as verified. Reads create no cache or lock. Explicit writes use a flock and retain at most 128 models, evicting oldest `(verified_date, model_id)` first. Model IDs must match `^[a-z0-9][a-z0-9._:-]{0,127}$`; each rate must be finite and between 0 and 1000 inclusive. Invalid input exits 2; cache write failures exit 1 with a fixing command.
 
-An override for `grok-4.7` also reaches its flat effort IDs (`low`, `medium`,
-`high`, `xhigh`) and `grok-4.7-build`; `grok-4.7-fast` reaches those effort
-IDs' `-fast` variants; `grok-4.6` reaches `grok-4.6-build`. It must pass the
+An override for `grok-4.7` also reaches `grok-4.7-build`; `grok-4.6` reaches
+`grok-4.6-build`. It must pass the
 bundled-date gate for both the alias and its card ID, wherever those IDs are
 verified. An active exact-ID override wins. Other vendors' overrides remain
 exact-ID. `cached_model_ids` lists only cache IDs whose own card is active,
@@ -1620,7 +1612,7 @@ The link is created on `mm init` and re-checked by each push **for agents author
 
 To filter to your own commits only, every machine publishes the identities it commits under (the global `git config user.email`, each captured repository's own `user.email`, your GitHub noreply address and any `[retro].author_emails` entries), and the retro counts commits by the union across the fleet, so a peer needs no entry of its own for an identity another machine publishes. Every push that captures activity, including autopush, publishes the current configured identities without waiting for the seven-day identity-cache refresh. When activity is captured, an attended `mm push` also refreshes that cache early after a change to `[retro].author_emails`, the global `user.email` or the set of discovered repositories; autopush keeps the TTL-only refresh policy. `mm refresh-identity` refreshes the cache on demand. `[retro].author_emails` stays additive: use it for an identity no Git configuration names, such as an ID a hosted service writes as the author email. Commits by `checkpointer@noreply`, or whose subject starts with `checkpoint:`, are never captured or counted, including under `--no-author-filter`, which otherwise renders every fleet commit. To override the events directory (custom `mm-events` path), set `MM_EVENTS_DIR=/path/to/events` before invoking.
 
-**Pin repositories this Mac should capture** with `[retro] repo_roots` in `~/.config/mind-meld/config.toml`. Paths must be absolute (or start with `~`). The setting is per-machine and is not synced. Manual roots are classified before automatic discovery, which reads the logs of every enabled provider (Claude Code, Codex, Cursor with `[retro] cursor_host_usage = true`, Muse and Antigravity) and, when installed, Paseo's project list and the mmm factory's items; `repo_roots` remains for repositories none of those names. Verify with `mm diag`, which labels each root with the source that found it:
+**Pin repositories this Mac should capture** with `[retro] repo_roots` in `~/.config/mind-meld/config.toml`. Paths must be absolute (or start with `~`). The setting is per-machine and is not synced. Manual roots are classified before automatic discovery, which reads the logs of every enabled provider (Claude Code, Codex, Muse and Antigravity) and, when installed, Paseo's project list and the mmm factory's items; `repo_roots` remains for repositories none of those names. Verify with `mm diag`, which labels each root with the source that found it:
 
 ```toml
 [retro]
@@ -2092,7 +2084,7 @@ A final `Pull interrupted [interrupted]` or `Pull failed [unexpected-error]` lin
 and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture).
 Use the [second-Mac publication check](#antigravity-agy); cache success alone does not prove that an agent reached the wire.
 
-**Why is my Grok machine always `>=`?** Grok's usage records cannot recover each request's context tier; no action resolves this. Through Cursor, a Grok 4.7 request above 256k input pays twice the standard rates (Fast: three times); Grok Build's grok-4.6 requests reaching 200k prompt tokens paid twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded, the model has cache writes, or an active local override changes its bundled base rates. Overrides keep the floor and its cause; confirming the bundled base rates preserves the bound when the other conditions allow it. Never average the bound with the floor or present it as the machine's cost. Grok Build's own usage is read from `usage.json` once you run `mm enable-source grok` (see [Grok Build](#grok-build)); Grok models used through Cursor remain supported and priceable.
+**Why is my Grok machine always `>=`?** Grok's usage records cannot recover each request's context tier; no action resolves this. On xAI, a `grok-4.7` or `grok-4.6` request reaching 200k prompt tokens pays twice the base rates for all its tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded, the model has cache writes, or an active local override changes its bundled base rates. Overrides keep the floor and its cause; confirming the bundled base rates preserves the bound when the other conditions allow it. Never average the bound with the floor or present it as the machine's cost. Grok Build's own usage is read from `usage.json` once you run `mm enable-source grok` (see [Grok Build](#grok-build)).
 
 **Why grok-4.6 rates, not grok-build-0.1?** On 2026-09-10 xAI's Build overview identified grok-4.6 as the model powering Build. `grok-4.6-build` is the exact observed CLI id; `grok-build-0.1` is a different model and stays unpriced. Bare `grok-4.6` also stays unpriced until observed. `costUsdTicks` is never decoded.
 
@@ -2118,7 +2110,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means a file could not be applied (decrypt, write, permission) — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; a `corrupt peer manifest(s)` count can also mean this Mac's own manifest vanished during the pull ([waiting content](#waiting-content-is-not-a-failure)). Fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that Mac. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
 
-**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. While the last push recorded discovery `partial`, `mm status` names `mm push` until it advises recovery (for example after three incomplete captures), then names `mm recapture <window>` as the way to finish discovery in one run. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo none of the discovery sources (Claude Code, Codex, Cursor, Muse and Antigravity logs; Paseo; the mmm factory) names, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
+**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. While the last push recorded discovery `partial`, `mm status` names `mm push` until it advises recovery (for example after three incomplete captures), then names `mm recapture <window>` as the way to finish discovery in one run. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo none of the discovery sources (Claude Code, Codex, Muse and Antigravity logs; Paseo; the mmm factory) names, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
 
 **`mm push --verbose` prints `events tail budget exceeded` (or `mm status` reports the events walk exceeded its budget).** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
 

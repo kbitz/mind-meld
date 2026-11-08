@@ -813,18 +813,18 @@ def _grok_row(data: agg.RetroData):
     return next(r for r in rows if r.key == "grok")
 
 
-def test_grok_build_and_cursor_grok_runs_sum_into_one_priced_grok_row():
+def test_grok_build_runs_across_machines_sum_into_one_priced_grok_row():
     counters = _retro_usage(input=10_000, cache_read=20_000, output=1_000)
     assert BUILD in tu.GROK_47_MODEL_IDS
     mixed = _retro_data(
         [
             _host_event("dev-a", BUILD, counters),
-            _host_event("dev-b", "grok-4.7", counters, token_sources=["cursor"]),
+            _host_event("dev-b", "grok-4.7", counters, token_sources=["grok"]),
         ]
     )
     row = _grok_row(mixed)
     assert row.tokens == 2 * sum(counters.values()) and row.machines == 2
-    # Both model ids price from the grok-4.7 card: the same tokens under the Cursor id alone cost
+    # Both model ids price from the grok-4.7 card: the same tokens under grok-4.7 alone cost
     # exactly the same as the Grok Build ones.
     reference = _retro_data(
         [_host_event("dev-a", "grok-4.7", _retro_usage(20_000, 0, 40_000, 2_000))],
@@ -845,7 +845,7 @@ def test_degraded_grok_reader_is_named_in_coverage_notes():
                 "dev-b",
                 "grok-4.7",
                 _retro_usage(input=1000),
-                token_sources=["cursor"],
+                token_sources=["codex"],
                 degraded_sources=["grok"],
             ),
         ]

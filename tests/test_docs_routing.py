@@ -57,7 +57,7 @@ def test_agents_md_preserves_routing_entrypoint_and_parallelism_cap() -> None:
 
 
 def test_agents_md_stays_inside_the_project_doc_budget() -> None:
-    """AGENTS.md loads into every agent session (twice under Cursor, via the
+    """AGENTS.md loads into every agent session (twice via the
     CLAUDE.md link), and Codex reads at most 32 KiB of project docs by default.
     The 49 KB pre-2026-10-06 file lost its Auto Commands section and most of the
     pointer table to that cut. The 2026-10-06 slimming targets 8 KiB; the hard
