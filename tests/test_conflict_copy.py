@@ -578,16 +578,6 @@ class TestMtimeHelpers:
 
 
 class TestConflictDiscovery:
-    def test_canonical_for_conflict_strips_infix(self) -> None:
-        """Converts .sync-conflict-<stuff>.ext back to the original filename."""
-        cpath = Path("/x/user_role.sync-conflict-20260421-143055-a1b2c3d4.md")
-        assert _canonical_for_conflict(cpath).name == "user_role.md"
-
-    def test_canonical_for_conflict_with_random_suffix(self) -> None:
-        """Random 4-char collision suffix is part of the conflict metadata."""
-        cpath = Path("/x/user_role.sync-conflict-20260421-143055-a1b2c3d4-7f9a.md")
-        assert _canonical_for_conflict(cpath).name == "user_role.md"
-
     def test_find_conflict_files_walks_sources(self, tmp_path: Path, monkeypatch) -> None:
         """_find_conflict_files walks configured sources and finds .sync-conflict-* files."""
         src = tmp_path / "src1"
@@ -831,13 +821,6 @@ class TestGcOldConflictFiles:
         assert conflict.exists()
 
 
-class TestCanonicalForConflictEdgeCases:
-    def test_no_infix_returns_path_unchanged(self) -> None:
-        """File without .sync-conflict- in its name is returned as-is."""
-        path = Path("/x/plain.md")
-        assert _canonical_for_conflict(path) == path
-
-
 class TestFindConflictFilesClaudeType:
     def test_walks_claude_projects_subtree(self, tmp_path: Path) -> None:
         """claude-type sources walk projects/*/memory and projects/*/todos."""
@@ -999,19 +982,6 @@ class TestFindConflictFilesIncludeFiles:
                 ]
             }
         }
-
-    def test_top_level_include_file_conflict_is_listed(self, tmp_path: Path) -> None:
-        """Conflict on a top-level include_files entry (e.g. config.yaml) appears
-        in the hits list. Pre-fix this was the 6-of-6 vs 5-of-6 regression."""
-        src = tmp_path / "gstack"
-        src.mkdir()
-        (src / "config.yaml").write_bytes(b"canonical")
-        conflict = src / "config.sync-conflict-20260424-233316-889e42c0.yaml"
-        conflict.write_bytes(b"divergent")
-
-        hits = _find_conflict_files(self._config(src, ["config.yaml"]))
-        hit_paths = [h[1] for h in hits]
-        assert conflict in hit_paths
 
     def test_dotfile_include_file_conflict_is_listed(self, tmp_path: Path) -> None:
         """Conflict on a leading-dot top-level include_files entry (e.g.
@@ -1384,63 +1354,24 @@ class TestResolveInteractiveLoop:
         conflict.write_bytes(b"remote content")  # post-inversion: sidecar = remote
         return canonical, conflict
 
-    def test_keep_remote_promotes_conflict_to_canonical(self, tmp_path: Path, monkeypatch) -> None:
-        """User picks 'r' under post-inversion: sidecar (REMOTE bytes) is
-        renamed over canonical, overwriting local."""
-
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
-
-        _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        assert canonical.exists()
-        assert canonical.read_bytes() == b"remote content", (
-            "canonical now holds remote bytes (sidecar promoted over)"
-        )
-        assert not conflict.exists(), "sidecar should be gone (renamed)"
-
-    def test_keep_local_unlinks_remote_sidecar(self, tmp_path: Path, monkeypatch) -> None:
-        """User picks 'l' under post-inversion: canonical IS local
-        already, so we just drop the remote sidecar."""
-
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
-
-        _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        assert canonical.exists()
-        assert canonical.read_bytes() == b"local content", "canonical untouched — already local"
-        assert not conflict.exists(), "remote sidecar should be unlinked"
-
-    def test_skip_is_noop(self, tmp_path: Path, monkeypatch) -> None:
-        """User picks 's' (default) — both files remain unchanged."""
-
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
-
-        _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        assert canonical.read_bytes() == b"local content"
-        assert conflict.read_bytes() == b"remote content"
-
-    def test_skip_default_on_enter(self, tmp_path: Path, monkeypatch) -> None:
-        """REGRESSION: default key flipped from 'b' to 's' in v0.11.x.
-        Empty input (Enter) maps to the default and leaves both files."""
-
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        # Simulate an empty submission by returning "" -- typer.prompt
-        # would normally substitute the default; we approximate that
-        # by returning the default key directly.
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: kw.get("default", ""))
-
-        _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        assert canonical.read_bytes() == b"local content"
-        assert conflict.read_bytes() == b"remote content"
-
-    @pytest.mark.parametrize("choice", ["b", "both", "back", "browse", "between", "unknown"])
+    @pytest.mark.parametrize(
+        "choice",
+        [
+            "s",  # explicit (s)kip shares the default-or-skip branch
+            "b",
+            "both",
+            "back",
+            "browse",
+            "between",
+            "unknown",
+            # Exact-match dispatch: full words must not prefix-match a key.
+            "lookup",  # not (l)ocal
+            "retry",  # not (r)emote
+            "cancel",  # not the legacy 'c' rejection
+        ],
+    )
     def test_unknown_input_skips_silently(self, tmp_path, monkeypatch, capsys, choice):
-        """The retired keys use ordinary unknown-input handling in 1.0."""
+        """(s)kip, the retired keys and unrecognized words all leave both files."""
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
         _resolve_interactive_loop([("s1", conflict, canonical)])
@@ -1467,20 +1398,12 @@ class TestResolveInteractiveLoop:
 
         assert caps == [80]
 
-    def test_abort_raises_typer_abort(self, tmp_path: Path, monkeypatch) -> None:
-        """User picks 'a' — typer.Abort is raised, subsequent conflicts not processed."""
+    @pytest.mark.parametrize("letter", ["c", "f"])
+    def test_old_letters_rejected_loudly(self, tmp_path: Path, monkeypatch, capsys, letter) -> None:
+        """User pipes legacy 'c' or 'f' — error to stderr, typer.Exit(1), no mutation."""
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "a")
-
-        with pytest.raises(typer.Abort):
-            _resolve_interactive_loop([("s1", conflict, canonical)])
-
-    def test_old_letter_c_rejected_loudly(self, tmp_path: Path, monkeypatch, capsys) -> None:
-        """User pipes legacy 'c' — error to stderr, typer.Exit(1), no mutation."""
-
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: letter)
 
         with pytest.raises(typer.Exit) as exc:
             _resolve_interactive_loop([("s1", conflict, canonical)])
@@ -1493,54 +1416,6 @@ class TestResolveInteractiveLoop:
         assert "no longer accepted" in captured.err
         assert "(l)ocal" in captured.err
         assert "(r)emote" in captured.err
-
-    def test_old_letter_f_rejected_loudly(self, tmp_path: Path, monkeypatch, capsys) -> None:
-        """User pipes legacy 'f' — error to stderr, typer.Exit(1), no mutation."""
-
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "f")
-
-        with pytest.raises(typer.Exit) as exc:
-            _resolve_interactive_loop([("s1", conflict, canonical)])
-        assert exc.value.exit_code == 1
-
-        assert canonical.read_bytes() == b"local content"
-        assert conflict.read_bytes() == b"remote content"
-
-        captured = capsys.readouterr()
-        assert "no longer accepted" in captured.err
-
-    def test_full_word_local_does_not_match_lookup(self, tmp_path: Path, monkeypatch) -> None:
-        """REGRESSION: dispatch must use exact match, not startswith.
-        Pre-fix, typing 'lookup' would silently match (l)ocal."""
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "lookup")
-
-        _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        assert canonical.read_bytes() == b"local content"
-        assert conflict.read_bytes() == b"remote content"
-
-    def test_full_word_remote_does_not_match_retry(self, tmp_path: Path, monkeypatch) -> None:
-        """REGRESSION: dispatch must use exact match, not startswith."""
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "retry")
-
-        _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        assert canonical.read_bytes() == b"local content"
-        assert conflict.read_bytes() == b"remote content"
-
-    def test_cancel_does_not_trigger_legacy_rejection(self, tmp_path: Path, monkeypatch) -> None:
-        """REGRESSION: legacy 'c'/'f' rejection uses exact match —
-        'cancel' must not be misclassified as legacy 'c'."""
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "cancel")
-
-        _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        assert canonical.read_bytes() == b"local content"
-        assert conflict.read_bytes() == b"remote content"
 
     def test_full_word_local_alias_works(self, tmp_path: Path, monkeypatch) -> None:
         """User typing 'local' (the full word) keeps local — same as 'l'."""
@@ -1604,7 +1479,10 @@ class TestResolveInteractiveLoop:
         choices = iter(["r", "l"])
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(choices))
 
-        _resolve_interactive_loop([("s1", conflict1, c1), ("s1", conflict2, c2)])
+        assert _resolve_interactive_loop([("s1", conflict1, c1), ("s1", conflict2, c2)]) == (
+            2,
+            0,
+        )
 
         # First pair: 'r' under post-inversion = sidecar promoted over canonical.
         assert c1.read_bytes() == b"a-remote"
@@ -1623,18 +1501,6 @@ class TestResolveExitCode:
     conflict (so the user can triage everything in one pass), and the command
     exits 1 if anything failed.
     """
-
-    def test_loop_returns_resolved_failed_tuple(self, tmp_path: Path, monkeypatch) -> None:
-        """Happy path: 1 resolved, 0 failed."""
-
-        canonical = tmp_path / "f.md"
-        canonical.write_bytes(b"canon")
-        conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
-        conflict.write_bytes(b"conflict")
-
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
-        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
-        assert (resolved, failed) == (1, 0)
 
     def test_loop_counts_rename_failure(self, tmp_path: Path, monkeypatch) -> None:
         """Promote choice + rename raises OSError -> failed += 1, walk continues."""
@@ -2246,324 +2112,6 @@ class TestResolveLocalMtimeBump:
         pullflow._drain_inline_bumps(None)
         pullflow._drain_inline_bumps({})
 
-    def test_inline_keep_remote_after_keep_local_pops_pending_bump(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """Regression pin (Issue 1 / Codex #1): a later peer's keep-remote on
-        the same file invalidates an earlier peer's pending keep-canonical
-        bump. Without the pop, the end-of-batch drain would bump a file that
-        now holds the later peer's REMOTE bytes — broadcasting remote bytes as
-        locally-authored and silently mtime-skipping the first peer's future
-        divergence.
-
-        Post-restructure: _apply_incoming_file returns the write outcome and
-        _download_and_apply gates invalidation on it via _CANONICAL_WRITE_OUTCOMES.
-        This test exercises the real _apply_incoming_file plus the real gate
-        primitive — the integration is pinned separately by
-        test_download_and_apply_outcome_gate_invalidates_on_canonical_write."""
-        rel = "f.md"
-        local = tmp_path / rel
-        local.write_bytes(b"local content")
-        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
-        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
-
-        bumps: dict[Path, float] = {}
-
-        # Peer A: keep-canonical -> records.
-        monkeypatch.setattr(
-            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
-        )
-        pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote A",
-            remote_info=_remote_info(hashlib.sha256(b"remote A").hexdigest(), peer_dt),
-            remote_device_id="devA1234",
-            interactive_resolve=True,
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        assert local.resolve() in bumps
-
-        # Peer B: keep-remote -> writes canonical, pops the pending bump.
-        monkeypatch.setattr(
-            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-remote", None)
-        )
-        outcome = pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote B",
-            remote_info=_remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt),
-            remote_device_id="devB5678",
-            interactive_resolve=True,
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        assert outcome == "written"
-        assert local.read_bytes() == b"remote B"
-        # The contract: "written" is a canonical-mutating outcome; the gate
-        # in _download_and_apply pops on it.
-        assert outcome in pullflow._CANONICAL_WRITE_OUTCOMES
-        pullflow._invalidate_inline_bump(bumps, local.resolve())
-        assert bumps == {}
-
-    def test_inline_merge_after_keep_local_pops_pending_bump(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """Regression pin (Issue 1 / Codex #1): a later peer's inline merge on
-        the same file invalidates an earlier pending keep-canonical bump —
-        canonical now holds merged bytes, so the bump is void."""
-        rel = "f.md"
-        local = tmp_path / rel
-        local.write_bytes(b"local content")
-        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
-        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
-
-        bumps: dict[Path, float] = {}
-
-        monkeypatch.setattr(
-            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
-        )
-        pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote A",
-            remote_info=_remote_info(hashlib.sha256(b"remote A").hexdigest(), peer_dt),
-            remote_device_id="devA1234",
-            interactive_resolve=True,
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        assert local.resolve() in bumps
-
-        # Peer B: merge -> writes merged bytes to canonical, pops the bump.
-        monkeypatch.setattr(
-            pullflow,
-            "_prompt_conflict_choice",
-            lambda *a, **kw: ("merge", b"merged content"),
-        )
-        outcome = pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote B",
-            remote_info=_remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt),
-            remote_device_id="devB5678",
-            interactive_resolve=True,
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        assert outcome == "merged-via-lcs"
-        assert local.read_bytes() == b"merged content"
-        assert outcome in pullflow._CANONICAL_WRITE_OUTCOMES
-        pullflow._invalidate_inline_bump(bumps, local.resolve())
-        assert bumps == {}
-
-    def test_inline_keep_both_after_keep_local_pops_pending_bump(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """Regression pin (T1-A / Codex #1): a later peer's keep-both on the
-        same file invalidates an earlier pending keep-canonical bump. keep-both
-        leaves the file UNRESOLVED (sidecar on disk); bumping canonical past
-        that peer would silently mtime-resolve a conflict the user explicitly
-        left open."""
-        rel = "f.md"
-        local = tmp_path / rel
-        local.write_bytes(b"local content")
-        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
-        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
-
-        bumps: dict[Path, float] = {}
-
-        monkeypatch.setattr(
-            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
-        )
-        pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote A",
-            remote_info=_remote_info(hashlib.sha256(b"remote A").hexdigest(), peer_dt),
-            remote_device_id="devA1234",
-            interactive_resolve=True,
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        assert local.resolve() in bumps
-
-        # Peer B: keep-both -> falls through to _apply_conflict, pops the bump.
-        monkeypatch.setattr(
-            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-both", None)
-        )
-        outcome = pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote B",
-            remote_info=_remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt),
-            remote_device_id="devB5678",
-            interactive_resolve=True,
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        assert outcome == "conflicted"
-        assert outcome in pullflow._CANONICAL_WRITE_OUTCOMES
-        pullflow._invalidate_inline_bump(bumps, local.resolve())
-        assert bumps == {}
-
-    def test_inline_failed_keep_remote_write_does_not_pop_pending_bump(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """Regression pin (T1-A success-only / Codex #3): if keep-remote's
-        write FAILS, canonical is still local — the prior keep-canonical bump
-        must NOT be popped. The propagation decision stands; popping on a
-        failed write would silently drop it."""
-        rel = "f.md"
-        local = tmp_path / rel
-        local.write_bytes(b"local content")
-        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
-        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
-
-        from mind_meld import cli as cli_module
-
-        bumps: dict[Path, float] = {}
-
-        monkeypatch.setattr(
-            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
-        )
-        pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote A",
-            remote_info=_remote_info(hashlib.sha256(b"remote A").hexdigest(), peer_dt),
-            remote_device_id="devA1234",
-            interactive_resolve=True,
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        assert local.resolve() in bumps
-
-        # Peer B: keep-remote, but the write blows up.
-        def boom(*a, **kw):
-            raise OSError("disk full")
-
-        monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
-        monkeypatch.setattr(
-            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-remote", None)
-        )
-        outcome = pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote B",
-            remote_info=_remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt),
-            remote_device_id="devB5678",
-            interactive_resolve=True,
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        assert outcome == "failed"
-        assert local.read_bytes() == b"local content"  # write failed, local kept
-        # "failed" is intentionally absent from the gate set; the gate would
-        # not pop on this outcome, so the prior keep-canonical decision stands.
-        assert outcome not in pullflow._CANONICAL_WRITE_OUTCOMES
-        assert bumps == {local.resolve(): pytest.approx(peer_dt.timestamp())}  # NOT popped
-
-    def test_inline_failed_merge_write_does_not_pop_pending_bump(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """Regression pin (testing specialist finding): the merge branch has
-        the same success-only invalidation contract as keep-remote. If the
-        merge write fails, canonical is still pure local, the prior keep-
-        canonical decision stands, and the dict entry must be retained.
-
-        The gate test ("failed" not in _CANONICAL_WRITE_OUTCOMES) makes the
-        invariant explicit so a future refactor of the gate set can't silently
-        regress it."""
-        rel = "f.md"
-        local = tmp_path / rel
-        local.write_bytes(b"local content")
-        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
-        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
-
-        from mind_meld import cli as cli_module
-
-        bumps: dict[Path, float] = {}
-
-        monkeypatch.setattr(
-            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
-        )
-        pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote A",
-            remote_info=_remote_info(hashlib.sha256(b"remote A").hexdigest(), peer_dt),
-            remote_device_id="devA1234",
-            interactive_resolve=True,
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        assert local.resolve() in bumps
-
-        def boom(*a, **kw):
-            raise OSError("disk full")
-
-        monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
-        monkeypatch.setattr(
-            pullflow,
-            "_prompt_conflict_choice",
-            lambda *a, **kw: ("merge", b"merged content"),
-        )
-        outcome = pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote B",
-            remote_info=_remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt),
-            remote_device_id="devB5678",
-            interactive_resolve=True,
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        assert outcome == "failed"
-        assert local.read_bytes() == b"local content"
-        assert outcome not in pullflow._CANONICAL_WRITE_OUTCOMES
-        assert bumps == {local.resolve(): pytest.approx(peer_dt.timestamp())}
-
-    def test_apply_write_after_keep_local_pops_pending_bump(self, tmp_path: Path) -> None:
-        """Regression pin (Codex adversarial HIGH): peer A picks keep-canonical
-        on path P (records a bump). The canonical file is deleted before peer B
-        is walked (e.g., user `rm`'d it while the blocking prompt waited, or an
-        autopull race). Peer B's _apply_incoming_file hits the [W] branch
-        (`not local_path.exists()`) and _apply_write writes peer B's REMOTE
-        bytes to canonical, returning "written". Without invalidation on that
-        outcome, the end-of-batch drain would bump peer B's remote bytes as if
-        locally-authored — silent cross-fleet corruption. The outcome-based
-        gate at the _download_and_apply seam invalidates on "written" uniformly,
-        whether it came from keep-remote OR the file-vanished _apply_write path."""
-        rel = "f.md"
-        local = tmp_path / rel
-        local.write_bytes(b"local content")
-        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
-        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
-        info = _remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt)
-
-        bumps: dict[Path, float] = {local.resolve(): peer_dt.timestamp()}
-        # File vanishes between peer A's prompt and peer B's apply.
-        local.unlink()
-
-        outcome = pullflow._apply_incoming_file(
-            local_path=local,
-            rel_path=rel,
-            plain_data=b"remote B",
-            remote_info=info,
-            remote_device_id="devB5678",
-            pending_inline_bumps=bumps,
-            resolved_local=local.resolve(),
-        )
-        # _apply_write fired (local was missing).
-        assert outcome == "written"
-        assert local.read_bytes() == b"remote B"
-        # "written" is in the gate set regardless of which branch produced it.
-        assert outcome in pullflow._CANONICAL_WRITE_OUTCOMES
-        pullflow._invalidate_inline_bump(bumps, local.resolve())
-        assert bumps == {}
-
     def test_pull_core_abort_skips_end_of_batch_drain(self, tmp_path: Path, monkeypatch) -> None:
         """Regression pin (T2-A / Codex #6): a `typer.Abort()` raised during
         the pull walk propagates past the end-of-batch drain (which lives
@@ -2870,61 +2418,24 @@ class TestParseConflictDeviceShort:
     the optional 4-char same-second random suffix, plus extension stripping.
     """
 
-    def test_post_inversion_extracts_device(self) -> None:
+    @pytest.mark.parametrize(
+        "name,device",
+        [
+            ("user.sync-conflict-20260421-143055-devA1234.md", "devA1234"),
+            ("role.sync-conflict-v0-20260420-120000-devA1234.md", "devA1234"),  # pre-inversion
+            # Same-second collision suffix `-abcd`: device is the segment before it.
+            ("user.sync-conflict-20260421-143055-devA1234-abcd.md", "devA1234"),
+            ("notes.draft.sync-conflict-20260421-143055-devA1234.md", "devA1234"),
+            ("user.sync-conflict-20260903-151747-v1-deadbeef.md", "deadbeef"),
+            ("user.sync-conflict-20260903-151747-v1-deadbeef-ab12.md", "deadbeef"),
+            ("plain.md", None),
+            ("user.sync-conflict-log.md", None),
+        ],
+    )
+    def test_extracts_device(self, name, device) -> None:
         from mind_meld.manifest import parse_conflict_device_short
 
-        assert (
-            parse_conflict_device_short("user.sync-conflict-20260421-143055-devA1234.md")
-            == "devA1234"
-        )
-
-    def test_pre_inversion_v0_prefix_extracts_device(self) -> None:
-        from mind_meld.manifest import parse_conflict_device_short
-
-        assert (
-            parse_conflict_device_short("role.sync-conflict-v0-20260420-120000-devA1234.md")
-            == "devA1234"
-        )
-
-    def test_random_suffix_dropped_in_favor_of_device(self) -> None:
-        from mind_meld.manifest import parse_conflict_device_short
-
-        # Same-second collision suffix `-abcd` (4 hex chars). Device stays
-        # as the segment before the suffix.
-        assert (
-            parse_conflict_device_short("user.sync-conflict-20260421-143055-devA1234-abcd.md")
-            == "devA1234"
-        )
-
-    def test_non_conflict_filename_returns_none(self) -> None:
-        from mind_meld.manifest import parse_conflict_device_short
-
-        assert parse_conflict_device_short("plain.md") is None
-        assert parse_conflict_device_short("user.sync-conflict-log.md") is None
-
-    def test_multidot_stem_preserves_device(self) -> None:
-        from mind_meld.manifest import parse_conflict_device_short
-
-        assert (
-            parse_conflict_device_short("notes.draft.sync-conflict-20260421-143055-devA1234.md")
-            == "devA1234"
-        )
-
-    def test_v1_era_extracts_device(self) -> None:
-        from mind_meld.manifest import parse_conflict_device_short
-
-        assert (
-            parse_conflict_device_short("user.sync-conflict-20260903-151747-v1-deadbeef.md")
-            == "deadbeef"
-        )
-
-    def test_v1_era_with_rand4_extracts_device(self) -> None:
-        from mind_meld.manifest import parse_conflict_device_short
-
-        assert (
-            parse_conflict_device_short("user.sync-conflict-20260903-151747-v1-deadbeef-ab12.md")
-            == "deadbeef"
-        )
+        assert parse_conflict_device_short(name) == device
 
 
 # ── Component 1: never default Enter to (m)erge ──────────────────────
