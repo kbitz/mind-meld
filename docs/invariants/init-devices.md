@@ -3,7 +3,8 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `_ensure_device_registered` / `init` / `_attended_pull` / `_do_gc`
-- `src/mind_meld/initflow.py` — `init` / `_register_and_save` / `_init_storage_guard` / `_probe_storage_occupancy` / `_classify_folder` / `_bootstrap_new_fleet` / `_verify_join` / `_write_stignore` / `_stop_for_missing_header` / `_refuse_new_fleet`
+- `src/mind_meld/initflow.py` — `init` / `_SyncthingSetup` / `_syncthing_start_command` / `_check_syncthing` / `_save_syncthing_record_or_stop` / `_require_syncthing` / `_is_inside_stock_default_folder` / `_managed_new_fleet_folder` / `_has_valid_device_id_check_digits` / `_read_fleet_device_id` / `_managed_join` / `_register_and_save` / `_init_storage_guard` / `_probe_storage_occupancy` / `_classify_folder` / `_bootstrap_new_fleet` / `_verify_join` / `_write_stignore` / `_stop_for_missing_header` / `_refuse_new_fleet`
+- `src/mind_meld/config.py` — `SYNCTHING_FOLDER_ID` / `SYNCTHING_FOLDER_LABEL` / `syncthing_record_path` / `save_syncthing_record` / `load_syncthing_record`
 - `src/mind_meld/crypto.py` — `get_passphrase` / `_non_interactive_keyring_read` / `_read_secret_service` / `_secret_service_state` / `store_passphrase_in_keyring`
 - `src/mind_meld/errors.py` — `KeyringUnavailableError`
 - `src/mind_meld/devices.py` — `register_device` / `update_last_seen` / `list_devices` / `inventory_devices` / `_devices_write_lock`
@@ -23,6 +24,28 @@ Plain `mm init` is the join. A `missing` fetch (absent folder, bookkeeping only,
 
 A crypto session on a folder with no header (`core._init_crypto_session`) says to wait for the folder to finish syncing, to restore the file from another machine if it never arrives, and never to reinitialize. It names no sync tool, includes the storage path, and does not contain `mm init`, so `_sync_failure` ends with `Run: mm diag`. The corrupt-header messages use the same wording.
 
+## Syncthing setup in init (Track 118A, load-bearing)
+
+`initflow.init` calls `_check_syncthing()` immediately after the overwrite confirm and the `Mind Meld v… — init` banner, before the storage-path prompt. `_check_syncthing()` sends only GET requests and writes nothing. It calls `config.load_syncthing_record()` (`~/.config/mind-meld/syncthing.toml`, `[syncthing] managed_device_id`, derived from `config.CONFIG_PATH` at call time and written via `save_config`) and `syncthing.classify_config(sanitize=safe_terminal_str)`:
+
+| Result | Outcome |
+|---|---|
+| `reach` is `not-found` or `unreachable` | stop (exit 1): Syncthing is not running; nothing was written; `Run: <start command>` (`brew services start syncthing` on `darwin`, `systemctl --user enable --now syncthing.service` otherwise) |
+| `reach == "ok"`, `source == "rest"`, record equals `local_device_id` | managed (`ManagedRecord(device_id=recorded_id)`), `persisted=True` (mm's own earlier writes make the configuration read as pre-existing on a rerun) |
+| `reach == "ok"`, `source == "rest"`, `state == "default"`, no matching record | managed via `check.managed_record()`, `persisted=False` |
+| `reach == "ok"`, `state == "pre-existing"`, no matching record (including a stale record for another Syncthing device) | owner-managed (`record=None`): print `Syncthing on this machine already has its own configuration, so mm changes nothing in it. Set it up as README "Configuring Syncthing yourself" describes.` |
+| `reach == "address-unsupported"` and offline `state == "pre-existing"` | owner-managed (`record=None`), same line |
+| anything else (`unknown`, `unauthorized`, `error`, `config-unreadable`, offline default behind an unsupported address) | stop (exit 1): `init: could not read Syncthing's configuration (<reach>/<cause>)... Nothing was written. Run: mm diag` |
+| `load_syncthing_record` raises `ConfigError` | stop (exit 1) with its message plus `Nothing was written. Fix or remove that file, then run 'mm init' again.` |
+
+**Order of writes:**
+- **Managed `--new-fleet`:** check (GET only) → storage path → folder/header reads → device name and passphrase → record (`save_syncthing_record`) → Default Folder removal (`remove_default_folder`, nested inside `stock_default_folder_path()` only) → mm's folder (`create_folder("mind-meld", "Mind Meld", full_path)`) → `.stignore` → key header (`mm-crypto-init`) → sources → device entry → `config.toml` → keyring → prints this machine's Syncthing device ID.
+- **Managed join (`mm init`):** check (GET only) → storage path → folder read → (unless `syncthing.read_state(full_path)` already reports `state == "ok"`, `folder_id == "mind-meld"` and `folder_path == full_path.expanduser().resolve()`) device-ID prompt and validation (`is_device_id`, Luhn-32 check digits per 14-char group via `syncthing._luhn32`, not `local_id`) → record (`save_syncthing_record`) → `add_device` → `mark_introducer` → prints own device ID → Default Folder removal (nested only) → `accept_folder_offer` or the approval stop (`mm devices approve <local_id>`) → folder re-read → header probe (missing: stop with `accepted=True`) → re-init guard → device name and passphrase → verify (`_verify_join`) → `.stignore` (`_write_stignore`) → sources → device entry → `config.toml` → keyring → pull (`cli._attended_pull`).
+- **Owner-managed (`setup.record is None`):** check → guide line → today's order unchanged.
+
+The missing-header stop on the managed join follows Syncthing writes and `syncthing.toml`, and still writes no mm storage folder, `config.toml`, device entry, keyring item, key header (`mm-crypto-init`) or `.stignore`.
+
+**Pytest default stub:** `tests/conftest.py` defines an autouse fixture `_default_init_syncthing` that patches `initflow._check_syncthing` to return a silent owner-managed `_SyncthingSetup(record=None, local_id=None, persisted=False)`. Opt out in a test by requesting the `fake_syncthing` fixture or the no-op `real_syncthing_gate` fixture.
 
 ---
 

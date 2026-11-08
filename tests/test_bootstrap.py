@@ -109,6 +109,38 @@ done < "{serve}"
 """
         _make_fake_script(self.sysbin / "curl", "curl", logic)
 
+    def install_venv_python(self) -> None:
+        venv_bin = self.venvs / "mind-meld" / "bin"
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        _make_fake_script(
+            venv_bin / "python",
+            "venv-python",
+            """\
+if [ "${MM_TEST_SYNCTHING_CHECK_EXIT:-0}" != "0" ]; then
+  exit "${MM_TEST_SYNCTHING_CHECK_EXIT}"
+fi
+printf '%s\\n' "${MM_TEST_SYNCTHING_CHECK:-pre-existing ok}"
+exit 0
+""",
+        )
+
+    def install_systemctl(self) -> None:
+        _make_fake_script(
+            self.sysbin / "systemctl",
+            "systemctl",
+            """\
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "enable" ] \\
+   && [ "${3:-}" = "--now" ] && [ "${4:-}" = "syncthing.service" ]; then
+  exit "${MM_TEST_START_FAIL:-0}"
+fi
+exit 2
+""",
+        )
+
+    def install_pgrep(self, *, found: bool) -> None:
+        code = 0 if found else 1
+        _make_fake_script(self.sysbin / "pgrep", "pgrep", f"exit {code}\n")
+
     def install_pipx(self, directory: Path) -> None:
         _make_fake_script(
             directory / "pipx",
@@ -133,6 +165,21 @@ case "${1:-}" in
     mkdir -p "$_venv_bin"
     printf '#!/bin/sh\\nprintf "mm\\\\n" >> "$MM_TEST_CALL_LOG"\\n' > "$_venv_bin/mm"
     chmod +x "$_venv_bin/mm"
+    cat > "$_venv_bin/python" << 'EOF_VENV_PY'
+#!/bin/sh
+set -eu
+printf '%s' "venv-python" >> "$MM_TEST_CALL_LOG"
+for _arg in "$@"; do
+  printf '\t%s' "$_arg" >> "$MM_TEST_CALL_LOG"
+done
+printf '\n' >> "$MM_TEST_CALL_LOG"
+if [ "${MM_TEST_SYNCTHING_CHECK_EXIT:-0}" != "0" ]; then
+  exit "${MM_TEST_SYNCTHING_CHECK_EXIT}"
+fi
+printf '%s\n' "${MM_TEST_SYNCTHING_CHECK:-pre-existing ok}"
+exit 0
+EOF_VENV_PY
+    chmod +x "$_venv_bin/python"
     # Like pipx 1.18: an existing file at the app path is left in place and
     # install still exits 0, unless --force replaces it.
     if [ "${2:-}" = "--force" ] || ! [ -e "$MM_TEST_PIPX_BIN/mm" ]; then
@@ -173,6 +220,9 @@ copy_exec() {{
   done < "$1" > "$2"
   chmod +x "$2"
 }}
+if [ "${{1:-}}" = "services" ] && [ "${{2:-}}" = "start" ] && [ "${{3:-}}" = "syncthing" ]; then
+  exit "${{MM_TEST_START_FAIL:-0}}"
+fi
 if [ "${{1:-}}" = "install" ]; then
   if [ "${{MM_TEST_PKG_FAIL:-0}}" = "1" ]; then
     exit 1
@@ -340,7 +390,7 @@ def harness(tmp_path: Path) -> BootstrapHarness:
     for directory in (home, brewbin, shadow, pipxbin, sysbin, tools, venvs):
         directory.mkdir(parents=True, exist_ok=True)
 
-    for tool_name in ("sed", "id", "chmod", "ln", "mkdir"):
+    for tool_name in ("sed", "id", "chmod", "ln", "mkdir", "cat"):
         resolved = shutil.which(tool_name)
         assert resolved, f"required tool {tool_name} not found"
         (tools / tool_name).symlink_to(resolved)
@@ -359,6 +409,7 @@ def harness(tmp_path: Path) -> BootstrapHarness:
         os_release=tmp_path / "os-release",
     )
     h.install_sudo()
+    h.install_systemctl()
     return h
 
 
@@ -433,12 +484,6 @@ class TestBootstrapMacOS:
             "Python 3.13, Syncthing 2.1.7 and mm are ready."
         )
         assert expected_ready in proc.stdout
-        assert (
-            "pairs no machine, shares no folder and writes no Syncthing configuration"
-            in proc.stdout
-        )
-        assert "brew services start syncthing" in proc.stdout
-        assert "~/Sync/mind-meld" in proc.stdout
         assert "mm init" in _last_line(proc.stdout)
 
     def test_macos_rerun_changes_nothing(self, harness: BootstrapHarness) -> None:
@@ -518,7 +563,6 @@ class TestBootstrapArch:
         ]
         pipx_install_calls = [row[1:] for row in calls if row[0] == "pipx" and row[1] == "install"]
         assert pipx_install_calls == [["install", upgrade.INSTALL_SPEC]]
-        assert "systemctl --user enable --now syncthing.service" in proc.stdout
         assert "mm init" in _last_line(proc.stdout)
 
     def test_arch_installs_only_missing_packages(self, harness: BootstrapHarness) -> None:
@@ -772,3 +816,153 @@ class TestBootstrapDownload:
         )
         assert harness.calls() == [], proc.stdout
         assert "bootstrap:" not in proc.stdout
+
+
+class TestBootstrapSyncthingStart118A:
+    def _ready_macos(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.1.7")
+        harness.install_pgrep(found=False)
+
+    def _ready_arch(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_pacman()
+        harness.install_python(harness.sysbin, "3.13.2")
+        harness.install_pipx(harness.sysbin)
+        harness.install_syncthing(harness.sysbin, "2.1.7")
+        harness.install_git(harness.sysbin)
+        harness.install_pgrep(found=False)
+
+    @pytest.mark.parametrize("check_val", ["default not-found", "no-config not-found"])
+    def test_macos_default_or_no_config_not_running_starts_syncthing(
+        self, harness: BootstrapHarness, check_val: str
+    ) -> None:
+        self._ready_macos(harness)
+        proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": check_val})
+        assert proc.returncode == 0, proc.stdout
+        brew_starts = [
+            row for row in harness.calls() if row == ["brew", "services", "start", "syncthing"]
+        ]
+        assert len(brew_starts) == 1
+        assert (
+            "started Syncthing and set it to start at login (brew services start syncthing)."
+            in proc.stdout
+        )
+        assert (
+            "pairs no machine, shares no folder and writes no Syncthing configuration"
+            not in proc.stdout
+        )
+        last = _last_line(proc.stdout)
+        assert "mm init --new-fleet" in last and "mm init" in last
+
+    @pytest.mark.parametrize("check_val", ["default unreachable", "no-config not-found"])
+    def test_arch_default_or_no_config_not_running_starts_syncthing(
+        self, harness: BootstrapHarness, check_val: str
+    ) -> None:
+        self._ready_arch(harness)
+        proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": check_val})
+        assert proc.returncode == 0, proc.stdout
+        systemctl_calls = [row for row in harness.calls() if row[0] == "systemctl"]
+        assert systemctl_calls == [["systemctl", "--user", "enable", "--now", "syncthing.service"]]
+        assert (
+            "started Syncthing and set it to start at login "
+            "(systemctl --user enable --now syncthing.service)." in proc.stdout
+        )
+        last = _last_line(proc.stdout)
+        assert "mm init --new-fleet" in last and "mm init" in last
+
+    @pytest.mark.parametrize("check_val", ["pre-existing ok", "pre-existing unreachable"])
+    def test_pre_existing_does_not_start_and_names_guide(
+        self, harness: BootstrapHarness, check_val: str
+    ) -> None:
+        self._ready_macos(harness)
+        proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": check_val})
+        assert proc.returncode == 0, proc.stdout
+        assert not [
+            row for row in harness.calls() if row == ["brew", "services", "start", "syncthing"]
+        ]
+        assert (
+            "Syncthing already has its own configuration, so this script leaves it alone; "
+            'see README "Configuring Syncthing yourself".' in proc.stdout
+        )
+        last = _last_line(proc.stdout)
+        assert "mm init --new-fleet" in last and "mm init" in last
+
+    @pytest.mark.parametrize(
+        ("check_val", "pgrep_found"),
+        [
+            ("default ok", False),
+            ("default unauthorized", False),
+            ("default error", False),
+            ("default not-found", True),
+        ],
+    )
+    def test_already_running_via_api_or_pgrep_never_starts_a_second_instance(
+        self, harness: BootstrapHarness, check_val: str, pgrep_found: bool
+    ) -> None:
+        self._ready_macos(harness)
+        harness.install_pgrep(found=pgrep_found)
+        proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": check_val})
+        assert proc.returncode == 0, proc.stdout
+        assert not [
+            row for row in harness.calls() if row == ["brew", "services", "start", "syncthing"]
+        ]
+        assert "Syncthing is already running; not starting another." in proc.stdout
+        last = _last_line(proc.stdout)
+        assert "mm init --new-fleet" in last and "mm init" in last
+
+    @pytest.mark.parametrize(
+        ("platform_name", "expected_cmd"),
+        [
+            ("Darwin", "brew services start syncthing"),
+            ("Linux", "systemctl --user enable --now syncthing.service"),
+        ],
+    )
+    def test_failed_start_stops_with_start_command(
+        self, harness: BootstrapHarness, platform_name: str, expected_cmd: str
+    ) -> None:
+        if platform_name == "Darwin":
+            self._ready_macos(harness)
+        else:
+            self._ready_arch(harness)
+        proc = harness.run(
+            extra_env={
+                "MM_TEST_SYNCTHING_CHECK": "default not-found",
+                "MM_TEST_START_FAIL": "1",
+            }
+        )
+        assert proc.returncode == 1, proc.stdout
+        last = _last_line(proc.stdout)
+        assert last.endswith(f"{expected_cmd} failed. Run: {expected_cmd}")
+
+    @pytest.mark.parametrize(
+        ("check_val", "check_exit"),
+        [
+            ("unknown error", "0"),
+            ("", "1"),
+        ],
+    )
+    def test_check_failure_does_not_start_and_still_exits_zero(
+        self, harness: BootstrapHarness, check_val: str, check_exit: str
+    ) -> None:
+        self._ready_macos(harness)
+        proc = harness.run(
+            extra_env={
+                "MM_TEST_SYNCTHING_CHECK": check_val,
+                "MM_TEST_SYNCTHING_CHECK_EXIT": check_exit,
+            }
+        )
+        assert proc.returncode == 0, proc.stdout
+        assert not [
+            row for row in harness.calls() if row == ["brew", "services", "start", "syncthing"]
+        ]
+        assert (
+            "could not check Syncthing's configuration, so it was not started; "
+            "mm diag shows why." in proc.stdout
+        )
+        last = _last_line(proc.stdout)
+        assert "mm init --new-fleet" in last and "mm init" in last
