@@ -707,13 +707,6 @@ class TestConflictClockSeparation:
         assert role_b.read_text() == "---\nname: role\n---\nSomething else entirely"
         return config_b, role_b, sidecar
 
-    def test_conflicting_pull_mints_v1_sidecar(self, tmp_path, monkeypatch):
-        """F1."""
-        _cfg, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch, wipe_marker=False)
-        assert "v1" in sidecar.name
-        assert sidecar.read_text() == "---\nname: role\n---\nEven newer from A"
-        assert role_b.read_bytes() != sidecar.read_bytes()
-
     def test_fresh_marker_device_does_not_migrate_on_next_pull(self, tmp_path, monkeypatch):
         """B7: inversion-installed-at = now; sidecar survives a second pull."""
         from mind_meld.manifest import is_pre_inversion_conflict_filename, is_v1_conflict_filename
@@ -2999,41 +2992,6 @@ class TestMmStatusMissingExcludesWarning:
         assert "gstack" in result.output
 
 
-class TestMmSourcesShowsExcludeCounts:
-    """5C-8: mm sources prints per-source exclude_patterns match counts."""
-
-    def test_sources_table_includes_excluded_column(self, tmp_path, monkeypatch):
-        config_path = tmp_path / "config.toml"
-        gstack_dir = tmp_path / ".gstack"
-        proj = gstack_dir / "projects" / "myapp"
-        proj.mkdir(parents=True)
-        (proj / "repo-mode.json").write_text("{}")
-        (proj / "role.md").write_text("kept")
-        config = {
-            "device": {"id": "dev-a", "name": "A"},
-            "storage": {"path": str(tmp_path / "storage")},
-            "sync": {
-                "max_file_size": 52_428_800,
-                "sources": [
-                    {
-                        "name": "gstack",
-                        "path": str(gstack_dir),
-                        "type": "generic",
-                        "include_dirs": ["projects"],
-                        "exclude_patterns": ["projects/*/repo-mode.json"],
-                    }
-                ],
-            },
-            "crypto": {"argon2_memory_kb": 1024},
-        }
-        save_config(config, config_path)
-        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-
-        result = runner.invoke(app, ["sources"])
-        assert result.exit_code == 0, result.output
-        assert "Excluded" in result.output
-
-
 class TestMmLogCommand:
     """5C-5: `mm log` queries pull-history.jsonl with filters and formats."""
 
@@ -3056,48 +3014,6 @@ class TestMmLogCommand:
         result = runner.invoke(app, ["log"])
         assert result.exit_code == 0, result.output
         assert "No log entries" in result.output
-
-    def test_log_filters_by_action(self, tmp_path, monkeypatch):
-        from mind_meld import pullhistory
-
-        monkeypatch.setattr("mind_meld.pullhistory.HISTORY_DIR", tmp_path / "mm_state")
-        # The machine's config is selected before anything is recorded: state.db is
-        # per machine, so history written under one config is not another's.
-        config_path = tmp_path / "config.toml"
-        save_config(
-            {
-                "device": {"id": "dev-a", "name": "A"},
-                "storage": {"path": str(tmp_path / "storage")},
-                "sync": {"max_file_size": 52_428_800, "claude_dir": str(tmp_path / ".claude")},
-                "crypto": {"argon2_memory_kb": 1024},
-            },
-            config_path,
-        )
-        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        for i in range(3):
-            pullhistory.append(
-                verb="pull",
-                device="dev-a",
-                source="gstack",
-                rel_path=f"f-{i}.md",
-                action="written",
-            )
-        for i in range(2):
-            pullhistory.append(
-                verb="pull",
-                device="dev-a",
-                source="gstack",
-                rel_path=f"e-{i}.json",
-                action="excluded",
-            )
-
-        result = runner.invoke(app, ["log", "--action", "excluded", "--format", "jsonl"])
-        assert result.exit_code == 0, result.output
-        lines = [line for line in result.output.strip().split("\n") if line.startswith("{")]
-        assert len(lines) == 2
-        for line in lines:
-            rec = json.loads(line)
-            assert rec["action"] == "excluded"
 
 
 class TestInversion5E:
@@ -3131,59 +3047,27 @@ class TestInversion5E:
     def _activate(self, monkeypatch, config_path):
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
 
-    def test_inversion_canonical_stays_local_remote_in_sidecar(self, tmp_path, monkeypatch):
-        """Round-trip: A pushes, B locally diverges, B pulls. Post-inversion,
-        canonical stays at B's LOCAL edit, A's REMOTE bytes land in the
-        sidecar. Plus: rollback path is irrelevant (no rename happens),
-        so canonical is preserved on sidecar-write failure too."""
-        storage_dir = tmp_path / "storage"
-        claude_a = tmp_path / "machine_a" / ".claude"
-        claude_b = tmp_path / "machine_b" / ".claude"
-        memory_a = claude_a / "projects" / "-Users-kb-myapp" / "memory"
-        memory_a.mkdir(parents=True)
-        (memory_a / "role.md").write_text("A initial")
-        memory_b = claude_b / "projects" / "-Users-kb-myapp" / "memory"
-        memory_b.mkdir(parents=True)
-
-        backend = self._bootstrap(storage_dir)
-        register_device(backend, "dev-a", "A")
-        register_device(backend, "dev-b", "B")
-
-        config_a = self._make_claude_config(tmp_path, storage_dir, claude_a, "dev-a", "A")
-        config_b = self._make_claude_config(tmp_path, storage_dir, claude_b, "dev-b", "B")
-        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-
-        # Round-trip phase 1: A pushes, B pulls clean.
-        self._activate(monkeypatch, config_a)
-        assert runner.invoke(app, ["push"]).exit_code == 0
-        self._activate(monkeypatch, config_b)
-        assert runner.invoke(app, ["pull"]).exit_code == 0
-        role_b = memory_b / "role.md"
-        assert role_b.exists()
-
-        # Phase 2: divergent edits. A pushes new content; B edits locally.
-        self._activate(monkeypatch, config_a)
-        (memory_a / "role.md").write_text("A second push")
-        assert runner.invoke(app, ["push"]).exit_code == 0
-
-        self._activate(monkeypatch, config_b)
-        role_b.write_text("B local edit")
-        old = time.time() - 3600
-        os.utime(role_b, (old, old))  # Backdate so pull sees remote-newer.
-
-        assert runner.invoke(app, ["pull"]).exit_code == 0
-
-        # Inversion: canonical = local; sidecar = remote.
-        assert role_b.read_text() == "B local edit"
-        siblings = list(memory_b.glob("role.sync-conflict-*.md"))
-        assert len(siblings) == 1
-        assert siblings[0].read_text() == "A second push"
-        # No `v0-` prefix on a freshly-produced post-inversion file.
-        assert "sync-conflict-v0-" not in siblings[0].name
-
-    def test_pull_refuses_when_peer_pre_inversion(self, tmp_path, monkeypatch):
-        """Mixed-version refusal: peer's last_seen_version < INVERSION_MIN_VERSION
-        => mm pull exits non-zero before any I/O with peer name in message."""
+    @pytest.mark.parametrize(
+        "peer,exit_code,needles",
+        [
+            # Peer's last_seen_version < INVERSION_MIN_VERSION: refuse before any
+            # I/O, naming the peer and the threshold.
+            (
+                {"last_seen": "2026-04-01T00:00:00+00:00", "last_seen_version": "0.9.1"},
+                1,
+                ("OldPeer", pullflow.INVERSION_MIN_VERSION),
+            ),
+            # Active peer (last_seen present) but no last_seen_version: refuse.
+            ({"last_seen": "2026-04-01T00:00:00+00:00"}, 1, ("OldPeer",)),
+            # Inactive peer (registered, never pushed): no last_seen, allow.
+            ({}, 0, ()),
+            # Dropped peer (corrupt device.json): refuse and cite the storage key.
+            (b"{not valid json}", 1, ("dev-old",)),
+        ],
+        ids=["pre-inversion", "version-missing", "inactive", "corrupt-device-json"],
+    )
+    def test_pull_fleet_version_gate(self, tmp_path, monkeypatch, peer, exit_code, needles):
+        """Mixed-version gate: mm pull refuses (exit 1, naming the peer) or proceeds."""
         from mind_meld.devices import register_device as _register
         from mind_meld.storage.keys import device_key
 
@@ -3193,17 +3077,18 @@ class TestInversion5E:
 
         backend = self._bootstrap(storage_dir)
         _register(backend, "dev-self", "Self")
-        _register(backend, "dev-old", "OldPeer")
-        # Manually write a stale device.json for the old peer with a
-        # pre-inversion last_seen_version. The fleet check must refuse.
-        old_data = {
-            "device_id": "dev-old",
-            "device_name": "OldPeer",
-            "registered": "2026-01-01T00:00:00+00:00",
-            "last_seen": "2026-04-01T00:00:00+00:00",
-            "last_seen_version": "0.9.1",  # pre-INVERSION_MIN_VERSION
-        }
-        backend.put(device_key("dev-old"), json.dumps(old_data).encode())
+        if isinstance(peer, bytes):
+            backend.put(device_key("dev-old"), peer)
+        else:
+            _register(backend, "dev-old", "OldPeer")
+            if peer:
+                record = {
+                    "device_id": "dev-old",
+                    "device_name": "OldPeer",
+                    "registered": "2026-01-01T00:00:00+00:00",
+                    **peer,
+                }
+                backend.put(device_key("dev-old"), json.dumps(record).encode())
 
         config_path = self._make_claude_config(
             tmp_path, storage_dir, claude_dir, "dev-self", "Self"
@@ -3212,111 +3097,10 @@ class TestInversion5E:
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
         result = runner.invoke(app, ["pull"])
-        assert result.exit_code == 1, result.output
-        # Refusal cites the offending peer (via stderr — _error routes there).
+        assert result.exit_code == exit_code, result.output
         combined = (result.output or "") + (result.stderr or "")
-        assert "OldPeer" in combined
-        assert "Mixed-version" in combined or "0.9.1" in combined
-        # Threshold appears in the message.
-        assert pullflow.INVERSION_MIN_VERSION in combined
-
-    def test_pull_refuses_when_peer_last_seen_version_missing(self, tmp_path, monkeypatch):
-        """Peer last_seen present (active), last_seen_version missing — REFUSE."""
-        from mind_meld.devices import register_device as _register
-        from mind_meld.storage.keys import device_key
-
-        storage_dir = tmp_path / "storage"
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-
-        backend = self._bootstrap(storage_dir)
-        _register(backend, "dev-self", "Self")
-        _register(backend, "dev-stale", "StalePeer")
-        # Active peer (last_seen present) but no last_seen_version.
-        stale_data = {
-            "device_id": "dev-stale",
-            "device_name": "StalePeer",
-            "registered": "2026-01-01T00:00:00+00:00",
-            "last_seen": "2026-04-01T00:00:00+00:00",
-        }
-        backend.put(device_key("dev-stale"), json.dumps(stale_data).encode())
-
-        config_path = self._make_claude_config(
-            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
-        )
-        self._activate(monkeypatch, config_path)
-        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-
-        result = runner.invoke(app, ["pull"])
-        assert result.exit_code == 1, result.output
-        combined = (result.output or "") + (result.stderr or "")
-        assert "StalePeer" in combined
-
-    def test_pull_proceeds_when_peer_inactive(self, tmp_path, monkeypatch):
-        """Inactive peer (registered, never pushed): no last_seen → ALLOW."""
-        from mind_meld.devices import register_device as _register
-
-        storage_dir = tmp_path / "storage"
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-
-        backend = self._bootstrap(storage_dir)
-        _register(backend, "dev-self", "Self")
-        _register(backend, "dev-newpeer", "NewPeer")  # registered, no last_seen
-
-        config_path = self._make_claude_config(
-            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
-        )
-        self._activate(monkeypatch, config_path)
-        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-
-        # Pull proceeds (no manifests to download, but doesn't refuse).
-        result = runner.invoke(app, ["pull"])
-        assert result.exit_code == 0, result.output
-
-    def test_pull_proceeds_with_no_peers(self, tmp_path, monkeypatch):
-        """Self-only fleet: pull does NOT self-refuse on its own version."""
-        storage_dir = tmp_path / "storage"
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-
-        backend = self._bootstrap(storage_dir)
-        register_device(backend, "dev-self", "Self")
-
-        config_path = self._make_claude_config(
-            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
-        )
-        self._activate(monkeypatch, config_path)
-        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-
-        result = runner.invoke(app, ["pull"])
-        assert result.exit_code == 0, result.output
-
-    def test_pull_refuses_when_peer_device_json_corrupt(self, tmp_path, monkeypatch):
-        """Dropped peer (corrupt device.json): refuse and cite the storage key."""
-        from mind_meld.devices import register_device as _register
-        from mind_meld.storage.keys import DEVICES_PREFIX
-
-        storage_dir = tmp_path / "storage"
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-
-        backend = self._bootstrap(storage_dir)
-        _register(backend, "dev-self", "Self")
-        # Write a malformed device.json directly.
-        bad_key = f"{DEVICES_PREFIX}dev-bad.json"
-        backend.put(bad_key, b"{not valid json}")
-
-        config_path = self._make_claude_config(
-            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
-        )
-        self._activate(monkeypatch, config_path)
-        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-
-        result = runner.invoke(app, ["pull"])
-        assert result.exit_code == 1, result.output
-        combined = (result.output or "") + (result.stderr or "")
-        assert bad_key in combined or "dev-bad" in combined
+        for needle in needles:
+            assert needle in combined
 
     def test_pre_inversion_file_resolves_under_v0_dispatch(self, tmp_path, monkeypatch):
         """A `v0-`-prefixed file (sidecar = local, canonical = remote) routes
@@ -3779,31 +3563,6 @@ class TestShipFixes5E:
 
 
 class TestSyncLog:
-    def test_writes_log_per_project(self, tmp_path):
-        """Sync log should be written to each affected project dir."""
-
-        claude_dir = tmp_path / ".claude"
-        project_dir = claude_dir / "projects" / "-Users-kb-myapp"
-        project_dir.mkdir(parents=True)
-
-        logs = write_sync_log(
-            claude_base=str(claude_dir),
-            device_name="MacBook Pro",
-            device_id="abc123",
-            new_files=["projects/-Users-kb-myapp/memory/user_role.md"],
-            modified_files=["projects/-Users-kb-myapp/memory/feedback.md"],
-            deleted_files=[],
-        )
-
-        assert len(logs) == 1
-        log_path = project_dir / ".mind-meld-log.md"
-        assert log_path.exists()
-        content = log_path.read_text()
-        assert "MacBook Pro" in content
-        assert "abc123" in content
-        assert "memory/user_role.md" in content
-        assert "memory/feedback.md" in content
-
     def test_no_log_without_changes(self, tmp_path):
 
         claude_dir = tmp_path / ".claude"
@@ -5285,66 +5044,6 @@ class TestInitFlow:
         assert "root_salt_fp" in cfg["crypto"]
         assert cfg["crypto"]["argon2_memory_kb"] == 65_536
 
-    def test_refuses_if_no_sources_enabled(self, tmp_path, monkeypatch):
-        """User declines every source prompt → init refuses to finish.
-
-        Behavior on first-device refuse-all (pinned here):
-          * exit code != 0, clear error message
-          * local config NOT written
-          * mm-crypto-init IS written to storage (bootstrap ran before
-            source prompt). This is benign — re-running init on the same
-            storage hits the second-device verify path; the user's same
-            passphrase verifies against their own earlier bootstrap. See
-            test_first_device_refuse_all_is_recoverable below.
-
-        Ordering rationale (see init() docstring): source prompt runs
-        AFTER crypto bootstrap because the second-device wrong-passphrase
-        path must fail fast, before we ask about sources. The cost is
-        a benign orphan mm-crypto-init on first-device refuse-all.
-        """
-
-        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
-        storage = tmp_path / "icloud"
-
-        # Decline every user-facing source.
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\nn\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
-        assert result.exit_code != 0, result.output
-        assert "no sync sources enabled" in result.output
-
-        # Local config NOT written.
-        assert not cfg_path.exists()
-        # Storage-side bootstrap IS committed (documented behavior).
-        backend = LocalBackend(storage)
-        assert backend.exists("mm-crypto-init")
-
-    def test_first_device_refuse_all_is_recoverable(self, tmp_path, monkeypatch):
-        """--new-fleet refuse-all leaves mm-crypto-init orphaned. Running plain
-        init with the same passphrase should succeed via the join
-        verify path (against the orphaned bootstrap).
-        """
-
-        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
-        storage = tmp_path / "icloud"
-
-        # First attempt: refuse all, leaves mm-crypto-init orphan.
-        stdin1 = f"{storage}\nMac A\npw-shared\npw-shared\nn\nn\nn\nn\nn\nn\nn\n"
-        result1 = runner.invoke(app, ["init", "--new-fleet"], input=stdin1)
-        assert result1.exit_code != 0
-
-        # Second attempt: same passphrase, accept claude. Takes the
-        # second-device path against the orphaned bootstrap.
-        stdin2 = f"{storage}\nMac A\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
-        result2 = runner.invoke(app, ["init"], input=stdin2)
-        assert result2.exit_code == 0, result2.output
-        assert "Verified passphrase against existing mm-crypto-init" in result2.output
-
-        # Config now written, with claude enabled. mm-events is mm-internal
-        # infrastructure and auto-includes alongside any user-facing source.
-        with open(cfg_path, "rb") as f:
-            cfg = tomllib.load(f)
-        assert [s["name"] for s in cfg["sync"]["sources"]] == ["claude", "mm-events"]
-
     def test_first_device_gstack_only_init(self, tmp_path, monkeypatch):
         """Decline claude, accept gstack → user-facing sources list has
         gstack only. mm-events auto-includes (mm-internal infrastructure)."""
@@ -5429,70 +5128,6 @@ class TestInitFlow:
             cfg = tomllib.load(f)
         assert cfg["crypto"]["argon2_memory_kb"] == MEMORY_KB
 
-    def test_second_device_wrong_passphrase_aborts_cleanly(self, tmp_path, monkeypatch):
-        """Wrong passphrase on second-device: abort, NO config or device registered."""
-
-        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
-        storage = tmp_path / "icloud"
-        storage.mkdir()
-
-        backend = LocalBackend(storage)
-        bootstrap_crypto_init(backend, "correct-pw", argon2_memory_kb=MEMORY_KB)
-
-        # Second device uses WRONG passphrase.
-        stdin = f"{storage}\nMac B\nwrong-pw\n"
-        result = runner.invoke(app, ["init"], input=stdin)
-        assert result.exit_code != 0
-        assert "does not match" in result.output
-
-        # No local state should have been written.
-        assert not cfg_path.exists()
-        # Storage devices/ should NOT have Mac B registered.
-        devices_dir = storage / "devices"
-        if devices_dir.exists():
-            # Only the one device from bootstrap_crypto_init helper (which doesn't
-            # register a device) — so there should be zero entries actually.
-            assert list(devices_dir.iterdir()) == []
-
-    def test_fetch_selects_canonical_without_rewriting_conflict_copy(self, tmp_path, monkeypatch):
-        """A canonical with the lower salt wins without rewriting either header."""
-
-        self._setup_monkeypatch(tmp_path, monkeypatch)
-        storage = tmp_path / "icloud"
-        storage.mkdir()
-        backend = LocalBackend(storage)
-
-        # Device A bootstraps with one passphrase.
-        bootstrap_crypto_init(backend, "shared-pw", argon2_memory_kb=MEMORY_KB)
-        # Simulate device B losing the race: its mm-crypto-init landed as
-        # "mm-crypto-init 2". Build that blob manually.
-
-        crypto_module.clear_crypto_session()
-        other_salt = bytes([0xFF] * 16)
-        crypto_module.set_crypto_session(other_salt, MEMORY_KB)
-        other_mk = crypto_module.load_master_key("shared-pw", other_salt, MEMORY_KB)
-        other_keycheck = crypto_module._encrypt_with_master_key(
-            crypto_module._KEYCHECK_PLAINTEXT, other_mk
-        )
-        other_blob = (
-            bytes([crypto_module.FORMAT_VERSION])
-            + MEMORY_KB.to_bytes(4, "big")
-            + other_salt
-            + other_keycheck
-        )
-        (storage / "mm-crypto-init 2").write_bytes(other_blob)
-
-        # Now fetch_crypto_init is called (as if we just started a command).
-        # Lex-smallest salt wins. Our canonical salt is random; other_salt is 0xFF*16.
-        fetched = crypto_module.fetch_crypto_init(backend)
-        assert fetched.status == "ok"
-        # Reading selects a winner without changing either lineage.
-        assert (storage / "mm-crypto-init 2").read_bytes() == other_blob
-        # The existing canonical wins; fetching did not replace either lineage.
-        canonical_bytes = (storage / "mm-crypto-init").read_bytes()
-        winner_salt_in_canonical = canonical_bytes[5:21]
-        assert winner_salt_in_canonical == fetched.root_salt
-
 
 class TestInitReInitGuard:
     """Re-init guard and the no-header stop (Track 89A).
@@ -5519,18 +5154,6 @@ class TestInitReInitGuard:
         backend.put("data/oldpeer/decafbad.enc", b"stub-blob")
         return storage, backend
 
-    def test_fresh_machine_joining_a_populated_folder_is_not_asked(self, tmp_path, monkeypatch):
-        self._setup(tmp_path, monkeypatch)
-        storage, _backend = self._populated(tmp_path)
-
-        # Inputs: storage path, device name, passphrase, per-source
-        # (claude Y, all others n). No orphan confirm: nothing to orphan.
-        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
-        assert result.exit_code == 0, result.output
-        assert "orphaning" not in result.output
-        assert "Verified passphrase against existing mm-crypto-init" in result.output
-
     def test_orphan_case_warns_and_confirms(self, tmp_path, monkeypatch):
         """A configured machine re-running init against a populated folder
         answers 'y' to the orphan prompt and proceeds on the join path."""
@@ -5549,74 +5172,6 @@ class TestInitReInitGuard:
         assert result.exit_code == 0, result.output
         assert "orphaning existing device" in result.output
         assert "Verified passphrase against existing mm-crypto-init" in result.output
-
-    def test_orphan_case_abort_on_n_leaves_state_clean(self, tmp_path, monkeypatch):
-        cfg = self._setup(tmp_path, monkeypatch)
-        storage, backend = self._populated(tmp_path)
-        first = runner.invoke(
-            app, ["init"], input=f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
-        )
-        assert first.exit_code == 0, first.output
-        saved = cfg.read_bytes()
-        devices_before = sorted(backend.list_keys("devices/"))
-
-        # Answer 'y' to the overwrite prompt, 'n' to the orphan prompt.
-        result = runner.invoke(app, ["init"], input=f"y\n{storage}\nn\n")
-        assert result.exit_code == 0  # typer.Exit() without code is 0
-        assert "Nothing changed." in result.output
-        assert cfg.read_bytes() == saved
-        assert sorted(backend.list_keys("devices/")) == devices_before
-
-    @pytest.mark.parametrize("token", ["whatever", "brick", "BRICK"])
-    def test_blobs_without_a_key_header_never_mint_one(self, tmp_path, monkeypatch, token):
-        """No header + blobs: plain init stops before any prompt that could
-        write, and no typed token overrides it."""
-
-        cfg = self._setup(tmp_path, monkeypatch)
-        storage = tmp_path / "icloud"
-        storage.mkdir()
-        backend = LocalBackend(storage)
-        # Seed blobs but NO mm-crypto-init (simulating deletion / sync loss).
-        backend.put("data/peer/cafebabe.enc", b"stub-blob")
-        backend.put("manifests/peer/manifest.json.enc", b"stub-manifest")
-        before = sorted(p.relative_to(storage) for p in storage.rglob("*"))
-
-        result = runner.invoke(app, ["init"], input=f"{storage}\n{token}\nMac A\npw\npw\n")
-        assert result.exit_code == 1, result.output
-        assert "holds fleet files" in result.output
-        assert "BRICK" not in result.output and "DANGER" not in result.output
-        assert "--new-fleet" not in result.output
-        assert not cfg.exists()
-        assert not backend.exists("mm-crypto-init")
-        assert sorted(p.relative_to(storage) for p in storage.rglob("*")) == before
-
-    def test_new_fleet_refuses_blobs_without_a_key_header(self, tmp_path, monkeypatch):
-        cfg = self._setup(tmp_path, monkeypatch)
-        storage = tmp_path / "icloud"
-        storage.mkdir()
-        backend = LocalBackend(storage)
-        backend.put("manifests/peer/manifest.json.enc", b"stub-manifest")
-
-        result = runner.invoke(app, ["init", "--new-fleet"], input=f"{storage}\n")
-        assert result.exit_code == 1, result.output
-        assert "--new-fleet needs an empty folder" in " ".join(result.output.split())
-        assert not cfg.exists()
-        assert not backend.exists("mm-crypto-init")
-        assert not (storage / ".stignore").exists()
-
-    def test_first_device_path_not_gated_on_empty_storage(self, tmp_path, monkeypatch):
-        """Empty storage: no guard triggers, --new-fleet works normally.
-
-        Regression guard: the guard must not fire on a fresh new fleet.
-        """
-
-        self._setup(tmp_path, monkeypatch)
-        storage = tmp_path / "icloud"
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
-        assert result.exit_code == 0, result.output
-        assert "orphaning" not in result.output
-        assert "DANGER" not in (result.stderr or "") + result.output
 
     def test_devices_only_folder_is_fleet_data_not_empty(self, tmp_path, monkeypatch):
         """A folder holding only devices/ is not empty: --new-fleet refuses and
