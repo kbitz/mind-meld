@@ -645,7 +645,7 @@ class TestGatherSources:
         real_subprocess.run(
             ["git", "config", "user.email", "user@example.com"], cwd=repo, check=True
         )
-        real_subprocess.run(["git", "config", "user.name", "KB"], cwd=repo, check=True)
+        real_subprocess.run(["git", "config", "user.name", "User"], cwd=repo, check=True)
         real_subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
         (repo / "a.txt").write_text("a")
         real_subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
