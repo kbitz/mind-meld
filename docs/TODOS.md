@@ -44,182 +44,38 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Unsupported Syncthing GUI address during init
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Owner-managed classification is tested through REST, but the unsupported-address/offline pre-existing branch lacks an init integration case.
-- **Hypothesis (untested):** assert this classification continues without Syncthing writes; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/initflow.py, `_check_syncthing`
-- **Evidence:** PR #291 coverage audit at 81504a4; required classification tests exist and no failure was reproduced.
-- **Context:** /review-and-prep, 2026-11-08. Revisit on the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Init routing of Syncthing writer failures
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Init covers successful writes and folder-exists recovery, but not every transport, path-overlap and generic refusal result returned by the writer.
-- **Hypothesis (untested):** extend the error table at the init boundary and assert a controlled stop with its fixing command; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/initflow.py, `_require_syncthing`
-- **Evidence:** PR #291 coverage audit at 81504a4; lower-level writer failures are tested and no init failure was reproduced.
-- **Context:** /review-and-prep, 2026-11-08. Revisit on the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Managed join ignore-file write failure
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Successful managed-join ignore-file ordering is covered; an ignore-file write failure before registration lacks a direct join test.
-- **Hypothesis (untested):** inject the write failure after passphrase verification and assert no registration or config write; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/initflow.py, `init`
-- **Evidence:** PR #291 coverage audit at 81504a4; new-fleet ignore failures are covered and no managed-join defect was reproduced.
-- **Context:** /review-and-prep, 2026-11-08. Revisit on the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Malformed managed record at init
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Record parsing is tested, but init's controlled stop for a malformed management record lacks a direct integration assertion.
-- **Hypothesis (untested):** verify init stops before prompts or writes when the record loader raises ConfigError; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/initflow.py, `_check_syncthing`
-- **Evidence:** Track 118A outside review and source audit; no failure reproduced.
-- **Context:** /review-and-prep, branch mmm/c58912d3 at 30dd2b5, 2026-11-08. Revisit on the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Stale management record on default Syncthing
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The stale-record test covers owner-managed configuration, but not replacing a stale ID when the live configuration is default.
-- **Hypothesis (untested):** assert the current local device ID is recorded before the first managed write; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/initflow.py, `_check_syncthing` and `_save_syncthing_record_or_stop`
-- **Evidence:** Track 118A outside review and source audit; no failure reproduced.
-- **Context:** /review-and-prep, branch mmm/c58912d3 at 30dd2b5, 2026-11-08. Revisit on the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Managed join default-folder refusal
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The writer's default-folder protection is covered, but the managed join's handling of a default-folder-in-use refusal lacks a direct integration assertion.
-- **Hypothesis (untested):** simulate the stock folder becoming occupied or shared after classification, then assert the join stops without accepting the offer; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/initflow.py, `_managed_join` and `_require_syncthing`
-- **Evidence:** Track 118A outside review and source audit; no failure reproduced.
-- **Context:** /review-and-prep, branch mmm/c58912d3 at 30dd2b5, 2026-11-08. Revisit on the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Writer HTTPS transport
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Exercise successful and certificate-rejected writes over loopback HTTPS; existing TLS tests cover GET only.
-- **Hypothesis (untested):** extend the existing writer integration cases; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/syncthing.py
-- **Evidence:** coverage audit at 4bff8f5; no failure reproduced.
-- **Context:** /review-and-prep, branch mmm/347df673, 2026-11-08; trigger is the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Malformed writer config lists
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Exercise malformed folder/device list responses in SyncthingWriter._get_list and assert safe refusal without writes.
-- **Hypothesis (untested):** extend the existing writer integration cases; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/syncthing.py
-- **Evidence:** coverage audit at 4bff8f5; no failure reproduced.
-- **Context:** /review-and-prep, branch mmm/347df673, 2026-11-08; trigger is the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Post-write verification read failures
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Exercise a failed verification GET and a missing folder after POST; current test covers returned option mismatch.
-- **Hypothesis (untested):** extend the existing writer integration cases; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/syncthing.py
-- **Evidence:** coverage audit at 4bff8f5; no failure reproduced.
-- **Context:** /review-and-prep, branch mmm/347df673, 2026-11-08; trigger is the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/devicesflow.py|src/mind_meld/syncthing.py] Concurrent approvals can drop a fleet-folder device
-- **Description:** `share_folder` reads the fleet folder's device list and PATCHes the whole replacement. Two `mm devices approve` runs at once on one machine, or a Syncthing-side change between the GET and the PATCH, can drop a device from `mind-meld` while both runs print success. A rerun of `mm devices approve <id>` for the dropped device finishes it.
-- **Hypothesis (untested):** serialize mm's Syncthing writers behind a lock, or re-read the folder after the PATCH and stop with a rerun note when a device present before it is missing; the Track 119A plan chose "takes no lock", so this needs an owner decision.
-- **Upstream severity:** CRITICAL (Codex challenge, Medium, Blocks: yes); Red Team and adversarial rated it confidence 3-4
-- **Found in:** src/mind_meld/devicesflow.py `approve` (share step); src/mind_meld/syncthing.py `SyncthingWriter.share_folder`
-- **Evidence:** Codex challenge reproduced the interleaving with in-memory doubles; not reproduced against a real Syncthing.
-- **Context:** /review-and-prep, branch mmm/999957e9 at 252cf98, 2026-11-08. Revisit trigger: a second Syncthing writer that can run beside approve (batch approval, automatic pairing), or an owner report of a joined machine losing the fleet folder.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/devicesflow.py|src/mind_meld/syncthing.py] Approve can report approved while Syncthing cannot save its config
-- **Description:** When Syncthing's config `Save()` keeps failing (full disk, read-only `config.xml`), each REST write applies in memory and answers 500. Reruns of `mm devices approve` then read the in-memory state and end with "already approved" (exit 0) although nothing reached `config.xml`; the next Syncthing restart drops the device again.
-- **Hypothesis (untested):** before printing Approved, Finished or already approved, compare the in-memory state with the parsed `config.xml` (mm already parses it) and say Syncthing did not save its configuration when they differ.
-- **Upstream severity:** INFORMATIONAL (native adversarial INVESTIGATE, Low)
-- **Found in:** src/mind_meld/devicesflow.py `approve` (already-approved exit)
-- **Evidence:** cycle-2 native adversarial read of Syncthing's confighandler `finish()`; not reproduced.
-- **Context:** /review-and-prep, branch mmm/999957e9 at 252cf98, 2026-11-08. Revisit trigger: an owner report of an approval lost on Syncthing restart, or the next Track touching `SyncthingWriter`.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=tests/test_devices_approve.py|src/mind_meld/cli.py] Test gap: Configured auto commands with a pending device
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The behavioral half of the never-auto-accept check runs `mm autopull` and `mm autopush` with no mm config, so both take the unconfigured early exit before any sync code runs.
-- **Hypothesis (untested):** run push, pull, autopull and autopush on an initialized fleet (config, storage, passphrase) with a managed record and a pending device; assert they synced, sent no non-GET Syncthing request and left the device pending. Re-verify first.
-- **Upstream severity:** CRITICAL
-- **Found in:** tests/test_devices_approve.py, `test_no_push_pull_or_auto_command_ever_accepts_a_device`
-- **Evidence:** Red Team and native adversarial, cycle 1; the AST gate is the primary enforcement and no pairing call reaches these commands; no failure reproduced.
-- **Context:** Filed by /review-and-prep on branch mmm/999957e9 at 252cf98 (2026-11-08).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=tests/test_devices_approve.py|src/mind_meld/syncthing.py] Test gap: Pairing gate exemptions inside the writer module
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The pairing-call gate exempts every pairing reference inside `SyncthingWriter` and every raw send-helper reference in `syncthing.py`, so a future non-pairing writer method that wraps `add_device`, or a module helper that sends a write route directly, would pass it.
-- **Hypothesis (untested):** collect the `syncthing.py` sites into their own expected set (pairing names only inside their own method, raw sends only in the named helpers) instead of skipping them. Re-verify first.
-- **Upstream severity:** CRITICAL
-- **Found in:** tests/test_devices_approve.py, `test_no_push_pull_or_auto_command_ever_accepts_a_device`
-- **Evidence:** cycle-3 adversarial; no such wrapper or raw send exists at 252cf98; no failure reproduced.
-- **Context:** Filed by /review-and-prep on branch mmm/999957e9 at 252cf98 (2026-11-08).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=tests/test_devices_approve.py|src/mind_meld/cli.py] Test gap: Pairing entry points reached through imports or aliases
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The entry-point reach check matches only `devicesflow.approve`, `initflow.init`, `initflow._managed_join` and a bare `_managed_join`; `from ... import approve`, module aliases, attribute chains and in-module wrappers would pass it.
-- **Hypothesis (untested):** also walk `Import`/`ImportFrom` nodes for these names under any alias and match attribute chains by their last two segments. Re-verify first.
-- **Upstream severity:** CRITICAL
-- **Found in:** tests/test_devices_approve.py, `test_no_push_pull_or_auto_command_ever_accepts_a_device`
-- **Evidence:** cycle-3 adversarial; no such import or alias exists at 252cf98; no failure reproduced.
-- **Context:** Filed by /review-and-prep on branch mmm/999957e9 at 252cf98 (2026-11-08).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py|tests/test_devices_approve.py] Test gap: Writer shape with an empty introducedBy
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Real Syncthing returns `introducedBy: ""` for a device nobody introduced; `approval_state` accepts it as `writer_shape`, but no test uses an entry with that key, because FakeSyncthing stores the POST body without it.
-- **Hypothesis (untested):** add a device entry with `introducedBy: ""` to the writer_shape test and to the resume parametrize. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/syncthing.py `SyncthingWriter.approval_state`
-- **Evidence:** coverage audit at 252cf98 (gap P17); the code handles `""`; no failure reproduced.
-- **Context:** Filed by /review-and-prep on branch mmm/999957e9 at 252cf98 (2026-11-08).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/devicesflow.py|tests/test_devices_approve.py] Test gap: Approve when the pending-device read fails
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No approve test injects a failure on `/rest/cluster/pending/devices` after a clean approval-state read; the stop (`could not read Syncthing's configuration ... Run: mm diag`, or the start command when unreachable) and the absence of writes are untested.
-- **Hypothesis (untested):** set the pending route to 403 in the stand-in and assert the stop text and `bodies == []`. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/devicesflow.py `approve`
-- **Evidence:** coverage audit at 252cf98 (gap P25); no failure reproduced.
-- **Context:** Filed by /review-and-prep on branch mmm/999957e9 at 252cf98 (2026-11-08).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_devices_approve.py] Test gap: Approval state when the folders read fails
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Only the devices route is error-injected for `approval_state`; a failed `GET /rest/config/folders` returning a typed outcome (and approve's `mm diag` stop) is untested.
-- **Hypothesis (untested):** parametrize the approve HTTP-error test over the folders route. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/syncthing.py `SyncthingWriter.approval_state`
-- **Evidence:** coverage audit at 252cf98 (gap P13); no failure reproduced.
-- **Context:** Filed by /review-and-prep on branch mmm/999957e9 at 252cf98 (2026-11-08).
-- **Effort:** ? (user triages in /roadmap)
-
-### [manual:files=src/mind_meld/skills/retro_fleet/aggregator.py] Unpriced Cursor-era Grok rows get an upgrade remedy that cannot fix them
-- **Why:** Cursor-era Grok rows in `retro-fleet` (`grok-4.7-fast` and effort-suffixed model ids) stay unpriced, and the `unpriced_models` note tells the owner to "Upgrade mm on the machine rendering this report", a remedy that does not fit them.
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py, the `unpriced_models` note's remedy
-- **Context:** Track 116A plan decision d4; Karl approved logging it (2026-11-08). Revisit trigger: the next Track touching retro-fleet's unpriced-model notes or Grok pricing, or an owner report of the misleading remedy.
-- **Effort:** ? (user triages in /roadmap)
-
-
 ## Drain records
+
+### Roadmap inbox drain — 2026-11-08 (18 items; six folded into Track 122A)
+
+Run by `/roadmap` from manager Ephesus 16's brief after the 2026-11-08 cleanup left the inbox undrained (the owner: "roadmap should have processed the todos though"). Verification baseline: `cf2e127` (v1.12.29). Within the owner's earlier instruction ("once we use the new syncing mechanism for a bit, we will determine how to get to 2.0 and what future items we actually want to pursue"), nothing is promoted from Future and no path to 2.0 is chosen; Track 122A stays the only Current Plan Track. The owner answered the PR's three review flags on 2026-11-08 ("1 kill / 2 fold in / 3 kill it"): the two approve edge cases stay killed, the six `mm init` test gaps fold into Track 122A's card, and one existing Future entry is killed (below). Every premise was re-checked at `cf2e127`: no source or test file named by an item has changed since it was filed. **Inbox: 18 drained: 6 placed, 10 deferred (as 6 Future entries, grouped where items share the same paths), 2 killed, 0 discharged. Future: 1 killed.** Authored-false rate: 0 / (6 + 0) = 0%. Future: 25 → 30 entries.
+
+| Item | Disposition |
+|---|---|
+| `[review]` Test gap: Unsupported Syncthing GUI address during init | place → Track 122A, fourth task "Init integration tests for six Syncthing setup paths" (M). Its `_touches:` already cover `initflow.py` and `test_initflow.py`; the owner approved changing the card ("fold in") and treats the session-weight cap as guidance, so the card stands at weight 7 against the cap of 6 and the audit's SIZE check flags it |
+| `[review]` Test gap: Init routing of Syncthing writer failures | place → Track 122A, same task |
+| `[review]` Test gap: Managed join ignore-file write failure | place → Track 122A, same task |
+| `[review]` Test gap: Malformed managed record at init | place → Track 122A, same task |
+| `[review]` Test gap: Stale management record on default Syncthing | place → Track 122A, same task |
+| `[review]` Test gap: Managed join default-folder refusal | place → Track 122A, same task |
+| `[review]` Test gap: Writer HTTPS transport | defer → "Test gaps: Syncthing writer transport and response handling (3)"; no Track covers `syncthing.py` and `test_syncthing_write.py` |
+| `[review]` Test gap: Malformed writer config lists | defer → same entry |
+| `[review]` Test gap: Post-write verification read failures | defer → same entry |
+| `[review]` Concurrent approvals can drop a fleet-folder device | kill (kept by the owner, "1 kill"): unobserved (reproduced only with in-memory doubles, not against a real Syncthing); reversible (a rerun of `mm devices approve <id>` re-adds the device, as the item says); reopen if it manifests. Track 119A's plan chose "takes no lock"; a second Syncthing writer that can run beside approve (batch approval, automatic pairing) would be new scope and should revisit this race in its own plan |
+| `[review]` Approve can report approved while Syncthing cannot save its config | kill (kept by the owner, "1 kill"): unobserved (a read of Syncthing's confighandler, not reproduced); reversible (after the disk or permission fault is fixed and Syncthing restarts, a rerun of approve sees the device unapproved and approves it); reopen if it manifests |
+| `[review]` Test gap: Configured auto commands with a pending device | defer → "Test gaps: never-auto-accept gate reach (2)"; no Track covers `test_devices_approve.py` and `cli.py`. Upstream CRITICAL, but a recorded test gap asserts no failure and admits no Track on its own |
+| `[review]` Test gap: Pairing entry points reached through imports or aliases | defer → same entry |
+| `[review]` Test gap: Pairing gate exemptions inside the writer module | defer → "Test gaps: Syncthing writer reads behind `mm devices approve` (2)"; no Track covers `syncthing.py` and `test_devices_approve.py`. Upstream CRITICAL, same reasoning |
+| `[review]` Test gap: Approval state when the folders read fails | defer → same entry |
+| `[review]` Test gap: Writer shape with an empty introducedBy | defer → "Test gap: writer shape with an empty introducedBy"; premise re-checked: the only `introducedBy: ""` in the tests is a folder-device entry in `test_syncthing_write.py`, not a device-config entry |
+| `[review]` Test gap: Approve when the pending-device read fails | defer → "Test gap: approve when the pending-device read fails" |
+| `[manual]` Unpriced Cursor-era Grok rows get an upgrade remedy that cannot fix them | defer → same title. Observed in real fleet data (Track 116A plan decision d4), but wording only: no data at risk and the owner already knows the remedy does not apply. Track 122A touches `aggregator.py` for placeholders only, so the item's own trigger is not met |
+
+**Future killed (1):** "Bootstrap hardening candidates from the Track 98A review": unobserved and reversible (14 Low review findings, each still ending with a Run: fix), so the manifestation gate kills rather than defers it; killed by the owner, 2026-11-08 ("kill it"). Reopen any finding a real bootstrap run hits as a new item with that evidence.
+
+**Future otherwise left as it is (24):** the brief limits this run to the inbox.
+
+**Version:** documentation-only change; no bump under SPEC's release policy. No `## Acceptance` entry is added.
 
 ### Roadmap cleanup regeneration — 2026-11-08 (Syncthing Tracks shipped, history scrub dropped)
 
