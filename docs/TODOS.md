@@ -221,6 +221,21 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap cleanup regeneration — 2026-11-08 (Syncthing Tracks shipped, history scrub dropped)
+
+Run by `/roadmap` as a cleanup from manager Ephesus 16's brief on the owner's 2026-11-08 decisions. Verification baseline: `5eba9e4` (v1.12.29). The owner asked for a cleanup only ("once we use the new syncing mechanism for a bit, we will determine how to get to 2.0 and what future items we actually want to pursue"), so Future is unchanged (25 entries, none promoted, killed or rewritten), no path to 2.0 is chosen, and the 18 Unprocessed inbox items above stay held for a later full regeneration. **Leftover plan: 4 recorded as shipped, 1 dropped by the owner. Brief: 1 placed.**
+
+| Item | Disposition |
+|---|---|
+| Track 117A: Detect Syncthing's default configuration and give mm a Syncthing writer | shipped: receipt added (PR #289, `3a76b91`, v1.12.25) |
+| Track 118A: Set Syncthing up from the bootstrap script and `mm init` on a default configuration | shipped: receipt added (PR #291, `92d2763`, v1.12.26) |
+| Track 119A: Move `mm devices` into its own module, then approve a joining machine | shipped: receipt added (PR #292, `0dad433`, 23 of 23 VERIFIED, v1.12.28) |
+| Track 120A: Replace the cutover runbook with the per-machine move, and prove a move loses no file | shipped: receipt added (PR #294, `5eba9e4`, 13 of 13 VERIFIED, v1.12.29) |
+| Track 121A: Rewrite the git history to remove the owner's machine hostnames | killed: dropped by the owner, 2026-11-08 ("I didn't realize there was no way to scrub the PRs, so basically this is a pointless exercise, we should just make sure it stays impersonal moving forward?", then "Yes"). GitHub keeps pull-request refs and cached views of old commits that a force-push cannot clean. docs/SPEC.md drops it as a condition of 2.0.0 and of making the repository public again; Group 121 is retired (tombstoned) and its README note, PR #295, is closed unmerged. Do not re-propose without a new owner decision |
+| Brief: keep the tree impersonal from here on (owner, 2026-11-08) | place: Track 122A (one-time placeholder cleanup of the current tree and no hostname default for `mm init`'s device name); the forward rule is added to AGENTS.md. The owner refused a committed list of names, a CI check and an Actions-secret or factory-side scanner ("The ci check would be part of the repo though, so we aren't doing that"; "Neither of those") |
+
+**Version:** documentation-only change; no bump under SPEC's release policy. The amended 2.0.0 release line loses a condition and adds no checkpoint; no `## Acceptance` entry is added.
+
 ### Roadmap regeneration — 2026-11-07 (no cutover: per-machine move and Syncthing setup)
 
 Run by `/project-spec` and a full `/roadmap` regeneration from manager Ephesus 13's brief on Karl's 2026-11-07 decisions. Verification baseline: `488094e` (v1.12.23). docs/SPEC.md drops the fleet-wide cutover and migration tool (each machine moves by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive) and rewrites O2 for first-install Syncthing setup when Syncthing has its default configuration, approval by pasted device ID and an introducer mesh. Tracks 113A, 114A and 115A are recorded as shipped and Groups 113 to 115 retired. In Progress and Current Plan were regenerated whole: Track 116A (kept, with one inbox item), Tracks 117A to 120A (new: Syncthing writer; bootstrap start at login and `mm init` setup; the move-only `mm devices` move and approval; per-machine move) and Track 121A (the history scrub, previously 117A, still last). The owner asked for the fewest Tracks the size audit allows (Karl, 2026-11-07: "Do we need this many separate tracks?", then "Revise as discussed"), so the first candidate's separate bootstrap and move-only Tracks were folded in. **Inbox: 6 drained: 1 placed, 3 deferred, 0 killed, 2 discharged. Leftover plan: 3 recorded as shipped, 2 kept. Brief: 3 placed. Future re-derived: 26 entries, 4 placed, 1 narrowed (removed and re-added), 1 trigger restated, 2 kept deferred by owner decision despite a met trigger, 3 added, so 26 → 25.** Authored-false rate: 2 / (8 + 2) = 20%.
