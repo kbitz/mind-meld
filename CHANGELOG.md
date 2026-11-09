@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.30] - 2026-11-08
+
+Documentation uses placeholders for personal identifiers.
+
+### Changed
+
+- README and other documentation use placeholders for personal identifiers.
+
 ## [1.12.29] - 2026-11-08
 
 Moving a machine keeps files that were excluded from its share.

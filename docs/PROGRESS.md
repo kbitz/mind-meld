@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.30 | 2026-11-08 | Documentation uses placeholders for personal identifiers. |
 | 1.12.29 | 2026-11-08 | Moving a machine keeps files that were excluded from its share. |
 | 1.12.28 | 2026-11-08 | You can approve a joining machine onto the fleet. |
 | 1.12.27 | 2026-11-08 | The test suite is smaller and faster: about 8,785 tests instead of 11,388, with the same protection, and an unused manifest helper is gone. |
