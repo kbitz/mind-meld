@@ -247,7 +247,7 @@ class TestWalkClaudeSource:
     def _setup_claude_dir(self, tmp_path: Path) -> Path:
         """Create a mock ~/.claude structure."""
         claude = tmp_path / ".claude"
-        projects = claude / "projects" / "-Users-kb-myapp"
+        projects = claude / "projects" / "-Users-user-myapp"
         memory = projects / "memory"
         memory.mkdir(parents=True)
         (memory / "user_role.md").write_text("---\nname: role\n---\nData scientist")
@@ -268,20 +268,20 @@ class TestWalkClaudeSource:
         files = walk_claude_source(claude)
         assert len(files) == 2
         paths = set(files.keys())
-        assert "projects/-Users-kb-myapp/memory/user_role.md" in paths
-        assert "projects/-Users-kb-myapp/memory/feedback.md" in paths
+        assert "projects/-Users-user-myapp/memory/user_role.md" in paths
+        assert "projects/-Users-user-myapp/memory/feedback.md" in paths
         # Sessions should NOT be included
         for p in paths:
             assert "sessions" not in p
 
     def test_syncs_todos_subdir(self, tmp_path):
         claude = self._setup_claude_dir(tmp_path)
-        todos = claude / "projects" / "-Users-kb-myapp" / "todos"
+        todos = claude / "projects" / "-Users-user-myapp" / "todos"
         todos.mkdir(parents=True)
         (todos / "tasks.json").write_text('{"task": "do stuff"}')
         files = walk_claude_source(claude)
         paths = set(files.keys())
-        assert "projects/-Users-kb-myapp/todos/tasks.json" in paths
+        assert "projects/-Users-user-myapp/todos/tasks.json" in paths
 
     def test_skips_large_files(self, tmp_path):
         claude = tmp_path / ".claude"
@@ -1980,25 +1980,25 @@ class TestWalkerExcludesConflictFiles:
 
     def test_claude_source_skips_conflict_in_todos(self, tmp_path):
         claude = tmp_path / ".claude"
-        todos = claude / "projects" / "-Users-kb-myapp" / "todos"
+        todos = claude / "projects" / "-Users-user-myapp" / "todos"
         todos.mkdir(parents=True)
         (todos / "tasks.json").write_text("[]")
         (todos / "tasks.sync-conflict-20260422-120000-abc12345.json").write_text("[1, 2]")
 
         files = walk_claude_source(claude)
         paths = set(files.keys())
-        assert "projects/-Users-kb-myapp/todos/tasks.json" in paths
+        assert "projects/-Users-user-myapp/todos/tasks.json" in paths
         assert all(".sync-conflict-" not in p for p in paths)
 
     def test_claude_source_does_not_exclude_user_false_positive(self, tmp_path):
         claude = tmp_path / ".claude"
-        memory = claude / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         # User-named file containing the infix but no timestamp digits.
         (memory / "notes.sync-conflict-log.md").write_text("legitimate user file")
 
         files = walk_claude_source(claude)
-        assert "projects/-Users-kb-myapp/memory/notes.sync-conflict-log.md" in files
+        assert "projects/-Users-user-myapp/memory/notes.sync-conflict-log.md" in files
 
     def test_generic_source_skips_conflict_files(self, tmp_path):
         # Same exclusion contract MUST hold for the gstack/generic source path
@@ -3999,12 +3999,12 @@ class TestScanRootsAnchors91A:
 
     def test_the_walker_never_publishes_the_anchor(self, tmp_path):
         claude = tmp_path / ".claude"
-        memory = claude / "projects" / "-Users-kb-p" / "memory"
+        memory = claude / "projects" / "-Users-user-p" / "memory"
         memory.mkdir(parents=True)
         (memory / "a.md").write_text("a")
         (memory / ANCHOR_NAME).write_text(self.ANCHOR_VALUE + "\n")  # even inside a project folder
         write_anchor(claude, "projects", self.ANCHOR_VALUE)
-        assert set(walk_claude_source(claude)) == {"projects/-Users-kb-p/memory/a.md"}
+        assert set(walk_claude_source(claude)) == {"projects/-Users-user-p/memory/a.md"}
 
         base = tmp_path / "gen"
         (base / "d").mkdir(parents=True)

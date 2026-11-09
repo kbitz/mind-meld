@@ -3762,7 +3762,7 @@ def retro_fleet_cmd(
         help="NOTEWORTHY line for the ASCII card. Supplied by the skill.",
     ),
     name: str = typer.Option(
-        "", "--name", help="Optional name in the ASCII card header (e.g. 'kb')."
+        "", "--name", help="Optional name in the ASCII card header (e.g. 'user')."
     ),
     no_save: bool = typer.Option(
         False,
@@ -3798,7 +3798,7 @@ def retro_fleet_cmd(
       ``MM_THEMES_PROMPT`` JSON sidecar at the bottom. Skill reads the
       sidecar, synthesizes themes + noteworthy, then re-invokes.
     * Pass 2 — ``mm retro-fleet 7d --theme A --theme B --theme C
-      --noteworthy "..." --name kb`` re-renders with a pixel-aligned
+      --noteworthy "..." --name user`` re-renders with a pixel-aligned
       ASCII card up top. ``--no-save`` is accepted as a hidden no-op
       (removed as of v0.12.39; kept so a stale skill copy still exits 0).
 

@@ -308,7 +308,7 @@ def test_commit_date_contract_recapture_today_does_not_change_7d_card(tmp_path, 
     commit = {
         "sha": "deadbeef30",
         "date": (now - timedelta(days=30)).isoformat(),
-        "author_email": "kb@example.com",
+        "author_email": "user@example.com",
         "subject": "fix: old",
         "files": 1,
         "add": 1,
@@ -322,7 +322,7 @@ def test_commit_date_contract_recapture_today_does_not_change_7d_card(tmp_path, 
         "origin": events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
         "projects": [
             {
-                "remote": "https://github.com/kb/mm.git",
+                "remote": "https://github.com/user/mm.git",
                 "local_path": "/tmp/mm",
                 "commits": [commit],
             }
@@ -333,13 +333,13 @@ def test_commit_date_contract_recapture_today_does_not_change_7d_card(tmp_path, 
     data7 = aggregator.aggregate(
         events_dir=events_dir,
         window_days=7,
-        author_emails=frozenset({"kb@example.com"}),
+        author_emails=frozenset({"user@example.com"}),
         now=now,
     )
     data30 = aggregator.aggregate(
         events_dir=events_dir,
         window_days=30,
-        author_emails=frozenset({"kb@example.com"}),
+        author_emails=frozenset({"user@example.com"}),
         now=now,
     )
     assert data7.git.commits == 0
@@ -446,7 +446,7 @@ def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch, 
                     {
                         "sha": "recaptured",
                         "date": now.isoformat(),
-                        "author_email": "kb@example.com",
+                        "author_email": "user@example.com",
                         "subject": "fix: recovered",
                         "files": 1,
                         "add": 1,

@@ -133,7 +133,7 @@ def write_sync_log(
 def _extract_project(rel_path: str) -> str | None:
     """Extract the project directory name from a relative path.
 
-    "projects/-Users-kb-myapp/memory/file.md" → "-Users-kb-myapp"
+    "projects/-Users-user-myapp/memory/file.md" → "-Users-user-myapp"
     """
     parts = rel_path.split("/")
     if len(parts) >= 3 and parts[0] == "projects":
@@ -144,7 +144,7 @@ def _extract_project(rel_path: str) -> str | None:
 def _friendly_name(rel_path: str) -> str:
     """Convert a full relative path to a human-readable name.
 
-    "projects/-Users-kb-myapp/memory/user_role.md" → "memory/user_role.md"
+    "projects/-Users-user-myapp/memory/user_role.md" → "memory/user_role.md"
     """
     parts = rel_path.split("/")
     if len(parts) >= 3 and parts[0] == "projects":

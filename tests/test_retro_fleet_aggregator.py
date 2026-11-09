@@ -48,7 +48,7 @@ def _git_event(
     device: str,
     days_ago: float,
     commits: list[dict],
-    remote: str = "github.com/kb/mm",
+    remote: str = "github.com/user/mm",
 ) -> dict:
     return {
         "v": 2,
@@ -58,7 +58,7 @@ def _git_event(
         "projects": [
             {
                 "remote": f"https://{remote}.git",  # raw form — aggregator canonicalizes
-                "local_path": f"/Users/kb/{remote.split('/')[-1]}",
+                "local_path": f"/Users/user/{remote.split('/')[-1]}",
                 "commits": commits,
             }
         ],
@@ -69,7 +69,7 @@ def _commit(
     sha: str,
     days_ago: float,
     *,
-    author_email: str = "kb@example.com",
+    author_email: str = "user@example.com",
     subject: str = "fix: thing",
     add: int = 10,
     dlt: int = 2,
@@ -468,7 +468,7 @@ class TestGitAggregation:
             "dev-a",
             "2026-04-28",
             [
-                _git_event("dev-a", 1.0, [c], remote="github.com/kb/mm"),
+                _git_event("dev-a", 1.0, [c], remote="github.com/user/mm"),
             ],
         )
         _write_events(
@@ -476,7 +476,7 @@ class TestGitAggregation:
             "dev-b",
             "2026-04-28",
             [
-                _git_event("dev-b", 1.0, [c], remote="github.com/kb/mm"),
+                _git_event("dev-b", 1.0, [c], remote="github.com/user/mm"),
             ],
         )
         data = _aggregate(events_dir)
@@ -491,9 +491,9 @@ class TestGitAggregation:
         events_dir.mkdir()
         c = _commit("abc123", 1.0)
         ev_a = _git_event("dev-a", 1.0, [c])
-        ev_a["projects"][0]["remote"] = "https://github.com/kb/mm.git"
+        ev_a["projects"][0]["remote"] = "https://github.com/user/mm.git"
         ev_b = _git_event("dev-b", 1.0, [c])
-        ev_b["projects"][0]["remote"] = "git@github.com:kb/mm.git"
+        ev_b["projects"][0]["remote"] = "git@github.com:user/mm.git"
         _write_events(events_dir, "dev-a", "2026-04-28", [ev_a])
         _write_events(events_dir, "dev-b", "2026-04-28", [ev_b])
         data = _aggregate(events_dir)
@@ -503,7 +503,7 @@ class TestGitAggregation:
         """Author email filter applies — only matching commits counted."""
         events_dir = tmp_path / "events"
         events_dir.mkdir()
-        mine = _commit("abc", 1.0, author_email="kb@example.com")
+        mine = _commit("abc", 1.0, author_email="user@example.com")
         not_mine = _commit("xyz", 1.0, author_email="bot@noreply.com")
         _write_events(
             events_dir,
@@ -513,7 +513,7 @@ class TestGitAggregation:
                 _git_event("dev-a", 1.0, [mine, not_mine]),
             ],
         )
-        data = _aggregate(events_dir, author_emails=frozenset({"kb@example.com"}))
+        data = _aggregate(events_dir, author_emails=frozenset({"user@example.com"}))
         assert data.git.commits == 1
         assert data.git.additions == 10  # _commit default
 
@@ -521,7 +521,7 @@ class TestGitAggregation:
         """Empty filter → all commits in window."""
         events_dir = tmp_path / "events"
         events_dir.mkdir()
-        c1 = _commit("aaa", 1.0, author_email="kb@example.com")
+        c1 = _commit("aaa", 1.0, author_email="user@example.com")
         c2 = _commit("bbb", 1.0, author_email="someone@else.com")
         _write_events(
             events_dir,
@@ -630,8 +630,8 @@ class TestCommitStreak:
                     "dev-a",
                     0.0,
                     [
-                        _commit("u0", 0.0, author_email="kb@example.com"),
-                        # 1, 2, 3 days ago: only bot — gap from kb's
+                        _commit("u0", 0.0, author_email="user@example.com"),
+                        # 1, 2, 3 days ago: only bot — gap from the user's
                         # perspective.
                         _commit("b1", 1.0, author_email="bot@noreply.com"),
                         _commit("b2", 2.0, author_email="bot@noreply.com"),
@@ -640,7 +640,7 @@ class TestCommitStreak:
                 ),
             ],
         )
-        data = _aggregate(events_dir, author_emails=frozenset({"kb@example.com"}))
+        data = _aggregate(events_dir, author_emails=frozenset({"user@example.com"}))
         # Only the user's "today" commit; yesterday belongs to the bot.
         assert data.git.streak_days == 1
 
@@ -1066,7 +1066,7 @@ class TestCustomPathNotice:
                 "sync": {
                     "disabled_sources": ["mm-events"],
                     "sources": [
-                        {"name": "mm-events", "path": "/Users/kb/custom-events"},
+                        {"name": "mm-events", "path": "/Users/user/custom-events"},
                     ],
                 }
             }
@@ -1094,21 +1094,21 @@ class TestSessionsSourceRoot:
 
     def test_two_distinct_source_roots_kept_separate(self, tmp_path):
         """REGRESSION (Group 8 hotfix #4): two ``type: claude`` source roots
-        that both contain a project encoded as ``-Users-kb-Documents-foo``
+        that both contain a project encoded as ``-Users-user-Documents-foo``
         must be kept as distinct entries; sessions counts must SUM across
         the two source roots, not silently overwrite."""
         events_dir = tmp_path / "events"
         events_dir.mkdir()
         proj_a = {
-            "claude_dir": "-Users-kb-Documents-foo",
-            "source_root": "/Users/kb/.claude",
+            "claude_dir": "-Users-user-Documents-foo",
+            "source_root": "/Users/user/.claude",
             "sessions": 5,
             "total_kb": 100,
             "ephemeral": False,
         }
         proj_b = {
-            "claude_dir": "-Users-kb-Documents-foo",
-            "source_root": "/Users/kb/work-claude",
+            "claude_dir": "-Users-user-Documents-foo",
+            "source_root": "/Users/user/work-claude",
             "sessions": 7,
             "total_kb": 200,
             "ephemeral": False,
@@ -1161,7 +1161,7 @@ class TestSessionsSourceRoot:
         }
         proj_populated = {
             "claude_dir": "-tmp-x",
-            "source_root": "/Users/kb/.claude",
+            "source_root": "/Users/user/.claude",
             "sessions": 5,
             "total_kb": 100,
             "ephemeral": False,
@@ -1195,7 +1195,7 @@ class TestSessionsSourceRoot:
         }
         proj_new = {
             "claude_dir": "-tmp-y",
-            "source_root": "/Users/kb/.claude",
+            "source_root": "/Users/user/.claude",
             "sessions": 7,
             "total_kb": 150,
             "ephemeral": False,
@@ -1245,7 +1245,7 @@ class TestSessionsSourceRoot:
         }
         proj_populated_stale = {
             "claude_dir": "-tmp-x",
-            "source_root": "/Users/kb/.claude",
+            "source_root": "/Users/user/.claude",
             "sessions": 5,
             "total_kb": 100,
             "ephemeral": False,
@@ -1337,12 +1337,12 @@ class TestGatherAuthorEmails:
         self._stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = aggregator.gather_author_emails()
-        assert emails == frozenset({"kb@example.com"})
+        assert emails == frozenset({"user@example.com"})
 
 
 class TestGitAggregationWithBroadenedFilter:
@@ -1354,7 +1354,7 @@ class TestGitAggregationWithBroadenedFilter:
     def test_noreply_commits_counted_when_alias_in_filter(self, tmp_path):
         events_dir = tmp_path / "events"
         events_dir.mkdir()
-        direct = _commit("aaa", 1.0, author_email="kb@example.com")
+        direct = _commit("aaa", 1.0, author_email="user@example.com")
         merged = _commit("bbb", 1.0, author_email="99999+fakeuser@users.noreply.github.com")
         unrelated = _commit("ccc", 1.0, author_email="bot@example.com")
         _write_events(
@@ -1370,7 +1370,7 @@ class TestGitAggregationWithBroadenedFilter:
             events_dir,
             author_emails=frozenset(
                 {
-                    "kb@example.com",
+                    "user@example.com",
                     "99999+fakeuser@users.noreply.github.com",
                 }
             ),
@@ -1396,7 +1396,7 @@ class TestTokenAggregation:
     ):
         proj = {
             "claude_dir": "-tmp-proj",
-            "source_root": "/Users/kb/.claude",
+            "source_root": "/Users/user/.claude",
             "sessions": sessions,
             "total_kb": 100,
             "last_session_at": last_session_at or ts,
@@ -1540,7 +1540,7 @@ class TestSyntheticAndUnpricedTokens:
             "projects": [
                 {
                     "claude_dir": "-tmp-proj",
-                    "source_root": "/Users/kb/.claude",
+                    "source_root": "/Users/user/.claude",
                     "sessions": 1,
                     "total_kb": 100,
                     "last_session_at": "2026-05-01T12:00:00+00:00",
@@ -2048,7 +2048,7 @@ class TestTrack10ASafeIntRetention:
             "projects": [
                 {
                     "claude_dir": "-tmp-proj",
-                    "source_root": "/Users/kb/.claude",
+                    "source_root": "/Users/user/.claude",
                     "sessions": 1,
                     "total_kb": 100,
                     "last_session_at": ts,
@@ -2122,7 +2122,7 @@ class TestTrack10AFleetRetroDeterminism:
             "projects": [
                 {
                     "claude_dir": "-proj-a",
-                    "source_root": "/Users/kb/.claude",
+                    "source_root": "/Users/user/.claude",
                     "sessions": 5,
                     "total_kb": 1000,
                     "last_session_at": "2026-05-01T12:00:00+00:00",
@@ -2168,7 +2168,7 @@ class TestTrack10AFleetRetroDeterminism:
             "projects": [
                 {
                     "claude_dir": "-proj-b",
-                    "source_root": "/Users/kb/.claude",
+                    "source_root": "/Users/user/.claude",
                     "sessions": 3,
                     "total_kb": 500,
                     "last_session_at": "2026-05-01T12:00:00+00:00",
@@ -2437,9 +2437,9 @@ class TestAggregateLocalEmailsFromEvents:
     def test_lowercases_case_variant_input(self):
         """Defense in depth: a peer that emitted mixed-case (shouldn't,
         but might from a buggy / pre-fix version) gets normalized."""
-        events = [_push_event_with_emails("a", 1.0, ["KB@Example.COM"])]
+        events = [_push_event_with_emails("a", 1.0, ["USER@Example.COM"])]
         union = aggregator.aggregate_local_emails_from_events(events)
-        assert union == {"kb@example.com"}
+        assert union == {"user@example.com"}
 
     def test_skips_pre_v0_11_17_rows(self):
         """A row WITHOUT ``local_emails`` key (pre-v0.11.17 peer) is
@@ -2634,10 +2634,10 @@ class TestMixedFleetRegression:
             events_dir,
             "dev-a",
             "2026-04-28",
-            [_git_event("dev-a", 1.0, [_commit("aaa", 1.0, author_email="kb@example.com")])],
+            [_git_event("dev-a", 1.0, [_commit("aaa", 1.0, author_email="user@example.com")])],
         )
         # No mm-push events emitted yet; only git-snapshot.
-        data = _aggregate(events_dir, author_emails=frozenset({"kb@example.com"}))
+        data = _aggregate(events_dir, author_emails=frozenset({"user@example.com"}))
         assert data.git.commits == 1
 
 
@@ -2660,11 +2660,11 @@ class TestFleetDeterminism:
             "dev-a",
             "2026-04-28",
             [
-                _push_event_with_emails("dev-a", 0.5, ["kb-machine-a@example.com"]),
+                _push_event_with_emails("dev-a", 0.5, ["user-machine-a@example.com"]),
                 _git_event(
                     "dev-a",
                     1.0,
-                    [_commit("aaa", 1.0, author_email="kb-machine-a@example.com")],
+                    [_commit("aaa", 1.0, author_email="user-machine-a@example.com")],
                 ),
             ],
         )
@@ -2673,19 +2673,19 @@ class TestFleetDeterminism:
             "dev-b",
             "2026-04-28",
             [
-                _push_event_with_emails("dev-b", 0.5, ["kb-machine-b@example.com"]),
+                _push_event_with_emails("dev-b", 0.5, ["user-machine-b@example.com"]),
                 _git_event(
                     "dev-b",
                     1.0,
-                    [_commit("bbb", 1.0, author_email="kb-machine-b@example.com")],
+                    [_commit("bbb", 1.0, author_email="user-machine-b@example.com")],
                 ),
             ],
         )
 
         # Machine A's view: passes its own gather.
-        data_a = _aggregate(events_dir, author_emails=frozenset({"kb-machine-a@example.com"}))
+        data_a = _aggregate(events_dir, author_emails=frozenset({"user-machine-a@example.com"}))
         # Machine B's view: passes its own gather.
-        data_b = _aggregate(events_dir, author_emails=frozenset({"kb-machine-b@example.com"}))
+        data_b = _aggregate(events_dir, author_emails=frozenset({"user-machine-b@example.com"}))
         # Both retros count both commits (union filter applies on both).
         assert data_a.git.commits == 2
         assert data_b.git.commits == 2
@@ -2929,7 +2929,7 @@ def _agg_git_only(commits: list[dict], window_days: int = 7) -> aggregator.GitAg
         [_git_event("dev-a", 0, commits)],
         since=NOW - timedelta(days=window_days),
         until=NOW,
-        author_emails=frozenset({"kb@example.com"}),
+        author_emails=frozenset({"user@example.com"}),
         window_days=window_days,
     )
 
@@ -2939,13 +2939,13 @@ class TestPullRequestAggregation:
         out = _agg_git_only(
             [
                 _commit("a" * 7, 1, subject="docs: regenerate roadmap (#114)"),
-                _commit("b" * 7, 1, subject="Merge pull request #115 from kb/topic"),
+                _commit("b" * 7, 1, subject="Merge pull request #115 from user/topic"),
             ]
         )
         assert out.pull_requests == 2
         assert out.pull_request_identities == {
-            ("github.com/kb/mm", 114),
-            ("github.com/kb/mm", 115),
+            ("github.com/user/mm", 114),
+            ("github.com/user/mm", 115),
         }
 
     def test_same_pr_in_distinct_accepted_commits_counts_once(self):
@@ -2964,20 +2964,20 @@ class TestPullRequestAggregation:
                 "dev-a",
                 0,
                 [_commit("a" * 7, 1, subject="feat: repo one (#114)")],
-                remote="github.com/kb/one",
+                remote="github.com/user/one",
             ),
             _git_event(
                 "dev-b",
                 0,
                 [_commit("b" * 7, 1, subject="feat: repo two (#114)")],
-                remote="github.com/kb/two",
+                remote="github.com/user/two",
             ),
         ]
         out = aggregator.aggregate_git(
             events,
             since=NOW - timedelta(days=7),
             until=NOW,
-            author_emails=frozenset({"kb@example.com"}),
+            author_emails=frozenset({"user@example.com"}),
         )
         assert out.pull_requests == 2
 
@@ -2992,12 +2992,12 @@ class TestPullRequestAggregation:
             0,
             [_commit("b" * 7, 1, subject="fix: second capture (#114)")],
         )
-        event_b["projects"][0]["remote"] = "git@github.com:kb/mm.git"
+        event_b["projects"][0]["remote"] = "git@github.com:user/mm.git"
         out = aggregator.aggregate_git(
             [event_a, event_b],
             since=NOW - timedelta(days=7),
             until=NOW,
-            author_emails=frozenset({"kb@example.com"}),
+            author_emails=frozenset({"user@example.com"}),
         )
         assert out.commits == 2
         assert out.pull_requests == 1
@@ -3019,11 +3019,11 @@ class TestPullRequestAggregation:
             events,
             since=NOW - timedelta(days=7),
             until=NOW,
-            author_emails=frozenset({"kb@example.com"}),
+            author_emails=frozenset({"user@example.com"}),
         )
         assert out.commits == 1
         assert out.pull_requests == 1
-        assert out.pull_request_identities == {("github.com/kb/mm", 114)}
+        assert out.pull_request_identities == {("github.com/user/mm", 114)}
 
     @pytest.mark.parametrize(
         "subject",
@@ -3036,7 +3036,7 @@ class TestPullRequestAggregation:
             "feat: leading zero (#0114)",
             "feat: unicode digits (#١١٤)",
             "feat: newline (#114)\n",
-            "Merge Pull Request #114 from kb/topic",
+            "Merge Pull Request #114 from user/topic",
             "Merge pull request #114",
             "Merge pull request #114 from ",
             "x" * 252 + " (#114)",
@@ -3051,7 +3051,7 @@ class TestPullRequestAggregation:
         subject = "x" * 249 + " (#114)"
         assert len(subject) == 256
         out = _agg_git_only([_commit("a" * 7, 1, subject=subject)])
-        assert out.pull_request_identities == {("github.com/kb/mm", 114)}
+        assert out.pull_request_identities == {("github.com/user/mm", 114)}
 
     @pytest.mark.parametrize("remote", ["", "github.com/", "not a remote", "not/a remote"])
     def test_invalid_remote_does_not_create_pr_identity(self, remote):
@@ -3065,7 +3065,7 @@ class TestPullRequestAggregation:
             [event],
             since=NOW - timedelta(days=7),
             until=NOW,
-            author_emails=frozenset({"kb@example.com"}),
+            author_emails=frozenset({"user@example.com"}),
         )
         assert out.commits == 1
         assert out.pull_requests == 0
@@ -3206,7 +3206,7 @@ class TestWeeklyBuckets:
             [_git_event("dev-a", 0, cs)],
             since=NOW - timedelta(days=14),
             until=NOW,
-            author_emails=frozenset({"kb@example.com"}),
+            author_emails=frozenset({"user@example.com"}),
             window_days=14,
         )
         assert len(out.weekly) == 2
@@ -3229,7 +3229,7 @@ class TestWeeklyBuckets:
             [_git_event("dev-a", 0, cs)],
             since=NOW - timedelta(days=14),
             until=NOW,
-            author_emails=frozenset({"kb@example.com"}),
+            author_emails=frozenset({"user@example.com"}),
             window_days=14,
         )
         assert len(out.weekly) >= 1
@@ -3249,7 +3249,7 @@ def _pair(
         since - timedelta(days=window_days),
         since,
         NOW,
-        emails if emails is not None else frozenset({"kb@example.com"}),
+        emails if emails is not None else frozenset({"user@example.com"}),
     )
 
 
@@ -3265,11 +3265,11 @@ def _agg_with_floor(
     events_dir = tmp_path / "events"
     _write_events(events_dir, "dev-a", floor, events)
     monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
-    monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset({"kb@example.com"}))
+    monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset({"user@example.com"}))
     return aggregator.aggregate(
         events_dir=events_dir,
         window_days=window_days,
-        author_emails=frozenset({"kb@example.com"}),
+        author_emails=frozenset({"user@example.com"}),
         now=now,
     )
 
@@ -3285,7 +3285,7 @@ class TestPriorPeriodComparison:
             since - timedelta(days=7),
             since,
             NOW,
-            frozenset({"kb@example.com"}),
+            frozenset({"user@example.com"}),
         )
         assert current.commits + prior.commits == 1
         assert current.commits == 1
@@ -3301,7 +3301,7 @@ class TestPriorPeriodComparison:
             since - timedelta(days=7),
             since,
             NOW,
-            frozenset({"kb@example.com"}),
+            frozenset({"user@example.com"}),
         )
         assert current.commits == 1
         assert prior.commits == 1
@@ -3398,7 +3398,7 @@ class TestPriorPeriodComparison:
         data = aggregator.aggregate(
             events_dir=events_dir,
             window_days=7,
-            author_emails=frozenset({"kb@example.com"}),
+            author_emails=frozenset({"user@example.com"}),
             now=NOW,
         )
         assert data.skipped_per_source == {"events": 1}
@@ -3512,7 +3512,7 @@ class TestPriorPeriodComparison:
         git = _git_event("dev-a", 1, [_commit("a" * 7, 1)])
         host = _host_event("dev-a", NOW.isoformat())
         since = NOW - timedelta(days=7)
-        emails = frozenset({"kb@example.com"})
+        emails = frozenset({"user@example.com"})
         with_host = aggregator._aggregate_git_period_pair(
             [git, host], since - timedelta(days=7), since, NOW, emails
         )
@@ -3562,7 +3562,7 @@ class TestPriorPeriodComparison:
         aggregator.aggregate(
             events_dir=events_dir,
             window_days=7,
-            author_emails=frozenset({"kb@example.com"}),
+            author_emails=frozenset({"user@example.com"}),
             now=NOW,
         )
         assert n["list"] == 1
@@ -3592,7 +3592,7 @@ class TestAsciiCard:
             commits=42,
             additions=1000,
             deletions=200,
-            repos_by_count={"github.com/kb/mm": 30, "github.com/kb/bolt": 12},
+            repos_by_count={"github.com/user/mm": 30, "github.com/user/bolt": 12},
             streak_days=37,
         )
         # Simulate two-machine fleet for the card.
@@ -3603,13 +3603,13 @@ class TestAsciiCard:
         data = self._baseline()
         out = aggregator.format_retro(
             data,
-            name="kb",
+            name="user",
             themes=["theme one", "theme two"],
             noteworthy="something noteworthy",
         )
         assert "╔" in out
         assert "╝" in out
-        assert "kb · " in out
+        assert "user · " in out
         assert "NOTEWORTHY" in out
         assert "TOP WORK" in out
         assert "theme one" in out
@@ -3629,7 +3629,7 @@ class TestAsciiCard:
         )
         out = aggregator.format_retro(
             data,
-            name="kb",
+            name="user",
             themes=["short", "longer theme line", "x"],
             noteworthy="medium length",
         )
@@ -3658,7 +3658,7 @@ class TestAsciiCard:
 
     def test_themes_prompt_omitted_on_second_pass(self):
         data = self._baseline()
-        out = aggregator.format_retro(data, themes=["a"], noteworthy="b", name="kb")
+        out = aggregator.format_retro(data, themes=["a"], noteworthy="b", name="user")
         assert "MM_THEMES_PROMPT" not in out
 
     def test_card_strips_terminal_escapes_from_llm_inputs(self):
@@ -3709,7 +3709,7 @@ class TestAsciiCard:
         }
         data = self._baseline()
         data.sessions = aggregator.SessionsAggregate(tokens_by_model=hostile)
-        out = aggregator.format_retro(data, name="kb")
+        out = aggregator.format_retro(data, name="user")
         card = [line for line in out.splitlines() if line.startswith("║")]
         assert card, "card must still render"
         for line in card:
@@ -3739,8 +3739,8 @@ class TestAsciiCard:
     def test_models_block_golden_layout_and_global_pr_reference(self):
         data = self._baseline()
         data.git.pull_request_identities = {
-            ("github.com/kb/mm", 114),
-            ("github.com/kb/bolt", 115),
+            ("github.com/user/mm", 114),
+            ("github.com/user/bolt", 115),
         }
         data.sessions = aggregator.SessionsAggregate(
             tokens_by_model={
@@ -3757,14 +3757,14 @@ class TestAsciiCard:
         )
         out = aggregator.format_retro(
             data,
-            name="kb",
+            name="user",
             themes=["theme one", "theme two"],
             noteworthy="something noteworthy",
         )
         card_contents = [line[3:-3].rstrip() for line in out.splitlines() if line.startswith("║")]
 
         assert card_contents == [
-            "kb · 2026-04-21 → 2026-04-28",
+            "user · 2026-04-21 → 2026-04-28",
             "42 commits · 2 repos · 2 PRs · 2 machines",
             "+1.0k / -200 LOC · 37-day streak",
             "",
@@ -3795,7 +3795,7 @@ class TestAsciiCard:
 
     def test_agents_block_renders_for_name_only_second_pass(self):
         data = self._baseline()
-        out = aggregator.format_retro(data, name="kb")
+        out = aggregator.format_retro(data, name="user")
 
         assert "AGENTS (" in out
         # One empty state for every agent. The pre-1.1 card needed a
@@ -3822,7 +3822,7 @@ class TestAsciiCard:
         )
         # Second pass is the shareable artifact and carries no health block;
         # read the payload from a first-pass render.
-        assert "≥$" in aggregator.format_retro(data, name="kb")
+        assert "≥$" in aggregator.format_retro(data, name="user")
         detail = _health_entry(aggregator.format_retro(data), "tokens_incomplete")["detail"]
         assert "old-host" in detail and "pre-v0.11.0 session schema" in detail
 
@@ -3845,10 +3845,10 @@ class TestThemesPrompt:
             commits=5,
             additions=100,
             deletions=10,
-            repos_by_count={"github.com/kb/foo": 3},
+            repos_by_count={"github.com/user/foo": 3},
         )
         data.git.ship = aggregator.ShipOfWeek(
-            repo="github.com/kb/foo",
+            repo="github.com/user/foo",
             sha="abc1234",
             subject="feat: ship it",
             additions=99,
@@ -3862,7 +3862,7 @@ class TestThemesPrompt:
         payload = json.loads(block)
         assert payload["commits"] == 5
         assert payload["ship"]["subject"] == "feat: ship it"
-        assert payload["top_repos"] == ["github.com/kb/foo"]
+        assert payload["top_repos"] == ["github.com/user/foo"]
 
     def test_long_repo_url_shortened_in_prompt(self):
         data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
@@ -3914,7 +3914,7 @@ class TestMainCliFlags:
             [
                 "7d",
                 "--name",
-                "kb",
+                "user",
                 "--noteworthy",
                 "did things",
                 "--theme",
@@ -3928,7 +3928,7 @@ class TestMainCliFlags:
         captured = capsys.readouterr()
         out = captured.out
         assert "╔" in out
-        assert "kb · " in out
+        assert "user · " in out
         assert "alpha" in out
         assert "AGENTS (" in out
         assert "0 PRs" in out
@@ -4003,7 +4003,7 @@ class TestRenderHardening:
         data.fleet.devices_in_events = {"dev-a"}
         local_until = NOW.astimezone().date().isoformat()
         local_since = (NOW - timedelta(days=7)).astimezone().date().isoformat()
-        out = aggregator.format_retro(data, themes=["x"], noteworthy="y", name="kb")
+        out = aggregator.format_retro(data, themes=["x"], noteworthy="y", name="user")
         assert f"# Retro: {local_since} → {local_until}" in out
 
 
@@ -4772,7 +4772,7 @@ class TestHostSnapshotNoWindowSpend:
             "projects": [
                 {
                     "claude_dir": "-tmp-proj",
-                    "source_root": "/Users/kb/.claude",
+                    "source_root": "/Users/user/.claude",
                     "sessions": 1,
                     "last_session_at": "2026-04-27T12:00:00+00:00",
                     "tokens_by_day": {
@@ -7889,9 +7889,11 @@ class TestCheckpointCommitsNeverCount:
                 "dev-a",
                 1,
                 [
-                    _commit("a" * 40, 1, author_email="kb@example.com"),
+                    _commit("a" * 40, 1, author_email="user@example.com"),
                     _commit("b" * 40, 1, author_email=self.CHECKPOINT, subject="wip"),
-                    _commit("c" * 40, 1, author_email="kb@example.com", subject="checkpoint: wip"),
+                    _commit(
+                        "c" * 40, 1, author_email="user@example.com", subject="checkpoint: wip"
+                    ),
                 ],
             )
         ]
@@ -7900,17 +7902,17 @@ class TestCheckpointCommitsNeverCount:
         from mind_meld import events as mm_events
 
         assert mm_events.is_checkpoint_commit(" Checkpointer@NoReply ", "x")
-        assert mm_events.is_checkpoint_commit("kb@example.com", "checkpoint: wip")
-        assert not mm_events.is_checkpoint_commit("kb@example.com", "Checkpoint: wip")
-        assert not mm_events.is_checkpoint_commit("kb@example.com", "fix: checkpoint: wip")
+        assert mm_events.is_checkpoint_commit("user@example.com", "checkpoint: wip")
+        assert not mm_events.is_checkpoint_commit("user@example.com", "Checkpoint: wip")
+        assert not mm_events.is_checkpoint_commit("user@example.com", "fix: checkpoint: wip")
         assert not mm_events.is_checkpoint_commit(None, 3)
 
     @pytest.mark.parametrize(
         "author_emails",
         [
             None,
-            frozenset({"kb@example.com"}),
-            frozenset({"kb@example.com", "checkpointer@noreply"}),
+            frozenset({"user@example.com"}),
+            frozenset({"user@example.com", "checkpointer@noreply"}),
         ],
     )
     def test_render_drops_checkpoints_under_every_filter(self, tmp_path, author_emails):
@@ -7923,7 +7925,7 @@ class TestCheckpointCommitsNeverCount:
 
     def test_period_pair_drops_checkpoints(self):
         prior, current = _pair(
-            self._events(), emails=frozenset({"kb@example.com", "checkpointer@noreply"})
+            self._events(), emails=frozenset({"user@example.com", "checkpointer@noreply"})
         )
         assert current.commits == 1
         assert prior.commits == 0
@@ -7935,9 +7937,9 @@ class TestCheckpointCommitsNeverCount:
             return f"\x1e{sha}\t2026-04-27T10:00:00+00:00\t{email}\t{subject}\n1\t0\tf.txt\n"
 
         out = (
-            record("a" * 40, "kb@example.com", "feat: real")
+            record("a" * 40, "user@example.com", "feat: real")
             + record("b" * 40, self.CHECKPOINT, "wip")
-            + record("c" * 40, "kb@example.com", "checkpoint: wip")
+            + record("c" * 40, "user@example.com", "checkpoint: wip")
         )
         parsed = mm_events._parse_git_log_numstat(out)
         assert [c["sha"] for c in parsed] == ["a" * 40]

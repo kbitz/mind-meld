@@ -1086,7 +1086,7 @@ class TestIsCacheCold:
                 {
                     "version": 1,
                     "files": {
-                        "/Users/kb/.claude/projects/x/sess.jsonl": {
+                        "/Users/user/.claude/projects/x/sess.jsonl": {
                             "size": 12345,
                             "mtime": 1.234e9,
                             "by_day": {

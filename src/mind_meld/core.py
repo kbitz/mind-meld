@@ -1414,7 +1414,7 @@ class MintGuard:
         return sum(len(v) for v in self.left_out.values())
 
     def clause(self) -> str:
-        """``3 files left out because /home/kb/.claude/projects is new; run mm pull ...``."""
+        """``3 files left out because /home/user/.claude/projects is new; run mm pull ...``."""
         if not self.left_out_files:
             return ""
         clauses = []

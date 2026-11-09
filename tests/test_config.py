@@ -545,7 +545,7 @@ class TestDefaultSources:
         snapshot = "projects/*/decisions.active.json"
         brain = "projects/*/brain-cache/*"
         assert fnmatch.fnmatch("projects/kbitz-mind-meld/decisions.active.json", snapshot)
-        assert fnmatch.fnmatch("projects/cnyfeeds-capsule-cli/decisions.active.json", snapshot)
+        assert fnmatch.fnmatch("projects/org-capsule-cli/decisions.active.json", snapshot)
         assert fnmatch.fnmatch("projects/kbitz-mind-meld/brain-cache/_meta.json", brain)
         # The append-only log that feeds the snapshot must NOT be excluded.
         assert not fnmatch.fnmatch("projects/kbitz-mind-meld/decisions.jsonl", snapshot)
@@ -2250,7 +2250,7 @@ class TestRepoRootsValidation:
 
     def test_repo_roots_bare_string_raises_configerror(self):
         config = self._base()
-        config["retro"] = {"repo_roots": "/Users/kb/src"}
+        config["retro"] = {"repo_roots": "/Users/user/src"}
         with pytest.raises(ConfigError, match="retro.repo_roots must be a list"):
             _validate(config)
 

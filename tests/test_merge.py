@@ -42,7 +42,7 @@ class TestShouldMerge:
 
     def test_memory_md_is_merged(self):
         """MEMORY.md index files should be merged (line-oriented)."""
-        assert should_merge("projects/-Users-kb-myapp/memory/MEMORY.md") is True
+        assert should_merge("projects/-Users-user-myapp/memory/MEMORY.md") is True
 
     def test_memory_md_at_root(self):
         assert should_merge("MEMORY.md") is True

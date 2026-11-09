@@ -223,7 +223,7 @@ class TestGcEventsIronRule:
 
         # Seed an old events file (will be reaped).
         claude_dir = tmp_path / "claude"
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "x.md").write_text("seed")
         old = datetime.now(timezone.utc) - timedelta(days=120)
@@ -408,8 +408,8 @@ class TestGcEventsOfflinePeerSuppression:
         for device, root in roots.items():
             claude = tmp_path / f"claude-{device}"
             (root / "events").mkdir(parents=True)
-            (claude / "projects" / "-Users-kb-p" / "memory").mkdir(parents=True)
-            (claude / "projects" / "-Users-kb-p" / "memory" / "x.md").write_text(device)
+            (claude / "projects" / "-Users-user-p" / "memory").mkdir(parents=True)
+            (claude / "projects" / "-Users-user-p" / "memory" / "x.md").write_text(device)
             configs[device] = tmp_path / f"config-{device}.toml"
             save_config(
                 {

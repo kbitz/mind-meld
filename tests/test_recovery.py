@@ -933,7 +933,7 @@ class TestRecoverAbandonManifestDestructive:
         bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
 
         claude = tmp_path / "claude"
-        project = claude / "projects" / "-Users-kb-myapp" / "memory"
+        project = claude / "projects" / "-Users-user-myapp" / "memory"
         project.mkdir(parents=True)
         kept = project / "kept.md"
         deleted = project / "will-be-deleted.md"

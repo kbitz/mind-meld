@@ -196,7 +196,7 @@ class TestGenerateTombstones:
 
         record = {"deleted_at": "2026-11-01T00:00:00+00:00", "device_id": "d", "sha256": "ab" * 32}
         _, remapped = manifest_module._remap_keys(
-            {}, {"claude:projects/-Users-kb-x/memory/a.md": record}, lambda folder: "@home-x"
+            {}, {"claude:projects/-Users-user-x/memory/a.md": record}, lambda folder: "@home-x"
         )
         assert remapped == {"claude:projects/@home-x/memory/a.md": record}
 

@@ -479,7 +479,7 @@ decision of the owner:
 2. No new header is written first.
 3. There is **no newer-side fleet gate**. A machine on this release publishes the
    new form at its first push that can list `projects/` (attended or auto) whatever version any other
-   machine runs. Karl, 2026-10-31: "we should not pause all machines until all
+   machine runs. the owner, 2026-10-31: "we should not pause all machines until all
    machines are updated (dumb), we should be able to go one at a time and sync the
    updated ones without waiting for the entire fleet". Updated machines sync with
    each other at once; older machines keep syncing with each other in the old form;

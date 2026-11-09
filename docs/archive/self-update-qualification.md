@@ -5,7 +5,7 @@
 # Real self-update qualification — Track 69A
 
 **Documentation complete; S13 REQUIRED / PENDING, 0 of 3 checks passed.**
-Owner: Karl / the trial operator. Retry when a stable release newer than the
+Owner: the owner / the trial operator. Retry when a stable release newer than the
 selected installation is published and its tag, Release and `latest` commit agree.
 Reinventory immediately before each command. The four automatic rows additionally
 need an existing, genuinely behind, exact own `@latest` pipx installation.
@@ -42,7 +42,7 @@ mkdir -p "$QUAL_TOOLS"
 chmod 700 "$QUAL_ROOT" "$QUAL_RUN" "$QUAL_TOOLS"
 export QUAL_MM="$(command -v mm)"   # choose an existing absolute suffixed command instead if needed
 export QUAL_DEVICE=local-candidate # portable device label
-export QUAL_OPERATOR=Karl          # whoever actually runs this trial
+export QUAL_OPERATOR=owner         # whoever actually runs this trial
 export QUAL_PY="$(python3 - "$QUAL_MM" <<'PYTHON'
 import shlex, sys
 from pathlib import Path
@@ -140,7 +140,7 @@ extra S13 blockers. One upgrade consumes that installation's old state.
 
 ## Five rows and concrete release schedule
 
-Inventory receipt: 2026-10-04T12:04:09.929481Z, operator Karl / Codex,
+Inventory receipt: 2026-10-04T12:04:09.929481Z, operator the owner / Codex,
 device label `local-candidate`, macOS 27.0, installed Python 3.14.8,
 pipx 1.17.9, unsuffixed own venv, held=false. Exposed binary is
 `~/.local/bin/mm`, target `~/.local/pipx/venvs/mind-meld/bin/mm`;
@@ -194,11 +194,11 @@ re-read.
 
 | Exact intended invocation (controlled terminal) | S13 family | Status / problem and observed cause | Candidate / target / consumed state | Owner, retry event and next action |
 |---|---|---|---|---|
-| `"$QUAL_MM" push` | 1 attended | REQUIRED / PENDING: current 1.4.0 and classifier-pinned bare spec | Local candidate unusable for automatic trial; other tracking candidates unknown | Karl: inventory an existing naturally-behind exact `@latest` install at a newer agreeing stable release; wait any natural cache/claim gates, confirm sync/observers; [automatic policy](../invariants/auto-upgrade.md#self-update-v130). |
-| `"$QUAL_MM" pull` | 1 attended sibling | REQUIRED / PENDING: same current/pinned prerequisite | Cannot reuse old state consumed by push; needs another real old install or later release | Karl: same inventory event; disclose unqualified sibling if push alone supplies family evidence; [automatic policy](../invariants/auto-upgrade.md#self-update-v130). |
-| `"$QUAL_MM" autopull` | 2 detached | REQUIRED / PENDING: same current/pinned prerequisite | Existing tracking candidate unknown; no hook integration observed | Karl: existing behind tracking install + newer agreeing release, quiet window/ready overlap observers and natural gates; [hook behavior](../../README.md#automatic-updates). |
-| `"$QUAL_MM" autopush` | 2 detached sibling | REQUIRED / PENDING: same current/pinned prerequisite | Cannot reuse consumed autopull state; same-Mac/same-target second automatic candidate waits claim+24h | Karl: separate natural old install or later release; preserve origin and disclose sibling coverage; [shared exclusion](../invariants/auto-upgrade.md#self-update-v130). |
-| `"$QUAL_MM" update`, then immediate current rerun | 3 explicit | REQUIRED / PENDING: no newer target in the 12:03Z observation (v1.5.0, then v1.5.1, followed; see the later observation above; not re-inventoried); negative observer capability INCONCLUSIVE | Local 1.4.0 classifier-pin can supply force-reinstall branch at the next newer release; tracking-upgrade sibling unqualified | Karl: newer agreeing stable release, recovery recorded and quiet window; after genuine target-reaching update, same invocation rerun must refresh target successfully with validated complete observer; [explicit update](../../README.md#upgrading). |
+| `"$QUAL_MM" push` | 1 attended | REQUIRED / PENDING: current 1.4.0 and classifier-pinned bare spec | Local candidate unusable for automatic trial; other tracking candidates unknown | the owner: inventory an existing naturally-behind exact `@latest` install at a newer agreeing stable release; wait any natural cache/claim gates, confirm sync/observers; [automatic policy](../invariants/auto-upgrade.md#self-update-v130). |
+| `"$QUAL_MM" pull` | 1 attended sibling | REQUIRED / PENDING: same current/pinned prerequisite | Cannot reuse old state consumed by push; needs another real old install or later release | the owner: same inventory event; disclose unqualified sibling if push alone supplies family evidence; [automatic policy](../invariants/auto-upgrade.md#self-update-v130). |
+| `"$QUAL_MM" autopull` | 2 detached | REQUIRED / PENDING: same current/pinned prerequisite | Existing tracking candidate unknown; no hook integration observed | the owner: existing behind tracking install + newer agreeing release, quiet window/ready overlap observers and natural gates; [hook behavior](../../README.md#automatic-updates). |
+| `"$QUAL_MM" autopush` | 2 detached sibling | REQUIRED / PENDING: same current/pinned prerequisite | Cannot reuse consumed autopull state; same-Mac/same-target second automatic candidate waits claim+24h | the owner: separate natural old install or later release; preserve origin and disclose sibling coverage; [shared exclusion](../invariants/auto-upgrade.md#self-update-v130). |
+| `"$QUAL_MM" update`, then immediate current rerun | 3 explicit | REQUIRED / PENDING: no newer target in the 12:03Z observation (v1.5.0, then v1.5.1, followed; see the later observation above; not re-inventoried); negative observer capability INCONCLUSIVE | Local 1.4.0 classifier-pin can supply force-reinstall branch at the next newer release; tracking-upgrade sibling unqualified | the owner: newer agreeing stable release, recovery recorded and quiet window; after genuine target-reaching update, same invocation rerun must refresh target successfully with validated complete observer; [explicit update](../../README.md#upgrading). |
 
 No trial was invoked, so sync outcome, installer outcome/output, parent/child
 lifetime and trial lock evidence are **not observed** for every row. Inventory
@@ -273,7 +273,7 @@ macOS `/usr/bin/eslogger exec fork exit`, as described in local `man eslogger`
 and [Apple Endpoint Security documentation](https://developer.apple.com/documentation/endpointsecurity/monitoring-system-events-with-endpoint-security).
 On this host the nonprivileged preparation attempt exited 1 with
 `ES_NEW_CLIENT_RESULT_ERR_NOT_PRIVILEGED`. Complete coverage is **unavailable**;
-owner Karl must arrange an already-authorized privileged/FDA observer context
+the owner must arrange an already-authorized privileged/FDA observer context
 outside this Track, validate it, then retry at the genuine opportunity. No
 privilege/TCC/config change was made here. The explicit row remains pending;
 its no-installer capability is inconclusive, never an observed no-installer pass.
@@ -575,13 +575,13 @@ released commit; never credit a below-known-target install or untagged bytes.
 
 | Outcome | Decision and actionable remedy |
 |---|---|
-| REQUIRED / PENDING: current/wrong/unknown install | Record exact missing spec/version/own-prefix/hold/updater fact. Karl reinventories an existing eligible install at the next newer agreeing stable release; unsupported or setup changes need separate work. [Ownership](../invariants/auto-upgrade.md#self-update-v130). |
+| REQUIRED / PENDING: current/wrong/unknown install | Record exact missing spec/version/own-prefix/hold/updater fact. the owner reinventories an existing eligible install at the next newer agreeing stable release; unsupported or setup changes need separate work. [Ownership](../invariants/auto-upgrade.md#self-update-v130). |
 | PENDING: target unavailable/mismatched | Cause is request failure, no eligible stable tag, or tag/Release/latest disagreement. Wait for network/rate limit/release publication to recover and rerun read-only discovery; no forced pin update on a guess. [Upgrading](../../README.md#upgrading). |
 | PENDING: normal cache/claim skip | Record actual checked/attempt/claim times and next eligible time. Wait for natural 24h freshness/retry or 4h failed-fetch backoff; newer target can reset claim. A skipped installer never failed. [Gates](../invariants/auto-upgrade.md#self-update-v130). |
 | PENDING IN-FLIGHT / busy | Positively observed live installer or exclusion prevents another. Preserve PID/locks, wait for actual exit; ten-minute observation is not timeout. Never remove any lock. [Exclusion](../invariants/auto-upgrade.md#self-update-v130). |
 | PENDING: sync refusal/tail unreached | Preserve sync stderr/exit independently; cause may be invalid config, crypto/storage refusal or no sources. `pull` skips its update tail after a refused sync. Follow [sync remedies](../../README.md#troubleshooting) in separate authorized repair work, then retry only if real old state remains eligible. Exit 0 from an auto command alone does not prove it reached the tail. |
 | PENDING, state consumed: push sync failed but its tail installed | Attended `push` runs its update tail even after a failed sync. Record the installer evidence as usual, but check 1 requires sync completion, so it earns no credit and the starting state is spent. Repair the sync cause in separate work and retry with another naturally-behind install or later release. [Self-update](../invariants/auto-upgrade.md#self-update-v130). |
-| OBSERVED FAILURE: pipx nonzero/foreground timeout, missing venv or below-target result | Record reproduction, installer logs and actual installed state, with sync success kept separate. Karl uses the **recorded own** home/bin/suffix recovery after quiet-window verification; do not blindly repair a sibling. File reproduced updater defects separately. [Recovery](../../README.md#upgrading). Recovery is not a retroactive pass. |
+| OBSERVED FAILURE: pipx nonzero/foreground timeout, missing venv or below-target result | Record reproduction, installer logs and actual installed state, with sync success kept separate. the owner uses the **recorded own** home/bin/suffix recovery after quiet-window verification; do not blindly repair a sibling. File reproduced updater defects separately. [Recovery](../../README.md#upgrading). Recovery is not a retroactive pass. |
 | INCONCLUSIVE: missing overlap, event loss, wrong inode/log, LockError or silent lock-gap skip | Cause is missing/ambiguous proof, not established updater failure. Retain partial evidence; validate observers/quiet window and retry with another naturally-behind install or later release. For no-installer proof arrange validated complete observation, not faster polling. [Lock/process contract](../invariants/auto-upgrade.md#self-update-v130). |
 | INCONCLUSIVE: target moved / receipt lost | Resolve actual released commit against before/after refs; restore independently attributable raw receipts. If attribution remains unknown, retry at a natural opportunity. Do not promote an overwritten log or below-target result to a pass. [Release discipline](../invariants/auto-upgrade.md#release-discipline-enforced-by-mm-auto-upgrade). |
 | OBSERVED PASS | Only after all required family receipts agree. Record which command and explicit branch passed; leave unqualified siblings visible. S13 closes only with checks 1, 2 and full 3 satisfied. |

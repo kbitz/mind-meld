@@ -941,11 +941,11 @@ class TestWalkSessionMetadata:
         assert out[0]["projects"][0]["total_kb"] == 4
 
     def test_conductor_workspace_marked_ephemeral(self, tmp_path):
-        proj = tmp_path / "projects" / "-Users-kb-conductor-workspaces-foo"
+        proj = tmp_path / "projects" / "-Users-user-conductor-workspaces-foo"
         proj.mkdir(parents=True)
         # cwd points at a path that matches the conductor pattern
         (proj / "session.jsonl").write_text(
-            json.dumps({"cwd": "/Users/kb/conductor/workspaces/foo", "type": "user"}) + "\n"
+            json.dumps({"cwd": "/Users/user/conductor/workspaces/foo", "type": "user"}) + "\n"
         )
         out = events.walk_session_metadata(
             tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
@@ -956,7 +956,7 @@ class TestWalkSessionMetadata:
         proj = tmp_path / "projects" / "-tmp-x"
         proj.mkdir(parents=True)
         (proj / "session.jsonl").write_text(
-            json.dumps({"cwd": "/Users/kb/code/foo", "type": "user"}) + "\n"
+            json.dumps({"cwd": "/Users/user/code/foo", "type": "user"}) + "\n"
         )
         out = events.walk_session_metadata(
             tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
@@ -1203,10 +1203,10 @@ class TestWalkSessionMetadata:
         ``(device, source_root, claude_dir)`` to avoid silent overwrite
         when two configured ``type: claude`` source roots share an encoded
         project name."""
-        proj = tmp_path / "projects" / "-Users-kb-Documents-foo"
+        proj = tmp_path / "projects" / "-Users-user-Documents-foo"
         proj.mkdir(parents=True)
         (proj / "session.jsonl").write_text(
-            json.dumps({"cwd": "/Users/kb/Documents/foo", "type": "user"}) + "\n"
+            json.dumps({"cwd": "/Users/user/Documents/foo", "type": "user"}) + "\n"
         )
         out = events.walk_session_metadata(
             tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
@@ -2193,7 +2193,7 @@ class TestMmPushEventLocalEmails:
         push = events.make_mm_push_event(
             device="dev-a",
             mm_version="0.11.17",
-            local_emails=["kb@example.com", "kb-work@example.com"],
+            local_emails=["user@example.com", "user-work@example.com"],
         )
         events.write_push_event(events_dir, "dev-a", [push])
         files = list(events_dir.glob("*.jsonl"))
@@ -2201,7 +2201,7 @@ class TestMmPushEventLocalEmails:
         line = files[0].read_text(encoding="utf-8").strip()
         parsed = json.loads(line)
         assert parsed["type"] == "mm-push"
-        assert parsed["local_emails"] == ["kb@example.com", "kb-work@example.com"]
+        assert parsed["local_emails"] == ["user@example.com", "user-work@example.com"]
 
 
 def _u(input_tokens: int = 0):
@@ -3465,7 +3465,7 @@ def test_worktree_dedup_and_author_filtered_recapture_fixture(tmp_path, monkeypa
         json.dumps(
             {
                 "version": 2,
-                "emails": ["kb@example.com"],
+                "emails": ["user@example.com"],
                 "refreshed_at": datetime.now(timezone.utc).isoformat(),
             }
         )
@@ -3475,10 +3475,10 @@ def test_worktree_dedup_and_author_filtered_recapture_fixture(tmp_path, monkeypa
     user_repo = tmp_path / "mmm-factory"
     _init_git_repo(user_repo)
     subprocess.run(
-        ["git", "-C", str(user_repo), "config", "user.email", "kb@example.com"], check=True
+        ["git", "-C", str(user_repo), "config", "user.email", "user@example.com"], check=True
     )
     subprocess.run(
-        ["git", "-C", str(user_repo), "remote", "add", "origin", "https://github.com/kb/mmm.git"],
+        ["git", "-C", str(user_repo), "remote", "add", "origin", "https://github.com/user/mmm.git"],
         check=True,
     )
     (user_repo / "main.txt").write_text("main line\n")
@@ -3522,7 +3522,7 @@ def test_worktree_dedup_and_author_filtered_recapture_fixture(tmp_path, monkeypa
                     "-C",
                     str(wt),
                     "-c",
-                    "user.email=kb+alias@example.com",
+                    "user.email=user+alias@example.com",
                     "commit",
                     "-q",
                     "-m",
@@ -3585,7 +3585,7 @@ def test_worktree_dedup_and_author_filtered_recapture_fixture(tmp_path, monkeypa
 
     cfg = load_config()
     cfg["retro"] = {
-        "author_emails": ["kb+alias@example.com"],
+        "author_emails": ["user+alias@example.com"],
         "repo_roots": [
             str(wt)
             for wt in [*user_worktrees[:4], user_repo, *upstream_worktrees[:2], upstream_repo]
@@ -3632,8 +3632,8 @@ def test_worktree_dedup_and_author_filtered_recapture_fixture(tmp_path, monkeypa
         assert "--all" in argv
         assert "--regexp-ignore-case" in argv
         assert "--fixed-strings" in argv
-        assert "--author=<kb@example.com>" in argv
-        assert "--author=<kb+alias@example.com>" in argv
+        assert "--author=<user@example.com>" in argv
+        assert "--author=<user+alias@example.com>" in argv
 
     # Verify the captured snapshot contents directly: both the main commit and the
     # worktree-only commit are present on user_repo, upstream_repo has 0 commits,

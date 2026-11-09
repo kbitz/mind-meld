@@ -295,7 +295,7 @@ so peers keep their copies (a false tombstone would block the project fleet-wide
 file deleted on the old form, in a folder already gone when a machine switches, can come back on
 any machine that owns the project, on any pull, for the rest of its 30 days: nothing ties that
 record to the project, a machine owning it reads the home-relative name as superseded, and its
-next push republishes the file under the identity (Karl, 2026-10-31, who removed the first-switch
+next push republishes the file under the identity (the owner, 2026-10-31, who removed the first-switch
 spelling rather than patch it, and accepted this scope). On the switching machine itself, a pull
 elsewhere leaves the folder gone; a pull inside that checkout, or anything that recreates the
 folder, makes it an owner too. The same holds for a file in a folder gone since the last old-form
