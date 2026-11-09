@@ -76,7 +76,7 @@ The 2.0.0 cut is not a Track, and its path is open: the owner will decide how to
 
 ## Future
 
-Deferred: docs/roadmap-future.md (25 items)
+Deferred: docs/roadmap-future.md (32 items)
 
 ## Shipped
 
