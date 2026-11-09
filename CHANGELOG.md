@@ -2281,11 +2281,11 @@ New helper `_restore_mtime_best_effort(path, mtime_iso)` parses the manifest's I
 
 **`/retro-fleet` borrows the gstack `/retro` shape: ASCII screenshot card, commit-type mix, peak hours, commit bursts, ship-of-the-window, week-over-week deltas, snapshot persistence, and an LLM-driven praise/level-up/focus narrative.** Pre-fix, the skill rendered a flat "stats and notes" markdown body and told the LLM to paste it verbatim — which left the gstack-style judgment layer (themes, ship of the week, narrative) entirely on the table. The aggregator now does the deterministic work and the SKILL.md hands off the narrative pieces to the LLM with a tone block opinionated enough to keep the output specific instead of fluffy.
 
-The card is rendered through a **two-pass CLI flow**. Pass 1 (`mm retro-fleet 7d`) emits the markdown body plus a `MM_THEMES_PROMPT` JSON sidecar; the LLM reads it, synthesizes a noteworthy line + 3 themes, then re-invokes with `mm retro-fleet 7d --theme A --theme B --theme C --noteworthy "..." --name kb --no-save`. Pass 2 re-renders with a pixel-aligned ASCII card pinned at the top:
+The card is rendered through a **two-pass CLI flow**. Pass 1 (`mm retro-fleet 7d`) emits the markdown body plus a `MM_THEMES_PROMPT` JSON sidecar; the LLM reads it, synthesizes a noteworthy line + 3 themes, then re-invokes with `mm retro-fleet 7d --theme A --theme B --theme C --noteworthy "..." --name user --no-save`. Pass 2 re-renders with a pixel-aligned ASCII card pinned at the top:
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║  kb · 2026-04-30 → 2026-05-07                                ║
+║  user · 2026-04-30 → 2026-05-07                              ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  118 commits · 8 repos · 3 machines                          ║
 ║  +31k / -11k LOC · 37-day streak                             ║
@@ -2366,7 +2366,7 @@ no further mind-meld change is needed.
 
 ## [0.11.29] - 2026-05-07
 
-**`mm retro-fleet` drops the misleading "across N projects" stat; ephemeral-workspace count moves inline with sessions.** User feedback: a 7d retro reported "171 sessions across 89 projects" against a fleet that has only ever worked on ~10 real repos. Root cause: Claude Code keys session storage by encoded cwd (`~/.claude/projects/-Users-kb-conductor-workspaces-mind-meld-pangyo-v1/`), so every Conductor workspace and git worktree gets its own dir on disk and the aggregator's `(device, source_root, claude_dir)` tuple counted each as a distinct project. The number was correct as "unique session-storage paths" but useless as "projects." The repo count under `## Code shipped` already covers the meaningful signal — it dedups by canonical git remote URL.
+**`mm retro-fleet` drops the misleading "across N projects" stat; ephemeral-workspace count moves inline with sessions.** User feedback: a 7d retro reported "171 sessions across 89 projects" against a fleet that has only ever worked on ~10 real repos. Root cause: Claude Code keys session storage by encoded cwd (`~/.claude/projects/-Users-user-conductor-workspaces-mind-meld-pangyo-v1/`), so every Conductor workspace and git worktree gets its own dir on disk and the aggregator's `(device, source_root, claude_dir)` tuple counted each as a distinct project. The number was correct as "unique session-storage paths" but useless as "projects." The repo count under `## Code shipped` already covers the meaningful signal — it dedups by canonical git remote URL.
 
 `format_retro` now renders one of:
 
@@ -2980,15 +2980,15 @@ inline.
 
 **Scrub real email fixtures from public test suite + sync docs to
 v0.11.13 default.** v0.11.10's trust-rooted-author work added real
-personal/work email addresses (`kb@wardbitz.com`, `kb@cnyfeeds.com`)
+personal/work email addresses (`user@example.com`, `user.work@example.com`)
 as test fixtures in `tests/test_retro_fleet_aggregator.py`. The
 personal address was already exposed via legacy commit author
 metadata, but the work address had never appeared in the public repo
 until that PR. Replaced all 26 occurrences with `example.com` /
 `example.org` equivalents that preserve the test's two-distinct-
 identities semantics. Also normalized 3 occurrences of
-`kb@personal.com` (real domain, not the user's) to
-`kb-personal@example.com` for fixture consistency. CLAUDE.md and
+`user@personal.com` (real domain, not the user's) to
+`user-personal@example.com` for fixture consistency. CLAUDE.md and
 README.md were missing the v0.11.13 default exclude
 `analytics/.last-sync-*` (gstack per-machine analytics cursor files);
 both now match `src/mind_meld/config.py:DEFAULT_SOURCES`.
@@ -3029,7 +3029,7 @@ leaking instance/tenant detail into output that may be shared publicly.
 ## [0.11.14] - 2026-05-01
 
 **Token usage measurement in retro-fleet.** The "Claude Code activity"
-section in `/retro-fleet` now answers the question kb actually asks at
+section in `/retro-fleet` now answers the question the owner actually asks at
 retro time: how much did Claude Code consume this week, was it Sonnet or
 Opus heavy, did the cache do its job, what would this have cost at API
 list rates. Real numbers from this Mac's 30-day window: 12.4M input,
@@ -3286,7 +3286,7 @@ on each other to make retros look broken:
 
   Trade-off: this set may *under*-count if you have identities in use
   on machines outside this one's reach (committing as
-  `karl@personal` on the iMac but the MacBook only has `kb@work`
+  `user@personal` on the iMac but the MacBook only has `user@work`
   configured, then running retro on the MacBook). Workaround: list
   every identity in `[retro].author_emails` on each machine. Future
   improvement: sync the trust set across the fleet via mm-events
@@ -3637,7 +3637,7 @@ silently-empty retros unless they also set `MM_EVENTS_DIR`.
   `_scan_one_project`, which writes it to each emitted `SessionMetadata`
   as a new `source_root: str` field. Pre-fix, two `type: claude` source
   roots that both contained a project encoded as e.g.
-  `-Users-kb-Documents-foo` silently overwrote each other; now they are
+  `-Users-user-Documents-foo` silently overwrote each other; now they are
   preserved as distinct entries and their session counts sum correctly.
   `SessionMetadata` is `TypedDict, total=False` so the schema change is
   additive — no v=3 bump.
@@ -4196,7 +4196,7 @@ Cosmetic-only — zero behavioral changes, all 836 tests still pass.
 
 ### Changed
 
-- `pyproject.toml` `authors` field set to `Karl Bitz` (was placeholder
+- `pyproject.toml` `authors` field set to the owner's name (was placeholder
   `Mind Meld Contributors`).
 - README's "How it works" section now documents the v0.9.5 auto-upgrade nudge
   (24h check, `mm: notice:` stderr prefix, `--no-check-version` opt-out flag,
@@ -5413,7 +5413,7 @@ fixed before merge (see Fixed).
 ## [0.8.3] - 2026-04-23
 
 Prep pass for public release: adds the MIT `LICENSE` file that `pyproject.toml`
-already declares, and scrubs the placeholder user path `/Users/kb/` out of the
+already declares, and scrubs the placeholder user path `/Users/user/` out of the
 spec, design doc, and one test fixture so examples don't leak a real username.
 No runtime behavior change.
 
@@ -5424,7 +5424,7 @@ No runtime behavior change.
 
 ### Changed
 - `SPEC.md`, `docs/designs/sync-gstack-context.md`, `tests/test_integration.py`:
-  replace `/Users/kb/` with `/Users/alice/` in JSON manifest examples and the v1
+  replace `/Users/user/` with `/Users/alice/` in JSON manifest examples and the v1
   backward-compat fixture. Pure string swap; the fixture's input and assertion
   change together, so semantics are unchanged.
 
