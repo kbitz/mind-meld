@@ -9,7 +9,7 @@ Contract version 1 · Track 68A · measured 2026-10-01 · **NO QUALIFIED ROUTE**
 > supersedes this design. The recipes, receipts and series below are a
 > historical record; they no longer run. Any future Codex memory route
 > requalifies from scratch.
-Qualification owner: Track 68A implementer. Karl owns genuine user enrollment.
+Qualification owner: Track 68A implementer. the owner owns genuine user enrollment.
 This contract covers the exact measured builds below. Protocol evidence from
 the tests-only model does not qualify native recall or shipped transport.
 
@@ -94,9 +94,9 @@ campaign budget is not falsely reported exhausted.
 | Prerequisite | Owner / required evidence | Missing prerequisite cancels |
 |---|---|---|
 | Actual context observation | Implementer: supported loaded/retrieved context channel, tested without marker leakage | Dependent recall/withdrawal/model-behavior evaluations |
-| Physical home and credentials | Implementer; Karl approves any new login: installed inventory, home binding, login write locations and verified cleanup | Credentialed CLI and dependent lifecycle/import trials |
+| Physical home and credentials | Implementer; the owner approves any new login: installed inventory, home binding, login write locations and verified cleanup | Credentialed CLI and dependent lifecycle/import trials |
 | Actual Conductor binding | Implementer/Conductor supported surface: distinct verified home and observation | Conductor trials only; CLI cannot fill them |
-| User authority | Karl and implementer: identity/action/target-bound evidence outside agent tools | Enrollment/retirement/explicit capture and all production promotion |
+| User authority | the owner and implementer: identity/action/target-bound evidence outside agent tools | Enrollment/retirement/explicit capture and all production promotion |
 
 Raw root handle `root-q1` was checked outside all configured sources, all six
 installed default roots, the disabled legacy OpenCode root, storage, Mobile
@@ -422,14 +422,14 @@ an exit-code change or permission for an agent to enroll, log in or retry captur
 | no-consolidation | Eligible input has no completed consolidation | recall, import/regeneration | Record scheduler delay; supported attended later observation | implementer |
 | unsupported-surface | Required source/consumer/control surface not qualified | dependent host/control gates | Research supported surface; retain no-route leaf | implementer |
 | observation-unavailable | Loaded/retrieved context unavailable; answer insufficient | recall, withdrawal, model behavior | Qualify actual observation, keep answer separate | implementer |
-| credential-unsupported | Approved isolated login/cleanup mechanism unavailable | credentialed native arms | Karl approves separate setup after locations/effects are established | Karl / implementer |
+| credential-unsupported | Approved isolated login/cleanup mechanism unavailable | credentialed native arms | the owner approves separate setup after locations/effects are established | the owner / implementer |
 | unsafe-root | Inventory/identity/containment/ownership/modes ambiguous or unsafe | raw writes, native launch, cleanup | Select and prove another owned root or repair owned modes while closed | implementer |
 | build-changed | Build/schema/control/carrier changed during observation | dependent cohort only | Record before/after and targeted requalification | implementer |
-| budget-exhausted | 72-hour campaign ended before observation completed | unfinished live arms | Preserve INCONCLUSIVE receipts; separately choose future campaign | Karl / implementer |
+| budget-exhausted | 72-hour campaign ended before observation completed | unfinished live arms | Preserve INCONCLUSIVE receipts; separately choose future campaign | the owner / implementer |
 | unstable-source | Descriptors or demonstrated source/job revisions disagree | scope, consent, recall census | Two short bounded attempts; qualified join before retry | implementer |
 | scan-limit | Count/bytes/lineage/deadline exceeds prototype budget | affected view/export | Preserve accepted evidence; examine supported bounded approach | implementer |
 | control-incomplete | Declared cohort controls not coherently accepted | recall, withdrawal | Complete validated inventory before serving; never infer empty controls | transport owner |
-| control-unresolved | An unsupported, unscoped or malformed control is unresolved control state | the affected view, or every view for invalid scope | Deliver a supported control with the same identity, or have the enrolled user clear it through the local remedy; never retire a root just to clear it | Karl / transport owner |
+| control-unresolved | An unsupported, unscoped or malformed control is unresolved control state | the affected view, or every view for invalid scope | Deliver a supported control with the same identity, or have the enrolled user clear it through the local remedy; never retire a root just to clear it | the owner / transport owner |
 | publication-unavailable | Write/durability failure may occur after rename | accepted view and cached delivery | Close view, reopen actual coherent bytes and validate controls | implementer / transport owner |
 
 Reason codes are closed machine values; this table is their remedy, and the
@@ -502,8 +502,8 @@ until the named owner resolves it.
 | Only `foreign_delivery` applies the served-record check and the pre-delivery ancestry block; `agent_frame` is a free function and `recall` alone persists no block | A startup carrier that pairs recall with framing bypasses the block; every real delivery path must route through the checked entry point | mm route / shared agent-config owner (Q14, Q15) |
 | macOS ACL grants are not inspected (`S_IMODE` ignores them); an inventory root spelled through a firmlink and still absent compares lexically | A 0600 file readable through an ACL passes; an absent root under `/System/Volumes/Data` is caught only after it exists, by the next check | qualification implementer |
 | No committed live cleanup entry | The 2026-10-01 cleanup used uncommitted steps; a later campaign needs a reviewed, opted-in entry before deleting a real home | qualification implementer |
-| Any partial delivery starts an acceptance transaction and closes the view until it completes; a rejected control batch leaves an already-live view live | A peer can hold a view closed by repeatedly sending incomplete deliveries; recorded with the unsupported-control denial question | Karl / authority design (Q7) |
-| Agent channels are modeled as a non-user authority value | H1 shows channel names author nothing, not that a real agent cannot reach the user channel | Karl / authority design (Q7) |
+| Any partial delivery starts an acceptance transaction and closes the view until it completes; a rejected control batch leaves an already-live view live | A peer can hold a view closed by repeatedly sending incomplete deliveries; recorded with the unsupported-control denial question | the owner / authority design (Q7) |
+| Agent channels are modeled as a non-user authority value | H1 shows channel names author nothing, not that a real agent cannot reach the user channel | the owner / authority design (Q7) |
 | An export block is never lifted, and block states have no reason code of their own | A project blocked by lost ancestry, a GC'd supersession target or an unqualified delivery publishes nothing automatically for good; operators see only `export()` returning nothing | transport (Q5, Q9) |
 | The revision hash covers the whole row, observation fields (`observed_date`, `evidence_ref`, `metadata_ref`) included | Re-observing the same revision with a new observation date is refused as new bytes; a production adapter must hash content and identity apart from observation metadata | transport |
 | The ledger never checks `expected_capture`: rows carry no capture observation | A trial cannot show that C was (or was not) extracted; the capture gate stays a separate live receipt | qualification implementer |
@@ -528,7 +528,7 @@ This table assigns work, without claiming a prototype settled a native gate.
 | Q4 | Atomic semantic snapshot/recovery built; encrypted production encoding and installation undecided | transport |
 | Q5 | Both ancestry modes exercised synthetically; native ancestry and explicit capture route unproven | qualification / transport |
 | Q6 | Model retains retirement on omission/GC and gates cold cohort; permanent storage class or compaction (a fixed budget plus permanent retirement gives a finite lifetime), completeness/checkpoint and encrypted encoding still required | transport |
-| Q7 | No live outside-agent authority; the model takes user-authority evidence and the unresolved-control remedy through assumed-trusted local channels whose cross-device transport is unmodeled; successor/restoration, compromised-peer denial (unsupported controls and incomplete deliveries can hold views closed) and author authentication unresolved | Karl / authority design / transport |
+| Q7 | No live outside-agent authority; the model takes user-authority evidence and the unresolved-control remedy through assumed-trusted local channels whose cross-device transport is unmodeled; successor/restoration, compromised-peer denial (unsupported controls and incomplete deliveries can hold views closed) and author authentication unresolved | the owner / authority design / transport |
 | Q8 | Minimal stable project identity must precede transport; Claude association must pass parity before bridge | transport / parity |
 | Q9 | Pre-delivery project/host blocks persist in model; qualified capture fallback must be sized/implemented before B-to-A acceptance can pass | transport |
 | Q10 | Frozen three-repeat matrix, answer/delivery separation; F1 and F2 run older/equal/newer/far-future clocks; actual observation and 48 trials unavailable | qualification implementer |

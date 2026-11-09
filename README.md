@@ -974,7 +974,7 @@ copies in ~/.config/mind-meld/deleted/<stamp> for 30 days; see ...#recovering-a-
 several machines deleted); `mm pull --verbose` lists the paths. A peer edit held back
 as `older` adds `; 1 older peer edit not applied`. A push whose scan folder was
 recreated says `Push: metadata updated; 12 files left out because
-/home/kb/.claude/projects is new; run mm pull to restore them.` Conflict copies are already included in applied files; skipped and failed
+/home/user/.claude/projects is new; run mm pull to restore them.` Conflict copies are already included in applied files; skipped and failed
 outcomes are separate. A scoped pull makes no claim about other sources or peers.
 Content a sync tool has not delivered yet is **waiting**, not failed: the line
 gains `; waiting for 2 files from Mac B` (or `Mac B's manifest`, or `cccccccc's
@@ -1635,9 +1635,9 @@ machine (the one the pull line names). Restore it there; a copy put back only on
 followed the deletion stays local until the deletion record expires, because the record
 still suppresses that file from every other machine. First transfer the recovery folder to
 the origin, preserving the folders inside it. Then choose the copy's path and the origin's
-destination separately. They can differ: a Claude project under `/home/kb/myapp` on Linux
-has a `projects/-home-kb-myapp/` folder, while the same project under `/Users/kb/myapp` on
-the origin Mac has `projects/-Users-kb-myapp/`. A shared git project can also live at
+destination separately. They can differ: a Claude project under `/home/user/myapp` on Linux
+has a `projects/-home-user-myapp/` folder, while the same project under `/Users/user/myapp` on
+the origin Mac has `projects/-Users-user-myapp/`. A shared git project can also live at
 different checkout paths. Check the origin's existing project folder or its checkout
 path; do not create a second project folder using the follower's name. For sources such
 as `gstack`, both paths are usually the same.
@@ -1649,8 +1649,8 @@ already at the destination:
 copies="$HOME/mm-recovery-20261101-181530-3fa9"  # the transferred recovery folder
 source_name=claude                              # mm sources: Name
 source_dir="$HOME/.claude"                     # mm sources: Path on the origin
-copy_path="projects/-home-kb-myapp/memory/user_role.md"    # inside the follower's copy
-origin_path="projects/-Users-kb-myapp/memory/user_role.md" # inside the origin's source
+copy_path="projects/-home-user-myapp/memory/user_role.md"    # inside the follower's copy
+origin_path="projects/-Users-user-myapp/memory/user_role.md" # inside the origin's source
 mkdir -p "$(dirname "$source_dir/$origin_path")"
 cp -n "$copies/$source_name/$copy_path" "$source_dir/$origin_path"
 mm push

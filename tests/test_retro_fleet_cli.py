@@ -146,7 +146,7 @@ class TestRetroFleetCommand:
                 "--noteworthy",
                 "shipped",
                 "--name",
-                "kb",
+                "user",
                 "--no-save",
             ],
         )
@@ -159,7 +159,7 @@ class TestRetroFleetCommand:
         assert "--noteworthy" in argv
         assert "shipped" in argv
         assert "--name" in argv
-        assert "kb" in argv
+        assert "user" in argv
         assert "--no-save" in argv
 
     def test_no_save_is_accepted_as_deprecated_noop(self, monkeypatch):

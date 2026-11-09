@@ -931,7 +931,7 @@ class TestFindConflictFilesMuseType:
     def test_walks_only_memory_and_never_a_symlinked_memory(self, tmp_path: Path) -> None:
         root = tmp_path / "muse"
         personal = root / "memory" / "personal"
-        project = root / "memory" / "projects" / "Users-kb-app-0c84"
+        project = root / "memory" / "projects" / "Users-user-app-0c84"
         expected = {
             personal / "role.sync-conflict-20261014-143055-devA1234.md",
             project / "notes.sync-conflict-20261014-143055-devA1234.md",
@@ -1591,7 +1591,7 @@ class TestResolveExitCode:
         storage = tmp_path / "storage"
         storage.mkdir()
         claude = tmp_path / ".claude"
-        memory = claude / "projects" / "-Users-kb-app" / "memory"
+        memory = claude / "projects" / "-Users-user-app" / "memory"
         memory.mkdir(parents=True)
         canonical = memory / "role.md"
         canonical.write_bytes(b"canon")

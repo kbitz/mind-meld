@@ -331,7 +331,7 @@ class TestReaderOrchestration:
         capture = events_tail._capture_host_usage(
             deadline=1_000.0,
             readers=_readers(
-                ("codex", _recording_reader(OSError("/Users/kb/.codex/sessions/secret"), [], "c"))
+                ("codex", _recording_reader(OSError("/Users/user/.codex/sessions/secret"), [], "c"))
             ),
             now=lambda: 0.0,
         )

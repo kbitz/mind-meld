@@ -751,7 +751,7 @@ def _make_config(tmp_path, storage_dir, claude_dir, device_id="dev-a", device_na
 
 def _populate_claude(claude_dir, contents: str = "Data scientist") -> None:
     """Populate a claude_dir with a single memory file so push has work to do."""
-    memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+    memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
     memory.mkdir(parents=True)
     (memory / "role.md").write_text(contents)
 

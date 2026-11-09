@@ -638,8 +638,8 @@ def test_pull_conflict_mode_fail_exits_3_before_writes(tmp_path, monkeypatch):
     claude_b = tmp_path / "machine_b" / ".claude"
     _populate_claude(claude_b, contents="from B -- locally edited")
     _populate_claude(claude_a, contents="from A")
-    b_file = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "role.md"
-    a_file = claude_a / "projects" / "-Users-kb-myapp" / "memory" / "role.md"
+    b_file = claude_b / "projects" / "-Users-user-myapp" / "memory" / "role.md"
+    a_file = claude_a / "projects" / "-Users-user-myapp" / "memory" / "role.md"
     os.utime(b_file, (1_700_000_000, 1_700_000_000))
     os.utime(a_file, (1_700_000_100, 1_700_000_100))
 
@@ -661,7 +661,7 @@ def test_pull_conflict_mode_fail_exits_3_before_writes(tmp_path, monkeypatch):
     # Switch to device B.
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
 
-    role = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "role.md"
+    role = claude_b / "projects" / "-Users-user-myapp" / "memory" / "role.md"
     snapshot_before = role.read_text()
 
     r = runner.invoke(app, ["pull", "--conflict-mode", "fail"])
@@ -1404,7 +1404,7 @@ def test_pull_conflict_mode_fail_catches_cross_peer_conflict(tmp_path, monkeypat
     _populate_claude(claude_a, contents="from A")
     _populate_claude(claude_b, contents="from B (different)")
     # Local starts empty at the target path (dir exists, file absent).
-    (claude_local / "projects" / "-Users-kb-myapp" / "memory").mkdir(parents=True)
+    (claude_local / "projects" / "-Users-user-myapp" / "memory").mkdir(parents=True)
 
     config_a, _ = _make_config(tmp_path / "a", storage_dir, claude_a, "dev-a", "Mac A")
     config_b, _ = _make_config(tmp_path / "b", storage_dir, claude_b, "dev-b", "Mac B")
@@ -1428,7 +1428,7 @@ def test_pull_conflict_mode_fail_catches_cross_peer_conflict(tmp_path, monkeypat
     r = runner.invoke(app, ["pull", "--conflict-mode", "fail"])
     assert r.exit_code == 3, (r.stdout, r.stderr)
     # Cross-peer conflict was detected; local file never written.
-    target = claude_local / "projects" / "-Users-kb-myapp" / "memory" / "role.md"
+    target = claude_local / "projects" / "-Users-user-myapp" / "memory" / "role.md"
     assert not target.exists()
 
 
@@ -1703,7 +1703,7 @@ def _setup_events_tail_config(tmp_path, monkeypatch):
     config_path = tmp_path / "config.toml"
     src = tmp_path / "claude"
     _populate_claude(src)
-    sess = src / "projects" / "-Users-kb-myapp"
+    sess = src / "projects" / "-Users-user-myapp"
     sess.mkdir(parents=True, exist_ok=True)
     day = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     (sess / "session.jsonl").write_text(
@@ -2122,7 +2122,7 @@ class TestAutopushHeldBreadcrumb75A:
     and a few paths. Degradations are never dropped when both exist.
     """
 
-    ROLE = "projects/-Users-kb-myapp/memory/role.md"
+    ROLE = "projects/-Users-user-myapp/memory/role.md"
 
     def _unstable(self, monkeypatch, *names):
         real = cli_module.manifest.read_file_revision
@@ -2166,7 +2166,7 @@ class TestAutopushHeldBreadcrumb75A:
     ):
         iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
         assert runner.invoke(app, ["autopush"]).exit_code == 0
-        memory = claude_root / "projects/-Users-kb-myapp/memory"
+        memory = claude_root / "projects/-Users-user-myapp/memory"
         (memory / "role.md").write_text("still being written")
         (memory / "fresh.md").write_text("a real change so the events tail runs")
         monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
@@ -2185,7 +2185,7 @@ class TestAutopushHeldBreadcrumb75A:
     def test_many_held_files_cap_paths_and_keep_the_detail_bounded(self, tmp_path, monkeypatch):
         iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
         assert runner.invoke(app, ["autopush"]).exit_code == 0
-        memory = claude_root / "projects/-Users-kb-myapp/memory"
+        memory = claude_root / "projects/-Users-user-myapp/memory"
         names = {f"hot{i}.md" for i in range(6)}
         for name in names:
             (memory / name).write_text(name)

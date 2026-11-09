@@ -155,7 +155,7 @@ class TestDetectInstall:
             (upgrade.REPO_SPEC, {}, "pinned"),
             (upgrade.INSTALL_SPEC, {"pinned": True}, "pipx-pinned"),
             ("git+https://github.com/someone/mind-meld.git@latest", {}, "foreign"),
-            ("/Users/kb/dev/mind-meld", {}, "foreign"),
+            ("/Users/user/dev/mind-meld", {}, "foreign"),
             # A lookalike ref must not read as the release branch.
             (f"{upgrade.REPO_SPEC}.evil@latest", {}, "foreign"),
             # mm injected into another package's venv is not ours to upgrade.
@@ -2141,7 +2141,7 @@ class TestFallsBackToTheNudge:
         [
             (f"{upgrade.REPO_SPEC}@v1.2.0", {}),  # the README rollback pin
             (upgrade.INSTALL_SPEC, {"pinned": True}),
-            ("/Users/kb/dev/mind-meld", {}),
+            ("/Users/user/dev/mind-meld", {}),
         ],
     )
     @pytest.mark.parametrize("attended", [True, False])
@@ -2971,7 +2971,7 @@ class TestUpdateCommand:
         "spec, meta, phrase",
         [
             (upgrade.INSTALL_SPEC, {"pinned": True}, "held by pipx pin"),
-            ("/Users/kb/dev/mind-meld", {}, "installed from /Users/kb/dev/mind-meld"),
+            ("/Users/user/dev/mind-meld", {}, "installed from /Users/user/dev/mind-meld"),
         ],
     )
     def test_refuses_installs_it_does_not_own(self, pipx_install, monkeypatch, spec, meta, phrase):

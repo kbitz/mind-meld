@@ -122,7 +122,7 @@ def storage(tmp_path):
 def claude_dir_a(tmp_path):
     """Simulate Machine A's ~/.claude."""
     d = tmp_path / "machine_a" / ".claude"
-    memory = d / "projects" / "-Users-kb-myapp" / "memory"
+    memory = d / "projects" / "-Users-user-myapp" / "memory"
     memory.mkdir(parents=True)
     (memory / "user_role.md").write_text("---\nname: role\n---\nData scientist")
     (memory / "feedback.md").write_text("---\nname: feedback\n---\nNo mocks")
@@ -173,7 +173,7 @@ class TestPushPullRoundTrip:
         return config_path
 
     def _populate_claude(self, claude_dir, role="Data scientist", feedback="No mocks"):
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True, exist_ok=True)
         (memory / "user_role.md").write_text(f"---\nname: role\n---\n{role}")
         (memory / "feedback.md").write_text(f"---\nname: feedback\n---\n{feedback}")
@@ -212,8 +212,8 @@ class TestPushPullRoundTrip:
 
         # Files arrive verbatim on B's claude_dir.
         for rel in (
-            "projects/-Users-kb-myapp/memory/user_role.md",
-            "projects/-Users-kb-myapp/memory/feedback.md",
+            "projects/-Users-user-myapp/memory/user_role.md",
+            "projects/-Users-user-myapp/memory/feedback.md",
         ):
             original = (claude_a / rel).read_bytes()
             pulled = (claude_b / rel).read_bytes()
@@ -229,7 +229,7 @@ class TestPushPullRoundTrip:
         (personal_a / "MEMORY.md").write_text("- [Role](role.md)\n")
         (personal_a / "role.md").write_text("Data scientist\n")
         (personal_a / ".muse-memory.lock").write_text("pid=111\n")
-        project_a = muse_a / "memory" / "projects" / "Users-kb-app-0c84"
+        project_a = muse_a / "memory" / "projects" / "Users-user-app-0c84"
         project_a.mkdir(parents=True)
         (project_a / "notes.md").write_text("project note\n")
         session_a = muse_a / "sessions" / "2026" / "10" / "14" / "s1"
@@ -270,7 +270,7 @@ class TestPushPullRoundTrip:
         assert set(remote["sources"]["muse"]["files"]) == {
             "memory/personal/MEMORY.md",
             "memory/personal/role.md",
-            "memory/projects/Users-kb-app-0c84/notes.md",
+            "memory/projects/Users-user-app-0c84/notes.md",
         }
 
         self._activate(monkeypatch, configs["dev-b"])
@@ -279,7 +279,7 @@ class TestPushPullRoundTrip:
         for rel in (
             "memory/personal/MEMORY.md",
             "memory/personal/role.md",
-            "memory/projects/Users-kb-app-0c84/notes.md",
+            "memory/projects/Users-user-app-0c84/notes.md",
         ):
             assert (muse_b / rel).read_bytes() == (muse_a / rel).read_bytes(), rel
         assert (personal_b / ".muse-memory.lock").read_text() == "pid=222\n"
@@ -335,7 +335,7 @@ class TestPushPullRoundTrip:
         (home / ".muse").mkdir(parents=True)
         enabled = runner.invoke(app, ["enable-source", "muse"])
         assert enabled.exit_code == 0, enabled.output
-        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+        (claude_dir / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").write_text(
             "changed after enabling muse"
         )
 
@@ -344,7 +344,7 @@ class TestPushPullRoundTrip:
         enc = backend.get("manifests/dev-a/manifest.json.enc")
         remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
         assert (
-            "projects/-Users-kb-myapp/memory/user_role.md" in remote["sources"]["claude"]["files"]
+            "projects/-Users-user-myapp/memory/user_role.md" in remote["sources"]["claude"]["files"]
         )
         assert not [key for key in remote["tombstones"] if key.startswith("claude:")]
 
@@ -389,7 +389,7 @@ class TestPushPullRoundTrip:
         # Losing usage-only data must not wedge unrelated context publishing:
         # no configuration files have ever been advertised for this source.
         shutil.rmtree(home / ".gemini/antigravity-cli/conversations")
-        role = claude_dir / "projects/-Users-kb-myapp/memory/user_role.md"
+        role = claude_dir / "projects/-Users-user-myapp/memory/user_role.md"
         role.write_text("Context changed after Antigravity conversations disappeared\n")
         pushed = runner.invoke(app, ["push"])
         assert pushed.exit_code == 0, pushed.output
@@ -401,7 +401,7 @@ class TestPushPullRoundTrip:
             )
         )
         assert (
-            remote["sources"]["claude"]["files"]["projects/-Users-kb-myapp/memory/user_role.md"][
+            remote["sources"]["claude"]["files"]["projects/-Users-user-myapp/memory/user_role.md"][
                 "sha256"
             ]
             == hashlib.sha256(role.read_bytes()).hexdigest()
@@ -439,7 +439,7 @@ class TestPushPullRoundTrip:
         assert runner.invoke(app, ["push"]).exit_code == 0
         self._activate(monkeypatch, config_b)
         assert runner.invoke(app, ["pull"]).exit_code == 0
-        memory_b = claude_b / "projects" / "-Users-kb-myapp" / "memory"
+        memory_b = claude_b / "projects" / "-Users-user-myapp" / "memory"
         assert (memory_b / "user_role.md").exists()
         return config_a, config_b, claude_a, memory_b
 
@@ -459,7 +459,7 @@ class TestPushPullRoundTrip:
         _move_state_db_aside()  # B's base for the file is gone
 
         self._activate(monkeypatch, config_a)
-        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").unlink()
+        (claude_a / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0
 
         self._activate(monkeypatch, config_b)
@@ -482,7 +482,7 @@ class TestPushPullRoundTrip:
         before = role_b.read_bytes()
 
         self._activate(monkeypatch, config_a)
-        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").unlink()
+        (claude_a / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0
 
         self._activate(monkeypatch, config_b)
@@ -524,14 +524,14 @@ class TestPushPullRoundTrip:
         assert runner.invoke(app, ["push"]).exit_code == 0
         self._activate(monkeypatch, config_b)
         assert runner.invoke(app, ["pull"]).exit_code == 0
-        role_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        role_b = claude_b / "projects" / "-Users-user-myapp" / "memory" / "user_role.md"
         assert role_b.exists()
         original_role = role_b.read_text()
 
         # Phase 2: divergent edit. A modifies user_role.md and pushes; B edits
         # it locally (different content). B pulls — conflict-copy expected.
         self._activate(monkeypatch, config_a)
-        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+        (claude_a / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").write_text(
             "---\nname: role\n---\nPrincipal engineer"
         )
         assert runner.invoke(app, ["push"]).exit_code == 0
@@ -560,12 +560,12 @@ class TestPushPullRoundTrip:
         # tombstone lives in storage and is visible to any future correctness sweep.
         _move_state_db_aside()
         self._activate(monkeypatch, config_a)
-        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "feedback.md").unlink()
+        (claude_a / "projects" / "-Users-user-myapp" / "memory" / "feedback.md").unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0
 
         self._activate(monkeypatch, config_b)
         assert runner.invoke(app, ["pull"]).exit_code == 0
-        feedback_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "feedback.md"
+        feedback_b = claude_b / "projects" / "-Users-user-myapp" / "memory" / "feedback.md"
         assert feedback_b.exists(), "A pull with no base must preserve the file locally"
 
         # Verify A's pushed manifest contains the tombstone for feedback.md.
@@ -605,12 +605,12 @@ class TestPushPullRoundTrip:
         assert runner.invoke(app, ["push"]).exit_code == 0
         self._activate(monkeypatch, config_b)
         assert runner.invoke(app, ["pull"]).exit_code == 0
-        memory_b = claude_b / "projects" / "-Users-kb-myapp" / "memory"
+        memory_b = claude_b / "projects" / "-Users-user-myapp" / "memory"
         role_b, feedback_b = memory_b / "user_role.md", memory_b / "feedback.md"
         feedback_bytes = feedback_b.read_bytes()
 
         self._activate(monkeypatch, config_a)
-        memory_a = claude_a / "projects" / "-Users-kb-myapp" / "memory"
+        memory_a = claude_a / "projects" / "-Users-user-myapp" / "memory"
         (memory_a / "user_role.md").write_text("---\nname: role\n---\nPrincipal engineer")
         (memory_a / "feedback.md").unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0
@@ -655,7 +655,7 @@ class TestConflictClockSeparation:
         return config_path
 
     def _populate(self, claude_dir, role="Data scientist"):
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True, exist_ok=True)
         (memory / "user_role.md").write_text(f"---\nname: role\n---\n{role}")
 
@@ -682,7 +682,7 @@ class TestConflictClockSeparation:
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
         assert runner.invoke(app, ["pull"]).exit_code == 0
 
-        role_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        role_b = claude_b / "projects" / "-Users-user-myapp" / "memory" / "user_role.md"
         role_b.write_text("---\nname: role\n---\nSomething else entirely")
         os.utime(role_b, (time.time() - 3600, time.time() - 3600))
 
@@ -691,7 +691,7 @@ class TestConflictClockSeparation:
             marker.unlink(missing_ok=True)
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
-        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+        (claude_a / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").write_text(
             "---\nname: role\n---\nEven newer from A"
         )
         assert runner.invoke(app, ["push"]).exit_code == 0
@@ -787,12 +787,12 @@ class TestFastForwardCli91A:
         assert runner.invoke(app, ["push"]).exit_code == 0
         helper._activate(monkeypatch, config_b)
         assert runner.invoke(app, ["pull"]).exit_code == 0
-        role_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        role_b = claude_b / "projects" / "-Users-user-myapp" / "memory" / "user_role.md"
         role_b.write_text("---\nname: role\n---\nSomething else entirely")
         old = time.time() - 3600
         os.utime(role_b, (old, old))
         helper._activate(monkeypatch, config_a)
-        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+        (claude_a / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").write_text(
             "---\nname: role\n---\nEven newer from A"
         )
         assert runner.invoke(app, ["push"]).exit_code == 0
@@ -858,7 +858,7 @@ class TestFastForwardCli91A:
         ledger, exc = core.load_ledger(["aaaaaaaa"])
         assert exc is None
         resolved_base = ledger.base(
-            "aaaaaaaa", "claude", "projects/-Users-kb-myapp/memory/user_role.md"
+            "aaaaaaaa", "claude", "projects/-Users-user-myapp/memory/user_role.md"
         )
 
         pulled = runner.invoke(app, ["pull"])
@@ -898,7 +898,7 @@ class TestFastForwardCli91A:
         ledger, exc = core.load_ledger(["aaaaaaaa"])
         assert exc is None
         assert (
-            ledger.base("aaaaaaaa", "claude", "projects/-Users-kb-myapp/memory/user_role.md")
+            ledger.base("aaaaaaaa", "claude", "projects/-Users-user-myapp/memory/user_role.md")
             is None
         )
 
@@ -944,13 +944,13 @@ class TestFastForwardCli91A:
         assert exc is None
         rows = {path for (_peer, _source, path) in ledger.bases}
         assert {
-            "projects/-Users-kb-myapp/memory/user_role.md",
-            "projects/-Users-kb-myapp/memory/feedback.md",
+            "projects/-Users-user-myapp/memory/user_role.md",
+            "projects/-Users-user-myapp/memory/feedback.md",
         } <= rows
 
         # And the rebuilt rows work: a deletion made now is followed.
         helper._activate(monkeypatch, config_a)
-        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "feedback.md").unlink()
+        (claude_a / "projects" / "-Users-user-myapp" / "memory" / "feedback.md").unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0
         helper._activate(monkeypatch, config_b)
         followed = runner.invoke(app, ["pull"])
@@ -971,7 +971,7 @@ class TestFastForwardCli91A:
         helper._activate(monkeypatch, config_a)
         backend = LocalBackend(tmp_path / "storage")
         blobs_before = set(backend.list_keys("data/dev-a/"))
-        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").unlink()
+        (claude_a / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0  # its post-push sweep runs
         assert runner.invoke(app, ["gc"]).exit_code == 0
         assert set(backend.list_keys("data/dev-a/")) < blobs_before  # the blob is collected
@@ -1011,8 +1011,8 @@ class TestFastForwardCli91A:
 
         helper = TestPushPullRoundTrip()
         filesystem = tmp_path / "fs"
-        home_a = filesystem / "Users" / "kb"
-        home_b = filesystem / "home" / "kb"
+        home_a = filesystem / "Users" / "user"
+        home_b = filesystem / "home" / "user"
         claude_a, claude_b = home_a / ".claude", home_b / ".claude"
         helper._populate_claude(claude_a)
         claude_b.mkdir(parents=True)
@@ -1036,11 +1036,11 @@ class TestFastForwardCli91A:
         activate(config_b, home_b)
         received = runner.invoke(app, ["pull"])
         assert received.exit_code == 0, received.output
-        memory_b = claude_b / "projects" / "-home-kb-myapp" / "memory"
+        memory_b = claude_b / "projects" / "-home-user-myapp" / "memory"
         assert (memory_b / "user_role.md").exists()
 
         activate(config_a, home_a)
-        origin_file = claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        origin_file = claude_a / "projects" / "-Users-user-myapp" / "memory" / "user_role.md"
         before = origin_file.read_bytes()
         origin_file.unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0
@@ -1051,7 +1051,7 @@ class TestFastForwardCli91A:
         assert (memory_b / "user_role.md").exists() is False
         copy_path = copy.relative_to(statedb.deleted_copies_dir() / folder / "claude")
         origin_path = origin_file.relative_to(claude_a)
-        assert copy_path.as_posix() == "projects/-home-kb-myapp/memory/user_role.md"
+        assert copy_path.as_posix() == "projects/-home-user-myapp/memory/user_role.md"
         assert copy_path != origin_path
 
         # Transfer the follower's folder intact, then run the extracted recipe on the origin.
@@ -2064,7 +2064,7 @@ class TestDisabledSourcesTombstoneSuppression:
         return config_path
 
     def _populate_claude(self, claude_dir):
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "user_role.md").write_text("---\nname: role\n---\nData scientist")
 
@@ -2123,7 +2123,7 @@ class TestDisabledSourcesTombstoneSuppression:
             disabled_sources=["gstack"],
         )
         # Touch claude file so push has a diff to upload.
-        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+        (claude_dir / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").write_text(
             "Data scientist v2"
         )
         result = runner.invoke(app, ["push"])
@@ -2167,7 +2167,7 @@ class TestDisabledSourcesTombstoneSuppression:
 
         # Phase 2: re-enable gstack, push.
         self._make_two_source_config(tmp_path, storage_dir, claude_dir, gstack_dir, "dev-a", "A")
-        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+        (claude_dir / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").write_text(
             "Data scientist v3"
         )
         assert runner.invoke(app, ["push"]).exit_code == 0
@@ -2277,7 +2277,7 @@ class TestDisabledSourcesTombstoneSuppression:
             "A",
             disabled_sources=["gstack"],
         )
-        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+        (claude_dir / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").write_text(
             "Data scientist v2"
         )
         result = runner.invoke(app, ["push"])
@@ -2414,7 +2414,7 @@ class TestDisabledSourcesTombstoneSuppression:
         ]
         config["sync"]["disabled_sources"] = ["opencode"]
         save_config(config, config_path)
-        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+        (claude_dir / "projects" / "-Users-user-myapp" / "memory" / "user_role.md").write_text(
             "Data scientist after retirement"
         )
         result = runner.invoke(app, ["push"])
@@ -3142,7 +3142,7 @@ class TestInversion5E:
         race against autopull. The sidecar's filename stays unchanged."""
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / ".claude"
-        memory = claude_dir / "projects" / "-Users-kb-app" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-app" / "memory"
         memory.mkdir(parents=True)
         canonical = memory / "role.md"
         canonical.write_bytes(b"remote content")
@@ -3171,7 +3171,7 @@ class TestInversion5E:
         gate; see _ensure_inversion_marker)."""
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / ".claude"
-        memory = claude_dir / "projects" / "-Users-kb-app" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-app" / "memory"
         memory.mkdir(parents=True)
         canonical = memory / "role.md"
         canonical.write_bytes(b"remote content")
@@ -3664,7 +3664,7 @@ class TestGCSafety:
         assert backend.exists(storage_keys.manifest_key("dev-ab")) == manifest_first
 
         if entrypoint == "push":
-            (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_bytes(new_content)
+            (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_bytes(new_content)
         result = runner.invoke(app, [entrypoint])
         assert result.exit_code == 0, result.output
         assert not backend.exists(orphan)
@@ -3676,7 +3676,7 @@ class TestGCSafety:
             assert decrypt(uploaded, PASSPHRASE, MEMORY_KB) == new_content
             accepted = cli_module.sidecar.read("dev-a")
             assert (
-                accepted["sources"]["claude"]["files"]["projects/-Users-kb-myapp/memory/new.md"][
+                accepted["sources"]["claude"]["files"]["projects/-Users-user-myapp/memory/new.md"][
                     "sha256"
                 ]
                 == new_sha
@@ -3845,7 +3845,7 @@ class TestGCSafety:
         assert pushed.exit_code == 0, pushed.output
         own = cli_module.sidecar.read("dev-a")
         hashes = [info["sha256"] for info in own["sources"]["claude"]["files"].values()]
-        (env["claude"] / "projects/-Users-kb-myapp/.git").mkdir()
+        (env["claude"] / "projects/-Users-user-myapp/.git").mkdir()
         before = {
             storage_keys.blob_key("dev-a", sha): env["backend"].get(
                 storage_keys.blob_key("dev-a", sha)
@@ -3987,12 +3987,12 @@ class TestGCSafety:
         key = storage_keys.manifest_key("dev-a")
         older = backend.get(key)
         # Created and deleted after the copy that will survive alone.
-        gone = env["claude"] / "projects/-Users-kb-myapp/memory/gone.md"
+        gone = env["claude"] / "projects/-Users-user-myapp/memory/gone.md"
         gone.write_text("created after the older copy")
         assert runner.invoke(app, ["push"]).exit_code == 0
         gone.unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0
-        tombstone = "claude:projects/-Users-kb-myapp/memory/gone.md"
+        tombstone = "claude:projects/-Users-user-myapp/memory/gone.md"
         assert tombstone in cli_module.sidecar.read("dev-a")["tombstones"]
         (backend.root / Path(key).with_name("manifest.json 2.enc")).write_bytes(older)
         if canonical == "absent":
@@ -4015,22 +4015,22 @@ class TestGCSafety:
         assert runner.invoke(app, ["push"]).exit_code == 0
         key = storage_keys.manifest_key("dev-a")
         older = backend.get(key)
-        late = env["claude"] / "projects/-Users-kb-myapp/memory/late.md"
+        late = env["claude"] / "projects/-Users-user-myapp/memory/late.md"
         late.write_text("pushed after the surviving copy")
         assert runner.invoke(app, ["push"]).exit_code == 0
         late_sha = cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"][
-            "projects/-Users-kb-myapp/memory/late.md"
+            "projects/-Users-user-myapp/memory/late.md"
         ]["sha256"]
         # Lost with the canonical; the project then becomes a frozen checkout.
         backend.delete(storage_keys.blob_key("dev-a", late_sha))
-        (env["claude"] / "projects/-Users-kb-myapp/.git").mkdir()
+        (env["claude"] / "projects/-Users-user-myapp/.git").mkdir()
         (backend.root / Path(key).with_name("manifest.json 2.enc")).write_bytes(older)
         backend.put(key, b"\x02" + b"unreadable current manifest" * 4)
         healed = runner.invoke(app, ["push"])
         assert healed.exit_code == 0, healed.output
         fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
         published = fetched.manifest["sources"]["claude"]["files"]
-        assert "projects/-Users-kb-myapp/memory/late.md" not in published
+        assert "projects/-Users-user-myapp/memory/late.md" not in published
         assert all(
             backend.exists(storage_keys.blob_key("dev-a", info["sha256"]))
             for info in published.values()
@@ -4322,8 +4322,8 @@ class TestAutoCommands:
 
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / ".claude"
-        (claude_dir / "projects" / "-Users-kb-myapp" / "memory").mkdir(parents=True)
-        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md").write_text("x")
+        (claude_dir / "projects" / "-Users-user-myapp" / "memory").mkdir(parents=True)
+        (claude_dir / "projects" / "-Users-user-myapp" / "memory" / "role.md").write_text("x")
 
         config_path = tmp_path / "config.toml"
         config = {
@@ -4402,7 +4402,7 @@ class TestAutoCommands:
         claude_dir_a = tmp_path / "machine_a" / ".claude"
 
         # Create memory files on machine A
-        memory = claude_dir_a / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir_a / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "role.md").write_text("Data scientist")
 
@@ -4442,7 +4442,7 @@ class TestMultiSourceSync:
 
     def _make_claude_dir(self, base: "Path") -> "Path":
         d = base / ".claude"
-        memory = d / "projects" / "-Users-kb-myapp" / "memory"
+        memory = d / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "role.md").write_text("Data scientist")
         return d
@@ -4499,7 +4499,7 @@ class TestMultiSourceSync:
         gstack_dir = tmp_path / ".gstack"
 
         # Phase 1: Machine A populates and pushes
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "role.md").write_text("Data scientist")
 
@@ -4541,7 +4541,7 @@ class TestMultiSourceSync:
         assert result.exit_code == 0
 
         # Verify claude files arrived
-        pulled_role = claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md"
+        pulled_role = claude_dir / "projects" / "-Users-user-myapp" / "memory" / "role.md"
         assert pulled_role.exists()
         assert pulled_role.read_text() == "Data scientist"
 
@@ -4814,7 +4814,7 @@ class TestMultiSourceSync:
         gstack_dir = tmp_path / ".gstack"
 
         # Phase 1: Machine A populates both sources, pushes
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "role.md").write_text("Data scientist")
 
@@ -4857,7 +4857,7 @@ class TestMultiSourceSync:
         assert (gstack_dir / "config.yaml").exists()
 
         # claude files should NOT be present (source filter excluded them)
-        assert not (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md").exists()
+        assert not (claude_dir / "projects" / "-Users-user-myapp" / "memory" / "role.md").exists()
 
     def test_source_filter_deletion_scoping(self, tmp_path, monkeypatch):
         """Pulling --source gstack must not delete B's claude files.
@@ -4893,7 +4893,7 @@ class TestMultiSourceSync:
         assert result.exit_code == 0
 
         # Phase 2: Machine B has both claude and gstack files locally
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "role.md").write_text("Data scientist")
 
@@ -4906,9 +4906,9 @@ class TestMultiSourceSync:
         assert result.exit_code == 0
 
         # B's claude files must still exist (not deleted by gstack-only pull)
-        assert (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md").exists()
+        assert (claude_dir / "projects" / "-Users-user-myapp" / "memory" / "role.md").exists()
         assert (
-            claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md"
+            claude_dir / "projects" / "-Users-user-myapp" / "memory" / "role.md"
         ).read_text() == "Data scientist"
 
     def test_gc_with_v2_manifest(self, tmp_path, monkeypatch):
@@ -5205,7 +5205,7 @@ class TestInitJoinPull89A:
         storage_dir = tmp_path / "storage"
         claude_a = tmp_path / "machine_a" / ".claude"
         claude_b = tmp_path / "machine_b" / ".claude"
-        memory = claude_a / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_a / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "user_role.md").write_text("---\nname: role\n---\nData scientist")
         claude_b.mkdir(parents=True)
@@ -5255,7 +5255,7 @@ class TestInitJoinPull89A:
         result = runner.invoke(app, ["init"], input=f"{storage}\nMac B\n{PASSPHRASE}\n")
         assert result.exit_code == 0, result.output
         assert asked == []
-        rel = "projects/-Users-kb-myapp/memory/user_role.md"
+        rel = "projects/-Users-user-myapp/memory/user_role.md"
         assert (claude_b / rel).read_bytes() == (claude_a / rel).read_bytes()
         assert config_b.exists()
         assert len(backend.list_keys("devices/")) == 2
@@ -5268,7 +5268,7 @@ class TestInitJoinPull89A:
         monkeypatch.setattr(core, "get_passphrase", lambda *a, **kw: "stale-wrong-passphrase")
         result = runner.invoke(app, ["init"], input=f"{storage}\nMac B\n{PASSPHRASE}\n")
         assert result.exit_code == 0, result.output
-        assert (claude_b / "projects/-Users-kb-myapp/memory/user_role.md").exists()
+        assert (claude_b / "projects/-Users-user-myapp/memory/user_role.md").exists()
 
     def test_a_failed_pull_keeps_config_and_device_and_ends_with_its_remedy(
         self, tmp_path, monkeypatch
@@ -5442,7 +5442,7 @@ class TestBackfillPreservesRawPaths:
         as the raw storage.path field (which may be a symlink or tilde)."""
 
         claude_dir = tmp_path / "claude"
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "role.md").write_text("Data scientist")
 
@@ -5544,7 +5544,7 @@ class TestBackfillPreservesRawPaths:
         real_storage = tmp_path / "real_storage"
         real_storage.mkdir()
         claude_dir = tmp_path / "claude"
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "role.md").write_text("Data scientist")
 
@@ -5699,7 +5699,7 @@ def test_later_autopush_supersedes_attended_reader_coverage(capture61, tmp_path,
     monkeypatch.setattr(
         events_tail, "_warm_host_cache_with_notice", lambda *a: pytest.fail("autopush warm")
     )
-    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("changed")
+    (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("changed")
     result = runner.invoke(app, ["autopush"])
     assert result.exit_code == 0, result.output
     latest = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
@@ -5885,7 +5885,7 @@ def test_content_refresh_counts_once_and_preserves_next_bare_push(
     env = capture61
     path = env["dayfile"]
     cfg = env["cfg"]
-    source_file = env["claude"] / "projects/-Users-kb-myapp/memory/user_role.md"
+    source_file = env["claude"] / "projects/-Users-user-myapp/memory/user_role.md"
     if change == "bytes":
         source_file.write_text("new content")
     elif change == "mtime":
@@ -5943,7 +5943,7 @@ def test_usage_mode_without_appended_host_row(capture61, monkeypatch, tmp_path, 
         path = (
             env["dayfile"]
             if change == "internal-mtime"
-            else env["claude"] / "projects/-Users-kb-myapp/memory/user_role.md"
+            else env["claude"] / "projects/-Users-user-myapp/memory/user_role.md"
         )
         stamp = path.stat().st_mtime + 1
         os.utime(path, (stamp, stamp))
@@ -6023,7 +6023,7 @@ def test_all_emitters_obey_git_batch_origin_contract(capture61, monkeypatch, emi
         assert result.exit_code in (0, 4), result.output
     else:
         if emitter == "push":
-            (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("changed")
+            (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("changed")
         # "capture" is the converged tree: nothing pending, so only the host row lands.
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, result.output
@@ -6114,7 +6114,7 @@ def test_attended_capture_exit_with_a_held_day_file_carries_held_and_not_publish
 
 def test_recapture_is_unaffected_by_a_held_user_file_75a(capture61, monkeypatch):
     env = capture61
-    (env["claude"] / "projects/-Users-kb-myapp/memory/hot.md").write_text("still being written")
+    (env["claude"] / "projects/-Users-user-myapp/memory/hot.md").write_text("still being written")
     result = _recapture_with_unstable(capture61, monkeypatch, held_name="hot.md")
     flat = " ".join((result.output + (result.stderr or "")).split())
     assert result.exit_code in (0, 4), result.output
@@ -6236,7 +6236,7 @@ def test_capture_prerequisites_skip_and_push_content(capture61, monkeypatch, sta
         # verdict to pin optional capture's behavior independently of loading.
         monkeypatch.setattr(config_module, "usage_capture_readiness", lambda *a, **kw: "unknown")
     save_config(cfg, env["path"])
-    (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     before = env["dayfile"].read_text().splitlines()
     keychain = []
     monkeypatch.setattr(
@@ -6248,7 +6248,7 @@ def test_capture_prerequisites_skip_and_push_content(capture61, monkeypatch, sta
     assert keychain == [True]
     assert result.stderr.count(f"(prerequisites: {state})") == 1
     remote = cli_module.sidecar.read("dev-a")
-    assert "projects/-Users-kb-myapp/memory/new.md" in remote["sources"]["claude"]["files"]
+    assert "projects/-Users-user-myapp/memory/new.md" in remote["sources"]["claude"]["files"]
     added = [json.loads(line) for line in env["dayfile"].read_text().splitlines()[len(before) :]]
     assert not any(row["type"] == "host-usage-snapshot" for row in added)
 
@@ -6257,7 +6257,7 @@ def test_capture_prerequisites_skip_and_push_content(capture61, monkeypatch, sta
 @pytest.mark.parametrize("pending", [False, True])
 def test_capture_failure_still_calls_push(capture61, monkeypatch, reason, pending):
     if pending:
-        (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+        (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     prior = cli_module.sidecar.read("dev-a")
     monkeypatch.setattr(
         _mm_codex_host,
@@ -6288,7 +6288,7 @@ def test_capture_failure_still_calls_push(capture61, monkeypatch, reason, pendin
     accepted = cli_module.sidecar.read("dev-a")
     assert (accepted != prior) == pending
     assert (
-        "projects/-Users-kb-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
+        "projects/-Users-user-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
     ) == pending
 
 
@@ -6312,14 +6312,14 @@ def test_unsupported_grok_push_exits_zero_and_publishes_codex(capture61, monkeyp
             tokens_by_day={day: {**usage, "by_model": {"gpt-6-astra": usage}}},
         ),
     )
-    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert grok_host.grok_usage_diag()["last_reason"] == "unsupported"
     manifest = load_manifest(
         decrypt(capture61["backend"].get(storage_keys.manifest_key("dev-a")), PASSPHRASE, MEMORY_KB)
     )
-    assert "projects/-Users-kb-myapp/memory/new.md" in manifest["sources"]["claude"]["files"]
+    assert "projects/-Users-user-myapp/memory/new.md" in manifest["sources"]["claude"]["files"]
     entry = manifest["sources"]["mm-events"]["files"]["events/" + capture61["dayfile"].name]
     clear = decrypt(
         capture61["backend"].get(storage_keys.blob_key("dev-a", entry["sha256"])),
@@ -6337,7 +6337,7 @@ def test_unsupported_grok_push_exits_zero_and_publishes_codex(capture61, monkeyp
 @pytest.mark.parametrize("pending", [False, True])
 def test_requested_capture_observes_append_failure(capture61, monkeypatch, short, pending):
     if pending:
-        (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+        (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     real = os.write
 
     def write(fd, payload):
@@ -6359,7 +6359,7 @@ def test_requested_capture_observes_append_failure(capture61, monkeypatch, short
     # A rolled-back append still bumps the internal file's mtime. The ordinary
     # activity path may republish that metadata even with no user-byte change.
     assert (
-        "projects/-Users-kb-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
+        "projects/-Users-user-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
     ) == pending
     if not short:
         assert "[events/dev-a.jsonl]" not in result.stderr
@@ -6408,14 +6408,14 @@ def test_capture_must_be_in_accepted_manifest(capture61, monkeypatch, mode, unre
     else:
         cfg["sync"]["max_file_size"] = 100
     if unrelated:
-        (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("unrelated")
+        (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("unrelated")
     save_config(cfg, env["path"])
     saved = config_module.load_config(env["path"])["sync"]
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     if unrelated:
         remote = cli_module.sidecar.read("dev-a")
-        assert "projects/-Users-kb-myapp/memory/new.md" in remote["sources"]["claude"]["files"]
+        assert "projects/-Users-user-myapp/memory/new.md" in remote["sources"]["claude"]["files"]
     if mode == "oversized":
         assert "Event append (max-file-size)" in result.stderr
         assert "Archive older rows outside mm-events" in " ".join(result.stderr.split())
@@ -6513,7 +6513,7 @@ def test_mode_render_failure_cannot_undo_manifest_acceptance(capture61, monkeypa
 
 @pytest.mark.parametrize("after", [False, True])
 def test_capture_exit_uses_acceptance_boundary(capture61, monkeypatch, after):
-    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     if after:
 
         def fail_gc(*a, **kw):
@@ -6605,11 +6605,11 @@ class TestTrack7BEventsTail:
         return config_path
 
     def _seed_claude(self, claude_dir: Path) -> None:
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True, exist_ok=True)
         (memory / "user_role.md").write_text("---\nname: role\n---\nEng")
         # session jsonl so walk_session_metadata has something to scan
-        sessions = claude_dir / "projects" / "-Users-kb-myapp"
+        sessions = claude_dir / "projects" / "-Users-user-myapp"
         (sessions / "session.jsonl").write_text(
             json.dumps({"cwd": str(claude_dir.parent), "type": "user"}) + "\n"
         )
@@ -6781,7 +6781,9 @@ class TestTrack7BEventsTail:
         assert self._events_files(self._events_dir(tmp_path)) == first
 
         # Third push WITH a real change: events tail must fire again.
-        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "new.md").write_text("new content")
+        (claude_a / "projects" / "-Users-user-myapp" / "memory" / "new.md").write_text(
+            "new content"
+        )
         assert runner.invoke(app, ["push"]).exit_code == 0
         third_rows = self._read_event_rows(first[0])
         assert len(third_rows) > len(second_rows), "events tail did not fire on a substantive push"
@@ -6935,7 +6937,7 @@ class TestTrack7BEventsTail:
             -1
         ]["ts"] == first_cursor
 
-        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "trigger.md").write_text(
+        (claude_a / "projects" / "-Users-user-myapp" / "memory" / "trigger.md").write_text(
             "substantive"
         )
         assert runner.invoke(app, ["push"]).exit_code == 0
@@ -7196,7 +7198,7 @@ class TestPushMtimeOnlyPropagation:
         """
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / "machine_a" / ".claude"
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         target = memory / "user_role.md"
         target.write_text("---\nname: role\n---\nEng")
@@ -7231,7 +7233,7 @@ class TestPushMtimeOnlyPropagation:
         baseline_enc = backend.get(mkey)
         baseline_manifest = load_manifest(decrypt(baseline_enc, PASSPHRASE, MEMORY_KB))
         baseline_mtime = baseline_manifest["sources"]["claude"]["files"][
-            "projects/-Users-kb-myapp/memory/user_role.md"
+            "projects/-Users-user-myapp/memory/user_role.md"
         ]["mtime"]
 
         # Bump the file's mtime in place (simulates _bump_canonical_mtime_post_resolve).
@@ -7251,7 +7253,7 @@ class TestPushMtimeOnlyPropagation:
         updated_enc = backend.get(mkey)
         updated_manifest = load_manifest(decrypt(updated_enc, PASSPHRASE, MEMORY_KB))
         updated_mtime = updated_manifest["sources"]["claude"]["files"][
-            "projects/-Users-kb-myapp/memory/user_role.md"
+            "projects/-Users-user-myapp/memory/user_role.md"
         ]["mtime"]
         assert updated_mtime != baseline_mtime, (
             f"manifest mtime not refreshed: baseline={baseline_mtime} updated={updated_mtime}"
@@ -7265,7 +7267,7 @@ class TestPushMtimeOnlyPropagation:
         """
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / "machine_a" / ".claude"
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "user_role.md").write_text("---\nname: role\n---\nEng")
 
@@ -7301,7 +7303,7 @@ class TestPushMtimeOnlyPropagation:
         """Setup helper for the status/dry-run mtime-only tests below."""
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / "machine_a" / ".claude"
-        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory = claude_dir / "projects" / "-Users-user-myapp" / "memory"
         memory.mkdir(parents=True)
         target = memory / "user_role.md"
         target.write_text("---\nname: role\n---\nEng")
@@ -9761,7 +9763,7 @@ def preview62(push_preview56, tmp_path, monkeypatch):
         action="written",
     )
     env["history_baseline"] = env["history"]()
-    memory = env["claude"] / "projects/-Users-kb-myapp/memory"
+    memory = env["claude"] / "projects/-Users-user-myapp/memory"
     env["legacy"] = memory / "role.sync-conflict-20260101-120000-abcd1234.md"
     env["legacy"].write_text("old peer bytes")
     (memory / "role.sync-conflict-20200101-120000-v1-deadbeef.md").write_bytes(
@@ -9802,7 +9804,7 @@ def preview62(push_preview56, tmp_path, monkeypatch):
     save_config(env["config"], env["config_path"])
     _seed_preview_prior(env)
     stamp = datetime.now(timezone.utc).isoformat()
-    prefix = "projects/-Users-kb-myapp/memory/"
+    prefix = "projects/-Users-user-myapp/memory/"
     _publish_peer62(
         env,
         "dev-b",
@@ -10258,7 +10260,7 @@ def test_pull_two_peer_parity62(preview62, tmp_path, monkeypatch, directory_firs
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_fail_mode_local_failure_only62(preview62, dry_run):
     env = preview62
-    prefix = "projects/-Users-kb-myapp/memory/"
+    prefix = "projects/-Users-user-myapp/memory/"
     blocked = env["claude"] / prefix / "blocked.md"
     blocked.write_bytes(b"local")
     blocked.chmod(0)
@@ -10281,7 +10283,7 @@ def test_fail_mode_local_failure_only62(preview62, dry_run):
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_fail_mode_mergeable_two_peers62(preview62, dry_run):
     env = preview62
-    path = "projects/-Users-kb-myapp/memory/merge.jsonl"
+    path = "projects/-Users-user-myapp/memory/merge.jsonl"
     for device in ("dev-b", "dev-c"):
         _publish_peer62(
             env, device, {("claude", path): (json.dumps({device: 1}).encode() + b"\n", None)}
@@ -10490,7 +10492,7 @@ def test_pending_events_root62(preview62):
 @pytest.mark.parametrize("target", ["dev-a", "dev-b"])
 def test_diff_excludes62(preview62, target):
     env = preview62
-    prefix = "projects/-Users-kb-myapp/memory/"
+    prefix = "projects/-Users-user-myapp/memory/"
     _publish_peer62(
         env,
         target,
@@ -10526,7 +10528,7 @@ def test_pull_preview_output62(preview62, monkeypatch, state):
     if state == "empty":
         _publish_peer62(env, "dev-b", {})
     if state == "converged":
-        path = "projects/-Users-kb-myapp/memory/role.md"
+        path = "projects/-Users-user-myapp/memory/role.md"
         _publish_peer62(
             env, "dev-b", {("claude", path): ((env["claude"] / path).read_bytes(), None)}
         )
@@ -11597,7 +11599,7 @@ class TestNewerStorage66A:
             "device_id": "dev-peer",
             "device_name": "Peer",
             "sources": {
-                "claude": {"files": {"projects/-Users-kb-myapp/memory/new.md": {"sha256": sha}}}
+                "claude": {"files": {"projects/-Users-user-myapp/memory/new.md": {"sha256": sha}}}
             },
             "tombstones": {},
         }
@@ -11641,7 +11643,7 @@ class TestNewerStorage66A:
             "device_id": "dev-peer",
             "device_name": "Peer",
             "sources": {
-                "claude": {"files": {"projects/-Users-kb-myapp/memory/new.md": {"sha256": sha}}}
+                "claude": {"files": {"projects/-Users-user-myapp/memory/new.md": {"sha256": sha}}}
             },
             "tombstones": {},
         }
@@ -11864,7 +11866,7 @@ def test_all_failed_autopush_keeps_previous_snapshot_to_age(capture61, monkeypat
         "read_codex_usage",
         lambda **kwargs: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
     )
-    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("changed")
+    (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("changed")
     result = runner.invoke(app, ["autopush"])
     assert result.exit_code == 0, result.output
     after = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
@@ -11877,7 +11879,7 @@ def test_all_failed_autopush_keeps_previous_snapshot_to_age(capture61, monkeypat
 @pytest.mark.parametrize("phase", ["capture", "warm-notice", "serialization"])
 def test_attended_capture_exception_never_retries_or_blocks_content(capture61, monkeypatch, phase):
     env = capture61
-    (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     calls = []
     real = events_tail._capture_host_snapshot
 
@@ -11913,7 +11915,7 @@ def test_attended_capture_exception_never_retries_or_blocks_content(capture61, m
     assert calls == [True]
     assert "mm: warning: Usage capture" in result.stderr
     assert (
-        "projects/-Users-kb-myapp/memory/new.md"
+        "projects/-Users-user-myapp/memory/new.md"
         in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
     )
 
@@ -11924,7 +11926,7 @@ def test_content_acceptance_survives_maintenance_independently(
     capture61, monkeypatch, capture_state, maintenance
 ):
     env = capture61
-    (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     if capture_state == "failed":
         monkeypatch.setattr(
             _mm_codex_host,
@@ -11946,7 +11948,7 @@ def test_content_acceptance_survives_maintenance_independently(
     assert result.exit_code == 0, result.output
     assert "post-publication maintenance failed" in " ".join(result.stderr.split())
     assert (
-        "projects/-Users-kb-myapp/memory/new.md"
+        "projects/-Users-user-myapp/memory/new.md"
         in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
     )
 
@@ -11954,7 +11956,7 @@ def test_content_acceptance_survives_maintenance_independently(
 @pytest.mark.parametrize("content", [False, True])
 def test_usage_only_skips_auto_gc_content_runs_it(capture61, monkeypatch, content):
     if content:
-        (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+        (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     calls = []
     monkeypatch.setattr(cli_module, "_do_gc", lambda *a, **kw: calls.append(True) or 0)
     result = runner.invoke(app, ["push"])
@@ -11977,7 +11979,7 @@ def test_own_gc_refusal_preserves_post_publication_capture_state(
             original_put(storage, key, refusal)
 
     monkeypatch.setattr(LocalBackend, "put", put)
-    (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     if capture_state == "failed":
         monkeypatch.setattr(
             _mm_codex_host,
@@ -11999,11 +12001,13 @@ def test_own_gc_refusal_preserves_post_publication_capture_state(
         ]
     )
     assert (
-        "projects/-Users-kb-myapp/memory/new.md"
+        "projects/-Users-user-myapp/memory/new.md"
         in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
     )
     accepted = cli_module.sidecar.read("dev-a")
-    sha = accepted["sources"]["claude"]["files"]["projects/-Users-kb-myapp/memory/new.md"]["sha256"]
+    sha = accepted["sources"]["claude"]["files"]["projects/-Users-user-myapp/memory/new.md"][
+        "sha256"
+    ]
     assert decrypt(
         env["backend"].get(storage_keys.blob_key("dev-a", sha)), PASSPHRASE, MEMORY_KB
     ) == (b"pending")
@@ -12019,7 +12023,7 @@ def test_unreadable_peer_allows_post_push_own_collection(capture61, peer_manifes
     own_orphan = storage_keys.blob_key("dev-a", hashlib.sha256(b"own orphan").hexdigest())
     env["backend"].put(peer_blob, b"peer")
     env["backend"].put(own_orphan, b"own orphan")
-    (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert "cannot GC safely" not in result.output
@@ -12110,13 +12114,13 @@ def test_event_size_guard_keeps_content_and_next_push_usable(capture61, monkeypa
     monkeypatch.setattr(events_tail, "_run_events_tail", tail)
     env["cfg"]["sync"]["max_file_size"] = limit
     save_config(env["cfg"], env["path"])
-    (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert "(max-file-size)" in result.stderr
     assert path.stat().st_size <= limit
     assert (
-        "projects/-Users-kb-myapp/memory/new.md"
+        "projects/-Users-user-myapp/memory/new.md"
         in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
     )
     monkeypatch.setattr(events_tail, "_run_events_tail", lambda *a, **kw: [])
@@ -12165,7 +12169,7 @@ def test_event_size_limit_reaches_every_emitter(capture61, monkeypatch, emitter)
         result = runner.invoke(app, ["recapture", "1d"])
         assert result.exit_code == 1 and "not written" in result.stderr
     else:
-        (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+        (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, result.output
         assert len(observed) == 2  # attended host append and ordinary activity tail
@@ -12215,7 +12219,7 @@ def test_push_stop_reports_failure_and_nudges_only_after_a_real_attempt(
 def test_post_push_gc_outcomes_never_undo_accepted_content(capture61, monkeypatch, outcome):
     from mind_meld.errors import MindMeldError
 
-    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
 
     def gc(*args, **kwargs):
         if outcome == "oserror":
@@ -12240,11 +12244,11 @@ def test_post_push_gc_outcomes_never_undo_accepted_content(capture61, monkeypatc
     assert sync["counts"]["maintenance_failures"] == (0 if outcome == "deleted" else 1)
     assert sync["content_accepted"] is True
     accepted = cli_module.sidecar.read("dev-a")
-    assert "projects/-Users-kb-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
+    assert "projects/-Users-user-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
 
 
 def test_publication_evidence_failure_cannot_undo_content_acceptance(capture61, monkeypatch):
-    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
 
     def broken(*args, **kwargs):
         raise RecursionError("evidence broke")
@@ -12259,7 +12263,7 @@ def test_publication_evidence_failure_cannot_undo_content_acceptance(capture61, 
     assert "Content sync succeeded" in flat
     assert "not-published:" not in result.stdout
     accepted = cli_module.sidecar.read("dev-a")
-    assert "projects/-Users-kb-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
+    assert "projects/-Users-user-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
     attempt, error = cli_module.attemptlog.read()
     assert error is None
     assert (attempt["class"], attempt["cause"]) == ("unverified", "evidence-error")
@@ -12284,7 +12288,7 @@ def test_attended_attempt_records_each_capture_outcome(
         ),
     )
     if content_change:
-        (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+        (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
 
     def fail(*a, **kw):
         raise OSError("capture test failure")
@@ -12538,7 +12542,7 @@ def test_push_receipt_counts_only_user_content_and_reports_verbose_publication(
 ):
     """content_files counts user byte changes; mm-events rewrites are internal."""
     env = capture61
-    memory = env["claude"] / "projects/-Users-kb-myapp/memory"
+    memory = env["claude"] / "projects/-Users-user-myapp/memory"
     (memory / "old.md").write_text("old")
     assert runner.invoke(app, ["push"]).exit_code == 0
     (memory / "old.md").unlink()
@@ -12647,7 +12651,7 @@ def test_interrupt_during_capture_releases_the_lock_and_pushes_nothing(capture61
     env = capture61
     real = _mm_codex_host.read_codex_usage
     before = env["dayfile"].read_bytes()
-    (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
 
     def interrupt(**kwargs):
         raise KeyboardInterrupt()
@@ -12660,7 +12664,7 @@ def test_interrupt_during_capture_releases_the_lock_and_pushes_nothing(capture61
     assert record["cause"] == "interrupted"
     assert record["row_ts"] is None
     assert env["dayfile"].read_bytes() == before
-    rel = "projects/-Users-kb-myapp/memory/new.md"
+    rel = "projects/-Users-user-myapp/memory/new.md"
     assert rel not in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
     monkeypatch.setattr(_mm_codex_host, "read_codex_usage", real)
     retry = runner.invoke(app, ["push"])
@@ -12689,7 +12693,7 @@ def test_upload_stop_cause_is_private_and_visible_in_status_diag(
     original = LocalBackend.put
     marker = "/private/sensitive-source-path"
     before = capture61["backend"].get(storage_keys.manifest_key("dev-a"))
-    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
 
     def stop(backend, key, data):
         if key.startswith("data/"):
@@ -12946,7 +12950,7 @@ def test_frozen_checkout_contents_are_never_probed(capture61):
     (root / "repo" / "locked").chmod(0)
     try:
         # An unrelated change forces a manifest upload.
-        (capture61["claude"] / "projects/-Users-kb-myapp/memory/x.md").write_text("change")
+        (capture61["claude"] / "projects/-Users-user-myapp/memory/x.md").write_text("change")
         result = runner.invoke(app, ["push"])
     finally:
         (root / "repo" / "locked").chmod(0o700)
@@ -13025,7 +13029,7 @@ def test_mm_events_rescan_uploads_a_path_whose_checkout_vanished(capture61, monk
     (nested / "old.md").write_text("published")
     assert runner.invoke(app, ["push"]).exit_code == 0
     (nested / ".git").mkdir()
-    (capture61["claude"] / "projects/-Users-kb-myapp/memory/x.md").write_text("change")
+    (capture61["claude"] / "projects/-Users-user-myapp/memory/x.md").write_text("change")
     original = cli_module.build_manifest_v2
 
     def rescan(device_id, device_name, sources, *args, **kwargs):
@@ -13095,7 +13099,7 @@ def test_interrupt_inside_storage_failure_handler_keeps_a_valid_record(capture61
 
     monkeypatch.setattr(LocalBackend, "put", put)
     monkeypatch.setattr(cli_module.core, "_error", interrupted_error)
-    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     result = runner.invoke(app, ["push"])
     assert result.exit_code != 0
     record, reason = cli_module.attemptlog.read()
@@ -13170,12 +13174,12 @@ def test_growth_warning_threshold_grouping_and_top_three(monkeypatch, capsys):
 
 def test_growth_warning_is_nonblocking_and_only_counts_new_files(capture61, monkeypatch):
     monkeypatch.setattr(cli_module, "_PUSH_GROWTH_WARNING_FILES", 2)
-    memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
     for name in ("a.md", "b.md", "c.md"):
         (memory / name).write_text("new file")
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
-    assert "large sync growth: claude:projects/-Users-kb-myapp (3 new files)" in " ".join(
+    assert "large sync growth: claude:projects/-Users-user-myapp (3 new files)" in " ".join(
         result.stderr.split()
     )
     for name in ("a.md", "b.md", "c.md"):
@@ -13207,7 +13211,7 @@ def _two_macs(tmp_path, monkeypatch):
         assert result.exit_code == 0, result.output
         return result
 
-    memory = Path("projects") / "-Users-kb-myapp" / "memory"
+    memory = Path("projects") / "-Users-user-myapp" / "memory"
     return run, claude_a / memory, claude_b / memory
 
 
@@ -13248,7 +13252,7 @@ def test_pull_never_writes_or_deletes_inside_a_local_checkout(tmp_path, monkeypa
     assert not [path for path in fixture.iterdir() if "sync-conflict" in path.name]
     logged = run("a", "log", "--action", "excluded", "--format", "jsonl")
     records = [json.loads(line) for line in logged.output.splitlines() if line.startswith("{")]
-    root = "projects/-Users-kb-myapp/memory/fixture"
+    root = "projects/-Users-user-myapp/memory/fixture"
     # One aggregated record per root and advertising manifest, never one per file.
     assert sorted((r["device"], r["source"], r["rel_path"]) for r in records) == [
         ("dev-a", "claude", root),
@@ -13271,7 +13275,7 @@ def test_pull_logs_a_checkout_root_for_skipped_deletions(tmp_path, monkeypatch):
     assert (fixture / "tracked.md").read_text() == "published"
     logged = run("a", "log", "--action", "excluded", "--format", "jsonl")
     records = [json.loads(line) for line in logged.output.splitlines() if line.startswith("{")]
-    root = "projects/-Users-kb-myapp/memory/fixture"
+    root = "projects/-Users-user-myapp/memory/fixture"
     # dev-b advertises only a tombstone under the checkout; it is still logged once.
     assert ("dev-b", "claude", root) in {(r["device"], r["source"], r["rel_path"]) for r in records}
 
@@ -13292,7 +13296,7 @@ def test_pull_logs_each_checkout_root_once_per_peer(tmp_path, monkeypatch):
     run("a", "pull")
     logged = run("a", "log", "--action", "excluded", "--format", "jsonl")
     records = [json.loads(line) for line in logged.output.splitlines() if line.startswith("{")]
-    root = "projects/-Users-kb-myapp/memory/fixture"
+    root = "projects/-Users-user-myapp/memory/fixture"
     from_b = [(r["source"], r["rel_path"]) for r in records if r["device"] == "dev-b"]
     # dev-b advertises a file and a tombstone under the root: still one record.
     assert from_b == [("claude", root)]
@@ -13328,7 +13332,7 @@ def test_unattended_push_still_fails_loudly_when_post_acceptance_maintenance_fai
     capture61, monkeypatch, maintenance
 ):
     """Only attended push downgrades post-acceptance maintenance to a warning."""
-    rel = "projects/-Users-kb-myapp/memory/new.md"
+    rel = "projects/-Users-user-myapp/memory/new.md"
     (capture61["claude"] / rel).write_text("pending")
 
     def fail(*args, **kwargs):
@@ -13562,14 +13566,14 @@ def test_history_failure_attended_only73(push_preview56, monkeypatch, command):
     env = push_preview56
     assert runner.invoke(app, ["push"]).exit_code == 0
     if command == "autopush":
-        memory = env["claude"] / "projects/-Users-kb-myapp/memory"
+        memory = env["claude"] / "projects/-Users-user-myapp/memory"
         memory.mkdir(parents=True, exist_ok=True)
         (memory / "local-73.md").write_text("local")
     _publish_peer62(
         env,
         "peer-73",
         {
-            ("claude", "projects/-Users-kb-myapp/memory/new-73.md"): (
+            ("claude", "projects/-Users-user-myapp/memory/new-73.md"): (
                 b"peer",
                 "2026-10-16T00:00:00+00:00",
             )
@@ -13687,7 +13691,7 @@ def test_attended_pull_2500_excluded_three_flushes73(push_preview56, monkeypatch
     peer["sources"] = {
         "claude": {
             "files": {
-                f"projects/-Users-kb-myapp/memory/excluded-{i}.md": {
+                f"projects/-Users-user-myapp/memory/excluded-{i}.md": {
                     "sha256": "a" * 64,
                     "size": 1,
                     "mtime": "2026-10-16T00:00:00+00:00",
@@ -13743,7 +13747,7 @@ def test_push_uploads_share_one_history_flush73(push_preview56, monkeypatch, com
 
     env = push_preview56
     assert runner.invoke(app, ["push"]).exit_code == 0
-    memory = env["claude"] / "projects/-Users-kb-myapp/memory"
+    memory = env["claude"] / "projects/-Users-user-myapp/memory"
     memory.mkdir(parents=True, exist_ok=True)
     for i in range(5):
         (memory / f"batch-{i}.md").write_text(str(i))
@@ -13905,7 +13909,7 @@ def status77(tmp_path, monkeypatch):
 def test_status77_content_and_metadata_round_trips(status77):
     from mind_meld import attemptlog
 
-    root = status77["claude"] / "projects/-Users-kb-myapp/memory"
+    root = status77["claude"] / "projects/-Users-user-myapp/memory"
     baseline = runner.invoke(app, ["status"])
     assert baseline.exit_code == 0, baseline.output
     # Missing new history on upgrade is normal, not a mandatory seeding run.
@@ -14337,7 +14341,7 @@ def test_status77_unrelated_scan_failure_does_not_block_selected_source(status77
 @pytest.mark.parametrize("mode", ["published-oversized", "new-oversized", "deleted", "excluded"])
 def test_status77_omitted_file_comparison_is_truthful(status77, mode):
     cfg = status77["cfg"]
-    root = status77["claude"] / "projects/-Users-kb-myapp/memory"
+    root = status77["claude"] / "projects/-Users-user-myapp/memory"
     path = root / "user_role.md"
     if mode == "deleted":
         path.unlink()
@@ -14383,7 +14387,7 @@ def test_sync78_default_and_verbose_share_one_logical_final_line(
 @pytest.mark.parametrize("change", ["files", "metadata", "selection", "repair"])
 def test_sync78_real_push_accepted_grammar(status77, monkeypatch, verbose, change):
     env = status77
-    memory = env["claude"] / "projects/-Users-kb-myapp/memory"
+    memory = env["claude"] / "projects/-Users-user-myapp/memory"
     file = memory / "user_role.md"
     if change == "files":
         file.write_text("changed")
@@ -14500,7 +14504,7 @@ def test_sync78_finalizer_notice_precedes_outcome_and_primary_wins(capture61, mo
 
 @pytest.mark.parametrize("when", ["before", "accepted"])
 def test_sync78_push_unexpected_receipt_survives_cleanup(status77, monkeypatch, when):
-    file = status77["claude"] / "projects/-Users-kb-myapp/memory/user_role.md"
+    file = status77["claude"] / "projects/-Users-user-myapp/memory/user_role.md"
     file.write_text("new78 bytes")
     original = cli_module._push_core
     propagated = []
@@ -14742,7 +14746,7 @@ def test_sync78_pull_update_eligibility_and_partial_exit(
 def test_sync78_activity_degradation_survives_later_upload_refusal(capture61, monkeypatch):
     from mind_meld.errors import SnapshotError
 
-    (capture61["claude"] / "projects/-Users-kb-myapp/memory/refused78.md").write_text("pending")
+    (capture61["claude"] / "projects/-Users-user-myapp/memory/refused78.md").write_text("pending")
     monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **k: ())
     monkeypatch.setattr(
         _mm_events,
@@ -14944,7 +14948,7 @@ def test_sync78_each_activity_loss_is_recorded_once(capture61, monkeypatch, faul
         "discover_git_roots",
         lambda *a, **k: _mm_events.GitRootDiscovery(tuple(roots), ()),
     )
-    memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
     # Prime once with deterministic discovery so the fixture's machine-dependent
     # first capture cannot leave a held cursor behind as unrelated noise.
     (memory / "prime78.md").write_text("prime")
@@ -15160,7 +15164,7 @@ class _SyncTerminalBuffer(io.StringIO):
 
 
 def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capture61, monkeypatch):
-    memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
     (memory / "user_role.md").write_text("updated content")
     (memory / "second.md").write_text("second file")
     monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
@@ -15556,7 +15560,7 @@ def test_sync_progress_clears_on_interrupt_and_error(status77, monkeypatch):
 
 
 def test_sync_progress_upload_counter_spans_sources(capture61, monkeypatch):
-    memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
     (memory / "user_role.md").write_text("updated content")
     codex_source = next(s for s in capture61["cfg"]["sync"]["sources"] if s["name"] == "codex")
     codex_source["include_dirs"] = ["skills"]

@@ -1268,7 +1268,7 @@ _SQUASH_PR_SUBJECT_RE = re.compile(r".+ \(#([1-9][0-9]*)\)")
 
 
 _MERGE_PR_SUBJECT_RE = re.compile(r"Merge pull request #([1-9][0-9]*) from [^\r\n]+")
-"""GitHub merge-commit subject, e.g. ``Merge pull request #114 from kb/topic``."""
+"""GitHub merge-commit subject, e.g. ``Merge pull request #114 from user/topic``."""
 
 
 def _extract_github_pr_number(subject: object) -> int | None:
@@ -2605,7 +2605,7 @@ def aggregate_sessions(
     Three-tuple key (Group 8 hotfix). Pre-fix the key was ``(device,
     claude_dir)`` where ``claude_dir`` is the encoded directory NAME. Two
     configured ``type: claude`` source roots that both contain a project
-    encoded as e.g. ``-Users-kb-Documents-foo`` would silently overwrite
+    encoded as e.g. ``-Users-user-Documents-foo`` would silently overwrite
     each other in ``latest``. The added ``source_root`` component preserves
     them as distinct entries.
 
@@ -4986,7 +4986,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--name",
         default="",
-        help="Optional name shown in the ASCII card header (e.g. 'kb').",
+        help="Optional name shown in the ASCII card header (e.g. 'user').",
     )
     parser.add_argument(
         "--no-save",

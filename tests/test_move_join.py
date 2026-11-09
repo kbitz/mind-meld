@@ -21,7 +21,7 @@ from mind_meld.storage.local import LocalBackend
 
 PASSPHRASE = "move-join-test-passphrase"
 MEMORY_KB = 1024
-PROJECT_REL = "projects/-Users-kb-myapp/memory"
+PROJECT_REL = "projects/-Users-user-myapp/memory"
 SHARED_FILES = (
     "untouched.md",
     "peer_ahead.md",

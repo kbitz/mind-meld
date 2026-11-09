@@ -25,7 +25,7 @@ def _mixed_root(tmp_path: Path) -> Path:
     personal = root / "memory" / "personal"
     personal.mkdir(parents=True)
     (personal / "MEMORY.md").write_text("# index\n")
-    project = root / "memory" / "projects" / "Users-kb-app-0c84"
+    project = root / "memory" / "projects" / "Users-user-app-0c84"
     project.mkdir(parents=True)
     (project / "notes.md").write_text("project note\n")
     sessions = root / "sessions" / "2026" / "10" / "13" / "s1"
@@ -47,7 +47,7 @@ def test_walker_syncs_only_memory_tree(tmp_path):
     files = walk_muse_source(src)
     assert set(files) == {
         "memory/personal/MEMORY.md",
-        "memory/projects/Users-kb-app-0c84/notes.md",
+        "memory/projects/Users-user-app-0c84/notes.md",
     }
 
 

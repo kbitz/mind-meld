@@ -97,12 +97,12 @@ class TestCacheLifecycle:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = identity.gather_local_identities(allow_refresh=True)
-        assert "kb@example.com" in emails
+        assert "user@example.com" in emails
         captured = capsys.readouterr()
         assert "refreshing identity cache (one-off)" in captured.err
 
@@ -167,12 +167,12 @@ class TestCacheLifecycle:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = identity.gather_local_identities(allow_refresh=True)
-        assert emails == ["kb@example.com"]
+        assert emails == ["user@example.com"]
 
     def test_wrong_version_in_cache_rebuilds(self, monkeypatch):
         """A different version is treated as stale; a complete gather replaces it."""
@@ -190,12 +190,12 @@ class TestCacheLifecycle:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = identity.gather_local_identities(allow_refresh=True)
-        assert "kb@example.com" in emails
+        assert "user@example.com" in emails
         assert "should-not-appear@example.com" not in emails
 
     def test_disable_refresh_returns_cached_or_empty(self, monkeypatch):
@@ -218,34 +218,34 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = identity.refresh_identity_cache(force=True)
-        assert "kb@example.com" in emails
+        assert "user@example.com" in emails
 
     def test_per_repo_overrides_unioned(self, monkeypatch):
         _stub_repos(monkeypatch, [Path("/fake/repo-a"), Path("/fake/repo-b")])
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("git", "-C", "/fake/repo-a", "config"): (0, "kb@example.com\n"),
-                ("git", "-C", "/fake/repo-b", "config"): (0, "kb-work@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
+                ("git", "-C", "/fake/repo-a", "config"): (0, "user@example.com\n"),
+                ("git", "-C", "/fake/repo-b", "config"): (0, "user-work@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = identity.refresh_identity_cache(force=True)
-        assert "kb@example.com" in emails
-        assert "kb-work@example.com" in emails
+        assert "user@example.com" in emails
+        assert "user-work@example.com" in emails
 
     def test_gh_noreply_added_when_authenticated(self, monkeypatch):
         _stub_repos(monkeypatch, [])
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (0, '{"id": 99999, "login": "fakeuser"}'),
             },
         )
@@ -257,12 +257,12 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): FileNotFoundError,
             },
         )
         emails = identity.refresh_identity_cache(force=True)
-        assert "kb@example.com" in emails
+        assert "user@example.com" in emails
         assert all("noreply" not in e for e in emails)
 
     def test_gh_malformed_json_returns_none(self, monkeypatch):
@@ -270,12 +270,12 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (0, "<<<not json>>>"),
             },
         )
         emails = identity.refresh_identity_cache(force=True)
-        assert "kb@example.com" in emails
+        assert "user@example.com" in emails
         assert all("noreply" not in e for e in emails)
 
     def test_gh_unexpected_shape_rejected(self, monkeypatch):
@@ -285,7 +285,7 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (0, '{"id": "not-an-int", "login": "fakeuser"}'),
             },
         )
@@ -298,12 +298,12 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = identity.refresh_identity_cache(force=True)
-        assert "kb@example.com" in emails
+        assert "user@example.com" in emails
         assert all("noreply" not in e for e in emails)
 
     def test_per_repo_failure_skipped_silently(self, monkeypatch):
@@ -312,15 +312,15 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("git", "-C", "/fake/good", "config"): (0, "kb-personal@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
+                ("git", "-C", "/fake/good", "config"): (0, "user-personal@example.com\n"),
                 ("git", "-C", "/fake/bad", "config"): (128, ""),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = identity.refresh_identity_cache(force=True)
-        assert "kb@example.com" in emails
-        assert "kb-personal@example.com" in emails
+        assert "user@example.com" in emails
+        assert "user-personal@example.com" in emails
 
     def test_config_load_failure_falls_back_to_other_sources(self, monkeypatch):
         """An unreadable config.toml drops only the per-repo walk; global stays."""
@@ -334,11 +334,11 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
-        assert set(identity.refresh_identity_cache(force=True)) == {"kb@example.com"}
+        assert set(identity.refresh_identity_cache(force=True)) == {"user@example.com"}
 
     def test_gh_string_encoded_uid_accepted(self, monkeypatch):
         """v0.11.19: GitHub Enterprise instances may return ``id`` as a
@@ -348,7 +348,7 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (
                     0,
                     '{"id": "12345678901234567890", "login": "ghuser"}',
@@ -366,7 +366,7 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (0, '{"id": true, "login": "ghuser"}'),
             },
         )
@@ -379,7 +379,7 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (0, '{"id": -1, "login": "ghuser"}'),
             },
         )
@@ -393,7 +393,7 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (0, '{"id": "99999abc", "login": "ghuser"}'),
             },
         )
@@ -417,13 +417,13 @@ class TestGatherSources:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = identity.refresh_identity_cache(force=True)
         assert "historical@example.com" in emails
-        assert "kb@example.com" in emails
+        assert "user@example.com" in emails
 
     def test_per_repo_walk_respects_budget(self, monkeypatch):
         """Tiny budget exhausts after ~one repo; remaining repos are
@@ -439,7 +439,7 @@ class TestGatherSources:
 
         def fake_run(cmd, **_kw):
             if tuple(cmd[:3]) == ("git", "config", "--global"):
-                return _FakeResult(0, "kb@example.com\n")
+                return _FakeResult(0, "user@example.com\n")
             if tuple(cmd[:2]) == ("gh", "api"):
                 return _FakeResult(1, "")
             if tuple(cmd[:2]) == ("git", "-C"):
@@ -447,7 +447,7 @@ class TestGatherSources:
                 import time as _time
 
                 _time.sleep(0.005)
-                return _FakeResult(0, "kb-personal@example.com\n")
+                return _FakeResult(0, "user-personal@example.com\n")
             return _FakeResult(1, "")
 
         monkeypatch.setattr(_subprocess, "run", fake_run)
@@ -642,12 +642,14 @@ class TestGatherSources:
         repo = tmp_path / "shared-repo"
         repo.mkdir()
         real_subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        real_subprocess.run(["git", "config", "user.email", "kb@example.com"], cwd=repo, check=True)
+        real_subprocess.run(
+            ["git", "config", "user.email", "user@example.com"], cwd=repo, check=True
+        )
         real_subprocess.run(["git", "config", "user.name", "KB"], cwd=repo, check=True)
         real_subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
         (repo / "a.txt").write_text("a")
         real_subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
-        real_subprocess.run(["git", "commit", "-q", "-m", "kb"], cwd=repo, check=True)
+        real_subprocess.run(["git", "commit", "-q", "-m", "user"], cwd=repo, check=True)
 
         env = {
             **__import__("os").environ,
@@ -665,14 +667,14 @@ class TestGatherSources:
 
         def fake_run(cmd, **kw):
             if tuple(cmd[:3]) == ("git", "config", "--global"):
-                return _FakeResult(0, "kb@example.com\n")
+                return _FakeResult(0, "user@example.com\n")
             if tuple(cmd[:2]) == ("gh", "api"):
                 return _FakeResult(1, "")
             return original_run(cmd, **kw)
 
         monkeypatch.setattr(real_subprocess, "run", fake_run)
         emails = identity.refresh_identity_cache(force=True)
-        assert "kb@example.com" in emails
+        assert "user@example.com" in emails
         assert "alice@collaborator.com" not in emails
 
 
@@ -731,14 +733,14 @@ class TestRefreshSemantics:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails1 = identity.refresh_identity_cache(force=True)
         # Independent read using disable-refresh path; should hit disk.
         emails2 = identity.gather_local_identities(allow_refresh=False)
-        assert emails1 == emails2 == ["kb@example.com"]
+        assert emails1 == emails2 == ["user@example.com"]
 
 
 # ---------------------------------------------------------------------------
@@ -754,13 +756,13 @@ class TestPersistence:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "KB@Example.COM\n"),
+                ("git", "config", "--global"): (0, "USER@Example.COM\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = identity.refresh_identity_cache(force=True)
-        assert "kb@example.com" in emails
-        assert "KB@Example.COM" not in emails
+        assert "user@example.com" in emails
+        assert "USER@Example.COM" not in emails
 
     def test_emails_deduplicated(self, monkeypatch):
         """Same email reported by multiple sources appears once."""
@@ -768,13 +770,13 @@ class TestPersistence:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("git", "-C", "/fake/repo-a", "config"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
+                ("git", "-C", "/fake/repo-a", "config"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = identity.refresh_identity_cache(force=True)
-        assert emails.count("kb@example.com") == 1
+        assert emails.count("user@example.com") == 1
 
     def test_emails_sorted(self, monkeypatch):
         """Output is deterministically sorted so the cache file diff
@@ -799,7 +801,7 @@ class TestPersistence:
         _stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "config", "--global"): (0, "user@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )

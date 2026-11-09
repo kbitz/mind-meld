@@ -1613,7 +1613,7 @@ def _run_events_backfill(
 
         def prepare_backfill_token_cache() -> CacheLockMode:
             # Warm the token cache inline at init (v0.11.14+). One-time cost
-            # at init time — kb already accepts init takes a few seconds.
+            # at init time — the owner already accepts init takes a few seconds.
             # Subsequent pushes inherit a warm cache. Keep this after the git
             # walk so a discovery failure retains its former no-warm behavior.
             if not claude_paths:
