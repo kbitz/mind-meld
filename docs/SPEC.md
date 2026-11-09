@@ -59,7 +59,14 @@ configuration, and otherwise points to a guide (owner: "it should set up
 syncthing IF syncthing had not otherwise been configured"). O2 is rewritten
 for setup, pairing and approval, and the constraints, known limits, non-goals
 and 2.0.0 release line lose the cutover. Audience, target, the other outcomes
-and the hostname-scrub condition are unchanged. Earlier text lives in
+and the hostname-scrub condition are unchanged. Amended 2026-11-08 at the
+owner's direct confirmation to drop the git-history hostname scrub as a
+condition of 2.0.0 and of making the repository public again: GitHub keeps
+pull-request refs and cached views of old commits that a force-push cannot
+clean, so the rewrite could not remove them (owner: "I didn't realize there
+was no way to scrub the PRs, so basically this is a pointless exercise, we
+should just make sure it stays impersonal moving forward?"). The current tree
+still names machines by role. Earlier text lives in
 `git log -- docs/SPEC.md`.
 
 ## Purpose
@@ -111,9 +118,8 @@ Grok row counts Grok Build's own runs only.
   have two Arch-based (Omarchy) Linux machines, which wait for 2.0 to join.
 - Audience ceiling: potentially-public. The code is MIT and the README stays
   readable by a newcomer, but no alpha group or public stage is planned. The
-  owner made the repository private on 2026-11-06; it becomes public again
-  only after the git history no longer contains the owner's machine
-  hostnames (see Constraints).
+  owner made the repository private on 2026-11-06; making it public again
+  is the owner's separate decision.
 - Selected target: MVP-1, the owner's fleet of macOS and Arch-based Linux
   machines syncing over Syncthing, with complete usage reporting and quiet,
   honest output.
@@ -337,12 +343,11 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   rewrite. While working and reviewing, run only the tests whose recorded
   coverage reaches the changed code; the full suite runs in CI before merge.
 - The owner's machine hostnames, or fragments of them, never appear in the
-  repository: files name machines by role (2026-11-06). Before 2.0.0, and
-  before the repository is made public again, the git history is rewritten
-  so no commit, tag or reachable ref contains them (owner, 2026-11-07). The
-  rewrite force-pushes the protected `main`, so it runs only on the owner's
-  explicit go at that time; the owner gives that go and runs or approves
-  the force-push.
+  repository: files name machines by role (2026-11-06), and code, tests,
+  fixtures and docs use placeholders instead of a real username, email or
+  person's name. The git history is not rewritten (owner, 2026-11-08):
+  GitHub keeps pull-request refs and cached views of old commits that a
+  force-push cannot clean.
 - A bootstrap script installs Python, pipx, mm and the Syncthing package on
   macOS and Arch-based Linux, starts Syncthing at login where Syncthing has
   its default configuration (O2.1), stops with instructions if Homebrew is
@@ -428,8 +433,7 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   Syncthing (macOS and Linux) = **2.0.0**: O1 to O4 accepted on the
   owner's own observation on one Mac and both Linux machines in the
   Syncthing fleet, with O6 to O8 holding, the bootstrap script and O2's
-  Syncthing setup and approval shipped, and the owner's machine hostnames
-  removed from the repository's git history (owner, 2026-11-07). MAJOR
+  Syncthing setup and approval shipped. MAJOR
   because the transport changes. A Mac not yet moved keeps running on iCloud
   Drive and does not hold 2.0.0 or any other machine up; a machine may move
   before 2.0.0 on any release that has the Syncthing support it needs.
