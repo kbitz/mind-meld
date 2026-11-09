@@ -29,11 +29,18 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 rewrite is affected, whether or not it saw that message:
 
 ```bash
-[ "$(git rev-parse refs/tags/v1.12.29)" = "$(git ls-remote origin refs/tags/v1.12.29 | cut -f1)" ] || echo "made before the history rewrite: re-clone"
+if remote_tag=$(git ls-remote --exit-code origin refs/tags/v1.12.29) &&
+   local_tag=$(git rev-parse --verify refs/tags/v1.12.29); then
+  [ "$local_tag" = "$(printf '%s\n' "$remote_tag" | cut -f1)" ] || echo "made before the history rewrite: re-clone"
+else
+  echo "cannot tell, retry online with the release tag available"
+fi
 ```
 
 Both sides use raw tag ref ids, so lightweight and annotated tags both work; a failed or empty
-`ls-remote` means "cannot tell, retry online", not "old clone". The history from an early commit
+`ls-remote` means "cannot tell, retry online", not "old clone". Use the canonical repository as
+`origin`; this check cannot classify a clone whose tags were already force-refreshed. A known
+pre-rewrite clone must still be replaced even if the check prints nothing. The history from an early commit
 (the first changed commit) on has new ids after removing machine names, while every branch and tag
 keeps its name. Make a fresh clone for every other clone and worktree rather than rebase, merge or
 pull, moving unpushed work across as patches (`git format-patch` in the old clone, `git am` in the
@@ -43,11 +50,12 @@ back. `pipx` installs from `@latest` or from a tag need no action: names still r
 install made before the rewrite holds the same code. Do not run `mm recapture` over days before the
 rewrite for this repository (keep recapture windows shorter than the days since the rewrite,
 overriding the older notes' recapture advice for that period): capture walks commits since each
-machine's own last push and deduplicates on `(remote, sha)`, so a commit one machine published under
-its old id and another machine, a 30-day `mm init` backfill, a `mm recapture`, or a late-publishing
-old clone publishes under its new id counts twice in `retro-fleet` until `mm gc` reaps event files
+machine's own last push and deduplicates on `(remote, sha)`, so the same commit published under
+its old id by one source and its new id by another (including a 30-day `mm init` backfill,
+`mm recapture`, or an old clone publishing old ids late) counts twice in `retro-fleet` until `mm gc` reaps event files
 90 days after their day (after interactive pushes that upload changes; an old clone that publishes
 late extends the period, so 90 days is when reaping becomes possible, not a guaranteed end).
+Use the owner's recorded rewrite date when choosing that recapture window.
 
 **Cursor support removed (Tracks 114A–116A):** `mm cursor-agent`,
 `mm capture-cursor-usage`, the `cursor` source alias for `mm enable-source` /
@@ -2582,75 +2590,142 @@ yourself.
 
 ### Re-cloning after the history rewrite
 
-Run steps 1–4 in every worktree of the old clone before moving the clone aside:
+Run steps 1–4 in every worktree of the old clone before moving the clone aside. Replace the
+example paths and branch names below. Use one absolute backup directory outside **all** checkouts,
+with a distinct `worktree_dir` for each worktree and `branch_dir` for each branch. Keep these paths
+and the inventory together; never overwrite an earlier export. Keep every old worktree until
+both its branch and its local state have been verified. Do not push from any old checkout.
 
 1. **List worktrees, stashes and branches with unpushed commits:**
 
    ```bash
+   backup_dir=/absolute/path/outside/all/checkouts/mm-recovery
+   worktree_dir="$backup_dir/worktree-1"   # choose a fresh number for each worktree
+   mkdir -p "$worktree_dir"
    git worktree list
    git stash list
    git branch -vv
+   git status --short --untracked-files=all > "$worktree_dir/status.txt"
    ```
 
-2. **Take the old base for each branch.** That is the value `origin/main` had before the forced
-   update (`git reflog show --format='%H %gs' origin/main | awk '/forced-update/{getline; print $1; exit}'`);
-   use local `main` instead if it was never updated, and check that
-   `git rev-list --count "$base"..<branch>` counts only your own commits:
+2. **Take the old base for each branch.** Use its old published upstream (`origin/main` for a
+   never-published branch, `origin/<branch>` for a published one). The reflog value before its
+   rewrite is the old tip. If that ref has never fetched the rewrite, use its current value;
+   local `main` is usable only if it has no unpushed work and is still that old published tip.
+   If the old value is missing, or you cannot identify the rewrite's reflog entry, **stop and
+   keep the old clone**. Do not guess a base from the new history. The reflog selector below
+   reads the value before the forced update, even when that update is the first displayed row:
 
    ```bash
-   base=$(git reflog show --format='%H %gs' origin/main | awk '/forced-update/{getline; print $1; exit}')
-   [ -n "$base" ] || base=$(git rev-parse main)
-   git rev-list --count "$base"..<branch>
+   branch=your-branch
+   upstream=origin/main                  # use the branch's own upstream if published
+   branch_dir="$backup_dir/branch-1"      # choose a fresh number for each branch
+   mkdir "$branch_dir"
+   base=
+   old_tip=
+   if reflog=$(git reflog show --format='%gs' "$upstream"); then
+     old_index=$(printf '%s\n' "$reflog" | awk '/forced-update/{print NR; exit}')
+     if [ -n "$old_index" ]; then
+       old_tip=$(git rev-parse --verify "$upstream@{$old_index}")
+     else
+       old_tip=$(git rev-parse --verify "$upstream")   # only if never fetched after the rewrite
+     fi
+     if git cat-file -e "$old_tip^{commit}" && base=$(git merge-base "$old_tip" "$branch"); then
+       git rev-list --count "$base..$branch"
+     else
+       echo "Old upstream value missing: stop and keep the old clone"
+     fi
+   fi
    ```
 
-3. **Export each branch outside the clone.** Export patches with
-   `git format-patch "$base"..<branch> -o ../mm-patches/<branch>`, and for a branch with merge
-   commits also run `git diff --binary "$base" <branch> > ../mm-patches/<branch>.diff`:
+   Continue only if the count is exactly the unpushed commits you intend to keep, with no
+   already-published commits. A failed command or unexpected count means stop. Record the branch,
+   upstream, old base and count with its export. A branch with no unpushed commits needs no replay.
+
+3. **Export each branch outside the clone.** The merge base above excludes changes made only on
+   upstream after the branch forked. For a branch with merges, the binary diff preserves the
+   merged result, including conflict resolutions; do not replay its individual patches as well:
 
    ```bash
-   git format-patch "$base"..<branch> -o ../mm-patches/<branch>
-   git diff --binary "$base" <branch> > ../mm-patches/<branch>.diff
+   git format-patch --binary "$base..$branch" -o "$branch_dir/patches"
+   git diff --binary "$base" "$branch" > "$branch_dir/branch.diff"
+   git rev-parse "$base^{tree}" > "$branch_dir/base-tree.txt"
+   git rev-parse "$branch^{tree}" > "$branch_dir/branch-tree.txt"
+   git rev-list --count --merges "$base..$branch" > "$branch_dir/merge-count.txt"
    ```
 
-4. **Save uncommitted, staged, stashed and untracked or ignored local state** —
-   `git diff --binary`, `git diff --cached --binary`, `git stash show -p stash@{n}` for each
-   stash, and copies of the untracked or ignored local state you want (for example `.gstack/`):
+4. **Save uncommitted, staged, stashed and untracked or ignored local state.** Copy the untracked
+   and ignored files you want (for example `.gstack/`) into this worktree's backup too. Record its
+   checked-out branch, or detached HEAD's tree, so local state goes back onto the right content.
+   For each stash, replace `n` below with its number. `--binary --include-untracked` retains all
+   stash content; the separate index patch retains its staged/unstaged split, and the base tree
+   identifies where to restore it. Stashes are shared across worktrees; export each once:
 
    ```bash
-   mkdir -p ../mm-patches/local
-   git diff --binary > ../mm-patches/local/unstaged.diff
-   git diff --cached --binary > ../mm-patches/local/staged.diff
-   git stash show -p stash@{n} > ../mm-patches/local/stash-n.patch
+   git diff --binary > "$worktree_dir/unstaged.diff"
+   git diff --cached --binary > "$worktree_dir/staged.diff"
+   git rev-parse 'HEAD^{tree}' > "$worktree_dir/base-tree.txt"
+   git stash show --binary --include-untracked -p 'stash@{n}' > "$worktree_dir/stash-n.patch"
+   git diff --binary 'stash@{n}^1' 'stash@{n}^2' > "$worktree_dir/stash-n-index.diff"
+   git rev-parse 'stash@{n}^1^{tree}' > "$worktree_dir/stash-n-base-tree.txt"
    ```
 
 5. **Move the old clone aside and clone to the same path** so `[retro] repo_roots` pins and
-   discovery still match:
+   discovery still match. Keep the old clone outside discovery roots while recovering, so capture
+   does not walk both histories. Stop agent sessions that could still write or push from it:
 
    ```bash
-   mv /path/to/mind-meld /path/to/mind-meld.old
+   old_clone=/absolute/path/outside/discovery/mind-meld.old
+   mv /path/to/mind-meld "$old_clone"
    git clone https://github.com/kbitz/mind-meld.git /path/to/mind-meld
    cd /path/to/mind-meld
    ```
 
-6. **Replay each branch in the new clone.** For each branch, run
-   `git switch -c <branch> origin/main` and then `git am ../mm-patches/<branch>/*.patch`
-   (`git am --continue` after resolving a conflict, or `git am --abort` to back out); for a
-   merge-bearing branch, run `git apply --index ../mm-patches/<branch>.diff` instead, then restore
-   any saved local state:
+6. **Replay each branch in the new clone.** First privately inspect exported messages and
+   author identities, and the new clone's Git identity, so new commits do not reintroduce removed
+   names. Use a fresh recovery branch name, including when recovering unpushed work from `main`.
+   Locate a rewritten upstream commit with the saved base tree; this also works when upstream
+   has advanced since the rewrite. If no matching tree exists, stop and retain the old clone:
 
    ```bash
-   git switch -c <branch> origin/main
-   git am ../mm-patches/<branch>/*.patch
-   # Or, for a merge-bearing branch:
-   git apply --index ../mm-patches/<branch>.diff
+   new_base=$(git log --format='%H %T' "$upstream" |
+     awk -v tree="$(cat "$branch_dir/base-tree.txt")" '$2 == tree {print $1; exit}')
+   if [ -z "$new_base" ]; then
+     echo "No matching rewritten base: stop and keep the old clone"
+   elif git switch -c recovered-your-branch "$new_base"; then
+     if [ "$(cat "$branch_dir/merge-count.txt")" -gt 0 ]; then
+       git apply --index "$branch_dir/branch.diff" && git commit -m "Recover branch after history rewrite"
+     else
+       git am "$branch_dir/patches"/*.patch
+     fi
+   fi
    ```
 
-7. **Verify each branch before deleting the old clone.** `git rev-parse <branch>^{tree}` in the
-   new clone must equal the old clone's tree for that branch; only then delete the old clone:
+   Do not continue after either stop message or a failed command. Require a clean worktree before
+   switching branches; recover all branches before restoring local changes. Use `git am --continue`
+   after resolving a conflict, or `git am --abort` to back out. Skip empty patches. For each old
+   worktree, restore its saved base tree on a separate recovery branch, apply its nonempty staged
+   diff with `git apply --index`, then its unstaged diff with `git apply`, then copy back its
+   untracked/ignored files. Restore each stash separately on its saved base tree: `git apply` its
+   content patch, then `git apply --cached` its index patch; inspect it before re-stashing. Never
+   apply several worktrees' or stashes' local state on top of one another.
+
+7. **Verify branches and local state before deleting anything.** Compare each recovered branch's
+   tree with its saved old tree (also available from `git -C "$old_clone" rev-parse "$branch^{tree}"`):
 
    ```bash
-   [ "$(git rev-parse <branch>^{tree})" = "$(git -C /path/to/mind-meld.old rev-parse <branch>^{tree})" ] && echo "tree matches"
+   if [ "$(git rev-parse 'recovered-your-branch^{tree}')" = "$(cat "$branch_dir/branch-tree.txt")" ]; then
+     echo "tree matches"
+   else
+     echo "MISMATCH: stop and keep the old clone and backups"
+   fi
    ```
+
+   A matching branch tree does **not** verify local changes or stashes. Separately compare the
+   restored staged/unstaged diffs, binary bytes and untracked/ignored files with each worktree's
+   inventory and backups, and check every stash's content and staged state. Keep the old clone,
+   old worktree directories and backups until all checks pass; resolve a mismatch before any
+   push or deletion. Only then integrate the recovered work with the current upstream.
 
 ## Uninstalling
 
