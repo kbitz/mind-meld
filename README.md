@@ -2595,6 +2595,7 @@ example paths and branch names below. Use one absolute backup directory outside 
 with a distinct `worktree_dir` for each worktree and `branch_dir` for each branch. Keep these paths
 and the inventory together; never overwrite an earlier export. Keep every old worktree until
 both its branch and its local state have been verified. Do not push from any old checkout.
+Stop agent sessions and editors in **all** old worktrees before starting the inventory or exports.
 
 1. **List worktrees, stashes and branches with unpushed commits:**
 
@@ -2605,7 +2606,7 @@ both its branch and its local state have been verified. Do not push from any old
    git worktree list
    git stash list
    git branch -vv
-   git status --short --untracked-files=all > "$worktree_dir/status.txt"
+   git status --short --untracked-files=all --ignored > "$worktree_dir/status.txt"
    ```
 
 2. **Take the old base for each branch.** Use its old published upstream (`origin/main` for a
@@ -2635,6 +2636,8 @@ both its branch and its local state have been verified. Do not push from any old
      else
        echo "Old upstream value missing: stop and keep the old clone"
      fi
+   else
+     echo "Cannot read upstream reflog: stop and keep the old clone"
    fi
    ```
 
@@ -2677,6 +2680,8 @@ both its branch and its local state have been verified. Do not push from any old
    ```bash
    old_clone=/absolute/path/outside/discovery/mind-meld.old
    mv /path/to/mind-meld "$old_clone"
+   git -C "$old_clone" worktree repair
+   git -C "$old_clone" worktree list
    git clone https://github.com/kbitz/mind-meld.git /path/to/mind-meld
    cd /path/to/mind-meld
    ```
@@ -2709,6 +2714,9 @@ both its branch and its local state have been verified. Do not push from any old
    untracked/ignored files. Restore each stash separately on its saved base tree: `git apply` its
    content patch, then `git apply --cached` its index patch; inspect it before re-stashing. Never
    apply several worktrees' or stashes' local state on top of one another.
+   For these local-state bases, use the same tree lookup over `git log --all --format='%H %T'`
+   so recovered branches are included. If a saved tree has no matching commit, stop and keep the
+   old worktree or stash; do not substitute the current upstream tip.
 
 7. **Verify branches and local state before deleting anything.** Compare each recovered branch's
    tree with its saved old tree (also available from `git -C "$old_clone" rev-parse "$branch^{tree}"`):
