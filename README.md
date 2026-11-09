@@ -2604,6 +2604,7 @@ Stop agent sessions and editors in **all** old worktrees before starting the inv
    worktree_dir="$backup_dir/worktree-1"   # choose a fresh number for each worktree
    mkdir -p "$worktree_dir"
    git worktree list
+   git worktree list --porcelain > "$worktree_dir/worktrees.txt"
    git stash list
    git branch -vv
    git status --short --untracked-files=all --ignored > "$worktree_dir/status.txt"
@@ -2680,8 +2681,24 @@ Stop agent sessions and editors in **all** old worktrees before starting the inv
    ```bash
    old_clone=/absolute/path/outside/discovery/mind-meld.old
    mv /path/to/mind-meld "$old_clone"
-   git -C "$old_clone" worktree repair
-   git -C "$old_clone" worktree list
+   ```
+
+   **Repair and check every old worktree before cloning.** Worktrees nested inside the old clone
+   moved with it. Pass **all** their relocated paths to repair; replace `<relative-path>` below
+   and add the other nested paths as arguments. With no nested worktrees, omit the path argument:
+
+   ```bash
+   git -C "$old_clone" worktree repair "$old_clone/<relative-path>"
+   git -C "$old_clone" worktree list --porcelain
+   ```
+
+   Check every saved inventory entry at its expected location, with no `prunable` entries. In
+   each old worktree, `git rev-parse --path-format=absolute --git-common-dir` must identify
+   `"$old_clone/.git"`, not the path the new clone will occupy. A failed repair, missing path or
+   wrong Git directory means **stop and keep the old clone; do not clone yet**. Only after all
+   old worktrees resolve correctly, create the new clone:
+
+   ```bash
    git clone https://github.com/kbitz/mind-meld.git /path/to/mind-meld
    cd /path/to/mind-meld
    ```
