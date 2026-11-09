@@ -46,23 +46,23 @@ here by hand, use the H3 form.
 
 ## Drain records
 
-### Roadmap inbox drain — 2026-11-08 (18 items, Current Plan unchanged)
+### Roadmap inbox drain — 2026-11-08 (18 items; six folded into Track 122A)
 
-Run by `/roadmap` from manager Ephesus 16's brief after the 2026-11-08 cleanup left the inbox undrained (the owner: "roadmap should have processed the todos though"). Verification baseline: `cf2e127` (v1.12.29). Within the owner's earlier instruction ("once we use the new syncing mechanism for a bit, we will determine how to get to 2.0 and what future items we actually want to pursue"), nothing is promoted from Future, no path to 2.0 is chosen and existing Future entries are left as they are; Track 122A stays the only Current Plan Track and its card is unchanged. Every premise was re-checked at `cf2e127`: no source or test file named by an item has changed since it was filed. **Inbox: 18 drained: 0 placed, 16 deferred (as 7 Future entries, grouped where items share the same paths), 2 killed, 0 discharged.** Authored-false rate: 0 / (0 + 0), no placement or discharge. Future: 25 → 32 entries.
+Run by `/roadmap` from manager Ephesus 16's brief after the 2026-11-08 cleanup left the inbox undrained (the owner: "roadmap should have processed the todos though"). Verification baseline: `cf2e127` (v1.12.29). Within the owner's earlier instruction ("once we use the new syncing mechanism for a bit, we will determine how to get to 2.0 and what future items we actually want to pursue"), nothing is promoted from Future and no path to 2.0 is chosen; Track 122A stays the only Current Plan Track. The owner answered the PR's three review flags on 2026-11-08 ("1 kill / 2 fold in / 3 kill it"): the two approve edge cases stay killed, the six `mm init` test gaps fold into Track 122A's card, and one existing Future entry is killed (below). Every premise was re-checked at `cf2e127`: no source or test file named by an item has changed since it was filed. **Inbox: 18 drained: 6 placed, 10 deferred (as 6 Future entries, grouped where items share the same paths), 2 killed, 0 discharged. Future: 1 killed.** Authored-false rate: 0 / (6 + 0) = 0%. Future: 25 → 30 entries.
 
 | Item | Disposition |
 |---|---|
-| `[review]` Test gap: Unsupported Syncthing GUI address during init | defer → "Test gaps: `mm init`'s Syncthing setup paths (6)". Track 122A's `_touches:` cover `initflow.py` and `test_initflow.py`, but its approved scope is at weight 5 of the cap of 6 and the six cases are more than one S task, so they wait for another Track touching those paths |
-| `[review]` Test gap: Init routing of Syncthing writer failures | defer → same entry |
-| `[review]` Test gap: Managed join ignore-file write failure | defer → same entry |
-| `[review]` Test gap: Malformed managed record at init | defer → same entry |
-| `[review]` Test gap: Stale management record on default Syncthing | defer → same entry |
-| `[review]` Test gap: Managed join default-folder refusal | defer → same entry |
+| `[review]` Test gap: Unsupported Syncthing GUI address during init | place → Track 122A, fourth task "Init integration tests for six Syncthing setup paths" (M). Its `_touches:` already cover `initflow.py` and `test_initflow.py`; the owner approved changing the card ("fold in") and treats the session-weight cap as guidance, so the card stands at weight 7 against the cap of 6 and the audit's SIZE check flags it |
+| `[review]` Test gap: Init routing of Syncthing writer failures | place → Track 122A, same task |
+| `[review]` Test gap: Managed join ignore-file write failure | place → Track 122A, same task |
+| `[review]` Test gap: Malformed managed record at init | place → Track 122A, same task |
+| `[review]` Test gap: Stale management record on default Syncthing | place → Track 122A, same task |
+| `[review]` Test gap: Managed join default-folder refusal | place → Track 122A, same task |
 | `[review]` Test gap: Writer HTTPS transport | defer → "Test gaps: Syncthing writer transport and response handling (3)"; no Track covers `syncthing.py` and `test_syncthing_write.py` |
 | `[review]` Test gap: Malformed writer config lists | defer → same entry |
 | `[review]` Test gap: Post-write verification read failures | defer → same entry |
-| `[review]` Concurrent approvals can drop a fleet-folder device | kill: unobserved (reproduced only with in-memory doubles, not against a real Syncthing); reversible (a rerun of `mm devices approve <id>` re-adds the device, as the item says); reopen if it manifests. Track 119A's plan chose "takes no lock"; a second Syncthing writer that can run beside approve (batch approval, automatic pairing) would be new scope and should revisit this race in its own plan |
-| `[review]` Approve can report approved while Syncthing cannot save its config | kill: unobserved (a read of Syncthing's confighandler, not reproduced); reversible (after the disk or permission fault is fixed and Syncthing restarts, a rerun of approve sees the device unapproved and approves it); reopen if it manifests |
+| `[review]` Concurrent approvals can drop a fleet-folder device | kill (kept by the owner, "1 kill"): unobserved (reproduced only with in-memory doubles, not against a real Syncthing); reversible (a rerun of `mm devices approve <id>` re-adds the device, as the item says); reopen if it manifests. Track 119A's plan chose "takes no lock"; a second Syncthing writer that can run beside approve (batch approval, automatic pairing) would be new scope and should revisit this race in its own plan |
+| `[review]` Approve can report approved while Syncthing cannot save its config | kill (kept by the owner, "1 kill"): unobserved (a read of Syncthing's confighandler, not reproduced); reversible (after the disk or permission fault is fixed and Syncthing restarts, a rerun of approve sees the device unapproved and approves it); reopen if it manifests |
 | `[review]` Test gap: Configured auto commands with a pending device | defer → "Test gaps: never-auto-accept gate reach (2)"; no Track covers `test_devices_approve.py` and `cli.py`. Upstream CRITICAL, but a recorded test gap asserts no failure and admits no Track on its own |
 | `[review]` Test gap: Pairing entry points reached through imports or aliases | defer → same entry |
 | `[review]` Test gap: Pairing gate exemptions inside the writer module | defer → "Test gaps: Syncthing writer reads behind `mm devices approve` (2)"; no Track covers `syncthing.py` and `test_devices_approve.py`. Upstream CRITICAL, same reasoning |
@@ -71,7 +71,9 @@ Run by `/roadmap` from manager Ephesus 16's brief after the 2026-11-08 cleanup l
 | `[review]` Test gap: Approve when the pending-device read fails | defer → "Test gap: approve when the pending-device read fails" |
 | `[manual]` Unpriced Cursor-era Grok rows get an upgrade remedy that cannot fix them | defer → same title. Observed in real fleet data (Track 116A plan decision d4), but wording only: no data at risk and the owner already knows the remedy does not apply. Track 122A touches `aggregator.py` for placeholders only, so the item's own trigger is not met |
 
-**Future left as it is (25):** the brief limits this run to the inbox. One note for the owner's later Future review: "Bootstrap hardening candidates from the Track 98A review" holds 14 unobserved Low findings behind a manifestation trigger ("a real bootstrap run hits one"), which the manifestation gate would now kill rather than defer.
+**Future killed (1):** "Bootstrap hardening candidates from the Track 98A review": unobserved and reversible (14 Low review findings, each still ending with a Run: fix), so the manifestation gate kills rather than defers it; killed by the owner, 2026-11-08 ("kill it"). Reopen any finding a real bootstrap run hits as a new item with that evidence.
+
+**Future otherwise left as it is (24):** the brief limits this run to the inbox.
 
 **Version:** documentation-only change; no bump under SPEC's release policy. No `## Acceptance` entry is added.
 
