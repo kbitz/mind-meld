@@ -749,6 +749,9 @@ Models are resolved from `gen_metadata.data` Tag 1.3 (`model_enum`) -> Tag 1.19 
 Turns are deduplicated across DBs by `sha256(f"agy\0{bot_id}")`.
 Cached in `~/.config/mind-meld/agy-host-tokens.json` using forensic replacement
 `files = staged_files if result.complete else {**cached_files, **staged_files}`.
+File entries are reusable only when the cache version, Antigravity format and
+`census_host_version` match the current reader; an older or missing census pin
+forces a re-read so changed step rules also update cached skipped-step counts.
 Full per-DB turns remain in the cache; the wire snapshot is trimmed to
 `MAX_BY_DAY_DAYS`. Antigravity models (`gemini-*`) classify as `"agy"` (`host_family()`),
 rendered in the `Antigravity` agent row. Verified API pricing (`gemini-4-argon`, `gemini-3.8-flash`)

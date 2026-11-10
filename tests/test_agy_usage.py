@@ -957,3 +957,32 @@ def test_nonzero_tokens_on_unexpected_step_types_refuse(tmp_path: Path, unexpect
     assert hu.agy_usage_diag()["last_error_detail"] == {
         "cause": "token_usage_on_unexpected_step_type"
     }
+
+
+@pytest.mark.parametrize("prior_census", ["1.4.5", None])
+def test_older_census_cache_recounts_usage_less_steps(tmp_path: Path, prior_census: str | None):
+    # Value: protects=skipped-step counts after a reader census upgrade;
+    # fails_when=an unchanged database reuses its old skipped-step count;
+    # why_new=other skip tests start without a pre-upgrade cache; seam=none.
+    root = tmp_path / "conversations"
+    no_tu = _make_step_metadata(1792692712, bot_id=None)
+    _create_agy_db(root / "old.db", {1417: "gemini-4-argon"}, [(1, 23, 3, no_tu)])
+    assert hu.read_agy_usage(root, consented=True).complete
+
+    # The old reader cached this unchanged database while ignoring step 23.
+    cached = json.loads(hu.AGY_CACHE_PATH.read_text(encoding="utf-8"))
+    if prior_census is None:
+        cached.pop("census_host_version")
+    else:
+        cached["census_host_version"] = prior_census
+    cached["usage_less_skipped"] = 0
+    cached["files"]["old.db"]["usage_less_skipped"] = 0
+    hu.AGY_CACHE_PATH.write_text(json.dumps(cached), encoding="utf-8")
+    assert hu.agy_usage_diag()["usage_less_skipped"] == 0
+
+    result = hu.read_agy_usage(root, consented=True)
+    assert result.complete
+    assert result.hosts == {}
+    assert hu.agy_usage_diag()["usage_less_skipped"] == 1
+    refreshed = json.loads(hu.AGY_CACHE_PATH.read_text(encoding="utf-8"))
+    assert refreshed["census_host_version"] == hu.AGY_USAGE_CENSUS_HOST_VERSION

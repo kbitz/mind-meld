@@ -1684,6 +1684,7 @@ def _utc_day(value: Any) -> str:
 # both main-DB and WAL fingerprints. Pre-open and post-close fingerprints must
 # match, and any hot journal refuses as stale. Deduplication across DBs is keyed
 # on sha256("agy\0" + bot_id).
+# Cache reuse also requires the current census pin so changed step rules reapply.
 
 AGY_CONVERSATIONS_PATH = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
 AGY_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "agy-host-tokens.json"
@@ -2307,6 +2308,7 @@ def read_agy_usage(
             current_format = (
                 locked.data.get("version") == CACHE_VERSION
                 and locked.data.get("agy_format") == _AGY_CACHE_FORMAT
+                and locked.data.get("census_host_version") == AGY_USAGE_CENSUS_HOST_VERSION
             )
             raw_files = _cached_files(locked.data) if current_format else {}
             cached_files = {

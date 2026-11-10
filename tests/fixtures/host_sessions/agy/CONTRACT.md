@@ -53,6 +53,7 @@ Counts-only read over 208 `.db` files (one `steps` schema, 0 open errors, step t
 
 - **Step Types:** `step_type` 15 and 23 carry token usage and are counted alike. A row with no tag 9, all-zero tokens, or `bot_id` starting with `<synthetic>` is skipped. Any other `step_type` carrying non-zero tokens refuses the reader as `unsupported` (`token_usage_on_unexpected_step_type`).
 - **Usage-less Skipped:** Any completed `step_type` 15 or 23 row (`status == 3`) that lacks tag 9 increments `usage_less_skipped`.
+- **Cache Validity:** Reuse requires the current cache version, Antigravity format and `census_host_version`. Older or missing census pins force a re-read, including skipped-step counts, even when database fingerprints match.
 - **Deduplication:** Turns are deduplicated across databases by `sha256("agy\0" + bot_id)`. Conflicting usage data for the same `bot_id` refuses the reader as `malformed` (`bot_id_conflict`).
 - **SQLite Safety:** Databases are opened with `mode=ro` and `immutable=1` when `-wal` is absent. `SQLITE_LIMIT_LENGTH` is capped at 16 MiB. Hot `-journal` (> 0 bytes) and pre-open vs post-close fingerprint drift refuse as `stale` (`hot_journal`, `identity_changed`).
 - **Error Mapping:** Protobuf wire corruption, negative or overflow counters, or duplicate `bot_id` conflict refuse as `malformed`. Missing required tables or columns, unknown `model_enum`, or unexpected step type token usage refuse as `unsupported`.
