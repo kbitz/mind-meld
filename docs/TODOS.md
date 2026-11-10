@@ -46,6 +46,36 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap promotion — 2026-11-09 (the bootstrap fix, the attended push's scans and the encountered bugs)
+
+Run from manager Ephesus 17's brief on two owner decisions of 2026-11-09. First, lifting the 2026-11-08 hold for two Tracks: "1 - sure", on the manager's recommended order (the bootstrap fix, then attended push finishing its scans), and, on the second Track, "ok, that makes sense" after the manager explained that the hooks already run `mm autopush` and `mm autopull` with their own small budgets. Second, a rule: "why isn't that fix in our current roadmap? Anything that is a reproducible bug we actually encountered should be current", recorded in ROADMAP.md's standing constraints. Inbox empty: **0 drained**. Verification baseline: `e04cfa0` (v1.12.30). Each row below was checked against that tree; the Track cards carry the cited code.
+
+| Item | Disposition |
+|---|---|
+| Brief 1: `bin/bootstrap` leaves an outdated mm and does not ensure Syncthing starts at login (findings 1, 2) | place → Track 123A |
+| README install one-liner 404s while the repository is private (finding 3) | place → folded into Track 123A (same three files: `bin/bootstrap`, `tests/test_bootstrap.py`, `README.md`; a few docs lines) |
+| Brief 2: `mm recapture` does not clear the git-walk-dropped advice (finding 5), with the retro's `git_budget` fold | place → Track 124A. Correction to the entry's hypothesis: recapture does advance the per-repository cursors when its capture is complete (`events_tail._commit_recorded_git_rows`), so the card starts from a reproduction |
+| Brief 2: an attended push finishes its scans within a cap; no new flag | place → Track 124A (cap as a `[retro]` setting; no flag, decision recorded in the card). The attended-push size (weight 8) is above the cap of 6, so the brief's second Track is three: 124A (cap and the looping advice), 125A (resume, progress, "catching up" on the push and in status), 126A (the wire field and the retro's wording) |
+| R2: Codex reader reported "failed" while catching up | place → 124A (finish the backlog), 125A (wording), 126A (wire and retro) |
+| Finding 4: managed `mm init` stops for the key header right after accepting the folder | place → Track 127A. Observed once and not shown to recur, but the cause is deterministic in code (`fetch_crypto_init` once, no wait) and the owner's rule covers it |
+| Finding 8: the codex source syncs `skills/gstack/*` | place → Track 127A, with the `agy` check and the byte-identical conflict-copy question as acceptance steps |
+| Antigravity `unsupported` cause (`token_usage_on_unexpected_step_type`) leaves its usage absent from the retro (finding 6 / R2 Antigravity part) | place → Track 123B (needs a census of real Antigravity data, per the ROADMAP constraint) |
+| Antigravity advice contradicts itself between the push notice and `mm status` (finding 6) | place → Track 130A |
+| Finding 7: recapture's own push prints one nested-repository notice per checkout | place → Track 130A. The manager's finding said every push prints them; by the code only `recapture`'s inner `_push_core` (and `mm push -v`) does, and which command printed the 107 lines is unconfirmed |
+| R1: cost floor computed from family-extrapolated Claude 5.5 rates | place → Track 128A |
+| R6 (confirmation part): `--set-model-price` prints nothing on success | place → Track 128A. The code is `aggregator.py`'s handling of the flag; `update_pricing_cache` itself is in `token_usage.py` |
+| R3 (attribution part): `cost_floor` causes repeated and without machine names | place → Track 129A |
+| R4: wrong remedy ("upgrade mind-meld to v0.14.17+ on that Mac") for a peer whose push has not arrived | place → Track 129A |
+| R5: commit-type classifier files version-prefixed subjects under `other` | place → Track 129A |
+| R3 (contagion part): a failed reader floors every family | defer, stays in Future (narrowed): a deliberate, documented rule, so a design question, not a bug |
+| R6 (rate tiers for overrides), R7 (Muse alias "verified" label), R8 (per-vendor verification date) | defer, stay in Future: the tier claims for `gpt-6-astra` and Haiku 5.5 are the manager's, unverified; R7 and R8 are design questions |
+| `mm status` hung inside an agent session | defer, stays: seen once on 2026-11-05 in an agent session, unconfirmed, not on the owner's machines on 2026-11-09 |
+| Unpriced Cursor-era Grok rows get an upgrade remedy that cannot fix them | defer, stays: logged from a plan decision on 2026-11-08, not encountered on the owner's machines |
+| Test gaps whose triggers the new Tracks' `_touches:` meet: "bootstrap Arch install paths" and "bootstrap version, os-release and pipx-link stops" (Track 123A), "retained SQLite diagnostic code filtering" (Track 123B) | defer, stay: the owner said everything else stays in Future; the Tracks' implementers may close them if they are adding the tests anyway |
+| New: reconcile SPEC O8.2 and O7.2 with the attended scan cap | defer → Future "Reconcile SPEC O8.2 and O7.2 with the attended scan cap", trigger Track 124A merging |
+
+**Future:** 42 entries before; 11 promoted and removed, 2 narrowed (R3, R6 to R8), 1 added: 32 after. SPEC, CHANGELOG and PROGRESS are untouched.
+
 ### Roadmap inbox drain — 2026-11-09, second batch (retro-fleet feedback: 8 findings, 3 not findings)
 
 Added to the same PR on the owner's word ("yes", 2026-11-09, asked whether to add these to #300). The owner ran `mm retro-fleet 7d` on a Mac (`mac-b`) and passed back a ten-item list; manager Ephesus 17 then ran it on the Linux desktop (`linux-a`), compared the two and checked each item against HEAD. Each premise was re-checked at `98a9131` (v1.12.30); the manager's numbers from the two machines are cited as its observations and were not re-run. The owner's standing direction holds: nothing is placed in Current Plan (it is empty), and every finding is deferred with a revisit trigger. **11 items: 0 placed, 8 deferred (as 6 new Future entries and one addition to an existing entry), 2 killed, 1 folded into an existing entry, 0 discharged; 2 premises narrowed.** Future: 36 → 42 entries.
