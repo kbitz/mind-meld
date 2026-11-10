@@ -14,6 +14,7 @@ set -eu
 
 MM_INSTALL_SPEC="git+https://github.com/kbitz/mind-meld.git@latest"
 MM_RELEASE="1.12.30"
+SYNCTHING_PLISTS="sh.brew.syncthing.plist homebrew.mxcl.syncthing.plist"
 HOMEBREW_INSTALL_CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
 say() {
@@ -83,14 +84,29 @@ unsupported_os() {
   die "$1 is not supported; bootstrap supports macOS and Arch-based Linux. Install Python 3.11+, pipx and Syncthing 2.1+ yourself" "pipx install $MM_INSTALL_SPEC"
 }
 
+check_pipx_link() {
+  pipx_mm="$venvs/mind-meld/bin/mm"
+  if ! [ "$bin/mm" -ef "$pipx_mm" ] 2>/dev/null; then
+    if [ -e "$bin/mm" ] || [ -L "$bin/mm" ]; then
+      die "$bin/mm is not pipx's mind-meld copy; another install put it there" "pipx install --force $MM_INSTALL_SPEC"
+    fi
+    die "pipx's link $bin/mm is missing" "pipx install --force $MM_INSTALL_SPEC"
+  fi
+}
+
 read_syncthing_login() {
   st_login="unknown"
   if [ "$platform" = "macos" ]; then
-    if [ -e "$HOME/Library/LaunchAgents/homebrew.mxcl.syncthing.plist" ]; then
-      st_login="yes"
-    else
-      st_login="no"
-    fi
+    st_login="no"
+    for plist_name in $SYNCTHING_PLISTS; do
+      if [ -e "$HOME/Library/LaunchAgents/$plist_name" ]; then
+        st_login="yes"
+        return 0
+      elif [ -L "$HOME/Library/LaunchAgents/$plist_name" ]; then
+        st_login="unknown"
+        return 0
+      fi
+    done
   else
     st_enabled=$(systemctl --user is-enabled syncthing.service 2>/dev/null || true)
     case "$st_enabled" in
@@ -156,17 +172,26 @@ ensure_syncthing_at_login() {
     say "Syncthing already starts at login but is not running; to start it now, run: $start_now_cmd"
   elif [ "$running" -eq 1 ]; then
     if [ "$platform" = "macos" ]; then
+      if [ "$st_login" = "unknown" ]; then
+        die "Syncthing's login item is a broken link; quit the running Syncthing first" "brew services start syncthing"
+      fi
       keg=$(brew --prefix syncthing 2>/dev/null || true)
-      keg_plist="$keg/homebrew.mxcl.syncthing.plist"
-      if [ -z "$keg" ] || [ ! -f "$keg_plist" ]; then
+      keg_plist=""
+      for plist_name in $SYNCTHING_PLISTS; do
+        if [ -n "$keg" ] && [ -f "$keg/$plist_name" ]; then
+          keg_plist="$keg/$plist_name"
+          break
+        fi
+      done
+      if [ -z "$keg_plist" ]; then
         die "Homebrew's Syncthing login item was not found; quit the running Syncthing first" "brew services start syncthing"
       fi
       launch_agents="$HOME/Library/LaunchAgents"
-      dest_plist="$launch_agents/homebrew.mxcl.syncthing.plist"
-      mkdir -p "$launch_agents"
-      cp "$keg_plist" "$dest_plist"
-      chmod 0644 "$dest_plist"
-      say "Syncthing is already running; set it to start at login from your next login (~/Library/LaunchAgents/homebrew.mxcl.syncthing.plist)."
+      dest_plist="$launch_agents/$plist_name"
+      if ! { mkdir -p "$launch_agents" && cp "$keg_plist" "$dest_plist" && chmod 0644 "$dest_plist"; }; then
+        die "could not register Syncthing to start at login; quit the running Syncthing first" "brew services start syncthing"
+      fi
+      say "Syncthing is already running; set it to start at login from your next login (~/Library/LaunchAgents/$plist_name)."
     else
       # shellcheck disable=SC2086
       if ! $enable_syncthing_cmd; then
@@ -367,9 +392,11 @@ main() {
       fi
     elif [ "$upgrade_args" = "install --force $MM_INSTALL_SPEC" ]; then
       upgrade_cmd="pipx install --force $MM_INSTALL_SPEC"
+      # A forced reinstall replaces exposed apps, so check ownership first.
+      check_pipx_link
       say "upgrading mm $old with pipx"
       if ! GIT_TERMINAL_PROMPT=0 pipx install --force "$MM_INSTALL_SPEC"; then
-        die "$upgrade_cmd failed, so mm stays at $old" "$upgrade_cmd"
+        die "$upgrade_cmd failed; mm may need reinstalling" "$upgrade_cmd"
       fi
     else
       die "could not tell how mm $old was installed, so it was not upgraded to $MM_RELEASE" "pipx install --force $MM_INSTALL_SPEC"
@@ -390,13 +417,7 @@ main() {
   # pipx's copy is its mind-meld venv's entry point, linked at $bin/mm. pipx
   # leaves a file another installer already put there in place, and never
   # relinks a missing link on a plain install, so check the link itself first.
-  pipx_mm="$venvs/mind-meld/bin/mm"
-  if ! [ "$bin/mm" -ef "$pipx_mm" ] 2>/dev/null; then
-    if [ -e "$bin/mm" ] || [ -L "$bin/mm" ]; then
-      die "$bin/mm is not pipx's mind-meld copy; another install put it there" "pipx install --force $MM_INSTALL_SPEC"
-    fi
-    die "pipx's link $bin/mm is missing" "pipx install --force $MM_INSTALL_SPEC"
-  fi
+  check_pipx_link
   found=$(command -v mm 2>/dev/null || true)
   if [ -z "$found" ]; then
     die "mm is installed in $bin, which is not on PATH; open a new terminal and rerun this script afterwards" "pipx ensurepath"
