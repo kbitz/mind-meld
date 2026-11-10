@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.31] - 2026-11-09
+
+Antigravity usage counts include step 23 and refresh from older censuses.
+
+### Fixed
+
+- Antigravity usage counts include step 23.
+- Antigravity usage caches refresh from older censuses.
+
 ## [1.12.30] - 2026-11-08
 
 Documentation uses placeholders for personal identifiers.

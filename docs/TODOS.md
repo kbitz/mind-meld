@@ -44,6 +44,16 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/host_usage.py|tests/test_agy_usage.py] Test gap: Antigravity cross-type turn deduplication
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** The fixtures cover equal and conflicting duplicate step-23 turns across databases, but do not pair step 15 with step 23 using the same `bot_id`.
+- **Hypothesis (untested):** Extend the existing duplicate fixture across types to pin that equal payloads count once and conflicting payloads refuse. The shared type-independent digest already implements this rule; re-verify before adding a test.
+- **Upstream severity:** INFORMATIONAL.
+- **Found in:** `tests/test_agy_usage.py:857`.
+- **Evidence:** Outside structured review and the coverage audit found this missing case; no failing run was reproduced. The real corpus census found no `bot_id` shared by types 15 and 23.
+- **Context:** Filed by `/review-and-prep` on https://github.com/kbitz/mind-meld/pull/304 at `ce4fd43` (2026-11-10). Revisit when the next Track touches either tagged file.
+- **Effort:** ? (user triages in `/roadmap`).
+
 ## Drain records
 
 ### Roadmap promotion — 2026-11-09 (the bootstrap fix, the attended push's scans and the encountered bugs)

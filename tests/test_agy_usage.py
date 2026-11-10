@@ -6,7 +6,7 @@ Covers:
 - happy path single DB and multi-model gen_metadata
 - status 3 usage-less skip
 - zero-token and <synthetic> skip
-- token_usage on step_type != 15 refusal as unsupported
+- step_type 15 and 23 token_usage counting and unexpected step_type refusal as unsupported
 - hot journal refusal as stale
 - concurrent WAL drift refusal as stale
 - length limit and deadline progress handler
@@ -71,6 +71,7 @@ def _make_step_metadata(
     bot_id: str | None = None,
     thinking: int | None = None,
     response: int | None = None,
+    extra_usage: bytes = b"",
 ) -> bytes:
     tag1_bytes = _encode_field(1, 0, ts)
     meta = _encode_field(1, 2, tag1_bytes)
@@ -89,6 +90,8 @@ def _make_step_metadata(
             tu_parts.append(_encode_field(9, 0, thinking))
         if response is not None:
             tu_parts.append(_encode_field(10, 0, response))
+        if extra_usage:
+            tu_parts.append(extra_usage)
         meta += _encode_field(9, 2, b"".join(tu_parts))
     return meta
 
@@ -761,3 +764,226 @@ def test_step_index_column_and_opaque_payload_fields(tmp_path):
     result = hu.read_agy_usage(root, consented=True)
     assert result.complete
     assert result.hosts["agy"]["2026-10-22"]["input"] == 100
+
+
+def test_census_shaped_db_counts_step_23_and_step_15(tmp_path: Path):
+    root = tmp_path / "conversations"
+    db_path = root / "census.db"
+    no_tu = _make_step_metadata(1792692712, bot_id=None)
+    extra = (
+        _encode_field(6, 0, 1)
+        + _encode_field(8, 2, b"opaque-8")
+        + _encode_field(11, 2, b"opaque-11")
+    )
+    meta_23 = _make_step_metadata(
+        1792692712,
+        model_enum=1417,
+        input_tokens=400,
+        output_tokens=120,
+        cache_read=300,
+        bot_id="bot-step23-1",
+        thinking=70,
+        response=50,
+        extra_usage=extra,
+    )
+    meta_15 = _make_step_metadata(
+        1792692712,
+        model_enum=1417,
+        input_tokens=600,
+        output_tokens=180,
+        cache_read=700,
+        bot_id="bot-step15-1",
+        thinking=100,
+        response=80,
+        extra_usage=extra,
+    )
+    _create_agy_db(
+        db_path,
+        {1417: "gemini-4-argon"},
+        [
+            (1, 14, 3, no_tu),
+            (2, 17, 3, no_tu),
+            (3, 101, 3, no_tu),
+            (4, 132, 3, no_tu),
+            (5, 132, 5, no_tu),
+            (6, 23, 3, meta_23),
+            (7, 15, 3, meta_15),
+        ],
+    )
+
+    result = hu.read_agy_usage(root, consented=True)
+    assert result.complete
+    expected_totals = {
+        "input": 1000,
+        "output": 300,
+        "cache_read": 1000,
+        "cache_create": 0,
+    }
+    assert result.hosts == {"agy": {"2026-10-22": expected_totals}}
+    assert result.tokens_by_day["2026-10-22"]["by_model"] == {
+        "gemini-4-argon": expected_totals,
+    }
+    assert hu.agy_usage_diag()["usage_less_skipped"] == 0
+
+
+def test_step_23_status_5_with_tokens_counts(tmp_path: Path):
+    root = tmp_path / "conversations"
+    meta = _make_step_metadata(
+        1792692712,
+        model_enum=1417,
+        input_tokens=300,
+        output_tokens=90,
+        cache_read=150,
+        bot_id="bot-step23-s5",
+        thinking=40,
+        response=50,
+    )
+    _create_agy_db(root / "s5.db", {1417: "gemini-4-argon"}, [(1, 23, 5, meta)])
+
+    result = hu.read_agy_usage(root, consented=True)
+    assert result.complete
+    assert result.hosts == {
+        "agy": {
+            "2026-10-22": {
+                "input": 300,
+                "output": 90,
+                "cache_read": 150,
+                "cache_create": 0,
+            }
+        }
+    }
+
+
+def test_step_23_deduplication_and_conflict_across_dbs(tmp_path: Path):
+    root = tmp_path / "conversations"
+    meta = _make_step_metadata(
+        1792692712,
+        model_enum=1417,
+        input_tokens=500,
+        output_tokens=100,
+        cache_read=200,
+        bot_id="shared-step23-bot",
+        thinking=60,
+        response=40,
+    )
+    _create_agy_db(root / "c1.db", {1417: "gemini-4-argon"}, [(1, 23, 3, meta)])
+    _create_agy_db(root / "c2.db", {1417: "gemini-4-argon"}, [(1, 23, 3, meta)])
+
+    result = hu.read_agy_usage(root, consented=True)
+    assert result.complete
+    assert result.hosts["agy"]["2026-10-22"]["input"] == 500
+
+    conflicting = _make_step_metadata(
+        1792692712,
+        model_enum=1417,
+        input_tokens=900,
+        output_tokens=100,
+        cache_read=200,
+        bot_id="shared-step23-bot",
+        thinking=60,
+        response=40,
+    )
+    _create_agy_db(root / "c3.db", {1417: "gemini-4-argon"}, [(1, 23, 3, conflicting)])
+
+    bad_result = hu.read_agy_usage(root, consented=True)
+    assert not bad_result.complete
+    assert bad_result.reason == "malformed"
+    assert hu.agy_usage_diag()["last_error_detail"] == {"cause": "bot_id_conflict"}
+
+
+def test_non_usage_step_types_without_tokens_are_skipped(tmp_path: Path):
+    root = tmp_path / "conversations"
+    no_tu = _make_step_metadata(1792692712, bot_id=None)
+    zero_tu = _make_step_metadata(
+        1792692712,
+        model_enum=1318,
+        input_tokens=0,
+        output_tokens=0,
+        cache_read=0,
+        cache_create=0,
+        bot_id="bot-zero-132",
+    )
+    _create_agy_db(
+        root / "non_usage.db",
+        {1318: "gemini-3.8-flash"},
+        [
+            (1, 14, 3, no_tu),
+            (2, 17, 3, no_tu),
+            (3, 101, 3, None),
+            (4, 132, 3, no_tu),
+            (5, 132, 3, zero_tu),
+        ],
+    )
+
+    result = hu.read_agy_usage(root, consented=True)
+    assert result.complete
+    assert result.hosts == {}
+    assert hu.agy_usage_diag()["usage_less_skipped"] == 0
+
+
+def test_step_23_status_3_usage_less_skip(tmp_path: Path):
+    root = tmp_path / "conversations"
+    no_tu = _make_step_metadata(1792692712, bot_id=None)
+    _create_agy_db(
+        root / "skip23.db",
+        {1417: "gemini-4-argon"},
+        [(1, 23, 3, no_tu), (2, 23, 3, None), (3, 23, 5, no_tu)],
+    )
+
+    result = hu.read_agy_usage(root, consented=True)
+    assert result.complete
+    assert hu.agy_usage_diag()["usage_less_skipped"] == 2
+
+
+@pytest.mark.parametrize("unexpected_step_type", [24, 101, 132])
+def test_nonzero_tokens_on_unexpected_step_types_refuse(tmp_path: Path, unexpected_step_type: int):
+    root = tmp_path / "conversations"
+    meta = _make_step_metadata(
+        1792692712,
+        model_enum=1417,
+        input_tokens=100,
+        output_tokens=50,
+        bot_id=f"bot-unexpected-{unexpected_step_type}",
+    )
+    _create_agy_db(
+        root / f"bad_{unexpected_step_type}.db",
+        {1417: "gemini-4-argon"},
+        [(1, unexpected_step_type, 3, meta)],
+    )
+
+    result = hu.read_agy_usage(root, consented=True)
+    assert not result.complete
+    assert result.reason == "unsupported"
+    assert hu.agy_usage_diag()["last_error_detail"] == {
+        "cause": "token_usage_on_unexpected_step_type"
+    }
+
+
+# pregate-literal: AGY_USAGE_CENSUS_HOST_VERSION=1.4.5 intentional old-cache regression input
+@pytest.mark.parametrize("prior_census", ["1.4.5", None])
+def test_older_census_cache_recounts_usage_less_steps(tmp_path: Path, prior_census: str | None):
+    # Value: protects=skipped-step counts after a reader census upgrade;
+    # fails_when=an unchanged database reuses its old skipped-step count;
+    # why_new=other skip tests start without a pre-upgrade cache; seam=none.
+    root = tmp_path / "conversations"
+    no_tu = _make_step_metadata(1792692712, bot_id=None)
+    _create_agy_db(root / "old.db", {1417: "gemini-4-argon"}, [(1, 23, 3, no_tu)])
+    assert hu.read_agy_usage(root, consented=True).complete
+
+    # The old reader cached this unchanged database while ignoring step 23.
+    cached = json.loads(hu.AGY_CACHE_PATH.read_text(encoding="utf-8"))
+    if prior_census is None:
+        cached.pop("census_host_version")
+    else:
+        cached["census_host_version"] = prior_census
+    cached["usage_less_skipped"] = 0
+    cached["files"]["old.db"]["usage_less_skipped"] = 0
+    hu.AGY_CACHE_PATH.write_text(json.dumps(cached), encoding="utf-8")
+    assert hu.agy_usage_diag()["usage_less_skipped"] == 0
+
+    result = hu.read_agy_usage(root, consented=True)
+    assert result.complete
+    assert result.hosts == {}
+    assert hu.agy_usage_diag()["usage_less_skipped"] == 1
+    refreshed = json.loads(hu.AGY_CACHE_PATH.read_text(encoding="utf-8"))
+    assert refreshed["census_host_version"] == hu.AGY_USAGE_CENSUS_HOST_VERSION
