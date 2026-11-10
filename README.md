@@ -6,13 +6,13 @@ Sync AI coding-agent context, skills, and gstack activity across your machines t
 
 ## Install
 
-On a fresh Mac or Arch-based Linux machine, fetch and run the bootstrap script from the `latest` release branch:
+While the repository is private, first install and log in with the GitHub CLI (`brew install gh` after Homebrew on macOS, or `sudo pacman -S github-cli` on Arch-based Linux, then `gh auth login` with HTTPS and Git authentication, which pipx's install also needs). On a Mac or Arch-based Linux machine, fetch and run the bootstrap script from the `latest` release branch:
 
 ```bash
-mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap) && sh -c "$mm_bootstrap"
+mm_bootstrap=$(gh api 'repos/kbitz/mind-meld/contents/bin/bootstrap?ref=latest' -H 'Accept: application/vnd.github.raw') && sh -c "$mm_bootstrap"
 ```
 
-It installs missing prerequisites (`python`, `pipx`, and `syncthing` with Homebrew on macOS, where a `python3` older than 3.11 counts as missing; `python`, `python-pipx`, `syncthing`, and `git` with `pacman -S --needed` on Arch-based Linux), checks that Python is 3.11 or newer and Syncthing is 2.1 or newer, installs `mm` through `pipx` from `@latest`, and verifies that `mm` on `PATH` is pipx's copy. Where Syncthing has no configuration yet or its default configuration and is not already running, the script starts Syncthing at login (`brew services start syncthing` on macOS, `systemctl --user enable --now syncthing.service` on Arch-based Linux); it never changes Syncthing's configuration itself. `mm init` sets Syncthing up on a default configuration, while a machine with its own Syncthing configuration follows [Configuring Syncthing yourself](#configuring-syncthing-yourself); see [Quick Start](#quick-start) for the next steps. The script stops with the fixing command when Homebrew is missing or off `PATH` on macOS, on an unsupported system, when an installed Python or Syncthing is too old, when starting Syncthing fails, or when `mm` is missing from `PATH`, shadowed by another install, or not pipx's copy. A rerun changes nothing.
+It installs missing prerequisites (`python`, `pipx`, and `syncthing` with Homebrew on macOS, where a `python3` older than 3.11 counts as missing; `python`, `python-pipx`, `syncthing`, and `git` with `pacman -S --needed` on Arch-based Linux), checks that Python is 3.11 or newer and Syncthing is 2.1 or newer, installs `mm` through `pipx` from `@latest` or upgrades an installed `mm` older than the script's release first (in place with `pipx upgrade mind-meld` for an `@latest` install, or the forced `@latest` reinstall for one pinned to a tag), and verifies that `mm` on `PATH` is pipx's copy. On a default or missing Syncthing configuration the script reports that Syncthing already starts at login, enables it without starting a second instance when it is already running (`systemctl --user enable syncthing.service` on Arch-based Linux, or registering Homebrew's login item at `~/Library/LaunchAgents/homebrew.mxcl.syncthing.plist` on macOS), or starts it at login (`brew services start syncthing` on macOS, `systemctl --user enable --now syncthing.service` on Arch-based Linux); on a pre-existing configuration, or when the check fails, it changes nothing and prints the command that starts Syncthing at login; it never changes Syncthing's configuration. `mm init` sets Syncthing up on a default configuration, while a machine with its own Syncthing configuration follows [Configuring Syncthing yourself](#configuring-syncthing-yourself); see [Quick Start](#quick-start) for the next steps. The script stops with the fixing command when Homebrew is missing or off `PATH` on macOS, on an unsupported system, when an installed Python or Syncthing is too old, when installing or upgrading `mm` fails, when starting or enabling Syncthing fails, or when `mm` is missing from `PATH`, shadowed by another install, or not pipx's copy. A rerun on a current machine changes nothing.
 
 To install manually when you already have the prerequisites (Python 3.11+, pipx, and Syncthing 2.1 or newer sharing one folder between your machines):
 
@@ -594,7 +594,7 @@ See [Status verdicts](#status-verdicts) to interpret `mm status` after your firs
 
 To add another Mac or an Arch-based Linux machine to a Syncthing fleet (for a Mac moving off iCloud Drive, see [Moving a machine from iCloud Drive to Syncthing](#moving-a-machine-from-icloud-drive-to-syncthing)):
 
-1. Run the bootstrap script from [Install](#install) on the new machine. On a default Syncthing configuration it starts Syncthing at login (`brew services start syncthing` on macOS, or `systemctl --user enable --now syncthing.service` on Arch-based Linux).
+1. Run the bootstrap script from [Install](#install) on the new machine. It upgrades an outdated `mm` and leaves Syncthing starting at login on a default configuration (`brew services start syncthing` on macOS, or `systemctl --user enable --now syncthing.service` on Arch-based Linux), or prints the command that starts it at login.
 2. On Linux, install `libsecret` and `gnome-keyring` and unlock the login keyring in your desktop session before hooks run (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)).
 3. Run Claude Code once so `~/.claude` exists.
 4. Run `mm init` on the new machine:
@@ -618,7 +618,7 @@ First-run-from-divergent-state is explicitly supported: if each machine already 
 
 ### Configuring Syncthing yourself
 
-When Syncthing on a machine already has its own configuration (extra devices, non-default folders, or a shared/non-empty Default Folder), `bin/bootstrap` and `mm init` leave Syncthing untouched. Configure Syncthing by hand on that machine, or when approving a joining machine without `mm devices approve`:
+When Syncthing on a machine already has its own configuration (extra devices, non-default folders, or a shared/non-empty Default Folder), `mm init` leaves Syncthing untouched, and `bin/bootstrap` changes nothing in it but prints the command that starts it at login (`brew services start syncthing` on macOS, or `systemctl --user enable --now syncthing.service` on Arch-based Linux) when it does not already. Configure Syncthing by hand on that machine, or when approving a joining machine without `mm devices approve`:
 
 - **Pairing machines:** follow [Pairing machines in Syncthing](#pairing-machines-in-syncthing) so both machines show **Connected**.
 - **Sharing the folder:** share the storage folder root (default `~/Sync/mind-meld`) with Syncthing folder ID `mind-meld` (label `Mind Meld`). A joining machine where `mm` manages Syncthing looks for the folder offer with ID `mind-meld`.

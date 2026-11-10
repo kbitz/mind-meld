@@ -407,8 +407,9 @@ and nudges the fleet to upgrade to it. /ship prepares the release PR;
 `.github/workflows/release.yml` creates the tag and GitHub Release automatically
 after a push to `main` touching `pyproject.toml` or `CHANGELOG.md`.
 
-- **Release PRs:** bump `pyproject.toml` and the root `VERSION` file to the
-  same version, add the matching `CHANGELOG.md` entry
+- **Release PRs:** bump `pyproject.toml`, the root `VERSION` file and
+  `MM_RELEASE` in `bin/bootstrap` (`tests/test_bootstrap.py::TestBootstrapContract::test_release_literal_matches_version_file`)
+  to the same version, add the matching `CHANGELOG.md` entry
   and `docs/PROGRESS.md` row, then merge through the approved PR workflow.
   The Release workflow creates missing tag/Release artifacts and advances
   `latest` only when that tag points at the merged commit. Verify the workflow,
