@@ -935,7 +935,7 @@ def _wait_for_header(backend: LocalBackend, full_path: Path) -> CryptoInitFetch:
     """Poll for mm-crypto-init after an accepted share; Ctrl-C stops cleanly."""
     console.print(
         "  Waiting up to 2 minutes for Syncthing to deliver the key header "
-        "(mm-crypto-init); Ctrl-C stops without writing anything."
+        "(mm-crypto-init); Ctrl-C stops the wait without writing Mind Meld data."
     )
     rounds = max(1, HEADER_WAIT_SECONDS // HEADER_POLL_SECONDS)
     try:
@@ -946,8 +946,10 @@ def _wait_for_header(backend: LocalBackend, full_path: Path) -> CryptoInitFetch:
                 return fetch
     except KeyboardInterrupt:
         core._error(
-            "init: stopped while waiting for the key header. Nothing was written; "
-            "when Syncthing finishes syncing the folder, run 'mm init' again."
+            "init: stopped while waiting for the key header. "
+            "No device entry, config.toml or key header was written. "
+            "Syncthing keeps syncing the accepted folder; once it delivers the header, "
+            "run 'mm init' again."
         )
     return CryptoInitFetch(status="missing")
 

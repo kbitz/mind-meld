@@ -1494,7 +1494,9 @@ def test_managed_join_ctrl_c_during_header_wait_stops_with_nothing_written(
     assert "Waiting up to 2 minutes for Syncthing to deliver the key header" in text
     assert "init: stopped while waiting for the key header." in text
     assert text.endswith(
-        "Nothing was written; when Syncthing finishes syncing the folder, run 'mm init' again."
+        "No device entry, config.toml or key header was written. "
+        "Syncthing keeps syncing the accepted folder; once it delivers the header, "
+        "run 'mm init' again."
     )
     assert config.load_syncthing_record() == my_id
     assert not config.CONFIG_PATH.exists()
