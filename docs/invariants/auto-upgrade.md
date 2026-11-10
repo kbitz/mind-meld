@@ -71,10 +71,12 @@ none. A network drop mid-clone therefore **uninstalls mm**. `pipx upgrade`
 runs `pip install --upgrade` inside the existing venv and does not remove the
 venv on failure. Interrupting pip during its package swap can still leave
 partial files, so interruption messages include a reinstall remedy. The
-unattended path is the in-place upgrade or nothing, and the
+unattended path within mm is the in-place upgrade or nothing, and its
 forced reinstall is reachable only from `mm update`, where a person is present
 to read `If mm is now missing, reinstall with: …`. Do not "simplify" the two
-paths onto one command.
+paths onto one command. The separately invoked `bin/bootstrap` can also
+force-reinstall an outdated pinned install after checking pipx link ownership;
+its failure message says mm may need reinstalling and prints the reinstall command.
 
 **Install classification (`detect_install`).** Reads
 `<sys.prefix>/pipx_metadata.json` and nothing else:
@@ -407,8 +409,9 @@ and nudges the fleet to upgrade to it. /ship prepares the release PR;
 `.github/workflows/release.yml` creates the tag and GitHub Release automatically
 after a push to `main` touching `pyproject.toml` or `CHANGELOG.md`.
 
-- **Release PRs:** bump `pyproject.toml` and the root `VERSION` file to the
-  same version, add the matching `CHANGELOG.md` entry
+- **Release PRs:** bump `pyproject.toml`, the root `VERSION` file and
+  `MM_RELEASE` in `bin/bootstrap` (`tests/test_bootstrap.py::TestBootstrapContract::test_release_literal_matches_version_file`)
+  to the same version, add the matching `CHANGELOG.md` entry
   and `docs/PROGRESS.md` row, then merge through the approved PR workflow.
   The Release workflow creates missing tag/Release artifacts and advances
   `latest` only when that tag points at the merged commit. Verify the workflow,

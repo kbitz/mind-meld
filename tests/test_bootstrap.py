@@ -17,9 +17,11 @@ from mind_meld import upgrade
 ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = ROOT / "bin" / "bootstrap"
 README = ROOT / "README.md"
+RELEASE = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 README_BOOTSTRAP_CMD = (
-    "mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap)"
+    "mm_bootstrap=$(gh api 'repos/kbitz/mind-meld/contents/bin/bootstrap?ref=latest'"
+    " -H 'Accept: application/vnd.github.raw')"
     ' && sh -c "$mm_bootstrap"'
 )
 HOMEBREW_INSTALL_CMD = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
@@ -97,23 +99,47 @@ exit 2
     def install_mm(self, directory: Path) -> None:
         _make_fake_script(directory / "mm", "mm", "exit 0\n")
 
-    def install_curl(self, *, serve: Path | None) -> None:
-        # Serves `serve` like `curl -fsSL` would, or fails with curl's HTTP error exit.
+    def install_gh(self, *, serve: Path | None) -> None:
+        # Serves `serve` for the exact Contents API call, or fails with exit 1.
         if serve is None:
-            logic = "exit 22\n"
+            logic = "exit 1\n"
         else:
             logic = f"""\
-while IFS= read -r _line || [ -n "$_line" ]; do
-  printf '%s\\n' "$_line"
-done < "{serve}"
+if [ "${{#}}" -eq 4 ] \\
+   && [ "$1" = "api" ] \\
+   && [ "$2" = "repos/kbitz/mind-meld/contents/bin/bootstrap?ref=latest" ] \\
+   && [ "$3" = "-H" ] \\
+   && [ "$4" = "Accept: application/vnd.github.raw" ]; then
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    printf '%s\\n' "$_line"
+  done < "{serve}"
+  exit 0
+fi
+exit 1
 """
-        _make_fake_script(self.sysbin / "curl", "curl", logic)
+        _make_fake_script(self.sysbin / "gh", "gh", logic)
+
+    def install_logging_curl(self) -> None:
+        _make_fake_script(self.sysbin / "curl", "curl", "exit 0\n")
 
     def install_systemctl(self) -> None:
         _make_fake_script(
             self.sysbin / "systemctl",
             "systemctl",
             """\
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "is-enabled" ] \\
+   && [ "${3:-}" = "syncthing.service" ] && [ "${#}" -eq 3 ]; then
+  _state="${MM_TEST_SYSTEMCTL_ENABLED:-disabled}"
+  printf '%s\\n' "$_state"
+  if [ "$_state" = "enabled" ]; then
+    exit 0
+  fi
+  exit 1
+fi
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "enable" ] \\
+   && [ "${3:-}" = "syncthing.service" ] && [ "${#}" -eq 3 ]; then
+  exit "${MM_TEST_ENABLE_FAIL:-0}"
+fi
 if [ "${1:-}" = "--user" ] && [ "${2:-}" = "enable" ] \\
    && [ "${3:-}" = "--now" ] && [ "${4:-}" = "syncthing.service" ]; then
   exit "${MM_TEST_START_FAIL:-0}"
@@ -126,12 +152,55 @@ exit 2
         code = 0 if found else 1
         _make_fake_script(self.sysbin / "pgrep", "pgrep", f"exit {code}\n")
 
+    def set_listed_mm_version(self, version: str) -> None:
+        self.pipx_state.write_text(f"mind-meld {version}\n", encoding="utf-8")
+
     def install_pipx(self, directory: Path) -> None:
-        _make_fake_script(
+        _write_executable(
             directory / "pipx",
-            "pipx",
-            """\
-case "${1:-}" in
+            f"""\
+#!/bin/sh
+set -eu
+printf 'pipx' >> "$MM_TEST_CALL_LOG"
+for _arg in "$@"; do
+  printf '\\t%s' "$_arg" >> "$MM_TEST_CALL_LOG"
+done
+case "${{1:-}}" in
+  install|upgrade)
+    printf '\\tGIT_TERMINAL_PROMPT=%s' "${{GIT_TERMINAL_PROMPT:-}}" >> "$MM_TEST_CALL_LOG"
+    ;;
+esac
+printf '\\n' >> "$MM_TEST_CALL_LOG"
+
+write_venv_python() {{
+  _py_label=$1
+  cat > "$_venv_bin/python" << EOF_VENV_PY
+#!/bin/sh
+set -eu
+printf '%s' "$_py_label" >> "\\$MM_TEST_CALL_LOG"
+for _arg in "\\$@"; do
+  printf '\\t%s' "\\$_arg" >> "\\$MM_TEST_CALL_LOG"
+done
+printf '\\n' >> "\\$MM_TEST_CALL_LOG"
+case "\\${{*:-}}" in
+  *update_argv*)
+    if [ "\\${{MM_TEST_UPDATE_ARGV_EXIT:-0}}" != "0" ]; then
+      exit "\\${{MM_TEST_UPDATE_ARGV_EXIT}}"
+    fi
+    printf '%s\\n' "\\${{MM_TEST_UPDATE_ARGV-upgrade mind-meld}}"
+    exit 0
+    ;;
+esac
+if [ "\\${{MM_TEST_SYNCTHING_CHECK_EXIT:-0}}" != "0" ]; then
+  exit "\\${{MM_TEST_SYNCTHING_CHECK_EXIT}}"
+fi
+printf '%s\\n' "\\${{MM_TEST_SYNCTHING_CHECK:-pre-existing ok}}"
+exit 0
+EOF_VENV_PY
+  chmod +x "$_venv_bin/python"
+}}
+
+case "${{1:-}}" in
   list)
     if [ -s "$MM_TEST_PIPX_STATE" ]; then
       while IFS= read -r _line || [ -n "$_line" ]; do
@@ -139,44 +208,45 @@ case "${1:-}" in
       done < "$MM_TEST_PIPX_STATE"
     fi
     # Real pipx exits 1 when any venv has a problem, but still lists the rest.
-    exit "${MM_TEST_PIPX_LIST_EXIT:-0}"
+    exit "${{MM_TEST_PIPX_LIST_EXIT:-0}}"
     ;;
   install)
-    if [ "${MM_TEST_PIPX_FAIL:-0}" = "1" ]; then
+    if [ "${{MM_TEST_PIPX_FAIL:-0}}" = "1" ]; then
       exit 1
     fi
-    printf 'mind-meld 1.12.0\\n' > "$MM_TEST_PIPX_STATE"
     _venv_bin="$MM_TEST_PIPX_VENVS/mind-meld/bin"
     mkdir -p "$_venv_bin"
     printf '#!/bin/sh\\nprintf "mm\\\\n" >> "$MM_TEST_CALL_LOG"\\n' > "$_venv_bin/mm"
     chmod +x "$_venv_bin/mm"
-    cat > "$_venv_bin/python" << 'EOF_VENV_PY'
-#!/bin/sh
-set -eu
-printf '%s' "venv-python" >> "$MM_TEST_CALL_LOG"
-for _arg in "$@"; do
-  printf '\t%s' "$_arg" >> "$MM_TEST_CALL_LOG"
-done
-printf '\n' >> "$MM_TEST_CALL_LOG"
-if [ "${MM_TEST_SYNCTHING_CHECK_EXIT:-0}" != "0" ]; then
-  exit "${MM_TEST_SYNCTHING_CHECK_EXIT}"
-fi
-printf '%s\n' "${MM_TEST_SYNCTHING_CHECK:-pre-existing ok}"
-exit 0
-EOF_VENV_PY
-    chmod +x "$_venv_bin/python"
+    if [ "${{2:-}}" = "--force" ]; then
+      printf 'mind-meld %s\\n' "${{MM_TEST_PIPX_UPGRADE_TO:-{RELEASE}}}" > "$MM_TEST_PIPX_STATE"
+      write_venv_python "venv-python-upgraded"
+    else
+      printf 'mind-meld {RELEASE}\\n' > "$MM_TEST_PIPX_STATE"
+      write_venv_python "venv-python"
+    fi
     # Like pipx 1.18: an existing file at the app path is left in place and
     # install still exits 0, unless --force replaces it.
-    if [ "${2:-}" = "--force" ] || ! [ -e "$MM_TEST_PIPX_BIN/mm" ]; then
+    if [ "${{2:-}}" = "--force" ] || ! [ -e "$MM_TEST_PIPX_BIN/mm" ]; then
       ln -sf "$_venv_bin/mm" "$MM_TEST_PIPX_BIN/mm"
     fi
     exit 0
     ;;
+  upgrade)
+    if [ "${{MM_TEST_PIPX_UPGRADE_FAIL:-0}}" != "0" ]; then
+      exit "${{MM_TEST_PIPX_UPGRADE_FAIL}}"
+    fi
+    printf 'mind-meld %s\\n' "${{MM_TEST_PIPX_UPGRADE_TO:-{RELEASE}}}" > "$MM_TEST_PIPX_STATE"
+    _venv_bin="$MM_TEST_PIPX_VENVS/mind-meld/bin"
+    mkdir -p "$_venv_bin"
+    write_venv_python "venv-python-upgraded"
+    exit 0
+    ;;
   environment)
-    if [ "${MM_TEST_PIPX_ENV_FAIL:-0}" = "1" ]; then
+    if [ "${{MM_TEST_PIPX_ENV_FAIL:-0}}" = "1" ]; then
       exit 1
     fi
-    case "${3:-}" in
+    case "${{3:-}}" in
       PIPX_BIN_DIR) printf '%s\\n' "$MM_TEST_PIPX_BIN" ;;
       PIPX_LOCAL_VENVS) printf '%s\\n' "$MM_TEST_PIPX_VENVS" ;;
       *) exit 1 ;;
@@ -195,6 +265,11 @@ esac
         self.install_python(stage, "3.13.2")
         self.install_pipx(stage)
         self.install_syncthing(stage, "2.1.7")
+        keg = self.tmp_path / "syncthing-keg"
+        keg.mkdir(parents=True, exist_ok=True)
+        (keg / "homebrew.mxcl.syncthing.plist").write_text(
+            "<plist>syncthing-keg</plist>\n", encoding="utf-8"
+        )
         _make_fake_script(
             self.brewbin / "brew",
             "brew",
@@ -205,6 +280,14 @@ copy_exec() {{
   done < "$1" > "$2"
   chmod +x "$2"
 }}
+if [ "${{1:-}}" = "--prefix" ] && [ "${{2:-}}" = "syncthing" ]; then
+  if [ "${{MM_TEST_NO_KEG_PLIST:-0}}" = "1" ]; then
+    printf '%s\\n' "{keg}-missing"
+    exit 0
+  fi
+  printf '%s\\n' "{keg}"
+  exit 0
+fi
 if [ "${{1:-}}" = "services" ] && [ "${{2:-}}" = "start" ] && [ "${{3:-}}" = "syncthing" ]; then
   exit "${{MM_TEST_START_FAIL:-0}}"
 fi
@@ -332,9 +415,9 @@ exit 2
             include_pipxbin=include_pipxbin,
             extra_env=extra_env,
         )
-        # Criterion 9: run by path, not through `sh`.
+        # Criterion 6: run by path with stdin closed (kernel still runs the script by its shebang).
         proc = subprocess.run(
-            [str(BOOTSTRAP)],
+            ["/bin/sh", "-c", 'exec "$0" <&-', str(BOOTSTRAP)],
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -375,7 +458,7 @@ def harness(tmp_path: Path) -> BootstrapHarness:
     for directory in (home, brewbin, shadow, pipxbin, sysbin, tools, venvs):
         directory.mkdir(parents=True, exist_ok=True)
 
-    for tool_name in ("sed", "id", "chmod", "ln", "mkdir", "cat"):
+    for tool_name in ("sed", "id", "chmod", "cp", "ln", "mkdir", "cat", "mktemp", "mv", "rm"):
         resolved = shutil.which(tool_name)
         assert resolved, f"required tool {tool_name} not found"
         (tools / tool_name).symlink_to(resolved)
@@ -418,6 +501,15 @@ class TestBootstrapContract:
         assert match is not None, "MM_INSTALL_SPEC literal missing in bin/bootstrap"
         assert match.group(1) == upgrade.INSTALL_SPEC
 
+    def test_release_literal_matches_version_file(self) -> None:
+        script_text = BOOTSTRAP.read_text(encoding="utf-8")
+        match = re.search(r'^MM_RELEASE="([0-9]+\.[0-9]+\.[0-9]+)"$', script_text, re.M)
+        assert match is not None, "MM_RELEASE literal missing in bin/bootstrap"
+        assert match.group(1) == RELEASE, (
+            f"bin/bootstrap MM_RELEASE={match.group(1)!r} != VERSION={RELEASE!r}; "
+            "set MM_RELEASE in bin/bootstrap together with VERSION in the release bump"
+        )
+
     def test_readme_install_section_points_to_bootstrap_on_latest(self) -> None:
         text = README.read_text(encoding="utf-8")
         match = re.search(r"^## Install\n(?P<body>.*?)(?=^## |\Z)", text, re.M | re.S)
@@ -425,7 +517,7 @@ class TestBootstrapContract:
         body = match.group("body")
         assert README_BOOTSTRAP_CMD in body
         url_match = re.search(
-            r"https://raw\.githubusercontent\.com/kbitz/mind-meld/(?P<ref>[^/]+)/(?P<path>[^\s\")]+)",
+            r"repos/kbitz/mind-meld/contents/(?P<path>[^?']+)\?ref=(?P<ref>[^']+)",
             body,
         )
         assert url_match is not None
@@ -462,7 +554,7 @@ class TestBootstrapMacOS:
         brew_calls = [row for row in calls if row[0] == "brew"]
         assert brew_calls == [["brew", "install", "python", "pipx", "syncthing"]]
         pipx_install_calls = [row[1:] for row in calls if row[0] == "pipx" and row[1] == "install"]
-        assert pipx_install_calls == [["install", upgrade.INSTALL_SPEC]]
+        assert pipx_install_calls == [["install", upgrade.INSTALL_SPEC, "GIT_TERMINAL_PROMPT=0"]]
 
         expected_ready = (
             "bootstrap: installed python pipx syncthing mm; "
@@ -485,7 +577,8 @@ class TestBootstrapMacOS:
 
         calls = harness.calls()
         assert not [row for row in calls if row[0] in {"brew", "pacman"}]
-        assert not [row for row in calls if row[0] == "pipx" and row[1] == "install"]
+        assert not [row for row in calls if row[0] == "pipx" and row[1] in {"install", "upgrade"}]
+        assert not [row for row in calls if any("update_argv" in arg for arg in row)]
         expected_noop = (
             "bootstrap: nothing to change: Python 3.13, pipx, "
             "Syncthing 2.1.7 and mm are already installed."
@@ -547,7 +640,7 @@ class TestBootstrapArch:
             ["pacman", "-S", "--needed", "python", "python-pipx", "syncthing", "git"]
         ]
         pipx_install_calls = [row[1:] for row in calls if row[0] == "pipx" and row[1] == "install"]
-        assert pipx_install_calls == [["install", upgrade.INSTALL_SPEC]]
+        assert pipx_install_calls == [["install", upgrade.INSTALL_SPEC, "GIT_TERMINAL_PROMPT=0"]]
         assert "mm init" in _last_line(proc.stdout)
 
     def test_arch_installs_only_missing_packages(self, harness: BootstrapHarness) -> None:
@@ -696,7 +789,10 @@ class TestBootstrapUnsupportedAndErrors:
         harness.clear_calls()
         second = harness.run(extra_env={"MM_TEST_PIPX_LIST_EXIT": "1"})
         assert second.returncode == 0, second.stdout
-        assert not [row for row in harness.calls() if row[0] == "pipx" and row[1] == "install"]
+        assert not [
+            row for row in harness.calls() if row[0] == "pipx" and row[1] in {"install", "upgrade"}
+        ]
+        assert not [row for row in harness.calls() if any("update_argv" in arg for arg in row)]
         assert "bootstrap: nothing to change:" in second.stdout
 
     def test_missing_pipx_link_stops_with_force_reinstall(self, harness: BootstrapHarness) -> None:
@@ -751,7 +847,7 @@ class TestBootstrapDownload:
         assert real_sh, "required tool sh not found"
         (harness.tools / "sh").symlink_to(real_sh)
         return subprocess.run(
-            ["/bin/sh", "-c", README_BOOTSTRAP_CMD],
+            ["/bin/sh", "-c", 'exec "$0" -c "$1" <&-', "/bin/sh", README_BOOTSTRAP_CMD],
             env=harness.env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -760,23 +856,39 @@ class TestBootstrapDownload:
         )
 
     def test_readme_command_fails_when_download_fails(self, harness: BootstrapHarness) -> None:
-        # A failed download must stop with curl's failure status, not run an
+        # A failed download must stop with gh's failure status, not run an
         # empty script and report success.
         harness.install_uname("Darwin")
-        harness.install_curl(serve=None)
+        harness.install_gh(serve=None)
 
         proc = self._run_readme_command(harness)
         assert proc.returncode != 0, proc.stdout
-        assert [row[0] for row in harness.calls()] == ["curl"]
+        assert [row[0] for row in harness.calls()] == ["gh"]
+        assert harness.calls() == [
+            [
+                "gh",
+                "api",
+                "repos/kbitz/mind-meld/contents/bin/bootstrap?ref=latest",
+                "-H",
+                "Accept: application/vnd.github.raw",
+            ]
+        ]
 
     def test_readme_command_runs_downloaded_script(self, harness: BootstrapHarness) -> None:
         harness.install_uname("Darwin")
-        harness.install_curl(serve=BOOTSTRAP)
+        harness.install_gh(serve=BOOTSTRAP)
 
         proc = self._run_readme_command(harness)
         assert proc.returncode == 1
         assert "Homebrew is not installed" in _last_line(proc.stdout)
-        assert [row[0] for row in harness.calls()] == ["curl", "uname"]
+        assert [row[0] for row in harness.calls()] == ["gh", "uname"]
+        assert harness.calls()[0] == [
+            "gh",
+            "api",
+            "repos/kbitz/mind-meld/contents/bin/bootstrap?ref=latest",
+            "-H",
+            "Accept: application/vnd.github.raw",
+        ]
 
     @pytest.mark.parametrize("cut", ["quarter", "half", "three-quarters", "all-but-last-line"])
     def test_truncated_download_runs_nothing(self, harness: BootstrapHarness, cut: str) -> None:
@@ -802,6 +914,28 @@ class TestBootstrapDownload:
         assert harness.calls() == [], proc.stdout
         assert "bootstrap:" not in proc.stdout
 
+    def test_harness_closes_stdin(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Darwin")
+        # `uname -s` runs inside `$(...)`, where GNU bash allocates fd 0 for the
+        # command-substitution pipe's read end when fd 0 was closed; a foreground
+        # command outside `$(...)` (`brew install`) inherits the closed fd 0.
+        # `9<&0` forces dup2(0, 9), since GNU bash treats `0<&0` as a no-op.
+        _make_fake_script(
+            harness.brewbin / "brew",
+            "brew",
+            """\
+if ( : <&0 9<&0 ) 2>/dev/null; then
+  printf 'stdin\\topen\\n' >> "$MM_TEST_CALL_LOG"
+else
+  printf 'stdin\\tclosed\\n' >> "$MM_TEST_CALL_LOG"
+fi
+exit 1
+""",
+        )
+        proc = harness.run()
+        assert proc.returncode == 1
+        assert ["stdin", "closed"] in harness.calls()
+
 
 class TestBootstrapSyncthingStart118A:
     def _ready_macos(self, harness: BootstrapHarness) -> None:
@@ -811,6 +945,7 @@ class TestBootstrapSyncthingStart118A:
         harness.install_pipx(harness.brewbin)
         harness.install_syncthing(harness.brewbin, "2.1.7")
         harness.install_pgrep(found=False)
+        harness.install_logging_curl()
 
     def _ready_arch(self, harness: BootstrapHarness) -> None:
         harness.install_uname("Linux")
@@ -821,6 +956,7 @@ class TestBootstrapSyncthingStart118A:
         harness.install_syncthing(harness.sysbin, "2.1.7")
         harness.install_git(harness.sysbin)
         harness.install_pgrep(found=False)
+        harness.install_logging_curl()
 
     @pytest.mark.parametrize("check_val", ["default not-found", "no-config not-found"])
     def test_macos_default_or_no_config_not_running_starts_syncthing(
@@ -852,7 +988,10 @@ class TestBootstrapSyncthingStart118A:
         proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": check_val})
         assert proc.returncode == 0, proc.stdout
         systemctl_calls = [row for row in harness.calls() if row[0] == "systemctl"]
-        assert systemctl_calls == [["systemctl", "--user", "enable", "--now", "syncthing.service"]]
+        assert systemctl_calls == [
+            ["systemctl", "--user", "is-enabled", "syncthing.service"],
+            ["systemctl", "--user", "enable", "--now", "syncthing.service"],
+        ]
         assert (
             "started Syncthing and set it to start at login "
             "(systemctl --user enable --now syncthing.service)." in proc.stdout
@@ -860,22 +999,89 @@ class TestBootstrapSyncthingStart118A:
         last = _last_line(proc.stdout)
         assert "mm init --new-fleet" in last and "mm init" in last
 
+    @pytest.mark.parametrize(
+        ("platform_name", "expected_cmd"),
+        [
+            ("Darwin", "brew services start syncthing"),
+            ("Linux", "systemctl --user enable --now syncthing.service"),
+        ],
+    )
     @pytest.mark.parametrize("check_val", ["pre-existing ok", "pre-existing unreachable"])
     def test_pre_existing_does_not_start_and_names_guide(
-        self, harness: BootstrapHarness, check_val: str
+        self,
+        harness: BootstrapHarness,
+        platform_name: str,
+        expected_cmd: str,
+        check_val: str,
     ) -> None:
-        self._ready_macos(harness)
+        if platform_name == "Darwin":
+            self._ready_macos(harness)
+        else:
+            self._ready_arch(harness)
         proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": check_val})
         assert proc.returncode == 0, proc.stdout
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
         assert not [
-            row for row in harness.calls() if row == ["brew", "services", "start", "syncthing"]
+            row
+            for row in harness.calls()
+            if row[0] == "systemctl" and row[2] in {"enable", "start"}
         ]
+        assert not (
+            harness.home / "Library" / "LaunchAgents" / "homebrew.mxcl.syncthing.plist"
+        ).exists()
+        assert not [row for row in harness.calls() if row[0] == "curl"]
         assert (
-            "Syncthing already has its own configuration, so this script leaves it alone; "
-            'see README "Configuring Syncthing yourself".' in proc.stdout
+            "bootstrap: Syncthing already has its own configuration, so this script changes "
+            'nothing in it (see README "Configuring Syncthing yourself"). '
+            f"It does not start at login; to make it, run: {expected_cmd}" in proc.stdout
         )
         last = _last_line(proc.stdout)
         assert "mm init --new-fleet" in last and "mm init" in last
+
+    @pytest.mark.parametrize("platform_name", ["Darwin", "Linux"])
+    @pytest.mark.parametrize("check_val", ["pre-existing ok", "unknown error"])
+    def test_pre_existing_or_check_failure_with_login_already_enabled_prints_no_command(
+        self, harness: BootstrapHarness, platform_name: str, check_val: str
+    ) -> None:
+        extra: dict[str, str] = {"MM_TEST_SYNCTHING_CHECK": check_val}
+        if platform_name == "Darwin":
+            self._ready_macos(harness)
+            plist = harness.home / "Library" / "LaunchAgents" / "homebrew.mxcl.syncthing.plist"
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            plist.write_text("<plist>existing</plist>\n", encoding="utf-8")
+        else:
+            self._ready_arch(harness)
+            extra["MM_TEST_SYSTEMCTL_ENABLED"] = "enabled"
+        proc = harness.run(extra_env=extra)
+        assert proc.returncode == 0, proc.stdout
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
+        assert not [
+            row
+            for row in harness.calls()
+            if row[0] == "systemctl" and row[2] in {"enable", "start"}
+        ]
+        assert not [row for row in harness.calls() if row[0] == "curl"]
+        assert "It already starts at login." in proc.stdout
+        assert "brew services start syncthing" not in proc.stdout
+        assert "systemctl --user enable --now syncthing.service" not in proc.stdout
+
+    def test_arch_pre_existing_with_unknown_login_status_prints_enable_command(
+        self, harness: BootstrapHarness
+    ) -> None:
+        self._ready_arch(harness)
+        proc = harness.run(
+            extra_env={
+                "MM_TEST_SYNCTHING_CHECK": "pre-existing ok",
+                "MM_TEST_SYSTEMCTL_ENABLED": "static",
+            }
+        )
+        assert proc.returncode == 0, proc.stdout
+        assert (
+            "bootstrap: Syncthing already has its own configuration, so this script changes "
+            'nothing in it (see README "Configuring Syncthing yourself"). '
+            "To make it start at login, run: systemctl --user enable --now syncthing.service"
+            in proc.stdout
+        )
 
     @pytest.mark.parametrize(
         ("check_val", "pgrep_found"),
@@ -893,12 +1099,202 @@ class TestBootstrapSyncthingStart118A:
         harness.install_pgrep(found=pgrep_found)
         proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": check_val})
         assert proc.returncode == 0, proc.stdout
-        assert not [
-            row for row in harness.calls() if row == ["brew", "services", "start", "syncthing"]
-        ]
-        assert "Syncthing is already running; not starting another." in proc.stdout
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
+        plist = harness.home / "Library" / "LaunchAgents" / "homebrew.mxcl.syncthing.plist"
+        assert plist.read_text(encoding="utf-8") == "<plist>syncthing-keg</plist>\n"
+        assert stat.S_IMODE(plist.stat().st_mode) == 0o644
+        assert (
+            "Syncthing is already running; set it to start at login from your next login "
+            "(~/Library/LaunchAgents/homebrew.mxcl.syncthing.plist)." in proc.stdout
+        )
         last = _last_line(proc.stdout)
         assert "mm init --new-fleet" in last and "mm init" in last
+
+    def test_arch_running_not_enabled_enables_without_starting_second_instance(
+        self, harness: BootstrapHarness
+    ) -> None:
+        self._ready_arch(harness)
+        proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": "default ok"})
+        assert proc.returncode == 0, proc.stdout
+        systemctl_calls = [row for row in harness.calls() if row[0] == "systemctl"]
+        assert systemctl_calls == [
+            ["systemctl", "--user", "is-enabled", "syncthing.service"],
+            ["systemctl", "--user", "enable", "syncthing.service"],
+        ]
+        assert (
+            "Syncthing is already running; set it to start at login "
+            "(systemctl --user enable syncthing.service)." in proc.stdout
+        )
+        last = _last_line(proc.stdout)
+        assert "mm init --new-fleet" in last and "mm init" in last
+
+    @pytest.mark.parametrize("platform_name", ["Darwin", "Linux"])
+    def test_default_running_and_already_enabled_runs_no_start_or_enable(
+        self, harness: BootstrapHarness, platform_name: str
+    ) -> None:
+        extra: dict[str, str] = {"MM_TEST_SYNCTHING_CHECK": "default ok"}
+        plist = harness.home / "Library" / "LaunchAgents" / "homebrew.mxcl.syncthing.plist"
+        if platform_name == "Darwin":
+            self._ready_macos(harness)
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            plist.write_text("<plist>custom-existing</plist>\n", encoding="utf-8")
+        else:
+            self._ready_arch(harness)
+            extra["MM_TEST_SYSTEMCTL_ENABLED"] = "enabled"
+        proc = harness.run(extra_env=extra)
+        assert proc.returncode == 0, proc.stdout
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
+        assert not [
+            row
+            for row in harness.calls()
+            if row[0] == "systemctl" and row[2] in {"enable", "start"}
+        ]
+        if platform_name == "Darwin":
+            assert plist.read_text(encoding="utf-8") == "<plist>custom-existing</plist>\n"
+        assert "bootstrap: Syncthing is running and already starts at login." in proc.stdout
+
+    @pytest.mark.parametrize("platform_name", ["Darwin", "Linux"])
+    def test_default_already_enabled_but_not_running_prints_start_now_command(
+        self, harness: BootstrapHarness, platform_name: str
+    ) -> None:
+        extra = {"MM_TEST_SYNCTHING_CHECK": "default not-found"}
+        if platform_name == "Darwin":
+            self._ready_macos(harness)
+            plist = harness.home / "Library" / "LaunchAgents" / "homebrew.mxcl.syncthing.plist"
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            plist.write_text("<plist>existing</plist>\n", encoding="utf-8")
+            expected_cmd = "brew services start syncthing"
+        else:
+            self._ready_arch(harness)
+            extra["MM_TEST_SYSTEMCTL_ENABLED"] = "enabled"
+            expected_cmd = "systemctl --user start syncthing.service"
+        proc = harness.run(extra_env=extra)
+        assert proc.returncode == 0, proc.stdout
+        systemctl_calls = [row for row in harness.calls() if row[0] == "systemctl"]
+        assert systemctl_calls == (
+            [["systemctl", "--user", "is-enabled", "syncthing.service"]]
+            if platform_name == "Linux"
+            else []
+        )
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
+        assert (
+            "bootstrap: Syncthing already starts at login but is not running; "
+            f"to start it now, run: {expected_cmd}" in proc.stdout
+        )
+
+    @pytest.mark.parametrize("already_enabled", [False, True])
+    def test_macos_current_homebrew_plist_name(
+        self, harness: BootstrapHarness, already_enabled: bool
+    ) -> None:
+        self._ready_macos(harness)
+        keg = harness.tmp_path / "syncthing-keg"
+        (keg / "homebrew.mxcl.syncthing.plist").rename(keg / "sh.brew.syncthing.plist")
+        plist = harness.home / "Library" / "LaunchAgents" / "sh.brew.syncthing.plist"
+        if already_enabled:
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            plist.write_text("<plist>already-enabled</plist>\n", encoding="utf-8")
+        proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": "default ok"})
+        assert proc.returncode == 0, proc.stdout
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
+        assert plist.read_text(encoding="utf-8") == (
+            "<plist>already-enabled</plist>\n"
+            if already_enabled
+            else "<plist>syncthing-keg</plist>\n"
+        )
+        assert not (plist.parent / "homebrew.mxcl.syncthing.plist").exists()
+        assert (
+            "already starts at login."
+            if already_enabled
+            else "~/Library/LaunchAgents/sh.brew.syncthing.plist"
+        ) in proc.stdout
+
+    @pytest.mark.parametrize("tool_name", ["mkdir", "mktemp", "cp", "chmod", "mv"])
+    def test_macos_registration_write_failure_has_fix_command(
+        self, harness: BootstrapHarness, tool_name: str
+    ) -> None:
+        self._ready_macos(harness)
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+        body = 'printf "partial plist" > "$2"\nexit 1\n' if tool_name == "cp" else "exit 1\n"
+        _make_fake_script(harness.sysbin / tool_name, tool_name, body)
+        proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": "default ok"})
+        assert proc.returncode == 1, proc.stdout
+        assert _last_line(proc.stdout).endswith(
+            "could not register Syncthing to start at login; quit the running Syncthing first. "
+            "Run: brew services start syncthing"
+        )
+        launch_agents = harness.home / "Library" / "LaunchAgents"
+        plist = launch_agents / "homebrew.mxcl.syncthing.plist"
+        assert not plist.exists(), "a failed registration must not look enabled on retry"
+        assert not list(launch_agents.glob(".syncthing.*"))
+
+        (harness.sysbin / tool_name).unlink()
+        harness.clear_calls()
+        retry = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": "default ok"})
+        assert retry.returncode == 0, retry.stdout
+        assert "set it to start at login from your next login" in retry.stdout
+        assert plist.read_text(encoding="utf-8") == "<plist>syncthing-keg</plist>\n"
+        assert stat.S_IMODE(plist.stat().st_mode) == 0o644
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
+
+    def test_macos_broken_login_link_is_not_followed(self, harness: BootstrapHarness) -> None:
+        self._ready_macos(harness)
+        plist = harness.home / "Library" / "LaunchAgents" / "homebrew.mxcl.syncthing.plist"
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        target = harness.tmp_path / "unrelated-plist"
+        plist.symlink_to(target)
+        proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": "default ok"})
+        assert proc.returncode == 1, proc.stdout
+        assert "login item is a broken link" in _last_line(proc.stdout)
+        assert not target.exists()
+        assert plist.is_symlink()
+
+    def test_macos_broken_modern_link_does_not_hide_enabled_legacy(
+        self, harness: BootstrapHarness
+    ) -> None:
+        self._ready_macos(harness)
+        launch_agents = harness.home / "Library" / "LaunchAgents"
+        launch_agents.mkdir(parents=True, exist_ok=True)
+        (launch_agents / "sh.brew.syncthing.plist").symlink_to(harness.tmp_path / "missing-plist")
+        legacy = launch_agents / "homebrew.mxcl.syncthing.plist"
+        legacy.write_text("<plist>already-enabled</plist>\n", encoding="utf-8")
+        proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": "default ok"})
+        assert proc.returncode == 0, proc.stdout
+        assert "Syncthing is running and already starts at login." in proc.stdout
+        assert legacy.read_text(encoding="utf-8") == "<plist>already-enabled</plist>\n"
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
+
+    @pytest.mark.parametrize(
+        ("platform_name", "extra", "expected_tail"),
+        [
+            (
+                "Darwin",
+                {"MM_TEST_SYNCTHING_CHECK": "default ok", "MM_TEST_NO_KEG_PLIST": "1"},
+                "Homebrew's Syncthing login item was not found; quit the running Syncthing first. "
+                "Run: brew services start syncthing",
+            ),
+            (
+                "Linux",
+                {"MM_TEST_SYNCTHING_CHECK": "default ok", "MM_TEST_ENABLE_FAIL": "1"},
+                "systemctl --user enable syncthing.service failed. "
+                "Run: systemctl --user enable syncthing.service",
+            ),
+        ],
+    )
+    def test_running_enable_or_registration_failure_stops_with_fix(
+        self,
+        harness: BootstrapHarness,
+        platform_name: str,
+        extra: dict[str, str],
+        expected_tail: str,
+    ) -> None:
+        if platform_name == "Darwin":
+            self._ready_macos(harness)
+        else:
+            self._ready_arch(harness)
+        proc = harness.run(extra_env=extra)
+        assert proc.returncode == 1, proc.stdout
+        assert _last_line(proc.stdout).endswith(expected_tail)
 
     @pytest.mark.parametrize(
         ("platform_name", "expected_cmd"),
@@ -925,6 +1321,13 @@ class TestBootstrapSyncthingStart118A:
         assert last.endswith(f"{expected_cmd} failed. Run: {expected_cmd}")
 
     @pytest.mark.parametrize(
+        ("platform_name", "expected_cmd"),
+        [
+            ("Darwin", "brew services start syncthing"),
+            ("Linux", "systemctl --user enable --now syncthing.service"),
+        ],
+    )
+    @pytest.mark.parametrize(
         ("check_val", "check_exit"),
         [
             ("unknown error", "0"),
@@ -932,9 +1335,17 @@ class TestBootstrapSyncthingStart118A:
         ],
     )
     def test_check_failure_does_not_start_and_still_exits_zero(
-        self, harness: BootstrapHarness, check_val: str, check_exit: str
+        self,
+        harness: BootstrapHarness,
+        platform_name: str,
+        expected_cmd: str,
+        check_val: str,
+        check_exit: str,
     ) -> None:
-        self._ready_macos(harness)
+        if platform_name == "Darwin":
+            self._ready_macos(harness)
+        else:
+            self._ready_arch(harness)
         proc = harness.run(
             extra_env={
                 "MM_TEST_SYNCTHING_CHECK": check_val,
@@ -942,12 +1353,228 @@ class TestBootstrapSyncthingStart118A:
             }
         )
         assert proc.returncode == 0, proc.stdout
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
         assert not [
-            row for row in harness.calls() if row == ["brew", "services", "start", "syncthing"]
+            row
+            for row in harness.calls()
+            if row[0] == "systemctl" and row[2] in {"enable", "start"}
         ]
+        assert not (
+            harness.home / "Library" / "LaunchAgents" / "homebrew.mxcl.syncthing.plist"
+        ).exists()
+        assert not [row for row in harness.calls() if row[0] == "curl"]
         assert (
-            "could not check Syncthing's configuration, so it was not started; "
-            "mm diag shows why." in proc.stdout
+            "bootstrap: could not check Syncthing's configuration, so this script changed "
+            "nothing in it; mm diag shows why. "
+            f"It does not start at login; to make it, run: {expected_cmd}" in proc.stdout
         )
         last = _last_line(proc.stdout)
         assert "mm init --new-fleet" in last and "mm init" in last
+
+
+class TestBootstrapUpgrade123A:
+    def _ready_macos(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.1.7")
+        harness.install_pgrep(found=False)
+
+    @pytest.mark.parametrize(
+        ("probe_out", "expected_pipx_row", "forbidden_subcmd"),
+        [
+            (
+                "upgrade mind-meld",
+                ["pipx", "upgrade", "mind-meld", "GIT_TERMINAL_PROMPT=0"],
+                "install",
+            ),
+            (
+                f"install --force {upgrade.INSTALL_SPEC}",
+                ["pipx", "install", "--force", upgrade.INSTALL_SPEC, "GIT_TERMINAL_PROMPT=0"],
+                "upgrade",
+            ),
+        ],
+    )
+    def test_outdated_mm_upgrades_before_syncthing_check(
+        self,
+        harness: BootstrapHarness,
+        probe_out: str,
+        expected_pipx_row: list[str],
+        forbidden_subcmd: str,
+    ) -> None:
+        self._ready_macos(harness)
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+
+        harness.set_listed_mm_version("1.12.24")
+        harness.clear_calls()
+
+        second = harness.run(extra_env={"MM_TEST_UPDATE_ARGV": probe_out})
+        assert second.returncode == 0, second.stdout
+
+        calls = harness.calls()
+        assert expected_pipx_row in calls
+        assert not [row for row in calls if row[0] == "pipx" and row[1] == forbidden_subcmd]
+        assert not [
+            row
+            for row in calls
+            if row[0] == "venv-python" and any("classify_config" in arg for arg in row)
+        ]
+        upgrade_idx = calls.index(expected_pipx_row)
+        classify_indices = [
+            idx
+            for idx, row in enumerate(calls)
+            if row[0] == "venv-python-upgraded" and any("classify_config" in arg for arg in row)
+        ]
+        assert classify_indices, calls
+        assert upgrade_idx < classify_indices[0]
+        assert (
+            f"bootstrap: upgraded mm 1.12.24 to {RELEASE}; "
+            "Python 3.13, Syncthing 2.1.7 and mm are ready." in second.stdout
+        )
+
+    def test_failed_upgrade_stops_and_preserves_installed_mm_before_syncthing_check(
+        self, harness: BootstrapHarness
+    ) -> None:
+        self._ready_macos(harness)
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+
+        harness.set_listed_mm_version("1.12.24")
+        harness.clear_calls()
+
+        second = harness.run(extra_env={"MM_TEST_PIPX_UPGRADE_FAIL": "1"})
+        assert second.returncode == 1, second.stdout
+        assert _last_line(second.stdout).endswith(
+            "pipx upgrade mind-meld failed, so mm stays at 1.12.24. Run: pipx upgrade mind-meld"
+        )
+        assert harness.pipx_state.read_text(encoding="utf-8") == "mind-meld 1.12.24\n"
+        assert (harness.pipxbin / "mm").exists()
+        assert (harness.venvs / "mind-meld" / "bin" / "mm").exists()
+        assert not [row for row in harness.calls() if any("classify_config" in arg for arg in row)]
+
+    def test_forced_upgrade_refuses_to_overwrite_foreign_mm(
+        self, harness: BootstrapHarness
+    ) -> None:
+        self._ready_macos(harness)
+        assert harness.run().returncode == 0
+        harness.set_listed_mm_version("1.12.24")
+        (harness.pipxbin / "mm").unlink()
+        harness.install_mm(harness.pipxbin)
+        original = (harness.pipxbin / "mm").read_bytes()
+        harness.clear_calls()
+        proc = harness.run(
+            extra_env={"MM_TEST_UPDATE_ARGV": f"install --force {upgrade.INSTALL_SPEC}"}
+        )
+        assert proc.returncode == 1, proc.stdout
+        assert (harness.pipxbin / "mm").read_bytes() == original
+        assert "another install put it there" in _last_line(proc.stdout)
+        assert not [row for row in harness.calls() if row[:2] == ["pipx", "install"]]
+        assert not [row for row in harness.calls() if any("classify_config" in arg for arg in row)]
+
+    def test_forced_upgrade_failure_does_not_claim_old_install_survives(
+        self, harness: BootstrapHarness
+    ) -> None:
+        self._ready_macos(harness)
+        assert harness.run().returncode == 0
+        harness.set_listed_mm_version("1.12.24")
+        proc = harness.run(
+            extra_env={
+                "MM_TEST_UPDATE_ARGV": f"install --force {upgrade.INSTALL_SPEC}",
+                "MM_TEST_PIPX_FAIL": "1",
+            }
+        )
+        assert proc.returncode == 1, proc.stdout
+        assert _last_line(proc.stdout).endswith(
+            f"pipx install --force {upgrade.INSTALL_SPEC} failed; mm may need reinstalling. "
+            f"Run: pipx install --force {upgrade.INSTALL_SPEC}"
+        )
+
+    @pytest.mark.parametrize(
+        ("probe_out", "probe_exit"),
+        [
+            ("", "1"),
+            ("upgrade some-other-venv", "0"),
+        ],
+    )
+    def test_unrecognized_upgrade_probe_stops_with_force_reinstall_without_calling_pipx(
+        self, harness: BootstrapHarness, probe_out: str, probe_exit: str
+    ) -> None:
+        self._ready_macos(harness)
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+
+        harness.set_listed_mm_version("1.12.24")
+        harness.clear_calls()
+
+        second = harness.run(
+            extra_env={
+                "MM_TEST_UPDATE_ARGV": probe_out,
+                "MM_TEST_UPDATE_ARGV_EXIT": probe_exit,
+            }
+        )
+        assert second.returncode == 1, second.stdout
+        assert _last_line(second.stdout).endswith(
+            f"could not tell how mm 1.12.24 was installed, so it was not upgraded to {RELEASE}. "
+            f"Run: pipx install --force {upgrade.INSTALL_SPEC}"
+        )
+        assert not [
+            row for row in harness.calls() if row[0] == "pipx" and row[1] in {"install", "upgrade"}
+        ]
+        assert not [row for row in harness.calls() if any("classify_config" in arg for arg in row)]
+
+    def test_upgrade_still_older_than_release_stops_before_syncthing_check(
+        self, harness: BootstrapHarness
+    ) -> None:
+        self._ready_macos(harness)
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+
+        harness.set_listed_mm_version("1.12.24")
+        harness.clear_calls()
+
+        second = harness.run(extra_env={"MM_TEST_PIPX_UPGRADE_TO": "1.12.24"})
+        assert second.returncode == 1, second.stdout
+        assert _last_line(second.stdout).endswith(
+            f"pipx reported success but mm is still 1.12.24, older than this script's {RELEASE}. "
+            f"Run: pipx install --force {upgrade.INSTALL_SPEC}"
+        )
+        assert not [row for row in harness.calls() if any("classify_config" in arg for arg in row)]
+
+    @pytest.mark.parametrize("listed_ver", ["unknown", RELEASE, "99.0.0"])
+    def test_unparseable_current_or_newer_listed_version_is_left_alone(
+        self, harness: BootstrapHarness, listed_ver: str
+    ) -> None:
+        self._ready_macos(harness)
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+
+        harness.set_listed_mm_version(listed_ver)
+        harness.clear_calls()
+
+        second = harness.run()
+        assert second.returncode == 0, second.stdout
+        assert not [
+            row for row in harness.calls() if row[0] == "pipx" and row[1] in {"install", "upgrade"}
+        ]
+        assert not [row for row in harness.calls() if any("update_argv" in arg for arg in row)]
+        assert "bootstrap: nothing to change:" in second.stdout
+
+    def test_missing_package_and_outdated_mm_joins_outcome_clauses(
+        self, harness: BootstrapHarness
+    ) -> None:
+        self._ready_macos(harness)
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+
+        (harness.brewbin / "syncthing").unlink()
+        harness.set_listed_mm_version("1.12.24")
+        harness.clear_calls()
+
+        second = harness.run()
+        assert second.returncode == 0, second.stdout
+        assert (
+            f"bootstrap: installed syncthing, upgraded mm 1.12.24 to {RELEASE}; "
+            "Python 3.13, Syncthing 2.1.7 and mm are ready." in second.stdout
+        )

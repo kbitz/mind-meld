@@ -44,6 +44,26 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=bin/bootstrap|tests/test_bootstrap.py] Test gap: bootstrap numeric version ordering
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The new numeric version comparison has older-patch, equality and newer-major coverage, but no older-major/minor or multi-digit component cases.
+- **Hypothesis (untested):** Extend the existing listed-version table before the next Track changes these paths.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** bin/bootstrap:69
+- **Evidence:** Coverage audit of `8f8f023` traced the comparison and existing tests; no incorrect result was reproduced.
+- **Context:** Filed by /review-and-prep for Track 123A at `8f8f023` (2026-11-10); the PR and full audit are linked in its review receipt. This records a gap, without promoting the owner's held Future work.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=bin/bootstrap|tests/test_bootstrap.py] Test gap: bootstrap unverifiable version after upgrade
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Post-upgrade validation tests a still-old parsed version, but not a successful pipx command followed by a missing or unparseable listed version.
+- **Hypothesis (untested):** Add a row to the existing post-upgrade validation test when these paths are next changed.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** bin/bootstrap:413
+- **Evidence:** Coverage audit of `8f8f023` found the empty parsed-version guard and no matching fixture case; no defect was reproduced.
+- **Context:** Filed by /review-and-prep for Track 123A at `8f8f023` (2026-11-10); the PR and full audit are linked in its review receipt.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/host_usage.py|tests/test_agy_usage.py] Test gap: Antigravity cross-type turn deduplication
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
 - **Description:** The fixtures cover equal and conflicting duplicate step-23 turns across databases, but do not pair step 15 with step 23 using the same `bot_id`.
