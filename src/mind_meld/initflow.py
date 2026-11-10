@@ -3,18 +3,20 @@
 Two flows. Plain `mm init` joins a fleet: it needs the fleet's key header
 (mm-crypto-init) in the storage folder, verifies the passphrase against it and
 registers this device. `mm init --new-fleet` is the only path that creates the
-key header, and only in an empty folder. A plain init that finds no header
-stops without writing anything.
+key header, and only in an empty folder. When a managed join accepts the folder
+offer (or the folder is already shared with a peer) and the header has not
+arrived yet, `init` waits up to `HEADER_WAIT_SECONDS` (`HEADER_POLL_SECONDS` per
+step); a plain init that still finds no header stops without writing anything.
 
 Raise surface for direct callers of `init`:
 - returns the verified passphrase after a join, so the `cli.init` shell can
   pull with it, and None after `--new-fleet`.
 - typer.Exit() (code 0): the user declined to overwrite an existing config or
   declined the re-init confirm; nothing local or remote changed.
-- typer.Exit(1): a core._error refusal (no key header yet, a folder that
-  `--new-fleet` will not accept, corrupt or newer mm-crypto-init, wrong
-  passphrase, a header that arrived during the prompts, no sync sources
-  enabled); each prints its own remedy.
+- typer.Exit(1): a core._error refusal (no key header yet, Ctrl-C while waiting
+  for the key header, a folder that `--new-fleet` will not accept, corrupt or
+  newer mm-crypto-init, wrong passphrase, a header that arrived during the
+  prompts, no sync sources enabled); each prints its own remedy.
 - typer.Abort (exit 1): stdin closed during a prompt; the shell turns it into
   a "needs a terminal" error when stdin is not a terminal.
 The `@app.command()` shell and the `mm init --help` text stay in cli.py; this
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import os
 import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -89,6 +92,11 @@ _BOOKKEEPING_NAMES = frozenset({".stfolder", ".stignore", ".stversions", ".DS_St
 _FLEET_DIRS = frozenset({"data", "manifests", "devices"})
 _IN_FLIGHT_PREFIXES = (".syncthing.", "~syncthing~")
 _HEADER_STEM = "mm-crypto-init"
+# Bounded wait after a managed join accepts the folder offer (or finds the
+# folder already shared with a peer) before Syncthing has delivered the header
+# file. Named without forbidden credential words (AGENTS.md).
+HEADER_WAIT_SECONDS = 120
+HEADER_POLL_SECONDS = 1
 
 
 @dataclass(frozen=True)
@@ -900,6 +908,50 @@ def _overwrite_prompt(new_fleet: bool) -> str:
     )
 
 
+def _pause(seconds: float) -> None:
+    """Wait between header poll attempts; tests replace this helper."""
+    time.sleep(seconds)
+
+
+def _fetch_header_or_stop(backend: LocalBackend, full_path: Path) -> CryptoInitFetch:
+    """Probe storage for mm-crypto-init and stop on unreadable, newer or corrupt headers."""
+    try:
+        fetch = fetch_crypto_init(backend)
+    except OSError as e:
+        _unreadable_folder(full_path, e)
+    if fetch.newer_version is not None:
+        core._error(core._newer_format_message(fetch.newer_version))
+    if fetch.status == "corrupt":
+        core._error(
+            f"init: mm-crypto-init in {safe_terminal_str(full_path)} is corrupt. Wait for "
+            "this folder to finish syncing, then run 'mm init' again. If it stays "
+            "corrupt, restore a valid copy from another machine; never reinitialize. "
+            f"For non-destructive recovery, see {NEWER_STORAGE_URL}."
+        )
+    return fetch
+
+
+def _wait_for_header(backend: LocalBackend, full_path: Path) -> CryptoInitFetch:
+    """Poll for mm-crypto-init after an accepted share; Ctrl-C stops cleanly."""
+    console.print(
+        "  Waiting up to 2 minutes for Syncthing to deliver the key header "
+        "(mm-crypto-init); Ctrl-C stops without writing anything."
+    )
+    rounds = max(1, HEADER_WAIT_SECONDS // HEADER_POLL_SECONDS)
+    try:
+        for _ in range(rounds):
+            _pause(HEADER_POLL_SECONDS)
+            fetch = _fetch_header_or_stop(backend, full_path)
+            if fetch.status != "missing":
+                return fetch
+    except KeyboardInterrupt:
+        core._error(
+            "init: stopped while waiting for the key header. Nothing was written; "
+            "when Syncthing finishes syncing the folder, run 'mm init' again."
+        )
+    return CryptoInitFetch(status="missing")
+
+
 def init(new_fleet: bool = False) -> str | None:
     """Run init; return the verified passphrase after a join, None after --new-fleet."""
     # Capture prior device metadata BEFORE any prompt so the orphan-case
@@ -936,23 +988,20 @@ def init(new_fleet: bool = False) -> str | None:
     backend = LocalBackend(str(full_path))
 
     # Probe storage for mm-crypto-init BEFORE committing any local state.
-    try:
-        fetch = fetch_crypto_init(backend)
-    except OSError as e:
-        _unreadable_folder(full_path, e)
-    if fetch.newer_version is not None:
-        core._error(core._newer_format_message(fetch.newer_version))
-    if fetch.status == "corrupt":
-        core._error(
-            f"init: mm-crypto-init in {safe_terminal_str(full_path)} is corrupt. Wait for "
-            "this folder to finish syncing, then run 'mm init' again. If it stays "
-            "corrupt, restore a valid copy from another machine; never reinitialize. "
-            f"For non-destructive recovery, see {NEWER_STORAGE_URL}."
-        )
+    fetch = _fetch_header_or_stop(backend, full_path)
     if not new_fleet and fetch.status == "missing":
-        _stop_for_missing_header(
-            full_path, folder, accepted=accepted_share is True, local_only=accepted_share is False
-        )
+        if accepted_share is True:
+            fetch = _wait_for_header(backend, full_path)
+        if fetch.status == "missing":
+            folder = _classify_folder(full_path)
+            if folder.error is not None:
+                _unreadable_folder(full_path, folder.error)
+            _stop_for_missing_header(
+                full_path,
+                folder,
+                accepted=accepted_share is True,
+                local_only=accepted_share is False,
+            )
     if new_fleet and fetch.status != "missing":
         _refuse_new_fleet(full_path, _classify_folder(full_path))
 

@@ -14,9 +14,10 @@ Input order follows `initflow.init`: storage path, then (on the managed join
 before the fleet folder is accepted) a fleet machine's Syncthing device ID,
 then the re-init confirm if a device is already configured, device name,
 passphrase(s), then seven source prompts. `--new-fleet` is the only flow that
-creates the key header; plain `mm init` joins and stops when the header has not
-arrived. The join's pull lives in the `cli.init` shell and is covered in
-tests/test_integration.py.
+creates the key header; plain `mm init` waits up to `HEADER_WAIT_SECONDS` after
+a managed share is accepted (replaced by the `pauses` autouse fixture here) and
+stops when the header still has not arrived. The join's pull lives in the
+`cli.init` shell and is covered in tests/test_integration.py.
 """
 
 from __future__ import annotations
@@ -77,6 +78,13 @@ _app.command("init")(initflow.init)
 @_app.command("capture")
 def _capture(new_fleet: bool = False) -> None:
     _joined.append(initflow.init(new_fleet=new_fleet))
+
+
+@pytest.fixture(autouse=True)
+def pauses(monkeypatch) -> list[float]:
+    recorded: list[float] = []
+    monkeypatch.setattr(initflow, "_pause", recorded.append)
+    return recorded
 
 
 @pytest.fixture
@@ -926,7 +934,7 @@ def test_managed_join_rerun_refuses_invalid_or_missing_folder_option(
 
 
 def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
-    env, fake_syncthing, tmp_path, monkeypatch
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
 ):
     _storage, _backend = env
     stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
@@ -936,6 +944,7 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     # remove Default Folder, stop on no-offer with approval command.
     run1, text1 = _run(f"{storage}\n{peer_id}\n")
     assert run1.exit_code == 1, run1.output
+    assert pauses == []
     assert my_id in text1
     assert f"mm devices approve {my_id}" in text1
     assert config.load_syncthing_record() == my_id
@@ -965,6 +974,10 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     }
     run2, text2 = _run(f"{storage}\n{peer_id}\n")
     assert run2.exit_code == 1, run2.output
+    assert pauses == [initflow.HEADER_POLL_SECONDS] * (
+        initflow.HEADER_WAIT_SECONDS // initflow.HEADER_POLL_SECONDS
+    )
+    assert "Waiting up to 2 minutes for Syncthing to deliver the key header" in text2
     assert "Syncthing has accepted the fleet folder" in text2
     assert "Wait for Syncthing to deliver it, then run 'mm init' again." in text2
     assert len(fake_syncthing.bodies) == 4
@@ -985,6 +998,7 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
 
     # Run 3: key header arrives -> no device ID prompt, verifies passphrase,
     # writes .stignore, registers device, and returns the passphrase.
+    pauses.clear()
     storage.mkdir(parents=True, exist_ok=True)
     backend = LocalBackend(storage)
     _populate(backend)
@@ -993,6 +1007,7 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
         command="capture",
     )
     assert run3.exit_code == 0, run3.output
+    assert pauses == []
     assert _joined == [PASSPHRASE]
     assert text3.endswith(JOIN_OUTCOME)
     assert (storage / ".stignore").read_text() == STIGNORE
@@ -1403,3 +1418,168 @@ def test_managed_join_stops_when_default_folder_becomes_occupied_or_shared(
     assert _tree(storage) == before
     assert _device_keys(LocalBackend(storage)) == []
     assert config.load_syncthing_record() == fake_syncthing.my_id
+
+
+def test_managed_join_waits_and_completes_in_one_run_when_header_arrives(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
+):
+    """Criterion 4 (Track 127A): with a fake Syncthing that accepts the folder
+    and delivers mm-crypto-init after a delay shorter than the wait, mm init
+    completes in one run."""
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {
+            "offeredBy": {
+                peer_id: {
+                    "label": "Mind Meld",
+                    "receiveEncrypted": False,
+                    "remoteEncrypted": False,
+                }
+            }
+        }
+    }
+
+    def pause_then_deliver(seconds: float) -> None:
+        pauses.append(seconds)
+        if len(pauses) == 3:
+            storage.mkdir(parents=True, exist_ok=True)
+            _populate(LocalBackend(storage))
+
+    monkeypatch.setattr(initflow, "_pause", pause_then_deliver)
+    result, text = _run(
+        f"{storage}\n{peer_id}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}",
+        command="capture",
+    )
+    assert result.exit_code == 0, result.output
+    assert pauses == [initflow.HEADER_POLL_SECONDS] * 3
+    assert "Waiting up to 2 minutes for Syncthing to deliver the key header" in text
+    assert text.endswith(JOIN_OUTCOME)
+    assert _joined == [PASSPHRASE]
+    assert (storage / ".stignore").read_text() == STIGNORE
+    assert config.CONFIG_PATH.is_file()
+    assert config.load_syncthing_record() == my_id
+    assert len(_device_keys(LocalBackend(storage))) == 2
+
+
+def test_managed_join_ctrl_c_during_header_wait_stops_with_nothing_written(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
+):
+    """Criterion 5 (Track 127A): Ctrl-C during the header wait exits 1 with
+    nothing written to the Mind Meld store or config.toml."""
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {
+            "offeredBy": {
+                peer_id: {
+                    "label": "Mind Meld",
+                    "receiveEncrypted": False,
+                    "remoteEncrypted": False,
+                }
+            }
+        }
+    }
+
+    def interrupt_on_first_pause(seconds: float) -> None:
+        pauses.append(seconds)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(initflow, "_pause", interrupt_on_first_pause)
+    result, text = _run(f"{storage}\n{peer_id}\n")
+    assert result.exit_code == 1, result.output
+    assert pauses == [initflow.HEADER_POLL_SECONDS]
+    assert "Waiting up to 2 minutes for Syncthing to deliver the key header" in text
+    assert "init: stopped while waiting for the key header." in text
+    assert text.endswith(
+        "Nothing was written; when Syncthing finishes syncing the folder, run 'mm init' again."
+    )
+    assert config.load_syncthing_record() == my_id
+    assert not config.CONFIG_PATH.exists()
+    assert not storage.exists()
+    assert _device_keys(LocalBackend(storage)) == []
+
+
+def test_no_header_wait_on_local_only_or_owner_managed_or_absent_folders(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
+):
+    """Criterion 5 & Criterion 9 (Track 127A): an absent or empty owner-managed
+    folder and a local-only managed folder (0 peers) never enter the header wait."""
+    storage, _backend = env
+    # 1. Owner-managed pre-existing Syncthing config with missing folder -> 0 pauses.
+    absent = tmp_path / "absent-store"
+    (storage / ".stignore").unlink(missing_ok=True)
+    res_absent, text_absent = _run(f"{absent}\n")
+    assert res_absent.exit_code == 1, res_absent.output
+    assert pauses == []
+    assert "Waiting up to 2 minutes" not in text_absent
+    assert not absent.exists()
+    assert not config.CONFIG_PATH.exists()
+
+    # 2. Owner-managed pre-existing Syncthing config with empty folder -> 0 pauses.
+    res_owner, text_owner = _run(f"{storage}\n")
+    assert res_owner.exit_code == 1, res_owner.output
+    assert pauses == []
+    assert "Waiting up to 2 minutes" not in text_owner
+    assert not config.CONFIG_PATH.exists()
+
+    # 3. Managed Syncthing with local-only mind-meld folder (0 peers) -> 0 pauses.
+    stock_root, my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    managed_storage = stock_root / "mind-meld"
+    config.save_syncthing_record(my_id)
+    fake_syncthing.set_folder(managed_storage, peers=[], write_stignore=False)
+    res_local, text_local = _run(f"{managed_storage}\n")
+    assert res_local.exit_code == 1, res_local.output
+    assert pauses == []
+    assert "Waiting up to 2 minutes" not in text_local
+    assert "no peer" in text_local
+    assert text_local.endswith("Run: mm init --new-fleet")
+    assert not config.CONFIG_PATH.exists()
+
+
+def test_managed_join_rerun_on_already_shared_folder_waits_for_header(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
+):
+    """Criterion 9 (Track 127A): a rerun of mm init whose already-configured
+    fleet folder has a peer waits the same way when the header is missing, and
+    completes in one run if the header arrives during the wait."""
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+    config.save_syncthing_record(my_id)
+    fake_syncthing.set_folder(storage, peers=[(peer_id, "mac-b", True)], write_stignore=False)
+    fake_syncthing.bodies.clear()
+
+    # Sub-run A: header never arrives -> full wait, no device-ID prompt, no REST writes.
+    res_timeout, text_timeout = _run(f"{storage}\n")
+    assert res_timeout.exit_code == 1, res_timeout.output
+    assert len(pauses) == initflow.HEADER_WAIT_SECONDS // initflow.HEADER_POLL_SECONDS
+    assert "Waiting up to 2 minutes for Syncthing to deliver the key header" in text_timeout
+    assert "Syncthing has accepted the fleet folder" in text_timeout
+    assert fake_syncthing.bodies == []
+    assert not config.CONFIG_PATH.exists()
+    assert not (storage / ".stignore").exists()
+
+    # Sub-run B: header arrives on the 2nd pause -> completes in one run.
+    pauses.clear()
+
+    def pause_then_deliver(seconds: float) -> None:
+        pauses.append(seconds)
+        if len(pauses) == 2:
+            _populate(LocalBackend(storage))
+
+    monkeypatch.setattr(initflow, "_pause", pause_then_deliver)
+    res_ok, text_ok = _run(
+        f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}",
+        command="capture",
+    )
+    assert res_ok.exit_code == 0, res_ok.output
+    assert pauses == [initflow.HEADER_POLL_SECONDS] * 2
+    assert fake_syncthing.bodies == []
+    assert text_ok.endswith(JOIN_OUTCOME)
+    assert _joined == [PASSPHRASE]
+    assert (storage / ".stignore").read_text() == STIGNORE
+    assert config.CONFIG_PATH.is_file()
+    assert len(_device_keys(LocalBackend(storage))) == 2
