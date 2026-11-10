@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.33] - 2026-11-10
+
+Attended `mm push` now lets capture scans finish up to `[retro] attended_capture_cap_ms` so usage and commit capture catch up in one push, and `retro-fleet` Git budget advice now recommends `mm recapture --dry-run` followed by `mm recapture 30d`.
+
+### Added
+
+- Attended `mm push` supports `retro.attended_capture_cap_ms`, with a default scan cap of 30 seconds.
+
+### Changed
+
+- An attended `mm push` now lets its capture scans finish up to the new `[retro] attended_capture_cap_ms` setting (default 30,000 ms), so usage and commit capture catch up in one push instead of advising another `mm recapture`.
+- `retro-fleet` Git budget advice now recommends `mm recapture --dry-run` followed by `mm recapture 30d`.
+
+### Upgrade notes
+
+- A terminal `mm push` can take tens of seconds longer when capture has a backlog; set `attended_capture_cap_ms` equal to `capture_budget_ms` to keep the previous time bound.
+
 ## [1.12.32] - 2026-11-09
 
 Bootstrap upgrades an outdated `mm` before checking Syncthing, registers a running default Syncthing for login without launching another instance, and the install command fetches bootstrap through authenticated `gh api`.
