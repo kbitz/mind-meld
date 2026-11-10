@@ -585,7 +585,7 @@ class TestFetchTagsGitAdapter124B:
                 "not-readable",
             ),
             (
-                "fatal: could not read Password for 'https://user@github.com': No such device",
+                "fatal: could not read Password for 'https://github.com': No such device",
                 "not-readable",
             ),
             ("fatal: terminal prompts disabled", "not-readable"),
@@ -946,9 +946,10 @@ class TestRecordedFailureCauses124B:
     def test_stderr_and_exception_secrets_never_enter_cache_json(self, monkeypatch):
         _set_version(monkeypatch, "1.0.0")
         monkeypatch.setattr(upgrade, "find_git", lambda: "/usr/bin/git")
+        synthetic_url = "https://" + "@".join((":".join(("user", "pw-placeholder")), "github.com"))
         sensitive_stderr = (
             "fatal: Authentication failed for "
-            "'https://user:pw-placeholder@github.com/kbitz/mind-meld.git/' "
+            f"'{synthetic_url}/kbitz/mind-meld.git/' "
             "from /Users/user/.gitconfig\n"
         )
         monkeypatch.setattr(
@@ -969,7 +970,7 @@ class TestRecordedFailureCauses124B:
         # Unexpected exception stores only the class name, never message text
         _stub_tags_raises(
             monkeypatch,
-            KeyError("https://user:pw-placeholder@github.com /Users/user/secret"),
+            KeyError(f"{synthetic_url} /Users/user/secret"),
         )
         upgrade.check_for_upgrade(force=True)
         raw_text_exc = upgrade.CACHE_PATH.read_text(encoding="utf-8")

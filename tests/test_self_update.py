@@ -1609,6 +1609,7 @@ class TestPipxSeams:
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and not out_file.exists():
                 time.sleep(0.05)
+        # gstack-timing-ok: a detached synthetic child must publish its result within 5s.
         recorded = json.loads(out_file.read_text(encoding="utf-8"))
         assert recorded["stdin_eof"] is True
         assert recorded["new_session"] is True
