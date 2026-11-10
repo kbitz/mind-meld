@@ -1574,6 +1574,53 @@ class TestPipxSeams:
             time.sleep(0.05)
         assert log.read_text().splitlines()[-1] == expected
 
+    @pytest.mark.parametrize("detached", [False, True])
+    def test_pipx_subprocesses_receive_no_prompt_env_closed_stdin_and_new_session(
+        self, pipx_install, monkeypatch, tmp_path, detached
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+        monkeypatch.delenv("GIT_SSH", raising=False)
+        out_file = tmp_path / f"pipx-child-{detached}.json"
+        code = (
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "payload = {\n"
+            "    'stdin_eof': sys.stdin.read() == '',\n"
+            "    'new_session': os.getsid(0) == os.getpid(),\n"
+            "    'GIT_TERMINAL_PROMPT': os.environ.get('GIT_TERMINAL_PROMPT'),\n"
+            "    'GIT_ASKPASS': os.environ.get('GIT_ASKPASS'),\n"
+            "    'SSH_ASKPASS': os.environ.get('SSH_ASKPASS'),\n"
+            "    'SSH_ASKPASS_REQUIRE': os.environ.get('SSH_ASKPASS_REQUIRE'),\n"
+            "    'GCM_INTERACTIVE': os.environ.get('GCM_INTERACTIVE'),\n"
+            "    'GIT_HTTP_LOW_SPEED_LIMIT': os.environ.get('GIT_HTTP_LOW_SPEED_LIMIT'),\n"
+            "    'GIT_HTTP_LOW_SPEED_TIME': os.environ.get('GIT_HTTP_LOW_SPEED_TIME'),\n"
+            "    'GIT_SSH_COMMAND': os.environ.get('GIT_SSH_COMMAND'),\n"
+            "}\n"
+            f"Path({str(out_file)!r}).write_text(json.dumps(payload))\n"
+        )
+        argv = [sys.executable, "-c", code]
+        if not detached:
+            upgrade._run_pipx(argv)
+        else:
+            log = tmp_path / "spawn.log"
+            upgrade._spawn_pipx(argv, log)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not out_file.exists():
+                time.sleep(0.05)
+        recorded = json.loads(out_file.read_text(encoding="utf-8"))
+        assert recorded["stdin_eof"] is True
+        assert recorded["new_session"] is True
+        assert recorded["GIT_TERMINAL_PROMPT"] == "0"
+        assert recorded["GIT_ASKPASS"] == ""
+        assert recorded["SSH_ASKPASS"] == ""
+        assert recorded["SSH_ASKPASS_REQUIRE"] == "never"
+        assert recorded["GCM_INTERACTIVE"] == "never"
+        assert recorded["GIT_HTTP_LOW_SPEED_LIMIT"] == "1000"
+        assert recorded["GIT_HTTP_LOW_SPEED_TIME"] == "60"
+        assert "BatchMode=yes" in (recorded["GIT_SSH_COMMAND"] or "")
+
     def test_timeout_stops_installer_descendants(self, pipx_install, monkeypatch):
         pipx_install()
         monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
@@ -3153,3 +3200,149 @@ def test_sync78_cancelled_optional_update_never_asserts_sync_success(
     assert "sync is complete" not in output
     assert "sync outcome is reported separately" in output
     assert _cache()["install_attempt_outcome"] == "failed"
+
+
+class TestTrack124BInstallRecordsAndPinnedRefusal:
+    def test_pinned_install_with_not_readable_check_names_cause_and_fix(
+        self, pipx_install, monkeypatch
+    ):
+        spec = f"{upgrade.REPO_SPEC}@v1.2.0"
+        pipx_install(spec=spec)
+        monkeypatch.setattr(
+            upgrade,
+            "_fetch_tags",
+            lambda: (_ for _ in ()).throw(upgrade._CheckFailed("not-readable")),
+        )
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 1
+        err = _flat(result.stderr)
+        assert "mm could not read the release tags with this machine's git credentials" in err
+        assert spec in err
+        assert err.endswith("Run: gh auth setup-git")
+        assert "Could not reach GitHub" not in err
+
+    def test_install_causes_recorded_and_cleared_across_lifecycle(self, pipx_install, monkeypatch):
+        # 1) not-tracking is recorded when install is pinned
+        venv = pipx_install(spec=f"{upgrade.REPO_SPEC}@v1.2.0", version="1.2.0")
+        upgrade.update_or_nudge({}, attended=True)
+        assert _cache()["install_failure_cause"] == "not-tracking"
+        assert _cache()["install_failure_at"] is not None
+
+        # 2) cleared when installed version is already at or above latest
+        _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+        upgrade.update_or_nudge({}, attended=True)
+        assert _cache()["install_failure_cause"] is None
+        assert _cache()["install_failure_at"] is None
+
+        # 3) pipx-missing is recorded when find_pipx returns None
+        _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.2.0")
+        monkeypatch.setattr(upgrade, "find_pipx", lambda: None)
+        upgrade.update_or_nudge({}, attended=True)
+        assert _cache()["install_failure_cause"] == "pipx-missing"
+        assert _cache()["install_failure_at"] is not None
+
+        # 4) cleared when attended update lands ("updated")
+        monkeypatch.setattr(upgrade, "find_pipx", lambda: PIPX)
+        _fake_run(monkeypatch, venv, lands="1.3.0")
+        upgrade.update_or_nudge({}, attended=True)
+        assert _cache()["install_failure_cause"] is None
+        assert _cache()["install_failure_at"] is None
+
+        # 5) attended failure records install-failed
+        _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.2.0")
+        upgrade.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "latest_version": "1.3.0",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
+        _fake_run(monkeypatch, venv, returncode=1, output="pip failed\n")
+        upgrade.update_or_nudge({}, attended=True)
+        assert _cache()["install_failure_cause"] == "install-failed"
+        assert _cache()["install_attempt_outcome"] == "failed"
+
+        # 6) cleared when a fresh check finds this release current
+        monkeypatch.setattr(upgrade, "_fetch_tags", lambda: [{"name": "v1.2.0"}])
+        res_cur = upgrade.check_for_upgrade(force=True)
+        assert res_cur.state == "current"
+        assert _cache()["install_failure_cause"] is None
+        assert _cache()["install_failure_at"] is None
+
+        # 7) unattended spawn failure records install-failed, and successful spawn clears it
+        monkeypatch.setattr(upgrade, "_fetch_tags", lambda: [{"name": "v1.3.0"}])
+        upgrade.CACHE_PATH.unlink(missing_ok=True)
+        _fake_spawn(monkeypatch, raises=OSError("spawn failed"))
+        upgrade.update_or_nudge({}, attended=False)
+        assert _cache()["install_failure_cause"] == "install-failed"
+
+        # Reset attempt gate so next unattended run can claim and spawn cleanly
+        cache_data = _cache()
+        cache_data["install_attempt_version"] = None
+        cache_data["install_attempt_at"] = None
+        cache_data["install_attempt_outcome"] = None
+        upgrade.CACHE_PATH.write_text(json.dumps(cache_data))
+        _fake_spawn(monkeypatch)
+        upgrade.update_or_nudge({}, attended=False)
+        assert _cache()["install_failure_cause"] is None
+        assert _cache()["install_failure_at"] is None
+
+        # 8) claim returning "failed" (expired grace) records install-failed
+        expired_at = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+        upgrade.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "latest_version": "1.3.0",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                    "install_attempt_version": "1.3.0",
+                    "install_attempt_at": expired_at,
+                    "install_attempt_outcome": None,
+                }
+            )
+        )
+        upgrade.update_or_nudge({}, attended=False)
+        assert _cache()["install_failure_cause"] == "install-failed"
+
+        # 9) unexpected:<Class> recorded when run_update raises inside _auto_install
+        upgrade.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "latest_version": "1.3.0",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
+        monkeypatch.setattr(
+            upgrade,
+            "run_update",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        upgrade.update_or_nudge({}, attended=True)
+        assert _cache()["install_failure_cause"] == "unexpected:RuntimeError"
+
+    @pytest.mark.parametrize("command", ["push", "autopush"])
+    def test_recording_lock_failure_never_raises_or_changes_sync_exit_code(
+        self, tmp_path, monkeypatch, pipx_install, command
+    ):
+        _setup_real_config(tmp_path, monkeypatch)
+        pipx_install(spec=f"{upgrade.REPO_SPEC}@v1.2.0", version="1.2.0")
+        monkeypatch.setattr(
+            upgrade,
+            "check_for_upgrade",
+            lambda *a, **kw: upgrade.UpgradeCheckResult(
+                state="upgrade-available",
+                local="1.2.0",
+                latest="1.3.0",
+                install_cmd=upgrade.INSTALL_CMD,
+                should_nudge=False,
+            ),
+        )
+        monkeypatch.setattr(
+            upgrade,
+            "locked_json_rmw",
+            lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        upgrade.update_or_nudge({}, attended=True)
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output

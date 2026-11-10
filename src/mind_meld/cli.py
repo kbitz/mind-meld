@@ -4353,6 +4353,9 @@ def update() -> None:
         # An unreachable GitHub is no verdict. The in-place upgrade below can
         # still let pipx decide; the forced reinstall a pinned install needs
         # deletes the venv if it fails, so it never runs on a guess.
+        if check.check_failure not in (None, "network"):
+            what, fix = upgrade.problem_text(check.check_failure)
+            core._error(f"{what}, and this install is pinned to {install.spec}. {fix}")
         core._error(
             "Could not reach GitHub to check for a newer release, and this install is pinned "
             f"to {install.spec}. Retry when online, or run: {upgrade.INSTALL_CMD}"
@@ -4363,7 +4366,7 @@ def update() -> None:
     except LockError as e:
         core._error(str(e))
     try:
-        # Another updater may have completed while the forced HTTP check ran.
+        # Another updater may have completed while the forced check ran.
         # Reclassify under the mm lock before choosing a destructive reinstall.
         install = upgrade.detect_install()
         refusal = _update_refusal(install)
@@ -4373,6 +4376,9 @@ def update() -> None:
             _print_update_current(install)
             return
         if install.kind == "pinned" and latest is None:
+            if check.check_failure not in (None, "network"):
+                what, fix = upgrade.problem_text(check.check_failure)
+                core._error(f"The install is now pinned, and {what}. {fix}")
             core._error("The install is now pinned; retry mm update when GitHub is reachable.")
         argv = upgrade.update_argv(pipx, install)
         shown = " ".join(["pipx", *argv[1:]])
