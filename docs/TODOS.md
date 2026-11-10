@@ -44,6 +44,16 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/events_tail.py|tests/test_host_usage_snapshot.py] Test gap: attended cap with a legacy sweep preference
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Explicit `attended_capture_cap_ms` and legacy `host_usage_interactive_budget_ms`, without `capture_budget_ms`, are covered separately but not together.
+- **Hypothesis (untested):** Extend the existing precedence test to assert the sweep preference, stashed cap and partitioned tail when the next Track touches these paths.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/events_tail.py:224
+- **Evidence:** Coverage audit of `6fb045c` traced the cap-presence guard and existing tests; no incorrect result was reproduced and no acceptance criterion requires this combination.
+- **Context:** Filed by /review-and-prep for Track 124A at `6fb045c` (2026-11-10); PR creation follows the external full-suite gate. Revisit when either tagged path next changes.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=bin/bootstrap|tests/test_bootstrap.py] Test gap: bootstrap numeric version ordering
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** The new numeric version comparison has older-patch, equality and newer-major coverage, but no older-major/minor or multi-digit component cases.
