@@ -168,8 +168,9 @@ content changes; Git/session activity capture still requires a substantive
 push. Use `mm recapture 30d` for omitted Git history, not repeated empty
 pushes.
 
-Use `mm push`, not `mm autopush`. The quiet autopush path gets the 250ms walk
-budget instead of 500ms AND takes `_decide_token_walk_policy`'s cold-cache
+Use `mm push`, not `mm autopush`. The quiet autopush path keeps its fixed
+250 ms walk budget; partitioned attended pushes extend their 500 ms base
+ceiling within the attended scan cap. Autopush also takes `_decide_token_walk_policy`'s cold-cache
 branch, which drops both `tokens_by_day` and `skills_by_day` for every project
 — so refreshing through it made the retro's own refresh the most
 truncation-prone push in the system, immediately before the retro read that
