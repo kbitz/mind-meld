@@ -1676,21 +1676,24 @@ def _utc_day(value: Any) -> str:
 # ``~/.gemini/antigravity-cli/conversations/<cid>.db``. Model metadata is
 # stored in protobuf format in ``gen_metadata``; per-step metadata, timestamps,
 # and token ledgers are stored in protobuf format in ``steps``.
-# The only step type carrying billable token usage is step_type 15. Any completed
-# step_type 15 row (status 3) lacking token usage increments usage_less_skipped.
-# Any step_type != 15 row carrying nonzero token usage refuses the reader as
-# unsupported.
+# Step types 15 and 23 carry billable token usage and are counted alike. Any
+# completed step_type 15 or 23 row (status 3) lacking token usage increments
+# usage_less_skipped. Any other step_type carrying nonzero token usage refuses
+# the reader as unsupported.
 # The cache entry shape is the shared turns shape keyed by <cid>.db, tracking
 # both main-DB and WAL fingerprints. Pre-open and post-close fingerprints must
 # match, and any hot journal refuses as stale. Deduplication across DBs is keyed
 # on sha256("agy\0" + bot_id).
+# Cache reuse also requires the current census pin so changed step rules reapply.
 
 AGY_CONVERSATIONS_PATH = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
 AGY_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "agy-host-tokens.json"
-AGY_USAGE_CENSUS_HOST_VERSION = "1.4.5"
+AGY_USAGE_CENSUS_HOST_VERSION = "1.5.3"
 _AGY_CACHE_FORMAT = 1
 _AGY_SQLITE_LENGTH_LIMIT = 16 * 1024 * 1024  # 16 MiB
 _AGY_SQLITE_SUFFIXES = ("", "-wal", "-shm", "-journal")
+# Step types carrying billable token usage per tests/fixtures/host_sessions/agy/CONTRACT.md.
+_AGY_USAGE_STEP_TYPES = frozenset({15, 23})
 
 AGY_READER_CAUSES: dict[str, Reason] = {
     "sqlite_unavailable": "io_error",
@@ -2045,7 +2048,7 @@ def _read_single_agy_db(
                 if _expired(deadline):
                     raise _ReadFailure("deadline")
                 if not meta or not isinstance(meta, (bytes, memoryview)):
-                    if step_type == 15 and status == 3:
+                    if step_type in _AGY_USAGE_STEP_TYPES and status == 3:
                         usage_less_skipped += 1
                     continue
                 meta_bytes = bytes(meta)
@@ -2061,7 +2064,7 @@ def _read_single_agy_db(
                         token_usage_bytes = fval
 
                 if token_usage_bytes is None:
-                    if step_type == 15 and status == 3:
+                    if step_type in _AGY_USAGE_STEP_TYPES and status == 3:
                         usage_less_skipped += 1
                     continue
 
@@ -2112,7 +2115,7 @@ def _read_single_agy_db(
                 has_tokens = (
                     input_tokens > 0 or output_tokens > 0 or cache_read > 0 or cache_create > 0
                 )
-                if step_type != 15:
+                if step_type not in _AGY_USAGE_STEP_TYPES:
                     if has_tokens:
                         raise _ReadFailure(
                             "unsupported", cause="token_usage_on_unexpected_step_type"
@@ -2305,6 +2308,7 @@ def read_agy_usage(
             current_format = (
                 locked.data.get("version") == CACHE_VERSION
                 and locked.data.get("agy_format") == _AGY_CACHE_FORMAT
+                and locked.data.get("census_host_version") == AGY_USAGE_CENSUS_HOST_VERSION
             )
             raw_files = _cached_files(locked.data) if current_format else {}
             cached_files = {
