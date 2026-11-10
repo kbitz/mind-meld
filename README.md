@@ -511,7 +511,7 @@ Once per 24h, `mm pull`, `mm push`, `mm autopull` and `mm autopush` check GitHub
 
 The new version takes effect on the next `mm` command. A failed update never fails the sync or changes its exit code: it prints a `mm: notice:`, `mm status` shows `Automatic update did not complete`, and mm retries once a day. Run `mm update` to see the error.
 
-The automatic path only ever runs the in-place `pipx upgrade`, and only when mm was installed from `@latest` by pipx. Anything else — a tag-pinned install (including the rollback below), a `pipx pin`, a fork, a local checkout, a non-pipx install — is left alone and gets the printed upgrade notice instead. Only an explicit `mm update` reinstalls a tag-pinned install onto `@latest`.
+The automatic path only ever runs the in-place `pipx upgrade`, and only when mm was installed from `@latest` by pipx. Anything else — a tag-pinned install (including the rollback below), a `pipx pin`, a fork, a local checkout, a non-pipx install — is left alone and gets the printed upgrade notice instead. An explicit `mm update` reinstalls a tag-pinned install onto `@latest`; rerunning the bootstrap also does so when the install is older than the script's release.
 
 To turn it off:
 
