@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.32 | 2026-11-09 | Bootstrap upgrades an outdated `mm` before checking Syncthing, registers a running default Syncthing for login without launching another instance, and the install command fetches bootstrap through authenticated `gh api`. |
 | 1.12.31 | 2026-11-09 | Antigravity usage counts include step 23 and refresh from older censuses. |
 | 1.12.30 | 2026-11-08 | Documentation uses placeholders for personal identifiers. |
 | 1.12.29 | 2026-11-08 | Moving a machine keeps files that were excluded from its share. |

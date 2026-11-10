@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.32] - 2026-11-09
+
+Bootstrap upgrades an outdated `mm` before checking Syncthing, registers a running default Syncthing for login without launching another instance, and the install command fetches bootstrap through authenticated `gh api`.
+
+### Changed
+
+- The install command fetches bootstrap through authenticated `gh api`.
+
+### Fixed
+
+- Bootstrap upgrades an outdated `mm` before checking Syncthing.
+- Bootstrap registers a running default Syncthing for login without launching another instance.
+
 ## [1.12.31] - 2026-11-09
 
 Antigravity usage counts include step 23 and refresh from older censuses.
