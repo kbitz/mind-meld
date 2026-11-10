@@ -2,7 +2,7 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/upgrade.py` — `run_transition_hook` / `update_or_nudge` / `emit_nudge_if_due` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_run_pipx` / `_signal_pipx_group` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `_pick_latest_tag` / `INSTALL_SPEC` / `INSTALL_CMD` / upgrade-state cache layout
+- `src/mind_meld/upgrade.py` — `run_transition_hook` / `update_or_nudge` / `emit_nudge_if_due` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_run_pipx` / `_signal_pipx_group` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `_pick_latest_tag` / `find_git` / `_run_git` / `_no_prompt_environment` / `_fetch_tags` / `_classify_git_failure` / `_record_install_problem` / `problem_text` / `INSTALL_SPEC` / `INSTALL_CMD` / upgrade-state cache layout
 - `src/mind_meld/updateprogress.py` — `PipxProgressParser` / `UpdateProgress`
 - `src/mind_meld/core.py` — `_get_config` / (read-only transition gate)
 - `src/mind_meld/initflow.py` — `init` / (transition seam)
@@ -219,6 +219,35 @@ cache keys carry it: `install_attempt_version`, `install_attempt_at`,
 `install_attempt_outcome`. A claim that cannot be recorded is not a claim —
 without the stamp every later pull and push would start its own pipx.
 
+**Recorded check and install failure causes (`check_failure_*`, `install_failure_*`).**
+Four flat keys in `upgrade-state.json` record why a release check or an
+automatic update did not run: `check_failure_cause`, `check_failure_at`,
+`install_failure_cause`, `install_failure_at` (backfilled to `None` by
+`_normalize_cache` for older cache files). Values are restricted to fixed
+vocabularies (`CHECK_FAILURE_CAUSES`: `not-readable`, `network`, `unparseable`,
+`git-missing`; `INSTALL_FAILURE_CAUSES`: `not-tracking`, `pipx-missing`,
+`install-failed`) or `unexpected:<ClassName>` where `<ClassName>` is a Python
+identifier of at most 64 characters; any other stored value validates as `None`
+and never reaches the terminal. No path, URL, credential or stderr message text
+is persisted. `check_for_upgrade` sets `check_failure_cause` and
+`check_failure_at` on a failed fetch and clears both on a successful fetch (the
+fresh-cache and failure-backoff paths leave them untouched), and also clears
+the install failure pair when a successful fetch finds the installed release
+current. A verified foreground update, including `mm update`, also clears the
+install pair. `_record_install_problem` (or the open RMW block in
+`_record_install_failed` and `_claim_install_attempt` — never a nested flock on
+`CACHE_PATH` in the same process) records `not-tracking`, `pipx-missing`,
+`install-failed`, or `unexpected:<ClassName>`, and clears the install pair when
+the installed version is already at or above latest, when a detached `pipx`
+spawns, or when an attended update completes (`updated`). `auto_install = false`
+records nothing, and cancelling an install keeps the failed attempt without
+adding a failure cause; a gated retry preserves explicit outcomes and causes,
+backfilling `install-failed` only for an expired detached attempt without one.
+Readers are `cached_upgrade_view` (read by `mm status`
+and plain-text `mm diag`, which map causes through `problem_text`) and
+`check_for_upgrade`'s own `UpgradeCheckResult` (read by `mm update` when a
+pinned install's forced check fails).
+
 **Installer exclusion is independent of the daily claim.** Both subprocess
 seams take a nonblocking kernel flock on `~/.config/mind-meld/install.lock`.
 Only that descriptor is passed to pipx; it does not inherit the mm lock.
@@ -274,8 +303,39 @@ nothing and sets no exit code: a failed install is a `mm: notice:`. The new
 version takes effect on the next mm process; nothing re-execs. The existing
 transition hook then writes the `self-upgrade` state.db history row, so the
 automatic path needed no new logging.
-The exception boundary covers the check, install, cache bookkeeping and
-fallback nudge, including interrupted HTTP responses and a closed stderr.
+The exception boundary covers the check, install, cache bookkeeping, failure
+cause recording and fallback nudge, including interrupted subprocesses and a
+closed stderr.
+
+**No prompts and bounded time (`_no_prompt_environment`, `_run_git`).** Neither
+the release check nor any pipx run (attended, detached, or `mm update`) may
+prompt for credentials or terminal input. Both `_run_git` and the pipx seams
+(`_run_pipx`, `_spawn_pipx`) start their child in a new session
+(`start_new_session=True`, detaching any controlling `/dev/tty`) with
+`stdin=DEVNULL` and an environment built by `_no_prompt_environment`:
+`GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=""`, `SSH_ASKPASS=""`,
+`SSH_ASKPASS_REQUIRE=never`, `GCM_INTERACTIVE=never`, and when unset
+`GIT_HTTP_LOW_SPEED_LIMIT=1000` and `GIT_HTTP_LOW_SPEED_TIME=60`. Unless
+only `GIT_SSH` is set, `GIT_SSH_COMMAND` appends `-o BatchMode=yes` to an
+existing `GIT_SSH_COMMAND`, to `git config --get core.sshCommand` (probed via
+`_run_git` with a 5 s bound), or to `ssh`. `_fetch_tags` additionally sets
+`LC_ALL=C` for its own git invocation so `_classify_git_failure` reads
+untranslated stderr, and `_run_git` runs in `tempfile.gettempdir()` using the
+`git` binary on `PATH` (`find_git()`, with no added `/usr/bin/git` fallback).
+Bounds: the tag-list subprocess waits at most `CHECK_TIMEOUT_SECONDS` (10 s),
+after the separate config probe (up to 5 s); each has up to 1 s of process-group
+cleanup on timeout or cancellation, so a complete check may take about 17 s.
+Foreground pipx waits at most `PIPX_TIMEOUT_SECONDS`
+(600 s); detached pipx is bounded by git's low-speed abort and pip's own
+network timeouts. Accepted limits: GUI dialogs raised outside git's environment
+by an OS keyring or macOS Keychain unlock (unlocking the Linux keyring before
+hooks run is an accepted manual step in `docs/SPEC.md`), the macOS developer-tools
+shim if `/usr/bin/git` is itself on `PATH` without Command Line Tools, and a
+`plink`-style `core.sshCommand` receiving `-o BatchMode=yes`. With only `GIT_SSH`
+set, git's SSH-command precedence remains unchanged; closed stdin, no controlling
+terminal and disabled askpass enforce non-interaction instead of an added option.
+The detached install has no overall mm deadline; git's HTTP low-speed settings do
+not bound a transport rewritten to SSH.
 
 **Both opt-outs of the check also stop the install.** `auto_install` acts only
 on what the check finds, so `--no-check-version` and `[upgrade] auto_check =
@@ -291,10 +351,50 @@ dependency on it. **Known limit:** a hook that refuses in `_auto_command_setup`
 never reaches the tail, so a Mac refused for newer storage does not update
 itself; the refusal message's remedy still applies.
 
-**No test can reach a real pipx.** `_run_pipx` and `_spawn_pipx` refuse under
-`PYTEST_CURRENT_TEST` (the same guard as `crypto.store_passphrase_in_keyring`),
-and the suite's own interpreter classifies as `not-pipx`.
-`test_real_test_environment_is_not_a_pipx_install` pins the second.
+**No test can reach a real pipx or git remote.** `_run_pipx` and `_spawn_pipx`
+refuse under `PYTEST_CURRENT_TEST` (`_refuse_under_pytest`, the same guard as
+`crypto.store_passphrase_in_keyring`), `_run_git` refuses under its own
+separate `_refuse_git_under_pytest` guard so pipx tests that disable the pipx
+guard never enable a real git subprocess, and the suite's own interpreter
+classifies as `not-pipx`.
+`test_real_test_environment_is_not_a_pipx_install` pins the classification.
+
+### Why automatic updates did not install (Track 124B)
+
+Reproduced on 2026-11-10 in disposable directories (`pipx 1.15.0`, `git 2.56.0`,
+`Python 3.14.8`) with a local release repository (`9.0.0` installed, `9.0.1`
+published on `latest`) mapped onto `INSTALL_SPEC`'s URL via `url.<local>.insteadOf`:
+
+- `pipx install git+https://github.com/kbitz/mind-meld.git@latest` recorded
+  `package_or_url = "git+https://github.com/kbitz/mind-meld.git@latest"`,
+  `package_version = "9.0.0"` and `pinned = false`, which `detect_install()`
+  classified as `tracking`.
+- With no `upgrade-state.json` (arms A1 for attended `mm push` and B1 for
+  `mm autopush`), `_fetch_tags()` sent an unauthenticated HTTP request to
+  `/repos/kbitz/mind-meld/tags?per_page=100`, bypassing git's configuration and
+  credentials. The manager's earlier private-repository observation was a 404 (leaving
+  `latest_version = null`, `checked_at = null`, `attempted_at` stamped and no
+  claim, matching `linux-a`'s real cache at `1.12.30`). During A1/B1 the endpoint
+  was public and returned `latest_version = "1.12.33"`; it still bypassed the
+  mapped git release repository (`install_attempt_version = null`,
+  `package_version = "9.0.0"`). The 404 is historical evidence, not the A1/B1 result.
+- With `upgrade-state.json` seeded to `latest_version = "9.0.1"` and a fresh
+  `checked_at` (arms A2 for attended `mm push` and B2 for `mm autopush`), both
+  paths claimed `install_attempt_version = "9.0.1"`, ran `pipx upgrade mind-meld`
+  (foreground in A2, detached in B2), and updated `package_version` from `"9.0.0"`
+  to `"9.0.1"` with `install_attempt_outcome = null`.
+
+The automatic installer and classifier therefore work against a reachable
+repository. Since 2026-11-06, the cause of missing updates on tracking installs
+was the unauthenticated REST tag check against the private repository. Before
+2026-11-06, the archived 2026-10-04 inventory (`docs/archive/self-update-qualification.md`)
+shows a bare-URL install (`pinned`, candidate 1), which the automatic path
+leaves alone with a stderr nudge that unattended hooks never surface; whether an
+agent's hook shell sandbox (`README.md`) also blocks network access or ends a
+detached child (candidate 5) cannot be observed in a plain shell and is separated
+on real machines by the persisted `check_failure_cause`, `install_failure_cause`
+and `install_attempt_*` records. Cause categories describe failures rather than
+proving their origin: a network sandbox can also emit a permission error.
 
 ## Upgrade nudge (v0.9.5)
 
@@ -339,12 +439,17 @@ would leak WIP on a `--force` reinstall, tracking `latest` cannot. Keep
 README Install / Upgrading and `INSTALL_CMD` on `@latest`; never reintroduce
 a `@{tag}` pin.
 
-**Version source: tag-based.** `/repos/kbitz/mind-meld/tags?per_page=100` →
-`packaging.Version` filter (skip `is_prerelease` AND skip `local is not None` —
-the latter because `0.9.4+local > 0.9.4` per packaging) → max-semver. Cap at
-100 tags is documented in `upgrade.py`; revisit when fleet has more than 100
-releases (~3 years at current velocity). Why tags not raw-pyproject-on-main:
-HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
+**Version source: git tag listing (`_fetch_tags`).** `_fetch_tags` runs
+`git ls-remote --tags --refs` against `REPO_URL` (the URL pip clones for
+`INSTALL_SPEC`), from `tempfile.gettempdir()` with the `PATH` `git` binary pip
+would use and the machine's own git configuration, `insteadOf` rewrites and
+credentials under `_no_prompt_environment` plus `LC_ALL=C`. It reads the whole
+tag list with no pagination and no tag-count cap, skips non-tag refs and peeled
+(`^{}`) entries, and passes the remaining tag names to `_pick_latest_tag`,
+which filters with `packaging.Version` (skipping `is_prerelease` and
+`local is not None`, the latter because `0.9.4+local > 0.9.4` per packaging)
+and takes the maximum version. Why tags rather than `pyproject.toml` on `main`:
+`main` HEAD may be mid-bump or contain WIP that has not been tagged for release.
 
 **3 hook seams across core.py, cli.py, initflow.py and statusflow.py:**
 1. **Transition detection** (`upgrade.run_transition_hook`) called AFTER each of
@@ -359,19 +464,31 @@ HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
 2. **Self-update or nudge** (`upgrade.update_or_nudge`) at the TAIL of
    `push` / `pull` / `autopull` / `autopush` AFTER main work completes
    (`recapture` keeps the nudge-only `upgrade.emit_nudge_if_due`). Tail
-   position keeps cold-cache HTTP latency (~500ms 1x/24h) from stacking on
+   position keeps cold-cache check latency from stacking on
    sync latency. Interactive `mm push` calls it from the command's `finally`
    block after `release_lock()`, so a failed attended attempt still updates or
    nudges (64A); `--dry-run` never does either.
 3. **Read-only surfacing** in `mm status` and plain-text `mm diag` — each calls
    `cached_upgrade_view` once, reading
-   `locked_json_snapshot(blocking=False)` with no HTTP request or cache write.
-   It honors dev-build, `--no-check-version`, and `auto_check = false` skips.
-   Missing, malformed, or contended caches are unknown; status shows the age
-   of stale results. Both commands use the view for unsupported-reader remedies.
-   Diag guards the read and keeps the update remedy if it fails; `diag --json`
-   does not read the view. Push, pull, autopull, and autopush keep the
-   refreshing `check_for_upgrade` path.
+   `locked_json_snapshot(blocking=False)` with no network request or cache write.
+   It honors dev-build, `--no-check-version`, and `auto_check = false` skips,
+   and validates `check_failure_cause`, `check_failure_at`,
+   `install_failure_cause`, and `install_failure_at` before checking
+   `latest_version`/`checked_at` so a cache with no prior successful check still
+   surfaces its recorded failure (dropping `install_failure` when `auto_install`
+   is off, when the running release is current, and dropping `not-tracking` once
+   `detect_install().kind == "tracking"`).
+   Missing, malformed, or contended caches are unknown; status shows one yellow
+   line per recorded failure cause with its one fix command last (replacing the
+   `unknown (... cache)` line when a check failure is recorded, and reusing the
+   existing `Automatic update did not complete` line for `install-failed`), plus
+   the age of stale results. Plain-text `mm diag` prints an `Upgrade check`
+   section with the state, latest release, check failure, install failure,
+   install attempt, and a `fix:` line when a failure cause is recorded. Both
+   commands use the view for unsupported-reader remedies. Diag guards the read
+   and keeps the update remedy if it fails; `diag --json` does not read the view.
+   Push, pull, autopull, and autopush keep the refreshing `check_for_upgrade`
+   path.
 
 **Lock-order invariants (load-bearing):** NEVER acquire mm lockfile while holding
 upgrade-state's flock; RELEASE upgrade-state's flock BEFORE appending to
@@ -404,8 +521,8 @@ column showing `OLD → NEW` for self-upgrade rows; pull/push rows leave it empt
 
 **Tag = release. Merge to main alone is not.**
 
-The auto-upgrade feature reads the latest tag from `/repos/kbitz/mind-meld/tags`
-and nudges the fleet to upgrade to it. /ship prepares the release PR;
+The auto-upgrade feature lists release tags from `REPO_URL` with `git ls-remote`
+and updates or nudges the fleet to the newest stable tag. /ship prepares the release PR;
 `.github/workflows/release.yml` creates the tag and GitHub Release automatically
 after a push to `main` touching `pyproject.toml` or `CHANGELOG.md`.
 

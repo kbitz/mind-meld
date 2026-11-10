@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.34] - 2026-11-10
+
+Automatic updates now look for new releases with this machine's own git credentials, so they work while the repository is private, and `mm status` and `mm diag` name the reason when a release check or an automatic update could not run.
+
+### Changed
+
+- Automatic updates now look for new releases with this machine's own git credentials, so they work while the repository is private, and `mm status` and `mm diag` name the reason when a release check or an automatic update could not run.
+- Automatic release checks use the machine’s Git credentials to reach private repositories.
+- `mm status` and `mm diag` report saved update failures and recovery commands.
+- `mm update` identifies the cause when a pinned installation's release check fails.
+
+### Upgrade notes
+
+- A machine on an earlier release cannot find this release by itself while the repository is private, so run `mm update` once on each machine.
+
 ## [1.12.33] - 2026-11-10
 
 Attended `mm push` now lets capture scans finish up to `[retro] attended_capture_cap_ms` so usage and commit capture catch up in one push, and `retro-fleet` Git budget advice now recommends `mm recapture --dry-run` followed by `mm recapture 30d`.

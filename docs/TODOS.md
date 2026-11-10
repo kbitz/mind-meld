@@ -44,6 +44,56 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/upgrade.py|tests/test_upgrade.py] Test gap: git executable disappears after discovery
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The adapter's `FileNotFoundError` classification after `find_git` succeeds lacks a direct test.
+- **Hypothesis (untested):** Extend the exception table with a vanished executable when the next Track touches these files.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/upgrade.py (`_fetch_tags`)
+- **Evidence:** Track 124B coverage audit G1; missing git and other subprocess failures are covered, but this race was not reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/3cee3c6a` (2026-11-10), before PR creation. Revisit on the next change to either tagged path.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/upgrade.py|tests/test_upgrade.py] Test gap: git cancellation cleanup
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Timeout tests exercise process-group cleanup, but direct `KeyboardInterrupt` propagation through `_run_git` is not separately asserted.
+- **Hypothesis (untested):** Inject cancellation while a synthetic git child runs and verify cleanup and propagation.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/upgrade.py (`_run_git`)
+- **Evidence:** Track 124B coverage audit G2; timeout cleanup passed, with no cancellation defect demonstrated.
+- **Context:** Filed by /review-and-prep on branch `mmm/3cee3c6a` (2026-11-10), before PR creation. Revisit on the next change to either tagged path.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/upgrade.py|tests/test_upgrade.py] Test gap: inherited git transfer and batch settings
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Existing batch-mode options and custom HTTP low-speed settings lack dedicated passthrough assertions.
+- **Hypothesis (untested):** Add inherited-value rows to the existing no-prompt environment table.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/upgrade.py (`_no_prompt_environment`)
+- **Evidence:** Track 124B coverage audit G3; default values and SSH-command precedence are tested, with no failure reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/3cee3c6a` (2026-11-10), before PR creation. Revisit on the next change to either tagged path.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/upgrade.py|tests/test_upgrade.py] Test gap: malformed SSH config fallback
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The malformed config-output and missing-git branches of SSH environment construction lack direct cases.
+- **Hypothesis (untested):** Extend the existing fallback table using synthetic malformed output and absent git.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/upgrade.py (`_no_prompt_environment`)
+- **Evidence:** Track 124B coverage audit G4; config-read exceptions are already tested; no fallback defect was observed.
+- **Context:** Filed by /review-and-prep on branch `mmm/3cee3c6a` (2026-11-10), before PR creation. Revisit on the next change to either tagged path.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/statusflow.py|tests/test_diag.py] Test gap: upgrade diagnostic fallback fields
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The new Upgrade check section lacks exact field assertions for unknown/unavailable views, no record, and missing timestamps.
+- **Hypothesis (untested):** Extend the diagnostic rendering cases while retaining cache-byte and no-network assertions.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/statusflow.py (`diag`)
+- **Evidence:** Track 124B coverage audit G6; recorded-cause output and view-failure survival are tested; no incorrect rendering was reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/3cee3c6a` (2026-11-10), before PR creation. Revisit on the next change to either tagged path.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/events_tail.py|tests/test_host_usage_snapshot.py] Test gap: attended cap with a legacy sweep preference
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Explicit `attended_capture_cap_ms` and legacy `host_usage_interactive_budget_ms`, without `capture_budget_ms`, are covered separately but not together.

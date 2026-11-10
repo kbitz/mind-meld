@@ -2887,3 +2887,214 @@ def test_grok_deadline_refreshes_inventory_count_in_status_and_diag(
     assert "grok usage read blocker: host-usage snapshot skipped (grok deadline)" in diag
     assert f"5 of {expected_disk} sessions cached" in diag
     assert f"grok sessions cached: 5 of {expected_disk}" in diag
+
+
+# ── Track 124B: status & diag surfacing of upgrade check / install causes ──
+
+
+@pytest.mark.parametrize(
+    ("field", "cause", "expected_prefix", "expected_fix"),
+    [
+        (
+            "check_failure_cause",
+            "not-readable",
+            "Upgrade check failing: mm could not read the release tags "
+            "with this machine's git credentials (last tried 2026-11-10).",
+            "Run: gh auth setup-git",
+        ),
+        (
+            "check_failure_cause",
+            "network",
+            "Upgrade check failing: Could not reach GitHub to check the latest "
+            "release (last tried 2026-11-10).",
+            "Run: mm update",
+        ),
+        (
+            "check_failure_cause",
+            "unparseable",
+            "Upgrade check failing: GitHub listed no release tag mm could read "
+            "(last tried 2026-11-10).",
+            "Run: mm update",
+        ),
+        (
+            "check_failure_cause",
+            "git-missing",
+            "Upgrade check failing: git was not found on PATH (last tried 2026-11-10).",
+            "Install git, then run: mm update",
+        ),
+        (
+            "check_failure_cause",
+            "unexpected:RuntimeError",
+            "Upgrade check failing: unexpected check error (RuntimeError) (last tried 2026-11-10).",
+            "Run: mm update",
+        ),
+        (
+            "install_failure_cause",
+            "not-tracking",
+            "Automatic update not running: this mm was not installed by pipx from "
+            "the release branch, so it does not update itself.",
+            "Run: mm update",
+        ),
+        (
+            "install_failure_cause",
+            "pipx-missing",
+            "Automatic update not running: pipx was not found, so mm cannot update itself.",
+            "Install pipx, then run: mm update",
+        ),
+        (
+            "install_failure_cause",
+            "install-failed",
+            "Automatic update did not complete:",
+            "run mm update to see why.",
+        ),
+        (
+            "install_failure_cause",
+            "unexpected:RuntimeError",
+            "Automatic update not running: unexpected install error (RuntimeError).",
+            "Run: mm update",
+        ),
+    ],
+)
+def test_status_prints_one_line_per_recorded_upgrade_cause_with_fix_last_124b(
+    tmp_path, monkeypatch, field, cause, expected_prefix, expected_fix
+):
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    monkeypatch.setattr("mind_meld.__version__", "1.0.0")
+    monkeypatch.setattr(upgrade, "__version__", "1.0.0")
+
+    cache = upgrade._empty_cache()
+    if field == "check_failure_cause":
+        # Null-latest cache with a check failure (the linux-a shape)
+        cache["check_failure_cause"] = cause
+        cache["check_failure_at"] = "2026-11-10T01:07:10+00:00"
+    else:
+        cache["latest_version"] = "1.1.0"
+        cache["checked_at"] = datetime.now(timezone.utc).isoformat()
+        cache["install_failure_cause"] = cause
+        cache["install_failure_at"] = "2026-11-10T01:07:10+00:00"
+        if cause == "install-failed":
+            cache["install_attempt_version"] = "1.1.0"
+            cache["install_attempt_at"] = datetime.now(timezone.utc).isoformat()
+            cache["install_attempt_outcome"] = "failed"
+    upgrade.CACHE_PATH.write_text(json.dumps(cache), encoding="utf-8")
+
+    monkeypatch.setattr(
+        upgrade, "_fetch_tags", lambda *a: pytest.fail("status must not fetch tags")
+    )
+    monkeypatch.setattr(
+        upgrade, "check_for_upgrade", lambda *a, **kw: pytest.fail("status must not refresh")
+    )
+    before = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    res = runner.invoke(app, ["status"])
+    after = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    assert res.exit_code == 0, res.output
+    assert before == after
+
+    lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    matching = [line for line in lines if line.startswith(expected_prefix)]
+    assert len(matching) == 1, f"expected 1 matching line, got {matching} in:\n{res.stdout}"
+    assert matching[0].endswith(expected_fix)
+    if field == "check_failure_cause":
+        assert "Upgrade check: unknown" not in res.stdout
+    if cause == "install-failed":
+        did_not_complete = [line for line in lines if "Automatic update did not complete:" in line]
+        assert len(did_not_complete) == 1
+
+
+def test_status_and_diag_visibility_filters_and_diag_section_124b(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    monkeypatch.setattr("mind_meld.__version__", "1.0.0")
+    monkeypatch.setattr(upgrade, "__version__", "1.0.0")
+
+    now = datetime.now(timezone.utc)
+    cache = upgrade._empty_cache()
+    cache["latest_version"] = "1.1.0"
+    cache["checked_at"] = now.isoformat()
+    cache["check_failure_cause"] = "not-readable"
+    cache["check_failure_at"] = "2026-11-10T01:07:10+00:00"
+    cache["install_failure_cause"] = "not-tracking"
+    cache["install_failure_at"] = "2026-11-10T01:07:10+00:00"
+    upgrade.CACHE_PATH.write_text(json.dumps(cache), encoding="utf-8")
+
+    # 1) Once detect_install().kind is "tracking", not-tracking is hidden
+    monkeypatch.setattr(
+        upgrade,
+        "detect_install",
+        lambda: upgrade.InstallInfo(
+            "tracking", venv_name="mind-meld", spec=upgrade.INSTALL_SPEC, version="1.0.0"
+        ),
+    )
+    status_tracking = runner.invoke(app, ["status"]).stdout
+    assert "Automatic update not running:" not in status_tracking
+    assert "Upgrade check failing:" in status_tracking
+
+    # 2) When not tracking, not-tracking is shown unless auto_install = false
+    monkeypatch.setattr(
+        upgrade,
+        "detect_install",
+        lambda: upgrade.InstallInfo("not-pipx"),
+    )
+    status_not_tracking = runner.invoke(app, ["status"]).stdout
+    assert "Automatic update not running:" in status_not_tracking
+
+    cfg = load_config()
+    cfg.setdefault("upgrade", {})["auto_install"] = False
+    save_config(cfg)
+    status_auto_off = runner.invoke(app, ["status"]).stdout
+    assert "Automatic update not running:" not in status_auto_off
+
+    # Re-enable auto_install and verify plain `mm diag` prints the Upgrade check section
+    # without touching the cache or network.
+    cfg["upgrade"]["auto_install"] = True
+    save_config(cfg)
+    monkeypatch.setattr(upgrade, "_fetch_tags", lambda *a: pytest.fail("diag must not fetch tags"))
+    monkeypatch.setattr(
+        upgrade, "check_for_upgrade", lambda *a, **kw: pytest.fail("diag must not refresh")
+    )
+    before = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    diag_res = runner.invoke(app, ["diag"])
+    after = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    assert diag_res.exit_code == 0, diag_res.output
+    assert before == after
+    diag_out = diag_res.stdout
+    assert "Upgrade check" in diag_out
+    assert "check failure:   not-readable at 2026-11-10T01:07:10+00:00" in diag_out
+    assert "install failure: not-tracking at 2026-11-10T01:07:10+00:00" in diag_out
+    assert "Run: gh auth setup-git" in diag_out
+    assert "Run: mm update" in diag_out
+
+
+@pytest.mark.parametrize("command", ["push", "autopush"])
+def test_push_and_autopush_with_not_readable_check_print_no_new_stderr_line_124b(
+    tmp_path, monkeypatch, command
+):
+    from mind_meld import devices, upgrade
+
+    _, _, backend = _setup(tmp_path, monkeypatch)
+    devices.register_device(backend, "mac-a", "Mac A")
+    mem_dir = tmp_path / "claude" / "projects" / "proj" / "memory"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    (mem_dir / "MEMORY.md").write_text("# test\n", encoding="utf-8")
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    monkeypatch.setattr("mind_meld.__version__", "1.0.0")
+    monkeypatch.setattr(upgrade, "__version__", "1.0.0")
+    monkeypatch.setattr(
+        upgrade,
+        "_fetch_tags",
+        lambda: (_ for _ in ()).throw(upgrade._CheckFailed("not-readable")),
+    )
+    res = runner.invoke(app, [command])
+    assert res.exit_code == 0, res.output
+    assert res.stderr == ""
+    saved = json.loads(upgrade.CACHE_PATH.read_text(encoding="utf-8"))
+    assert saved["check_failure_cause"] == "not-readable"

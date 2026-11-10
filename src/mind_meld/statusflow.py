@@ -1065,17 +1065,35 @@ def status(
 
         # Seam 3 — status inspects cached upgrade knowledge without refreshing it
         # (the view was read once, before the usage-capture verdict).
+        install_failed_shown = False
         if upgrade_result.state == "upgrade-available" and upgrade_result.latest:
             console.print(
                 f"  [yellow]Upgrade available:[/yellow] "
                 f"{safe_str(upgrade_result.local)} → {safe_str(upgrade_result.latest)} "
                 f"(run [bold]{safe_str(upgrade_result.install_cmd)}[/bold])"
             )
-            if upgrade_result.install_attempt == "failed":
+            if (
+                upgrade_result.install_attempt == "failed"
+                or upgrade_result.install_failure == "install-failed"
+            ):
                 console.print(
                     "  [yellow]Automatic update did not complete:[/yellow] "
                     "run [bold]mm update[/bold] to see why."
                 )
+                install_failed_shown = True
+        if upgrade_result.check_failure is not None:
+            what, fix = upgrade.problem_text(upgrade_result.check_failure, stage="check")
+            tried_date = (
+                upgrade_result.check_failure_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
+                if upgrade_result.check_failure_at is not None
+                else ""
+            )
+            tried = f" (last tried {tried_date})" if tried_date else ""
+            console.print(
+                f"  [yellow]Upgrade check failing:[/yellow] "
+                f"{safe_str(what)}{tried}. {safe_str(fix)}",
+                soft_wrap=True,
+            )
         elif upgrade_result.state == "unknown":
             reason = (
                 "contended"
@@ -1083,6 +1101,20 @@ def status(
                 else upgrade_result.cache_state
             )
             console.print(f"  Upgrade check: unknown ({safe_str(reason)} cache).")
+        if upgrade_result.install_failure is not None:
+            if upgrade_result.install_failure == "install-failed":
+                if not install_failed_shown:
+                    console.print(
+                        "  [yellow]Automatic update did not complete:[/yellow] "
+                        "run [bold]mm update[/bold] to see why."
+                    )
+            else:
+                what, fix = upgrade.problem_text(upgrade_result.install_failure, stage="install")
+                console.print(
+                    f"  [yellow]Automatic update not running:[/yellow] "
+                    f"{safe_str(what)}. {safe_str(fix)}",
+                    soft_wrap=True,
+                )
         if upgrade_result.stale and upgrade_result.checked_at is not None:
             age = datetime.now(timezone.utc) - upgrade_result.checked_at
             console.print(f"  [dim]Upgrade cache: checked {age.days}d ago (stale).[/dim]")
@@ -2603,14 +2635,68 @@ def diag(
         if status not in ("ok", "absent") and target:
             console.print(f"    {target}")
 
-    console.print("\n[bold]Host usage[/bold]")
-    publication = state["host_publication"]
     try:
         # The cached view only: no fetch, no cache write. diag runs on broken
         # state, so any failure keeps the `mm update` remedy.
         upgrade_view = upgrade.cached_upgrade_view(cfg)
     except Exception:
         upgrade_view = None
+
+    console.print("\n[bold]Upgrade check[/bold]")
+    if upgrade_view is None:
+        console.print("  state:           unavailable")
+    else:
+        if upgrade_view.state == "unknown" and upgrade_view.cache_state:
+            reason = (
+                "contended"
+                if upgrade_view.cache_state == "lock_failed"
+                else upgrade_view.cache_state
+            )
+            state_shown = f"unknown ({safe_str(reason)} cache)"
+        else:
+            state_shown = safe_str(upgrade_view.state)
+        if upgrade_view.latest is not None:
+            checked_shown = (
+                f" (checked {upgrade_view.checked_at.isoformat()})"
+                if upgrade_view.checked_at is not None
+                else ""
+            )
+            latest_shown = f"{safe_str(upgrade_view.latest)}{checked_shown}"
+        else:
+            latest_shown = "none"
+        if upgrade_view.check_failure is not None:
+            at_shown = (
+                f" at {upgrade_view.check_failure_at.isoformat()}"
+                if upgrade_view.check_failure_at is not None
+                else ""
+            )
+            check_fail_shown = f"{safe_str(upgrade_view.check_failure)}{at_shown}"
+        else:
+            check_fail_shown = "none"
+        if upgrade_view.install_failure is not None:
+            at_shown = (
+                f" at {upgrade_view.install_failure_at.isoformat()}"
+                if upgrade_view.install_failure_at is not None
+                else ""
+            )
+            install_fail_shown = f"{safe_str(upgrade_view.install_failure)}{at_shown}"
+        else:
+            install_fail_shown = "none"
+        attempt_shown = safe_str(upgrade_view.install_attempt or "none")
+        console.print(f"  state:           {state_shown}", soft_wrap=True)
+        console.print(f"  latest release:  {latest_shown}", soft_wrap=True)
+        console.print(f"  check failure:   {check_fail_shown}", soft_wrap=True)
+        console.print(f"  install failure: {install_fail_shown}", soft_wrap=True)
+        console.print(f"  install attempt: {attempt_shown}", soft_wrap=True)
+        if upgrade_view.check_failure is not None:
+            what, fix = upgrade.problem_text(upgrade_view.check_failure, stage="check")
+            console.print(f"  fix:             {safe_str(what)} — {safe_str(fix)}", soft_wrap=True)
+        if upgrade_view.install_failure is not None:
+            what, fix = upgrade.problem_text(upgrade_view.install_failure, stage="install")
+            console.print(f"  fix:             {safe_str(what)} — {safe_str(fix)}", soft_wrap=True)
+
+    console.print("\n[bold]Host usage[/bold]")
+    publication = state["host_publication"]
     no_release = _no_release_readers(publication, state["host_usage"], upgrade_view)
     upgrade_required = _usage_capture_needs_upgrade(publication, state["host_usage"], upgrade_view)
     _print_host_publication(

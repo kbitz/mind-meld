@@ -3,7 +3,7 @@
 Covers:
   - check_for_upgrade: short-circuits, cache freshness, network failure, parse
     failure, nudge gate (version + 24h), tag selection (prerelease / local /
-    invalid filtered), pagination cap behavior.
+    invalid / peeled filtered across >100 tags).
   - detect_self_version_transition: dev-build no-op, first-run seed,
     upgrade/downgrade detection, within-invocation idempotency,
     cross-invocation idempotency.
@@ -17,8 +17,11 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
+import random
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import urllib.error
@@ -57,14 +60,14 @@ def _set_version(monkeypatch, version: str) -> None:
 def _stub_tags(monkeypatch, tag_names: list[str]) -> None:
     """Replace _fetch_tags with a static list of tag-name dicts."""
 
-    def _fake(_url: str = upgrade.TAGS_API_URL):
+    def _fake(*_a):
         return [{"name": n} for n in tag_names]
 
     monkeypatch.setattr(upgrade, "_fetch_tags", _fake)
 
 
 def _stub_tags_raises(monkeypatch, exc: Exception) -> None:
-    def _fake(_url: str = upgrade.TAGS_API_URL):
+    def _fake(*_a):
         raise exc
 
     monkeypatch.setattr(upgrade, "_fetch_tags", _fake)
@@ -521,52 +524,494 @@ class TestPullhistoryContract:
         assert records[0]["verb"] == "self-upgrade"
 
 
-# ── _fetch_tags adapter (tested directly per Codex finding #3) ───────────
+# ── _fetch_tags git adapter + no-prompt / failure recording (Track 124B) ──
 
 
-class TestFetchTagsAdapter:
-    def test_url_includes_per_page_100(self, monkeypatch):
-        captured: dict = {}
+class TestFetchTagsGitAdapter124B:
+    @pytest.mark.parametrize("seed", [124, 999])
+    def test_218_tags_any_order_picks_highest_stable_without_http(self, monkeypatch, seed):
+        _set_version(monkeypatch, "1.0.0")
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda *a, **kw: pytest.fail("urlopen must not be called"),
+        )
+        monkeypatch.setattr(upgrade, "find_git", lambda: "/usr/bin/git")
 
-        class _FakeResp:
-            def __enter__(self):
-                return self
+        # 214 stable tags v1.0.0 .. v1.2.13 (highest stable: v1.2.13), plus 4
+        # non-qualifying lines (prerelease, local-version, peeled tag above all
+        # stable tags, and a non-tag branch ref) = 218 lines total.
+        lines: list[str] = []
+        for idx in range(214):
+            minor = idx // 100
+            patch = idx % 100
+            lines.append(f"{idx:040x}\trefs/tags/v1.{minor}.{patch}")
+        lines.extend(
+            [
+                f"{'a' * 40}\trefs/tags/v2.0.0-rc1",
+                f"{'b' * 40}\trefs/tags/v1.9.9+local",
+                f"{'c' * 40}\trefs/tags/v9.9.9^{{}}",
+                f"{'d' * 40}\trefs/heads/latest",
+            ]
+        )
+        assert len(lines) == 218
+        rng = random.Random(seed)
+        rng.shuffle(lines)
+        payload = ("\n".join(lines) + "\n").encode("utf-8")
 
-            def __exit__(self, *_a):
-                return False
+        def _fake_run_git(argv, *, env, timeout):
+            if "config" in argv:
+                return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"")
+            assert argv == ["/usr/bin/git", "ls-remote", "--tags", "--refs", upgrade.REPO_URL]
+            assert env.get("LC_ALL") == "C"
+            assert timeout == upgrade.CHECK_TIMEOUT_SECONDS
+            return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr=b"")
 
-            def read(self):
-                return b"[]"
+        monkeypatch.setattr(upgrade, "_run_git", _fake_run_git)
+        result = upgrade.check_for_upgrade(force=True)
+        assert result.state == "upgrade-available"
+        assert result.latest == "1.2.13"
+        assert result.check_failure is None
+        saved = json.loads(upgrade.CACHE_PATH.read_text())
+        assert saved["latest_version"] == "1.2.13"
+        assert saved["check_failure_cause"] is None
+        assert saved["check_failure_at"] is None
 
-        def _fake_urlopen(req, timeout=None):
-            captured["url"] = req.full_url
-            captured["headers"] = dict(req.header_items())
-            captured["timeout"] = timeout
-            return _FakeResp()
+    @pytest.mark.parametrize(
+        ("stderr_text", "expected_cause"),
+        [
+            (
+                "fatal: could not read Username for 'https://github.com': "
+                "terminal prompts disabled",
+                "not-readable",
+            ),
+            (
+                "fatal: could not read Password for 'https://github.com': No such device",
+                "not-readable",
+            ),
+            ("fatal: terminal prompts disabled", "not-readable"),
+            ("remote: Invalid username or token.\nfatal: Authentication failed", "not-readable"),
+            ("remote: Repository not found.\nfatal: repository not found", "not-readable"),
+            ("git@github.com: Permission denied (publickey).", "not-readable"),
+            ("Host key verification failed.", "not-readable"),
+            (
+                "fatal: unable to access '...': The requested URL returned error: 401",
+                "not-readable",
+            ),
+            (
+                "fatal: unable to access '...': The requested URL returned error: 403",
+                "not-readable",
+            ),
+            ("fatal: unable to access '...': Could not resolve host: github.com", "network"),
+            ("ssh: connect to host github.com port 22: Connection timed out", "network"),
+        ],
+    )
+    def test_classification_table_stderr_samples(self, monkeypatch, stderr_text, expected_cause):
+        _set_version(monkeypatch, "1.0.0")
+        monkeypatch.setattr(upgrade, "find_git", lambda: "/usr/bin/git")
 
-        monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
-        result = upgrade._fetch_tags()
-        assert result == []
-        assert "per_page=100" in captured["url"]
-        assert captured["timeout"] == upgrade.HTTP_TIMEOUT_SECONDS
-        # Headers normalize to title-case in urllib's Request
-        assert any("user-agent" in k.lower() for k in captured["headers"])
-        assert any("accept" in k.lower() for k in captured["headers"])
+        def _fake_run_git(argv, *, env, timeout):
+            if "config" in argv:
+                return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"")
+            return subprocess.CompletedProcess(
+                argv, 128, stdout=b"", stderr=stderr_text.encode("utf-8")
+            )
 
-    def test_non_array_response_raises(self, monkeypatch):
-        class _FakeResp:
-            def __enter__(self):
-                return self
+        monkeypatch.setattr(upgrade, "_run_git", _fake_run_git)
+        res = upgrade.check_for_upgrade(force=True)
+        assert res.state == "unknown"
+        assert res.check_failure == expected_cause
+        saved = json.loads(upgrade.CACHE_PATH.read_text())
+        assert saved["check_failure_cause"] == expected_cause
 
-            def __exit__(self, *_a):
-                return False
+    def test_classification_empty_tags_git_missing_oserror_and_timeout(self, monkeypatch):
+        _set_version(monkeypatch, "1.0.0")
 
-            def read(self):
-                return b'{"not": "an array"}'
+        # 1) exit 0 with no tags -> unparseable
+        monkeypatch.setattr(upgrade, "find_git", lambda: "/usr/bin/git")
+        monkeypatch.setattr(
+            upgrade,
+            "_run_git",
+            lambda argv, *, env, timeout: subprocess.CompletedProcess(
+                argv, 0, stdout=b"", stderr=b""
+            ),
+        )
+        res = upgrade.check_for_upgrade(force=True)
+        assert res.check_failure == "unparseable"
 
-        monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_kw: _FakeResp())
-        with pytest.raises(json.JSONDecodeError):
-            upgrade._fetch_tags()
+        # 2) find_git returning None -> git-missing
+        monkeypatch.setattr(upgrade, "find_git", lambda: None)
+        res = upgrade.check_for_upgrade(force=True)
+        assert res.check_failure == "git-missing"
+
+        # 3) PermissionError from seam -> unexpected:PermissionError
+        monkeypatch.setattr(upgrade, "find_git", lambda: "/usr/bin/git")
+
+        def _raise_perm(argv, *, env, timeout):
+            if "config" in argv:
+                return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"")
+            raise PermissionError("blocked by sandbox")
+
+        monkeypatch.setattr(upgrade, "_run_git", _raise_perm)
+        res = upgrade.check_for_upgrade(force=True)
+        assert res.check_failure == "unexpected:PermissionError"
+
+        # 4) TimeoutExpired -> network
+        def _raise_timeout(argv, *, env, timeout):
+            if "config" in argv:
+                return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"")
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        monkeypatch.setattr(upgrade, "_run_git", _raise_timeout)
+        res = upgrade.check_for_upgrade(force=True)
+        assert res.check_failure == "network"
+
+    def test_fake_git_script_records_argv_cwd_env_closed_stdin_and_new_session(
+        self, monkeypatch, tmp_path
+    ):
+        _set_version(monkeypatch, "1.0.0")
+        monkeypatch.setattr(upgrade, "_refuse_git_under_pytest", lambda: None)
+        monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+        monkeypatch.delenv("GIT_SSH", raising=False)
+        monkeypatch.delenv("GIT_HTTP_LOW_SPEED_LIMIT", raising=False)
+        monkeypatch.delenv("GIT_HTTP_LOW_SPEED_TIME", raising=False)
+
+        record_file = tmp_path / "git-invocation.json"
+        fake_git = tmp_path / "fake-git"
+        fake_git.write_text(
+            f"#!{sys.executable}\n"
+            + textwrap.dedent(
+                f"""
+                import json, os, sys
+                if sys.argv[1:2] == ["config"]:
+                    sys.exit(1)
+                stdin_data = sys.stdin.read()
+                info = {{
+                    "argv": sys.argv[1:],
+                    "cwd": os.getcwd(),
+                    "stdin_eof": stdin_data == "",
+                    "new_session": os.getsid(0) == os.getpid(),
+                    "env": {{
+                        k: os.environ.get(k)
+                        for k in (
+                            "GIT_TERMINAL_PROMPT",
+                            "GIT_ASKPASS",
+                            "SSH_ASKPASS",
+                            "SSH_ASKPASS_REQUIRE",
+                            "GCM_INTERACTIVE",
+                            "GIT_HTTP_LOW_SPEED_LIMIT",
+                            "GIT_HTTP_LOW_SPEED_TIME",
+                            "GIT_SSH_COMMAND",
+                            "LC_ALL",
+                        )
+                    }},
+                }}
+                with open({str(record_file)!r}, "w", encoding="utf-8") as fh:
+                    json.dump(info, fh)
+                sys.stdout.write("0123456789abcdef0123456789abcdef01234567\\trefs/tags/v1.3.0\\n")
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+        monkeypatch.setattr(upgrade, "find_git", lambda: str(fake_git))
+
+        res = upgrade.check_for_upgrade(force=True)
+        assert res.state == "upgrade-available"
+        assert res.latest == "1.3.0"
+
+        recorded = json.loads(record_file.read_text(encoding="utf-8"))
+        assert recorded["argv"] == ["ls-remote", "--tags", "--refs", upgrade.REPO_URL]
+        assert Path(recorded["cwd"]).resolve() == Path(tempfile.gettempdir()).resolve()
+        assert recorded["stdin_eof"] is True
+        assert recorded["new_session"] is True
+        env = recorded["env"]
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GIT_ASKPASS"] == ""
+        assert env["SSH_ASKPASS"] == ""
+        assert env["SSH_ASKPASS_REQUIRE"] == "never"
+        assert env["GCM_INTERACTIVE"] == "never"
+        assert env["GIT_HTTP_LOW_SPEED_LIMIT"] == "1000"
+        assert env["GIT_HTTP_LOW_SPEED_TIME"] == "60"
+        assert env["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
+        assert env["LC_ALL"] == "C"
+
+    def test_fake_git_reading_stdin_and_failing_auth_returns_not_readable_promptly(
+        self, monkeypatch, tmp_path
+    ):
+        _set_version(monkeypatch, "1.0.0")
+        monkeypatch.setattr(upgrade, "_refuse_git_under_pytest", lambda: None)
+        fake_git = tmp_path / "fake-git-auth"
+        fake_git.write_text(
+            f"#!{sys.executable}\n"
+            + textwrap.dedent(
+                """
+                import sys
+                if sys.argv[1:2] == ["config"]:
+                    sys.exit(1)
+                _ = sys.stdin.read()
+                sys.stderr.write(
+                    "fatal: could not read Username for 'https://github.com': "
+                    "terminal prompts disabled\\n"
+                )
+                sys.exit(128)
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+        monkeypatch.setattr(upgrade, "find_git", lambda: str(fake_git))
+
+        start = time.monotonic()
+        res = upgrade.check_for_upgrade(force=True)
+        elapsed = time.monotonic() - start
+        # gstack-timing-ok: closed stdin must prevent an authentication prompt from waiting.
+        assert elapsed < 5.0
+        assert res.state == "unknown"
+        assert res.check_failure == "not-readable"
+
+    def test_timeout_kills_sleeping_grandchild_and_records_network(self, monkeypatch, tmp_path):
+        _set_version(monkeypatch, "1.0.0")
+        monkeypatch.setattr(upgrade, "_refuse_git_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "CHECK_TIMEOUT_SECONDS", 1)
+        pid_file = tmp_path / "grandchild.pid"
+        fake_git = tmp_path / "fake-git-sleep"
+        fake_git.write_text(
+            f"#!{sys.executable}\n"
+            + textwrap.dedent(
+                f"""
+                import subprocess, sys, time
+                if sys.argv[1:2] == ["config"]:
+                    sys.exit(1)
+                child = subprocess.Popen(
+                    [{sys.executable!r}, "-c", "import time; time.sleep(60)"]
+                )
+                with open({str(pid_file)!r}, "w", encoding="utf-8") as fh:
+                    fh.write(str(child.pid))
+                time.sleep(60)
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+        monkeypatch.setattr(upgrade, "find_git", lambda: str(fake_git))
+
+        start = time.monotonic()
+        res = upgrade.check_for_upgrade(force=True)
+        elapsed = time.monotonic() - start
+        # gstack-timing-ok: forced 1s subprocess timeout must bound descendant cleanup too.
+        assert elapsed < 5.0
+        assert res.state == "unknown"
+        assert res.check_failure == "network"
+        grandchild_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        with pytest.raises(ProcessLookupError):
+            os.kill(grandchild_pid, 0)
+
+    def test_no_prompt_environment_ssh_command_precedence(self, monkeypatch):
+        # 1) Existing GIT_SSH_COMMAND gets -o BatchMode=yes appended
+        env = upgrade._no_prompt_environment({"GIT_SSH_COMMAND": "ssh -p 2222"})
+        assert env["GIT_SSH_COMMAND"] == "ssh -p 2222 -o BatchMode=yes"
+
+        # 2) GIT_SSH alone leaves GIT_SSH_COMMAND unset
+        env = upgrade._no_prompt_environment({"GIT_SSH": "/usr/local/bin/custom-ssh"})
+        assert "GIT_SSH_COMMAND" not in env
+        assert env["GIT_SSH"] == "/usr/local/bin/custom-ssh"
+
+        # 3) core.sshCommand from git config is preserved with -o BatchMode=yes appended
+        monkeypatch.setattr(upgrade, "find_git", lambda: "/usr/bin/git")
+        monkeypatch.setattr(
+            upgrade,
+            "_run_git",
+            lambda argv, *, env, timeout: subprocess.CompletedProcess(
+                argv, 0, stdout=b"ssh -i /Users/user/.ssh/id_test\n", stderr=b""
+            ),
+        )
+        env = upgrade._no_prompt_environment({})
+        assert env["GIT_SSH_COMMAND"] == "ssh -i /Users/user/.ssh/id_test -o BatchMode=yes"
+
+        # 4) Failing config read falls back to ssh -o BatchMode=yes
+        def _fail_git(argv, *, env, timeout):
+            raise OSError("git config failed")
+
+        monkeypatch.setattr(upgrade, "_run_git", _fail_git)
+        env = upgrade._no_prompt_environment({})
+        assert env["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
+
+    def test_pytest_guard_refuses_before_spawning_git(self, monkeypatch, tmp_path):
+        marker = tmp_path / "ran-git"
+        fake_git = tmp_path / "fake-git-marker"
+        fake_git.write_text(
+            f"#!{sys.executable}\n"
+            f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n",
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+        monkeypatch.setattr(upgrade, "find_git", lambda: str(fake_git))
+
+        with pytest.raises(OSError, match="refusing to run git under pytest"):
+            upgrade._run_git([str(fake_git), "version"], env={}, timeout=1)
+        assert not marker.exists()
+
+
+class TestRecordedFailureCauses124B:
+    @pytest.mark.parametrize(
+        "outcome,cause", [("failed", None), ("failed", "unexpected:RuntimeError")]
+    )
+    def test_retry_gate_preserves_explicit_outcome_and_cause(self, outcome, cause):
+        now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+        cache = upgrade._empty_cache()
+        cache.update(
+            install_attempt_version="1.1.0",
+            install_attempt_at=now.isoformat(),
+            install_attempt_outcome=outcome,
+            install_failure_cause=cause,
+            install_failure_at=now.isoformat() if cause else None,
+        )
+        upgrade.CACHE_PATH.write_text(json.dumps(cache))
+        before = upgrade.CACHE_PATH.read_bytes()
+        assert upgrade._claim_install_attempt("1.1.0", now=now) == "failed"
+        assert json.loads(upgrade.CACHE_PATH.read_text())["install_failure_cause"] == cause
+        assert upgrade.CACHE_PATH.read_bytes() == before
+
+    @pytest.mark.parametrize("cause", upgrade.INSTALL_FAILURE_CAUSES + ("unexpected:RuntimeError",))
+    def test_current_view_hides_obsolete_install_failure_without_writing(self, monkeypatch, cause):
+        _set_version(monkeypatch, "1.1.0")
+        now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+        cache = upgrade._empty_cache()
+        cache.update(
+            latest_version="1.1.0",
+            checked_at=now.isoformat(),
+            install_failure_cause=cause,
+            install_failure_at=now.isoformat(),
+        )
+        upgrade.CACHE_PATH.write_text(json.dumps(cache))
+        before = upgrade.CACHE_PATH.read_bytes()
+        view = upgrade.cached_upgrade_view({}, now=now)
+        assert view.state == "current"
+        assert view.install_failure is None
+        assert view.install_failure_at is None
+        assert upgrade.CACHE_PATH.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        ("cause", "exc_or_tags"),
+        [
+            ("not-readable", upgrade._CheckFailed("not-readable")),
+            ("network", OSError("network down")),
+            ("unparseable", ValueError("bad tag data")),
+            ("git-missing", upgrade._CheckFailed("git-missing")),
+            ("unexpected:RuntimeError", RuntimeError("secret message /Users/user/path")),
+        ],
+    )
+    def test_each_check_cause_is_recorded_and_cleared_by_next_success(
+        self, monkeypatch, cause, exc_or_tags
+    ):
+        _set_version(monkeypatch, "1.0.0")
+        t0 = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+        _stub_tags_raises(monkeypatch, exc_or_tags)
+
+        res = upgrade.check_for_upgrade(now=t0)
+        assert res.state == "unknown"
+        assert res.check_failure == cause
+        assert res.check_failure_at == t0
+
+        raw = json.loads(upgrade.CACHE_PATH.read_text(encoding="utf-8"))
+        assert raw["check_failure_cause"] == cause
+        assert raw["check_failure_at"] == t0.isoformat()
+
+        # Fresh-cache and backoff paths leave the recorded check failure untouched
+        t_backoff = t0 + timedelta(hours=1)
+        _stub_tags(monkeypatch, ["v1.1.0"])
+        res_backoff = upgrade.check_for_upgrade(now=t_backoff)
+        assert res_backoff.state == "unknown"
+        raw_backoff = json.loads(upgrade.CACHE_PATH.read_text(encoding="utf-8"))
+        assert raw_backoff["check_failure_cause"] == cause
+
+        # Next fetch after backoff clears check_failure_cause and check_failure_at
+        t_retry = t0 + upgrade.DEFAULT_FAILURE_BACKOFF + timedelta(minutes=1)
+        res_ok = upgrade.check_for_upgrade(now=t_retry)
+        assert res_ok.state == "upgrade-available"
+        assert res_ok.check_failure is None
+        raw_ok = json.loads(upgrade.CACHE_PATH.read_text(encoding="utf-8"))
+        assert raw_ok["check_failure_cause"] is None
+        assert raw_ok["check_failure_at"] is None
+
+        # And a fresh-cache call also leaves check_failure_cause untouched when set
+        raw_ok["check_failure_cause"] = "network"
+        raw_ok["check_failure_at"] = t_retry.isoformat()
+        upgrade.CACHE_PATH.write_text(json.dumps(raw_ok), encoding="utf-8")
+        res_fresh = upgrade.check_for_upgrade(now=t_retry + timedelta(minutes=5))
+        assert res_fresh.state == "upgrade-available"
+        raw_after_fresh = json.loads(upgrade.CACHE_PATH.read_text(encoding="utf-8"))
+        assert raw_after_fresh["check_failure_cause"] == "network"
+
+    def test_stderr_and_exception_secrets_never_enter_cache_json(self, monkeypatch):
+        _set_version(monkeypatch, "1.0.0")
+        monkeypatch.setattr(upgrade, "find_git", lambda: "/usr/bin/git")
+        synthetic_url = "https://" + "@".join((":".join(("user", "pw-placeholder")), "github.com"))
+        sensitive_stderr = (
+            "fatal: Authentication failed for "
+            f"'{synthetic_url}/kbitz/mind-meld.git/' "
+            "from /Users/user/.gitconfig\n"
+        )
+        monkeypatch.setattr(
+            upgrade,
+            "_run_git",
+            lambda argv, *, env, timeout: subprocess.CompletedProcess(
+                argv, 128, stdout=b"", stderr=sensitive_stderr.encode("utf-8")
+            ),
+        )
+        upgrade.check_for_upgrade(force=True)
+        raw_text = upgrade.CACHE_PATH.read_text(encoding="utf-8")
+        assert "pw-placeholder" not in raw_text
+        assert "github.com" not in raw_text
+        assert "/Users/user" not in raw_text
+        assert "Authentication failed" not in raw_text
+        assert json.loads(raw_text)["check_failure_cause"] == "not-readable"
+
+        # Unexpected exception stores only the class name, never message text
+        _stub_tags_raises(
+            monkeypatch,
+            KeyError(f"{synthetic_url} /Users/user/secret"),
+        )
+        upgrade.check_for_upgrade(force=True)
+        raw_text_exc = upgrade.CACHE_PATH.read_text(encoding="utf-8")
+        assert "pw-placeholder" not in raw_text_exc
+        assert "/Users/user" not in raw_text_exc
+        assert json.loads(raw_text_exc)["check_failure_cause"] == "unexpected:KeyError"
+
+    def test_pre_124b_cache_and_unknown_values_read_as_no_record(self, monkeypatch):
+        _set_version(monkeypatch, "1.0.0")
+        now = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+        pre_124b = {
+            "latest_version": "1.0.0",
+            "checked_at": now.isoformat(),
+            "attempted_at": now.isoformat(),
+            "last_nudged_version": None,
+            "last_nudged_at": None,
+            "last_seen_self_version": "1.0.0",
+        }
+        normalized = upgrade._normalize_cache(pre_124b)
+        assert normalized["check_failure_cause"] is None
+        assert normalized["check_failure_at"] is None
+        assert normalized["install_failure_cause"] is None
+        assert normalized["install_failure_at"] is None
+
+        upgrade.CACHE_PATH.write_text(json.dumps(pre_124b), encoding="utf-8")
+        view = upgrade.cached_upgrade_view({}, now=now)
+        assert view.check_failure is None
+        assert view.install_failure is None
+
+        # Unknown / hand-edited cause strings validate to None
+        bogus = dict(pre_124b)
+        bogus["check_failure_cause"] = "custom-message: /Users/user"
+        bogus["check_failure_at"] = now.isoformat()
+        bogus["install_failure_cause"] = "unexpected:not valid identifier!"
+        bogus["install_failure_at"] = now.isoformat()
+        upgrade.CACHE_PATH.write_text(json.dumps(bogus), encoding="utf-8")
+        view_bogus = upgrade.cached_upgrade_view({}, now=now)
+        assert view_bogus.check_failure is None
+        assert view_bogus.check_failure_at is None
+        assert view_bogus.install_failure is None
+        assert view_bogus.install_failure_at is None
 
 
 # ── Race pin (Codex F4): two concurrent processes, exactly ONE row ───────

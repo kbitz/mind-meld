@@ -1,6 +1,6 @@
-"""Self-update: check GitHub /tags for a newer release, install it through pipx
-when that is safe, otherwise nudge once per 24h via stderr; log self-version
-transitions to pullhistory.
+"""Self-update: check GitHub release tags for a newer release, install it
+through pipx when that is safe, otherwise nudge once per 24h via stderr; log
+self-version transitions to pullhistory.
 
 Two ways mm runs pipx (v1.3.0), and they are deliberately not the same command:
 
@@ -15,11 +15,12 @@ Two ways mm runs pipx (v1.3.0), and they are deliberately not the same command:
 
 See docs/invariants/auto-upgrade.md.
 
-Version source: pyproject.toml on main (raw.githubusercontent.com... actually,
-NO — switched to the /tags API in eng review). The repo has tags v0.3.0..vX.Y.Z
-but no GitHub Releases. We fetch /tags (public, no auth), filter to
-non-prerelease semver tags, take the max via packaging.Version. Tag prefix `v`
-stripped before comparison.
+Version source: `git ls-remote --tags --refs` over `REPO_URL`, the same URL
+pip clones for `INSTALL_SPEC`, using the machine's own git configuration and
+credentials in a non-interactive environment. The repository tags releases
+v0.3.0..vX.Y.Z without GitHub Releases; we read the complete tag list, filter
+to non-prerelease non-local-version semver tags, and take the maximum via
+packaging.Version with the leading `v` stripped.
 
 Cache: single JSON file at ~/.config/mind-meld/upgrade-state.json, fcntl-flocked
 on every read+modify+write so transition detection is race-correct under two
@@ -37,10 +38,12 @@ Lock-order invariants (load-bearing):
      correctness is bounded by upgrade-state's own flock. Status and push
      preview skip this hook so inspection does not consume transitions.
 
-Visible-failure stance: this is NOT a data-at-risk signal. Network failures
-degrade silently because `_check_fleet_version_or_refuse` already backstops
-mixed-version drift. The nudge uses prefix `mm: notice:` (NOT `mm: warning:`)
-so the warning-class reader trust stays focused on data-at-risk signals only.
+Visible-failure stance: this is NOT a data-at-risk signal. Check and automatic
+install failures degrade silently on sync commands (`_check_fleet_version_or_refuse`
+already backstops mixed-version drift) and are recorded in `upgrade-state.json`
+for `mm status`, `mm diag`, and `mm update`. The nudge uses prefix `mm: notice:`
+(NOT `mm: warning:`) so the warning-class reader trust stays focused on
+data-at-risk signals only.
 """
 
 from __future__ import annotations
@@ -59,16 +62,14 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import threading
 import time
-import urllib.error
-import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -83,11 +84,6 @@ from mind_meld.safety import safe_terminal_str, strip_terminal_escapes
 CACHE_DIR = Path.home() / ".config" / "mind-meld"
 CACHE_PATH = CACHE_DIR / "upgrade-state.json"
 
-# Tag-based version source. /tags returns up to 100 entries on page 1 with
-# per_page=100; that's ~3 years of headroom at current release velocity.
-# After 100 tags, the latest semver may not be on page 1 (GitHub /tags sort
-# is unspecified); revisit then. See plan §"Pagination" for analysis.
-TAGS_API_URL = "https://api.github.com/repos/kbitz/mind-meld/tags?per_page=100"
 # Upgrade command tracks the moving `latest` branch (force-advanced to each
 # tagged release by .github/workflows/release.yml), NOT a frozen `@vX.Y.Z` tag.
 # A git `@<ref>` is a URL fragment, not a PEP508 version specifier, so pipx's
@@ -96,16 +92,25 @@ TAGS_API_URL = "https://api.github.com/repos/kbitz/mind-meld/tags?per_page=100"
 # stuck on one version), while a branch ref re-resolves to its advancing HEAD.
 # The `--force` reinstall both lands the latest release AND rewrites a
 # previously tag-pinned install's recorded URL onto `@latest`, after which a
-# plain `pipx upgrade mind-meld` works. See docs/invariants/auto-upgrade.md.
+# plain `pipx upgrade mind-meld` works.
+# Tag checks list `refs/tags/*` directly from `REPO_URL` with `git ls-remote`
+# so the check uses the same git configuration, `insteadOf` rewrites, and
+# credentials as pip's clone of `INSTALL_SPEC`, with no pagination cap.
+# See docs/invariants/auto-upgrade.md.
 REPO_SPEC = "git+https://github.com/kbitz/mind-meld.git"
+REPO_URL = REPO_SPEC.removeprefix("git+")
 INSTALL_SPEC = f"{REPO_SPEC}@latest"
 INSTALL_CMD = f"pipx install --force {INSTALL_SPEC}"
 
 DEFAULT_THROTTLE = timedelta(hours=24)
 DEFAULT_NUDGE_GAP = timedelta(hours=24)
 DEFAULT_FAILURE_BACKOFF = timedelta(hours=4)
-HTTP_TIMEOUT_SECONDS = 10
+CHECK_TIMEOUT_SECONDS = 10
+SSH_CONFIG_TIMEOUT_SECONDS = 5
 DEV_BUILD_SENTINEL = "0.0.0+dev"
+
+CHECK_FAILURE_CAUSES = ("not-readable", "network", "unparseable", "git-missing")
+INSTALL_FAILURE_CAUSES = ("not-tracking", "pipx-missing", "install-failed")
 
 # One automatic install attempt per release per day. A newer release resets
 # the gate; a failed attempt falls back to the nudge until the gap elapses.
@@ -179,6 +184,8 @@ class UpgradeCheckResult:
     `checked_at` / `stale` carry the cache's age for status display.
     `install_attempt` is the automatic install's state for `latest`
     (`in-flight` / `failed`), None when none was made (`cached_upgrade_view`).
+    `check_failure` / `check_failure_at` and `install_failure` /
+    `install_failure_at` carry the recorded failure cause and timestamp.
     """
 
     state: str
@@ -190,6 +197,10 @@ class UpgradeCheckResult:
     stale: bool = False
     cache_state: str | None = None
     install_attempt: str | None = None
+    check_failure: str | None = None
+    check_failure_at: datetime | None = None
+    install_failure: str | None = None
+    install_failure_at: datetime | None = None
 
 
 # ── Cache I/O (single file, single flock — via mind_meld.lockedjson) ──────
@@ -206,6 +217,10 @@ def _empty_cache() -> dict[str, Any]:
         "install_attempt_version": None,
         "install_attempt_at": None,
         "install_attempt_outcome": None,
+        "check_failure_cause": None,
+        "check_failure_at": None,
+        "install_failure_cause": None,
+        "install_failure_at": None,
     }
 
 
@@ -219,33 +234,274 @@ def _normalize_cache(parsed: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
-# ── Tag-list HTTP adapter (testable seam) ─────────────────────────────────
+class _CheckFailed(Exception):
+    """Tag-check failure with a fixed cause token."""
+
+    def __init__(self, cause: str) -> None:
+        super().__init__(cause)
+        self.cause = cause
 
 
-def _fetch_tags(url: str = TAGS_API_URL) -> list[dict[str, Any]]:
-    """Fetch the GitHub /tags response. Network adapter for testability.
+def _unexpected_cause(error: BaseException) -> str:
+    name = type(error).__name__
+    if name.isidentifier() and len(name) <= 64:
+        return f"unexpected:{name}"
+    return "unexpected:Exception"
 
-    Tests monkeypatch THIS function; tests of the function itself patch
-    `urllib.request.urlopen`. This split keeps `check_for_upgrade` tests
-    free of HTTP details while still letting `_fetch_tags` be exercised
-    against the real wire shape.
 
-    Raises urllib.error.URLError, urllib.error.HTTPError, OSError, or
-    json.JSONDecodeError. Caller catches and treats as "unknown" outcome.
-    """
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": f"mm/{__version__}",
-            "Accept": "application/vnd.github+json",
-        },
+def _valid_cause(value: Any, allowed: tuple[str, ...]) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if value in allowed:
+        return value
+    if value.startswith("unexpected:"):
+        cls_name = value.removeprefix("unexpected:")
+        if cls_name and cls_name.isidentifier() and len(cls_name) <= 64:
+            return value
+    return None
+
+
+def problem_text(cause: str, *, stage: str = "check") -> tuple[str, str]:
+    """Return `(what_failed, fix_command)` for a recorded check or install cause."""
+    if cause == "not-readable":
+        return (
+            "mm could not read the release tags with this machine's git credentials",
+            "Run: gh auth setup-git",
+        )
+    if cause == "network":
+        return (
+            "Could not reach GitHub to check the latest release",
+            "Run: mm update",
+        )
+    if cause == "unparseable":
+        return (
+            "GitHub listed no release tag mm could read",
+            "Run: mm update",
+        )
+    if cause == "git-missing":
+        return (
+            "git was not found on PATH",
+            "Install git, then run: mm update",
+        )
+    if cause == "not-tracking":
+        return (
+            "this mm was not installed by pipx from the release branch, "
+            "so it does not update itself",
+            "Run: mm update",
+        )
+    if cause == "pipx-missing":
+        return (
+            "pipx was not found, so mm cannot update itself",
+            "Install pipx, then run: mm update",
+        )
+    if cause == "install-failed":
+        return (
+            "automatic update did not complete",
+            "Run: mm update",
+        )
+    if cause.startswith("unexpected:"):
+        raw_cls = cause.removeprefix("unexpected:")
+        cls_name = (
+            raw_cls
+            if raw_cls and raw_cls.isidentifier() and len(raw_cls) <= 64
+            else (safe_terminal_str(raw_cls) or "Exception")
+        )
+        return (
+            f"unexpected {stage} error ({cls_name})",
+            "Run: mm update",
+        )
+    return (
+        f"unexpected {stage} error",
+        "Run: mm update",
     )
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
-        body = resp.read()
-    parsed = json.loads(body.decode("utf-8"))
-    if not isinstance(parsed, list):
-        raise json.JSONDecodeError("expected JSON array", "", 0)
-    return parsed
+
+
+# ── Tag-list git adapter (testable seam) ──────────────────────────────────
+
+
+def find_git() -> str | None:
+    """Locate git on the process PATH only (never fallback to /usr/bin/git)."""
+    return shutil.which("git")
+
+
+def _refuse_git_under_pytest() -> None:
+    """Prevent unstubbed tests from reaching a real git remote, credential
+    helper, or network. Separate from `_refuse_under_pytest` so pipx tests
+    that disable the pipx guard never enable a real git subprocess."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        raise OSError("refusing to run git under pytest")
+
+
+def _run_git(
+    argv: list[str], *, env: dict[str, str], timeout: float
+) -> subprocess.CompletedProcess[bytes]:
+    """Run git in a detached session with stdin closed and no controlling tty.
+
+    Subprocess seam: tests replace THIS function wholesale, or turn off
+    `_refuse_git_under_pytest` and point `find_git` at a synthetic script.
+    """
+    _refuse_git_under_pytest()
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=tempfile.gettempdir(),
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException:
+        stop_deadline = time.monotonic() + 1.0
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+        try:
+            proc.wait(timeout=max(0.0, stop_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+        while time.monotonic() < stop_deadline:
+            try:
+                os.killpg(proc.pid, 0)
+            except (ProcessLookupError, PermissionError):
+                break
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                break
+            time.sleep(0.02)
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout=stdout, stderr=stderr)
+
+
+def _no_prompt_environment(base: Mapping[str, str]) -> dict[str, str]:
+    """Build a non-interactive environment for git and pipx subprocesses."""
+    env = dict(base)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS"] = ""
+    env["SSH_ASKPASS_REQUIRE"] = "never"
+    env["GCM_INTERACTIVE"] = "never"
+    if not env.get("GIT_HTTP_LOW_SPEED_LIMIT"):
+        env["GIT_HTTP_LOW_SPEED_LIMIT"] = "1000"
+    if not env.get("GIT_HTTP_LOW_SPEED_TIME"):
+        env["GIT_HTTP_LOW_SPEED_TIME"] = "60"
+
+    existing_ssh_cmd = env.get("GIT_SSH_COMMAND", "").strip()
+    if existing_ssh_cmd:
+        if "BatchMode=yes" not in existing_ssh_cmd:
+            env["GIT_SSH_COMMAND"] = f"{existing_ssh_cmd} -o BatchMode=yes"
+        else:
+            env["GIT_SSH_COMMAND"] = existing_ssh_cmd
+    elif env.get("GIT_SSH", "").strip():
+        env.pop("GIT_SSH_COMMAND", None)
+    else:
+        ssh_base = "ssh"
+        git = find_git()
+        if git is not None:
+            probe_env = dict(env)
+            probe_env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+            try:
+                proc = _run_git(
+                    [git, "config", "--get", "core.sshCommand"],
+                    env=probe_env,
+                    timeout=min(SSH_CONFIG_TIMEOUT_SECONDS, CHECK_TIMEOUT_SECONDS),
+                )
+                if proc.returncode == 0 and proc.stdout:
+                    raw = (
+                        proc.stdout.decode("utf-8", errors="replace")
+                        if isinstance(proc.stdout, bytes)
+                        else str(proc.stdout)
+                    ).strip()
+                    if raw and "\n" not in raw and "\t" not in raw and "refs/" not in raw:
+                        ssh_base = raw
+            except Exception:
+                ssh_base = "ssh"
+        if "BatchMode=yes" in ssh_base:
+            env["GIT_SSH_COMMAND"] = ssh_base
+        else:
+            env["GIT_SSH_COMMAND"] = f"{ssh_base} -o BatchMode=yes"
+    return env
+
+
+_NOT_READABLE_PATTERNS = (
+    "could not read username",
+    "could not read password",
+    "terminal prompts disabled",
+    "authentication failed",
+    "repository not found",
+    "permission denied",
+    "host key verification failed",
+    "returned error: 401",
+    "returned error: 403",
+)
+
+
+def _classify_git_failure(stderr: str) -> str:
+    """Map git stderr to a fixed cause string without retaining stderr text."""
+    lowered = stderr.lower()
+    for pattern in _NOT_READABLE_PATTERNS:
+        if pattern in lowered:
+            return "not-readable"
+    return "network"
+
+
+def _fetch_tags() -> list[dict[str, Any]]:
+    """List release tags from `REPO_URL` using the machine's git configuration.
+
+    Tests monkeypatch THIS function or `_run_git`. Returns `[{"name": "vX.Y.Z"}, ...]`
+    with peeled (`^{}`) and non-tag refs excluded.
+    """
+    git = find_git()
+    if git is None:
+        raise _CheckFailed("git-missing")
+    env = _no_prompt_environment(os.environ)
+    env["LC_ALL"] = "C"
+    try:
+        proc = _run_git(
+            [git, "ls-remote", "--tags", "--refs", REPO_URL],
+            env=env,
+            timeout=CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise _CheckFailed("network") from error
+    except FileNotFoundError as error:
+        raise _CheckFailed("git-missing") from error
+    except OSError as error:
+        raise _CheckFailed(_unexpected_cause(error)) from error
+
+    if proc.returncode != 0:
+        stderr = (
+            proc.stderr.decode("utf-8", errors="replace")
+            if isinstance(proc.stderr, bytes)
+            else str(proc.stderr or "")
+        )
+        raise _CheckFailed(_classify_git_failure(stderr))
+
+    stdout = (
+        proc.stdout.decode("utf-8", errors="replace")
+        if isinstance(proc.stdout, bytes)
+        else str(proc.stdout or "")
+    )
+    tags: list[dict[str, Any]] = []
+    for line in stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        ref = parts[1]
+        if not ref.startswith("refs/tags/"):
+            continue
+        name = ref.removeprefix("refs/tags/")
+        if not name or name.endswith("^{}"):
+            continue
+        tags.append({"name": name})
+    return tags
 
 
 # ── Tag selection: max-semver, skip prerelease + local versions ───────────
@@ -299,15 +555,51 @@ def cached_upgrade_view(
     with locked_json_snapshot(CACHE_PATH, blocking=False) as snapshot:
         if snapshot.state != "valid" or snapshot.data is None:
             return UpgradeCheckResult("unknown", local, None, None, cache_state=snapshot.state)
+        check_failure = _valid_cause(snapshot.data.get("check_failure_cause"), CHECK_FAILURE_CAUSES)
+        check_failure_at = (
+            _parse_iso(snapshot.data.get("check_failure_at")) if check_failure else None
+        )
+        install_failure = _valid_cause(
+            snapshot.data.get("install_failure_cause"), INSTALL_FAILURE_CAUSES
+        )
+        install_failure_at = (
+            _parse_iso(snapshot.data.get("install_failure_at")) if install_failure else None
+        )
         latest = snapshot.data.get("latest_version")
         checked_at = _parse_iso(snapshot.data.get("checked_at"))
-        if not isinstance(latest, str) or checked_at is None:
-            return UpgradeCheckResult("unknown", local, None, None, cache_state="malformed")
-        try:
-            available = Version(latest) > Version(local)
-        except InvalidVersion:
-            return UpgradeCheckResult("unknown", local, None, None, cache_state="malformed")
-        attempt = _attempt_state(snapshot.data, latest, now) if available else None
+        available = False
+        valid_latest = False
+        if isinstance(latest, str) and checked_at is not None:
+            try:
+                available = Version(latest) > Version(local)
+                valid_latest = True
+            except InvalidVersion:
+                valid_latest = False
+        attempt = (
+            _attempt_state(snapshot.data, latest, now) if (valid_latest and available) else None
+        )
+
+    if install_failure is not None:
+        if not auto_install_enabled(config) or (valid_latest and not available):
+            install_failure = None
+            install_failure_at = None
+        elif install_failure == "not-tracking" and detect_install().kind == "tracking":
+            install_failure = None
+            install_failure_at = None
+
+    if not valid_latest or not isinstance(latest, str) or checked_at is None:
+        return UpgradeCheckResult(
+            "unknown",
+            local,
+            None,
+            None,
+            cache_state="malformed",
+            check_failure=check_failure,
+            check_failure_at=check_failure_at,
+            install_failure=install_failure,
+            install_failure_at=install_failure_at,
+        )
+
     if attempt is not None:
         install = detect_install()
         if install.kind != "tracking" or Version(install.version or "") >= Version(latest):
@@ -323,6 +615,10 @@ def cached_upgrade_view(
         stale=now - checked_at >= DEFAULT_THROTTLE,
         cache_state="valid",
         install_attempt=attempt,
+        check_failure=check_failure,
+        check_failure_at=check_failure_at,
+        install_failure=install_failure,
+        install_failure_at=install_failure_at,
     )
 
 
@@ -334,10 +630,11 @@ def check_for_upgrade(
 ) -> UpgradeCheckResult:
     """Return whether an upgrade is available; honor cache; respect opt-outs.
 
-    Cache is the FIRST gate — no HTTP unless cache is stale (older than
+    Cache is the FIRST gate — no tag fetch unless cache is stale (older than
     `DEFAULT_THROTTLE`) AND last attempt is older than `DEFAULT_FAILURE_BACKOFF`.
-    Network failures degrade silently (return cached state or "unknown")
-    because `_check_fleet_version_or_refuse` backstops the data-at-risk case.
+    Check failures degrade silently (return cached state or "unknown") and record
+    their cause in `upgrade-state.json` because `_check_fleet_version_or_refuse`
+    backstops the data-at-risk case.
 
     Short-circuits (return state="skip"):
       - dev build (__version__ == "0.0.0+dev")
@@ -393,46 +690,59 @@ def check_for_upgrade(
                 attempted_at is not None and (now - attempted_at) < DEFAULT_FAILURE_BACKOFF
             )
 
+            failure_cause: str | None = None
+            fetched_ok = False
             if force or (not cache_fresh and not backoff_active):
                 # Stale cache + no recent failed attempt → fetch.
                 try:
                     tags = _fetch_tags()
                     picked = _pick_latest_tag(tags)
                     if picked is None:
-                        # Empty array or all tags filtered. Treat as "unknown"
-                        # but mark attempted_at so we don't hammer.
-                        ljson.data["attempted_at"] = now.isoformat()
+                        raise _CheckFailed("unparseable")
+                    cached_latest = picked[0].lstrip("v")
+                    ljson.data["latest_version"] = cached_latest
+                    ljson.data["checked_at"] = now.isoformat()
+                    ljson.data["attempted_at"] = now.isoformat()
+                    ljson.data["check_failure_cause"] = None
+                    ljson.data["check_failure_at"] = None
+                    fetched_ok = True
+                except _CheckFailed as error:
+                    failure_cause = error.cause
+                except OSError:
+                    failure_cause = "network"
+                except ValueError:
+                    failure_cause = "unparseable"
+                except Exception as error:
+                    failure_cause = _unexpected_cause(error)
+
+                if failure_cause is not None:
+                    # Check failure: update attempted_at and record the cause,
+                    # then fall back to cached state. A forced check never
+                    # answers from a cache it just failed to refresh.
+                    ljson.data["attempted_at"] = now.isoformat()
+                    ljson.data["check_failure_cause"] = failure_cause
+                    ljson.data["check_failure_at"] = now.isoformat()
+                    if cached_latest is None or force:
                         return UpgradeCheckResult(
                             state="unknown",
                             local=local,
                             latest=cached_latest,
                             install_cmd=None,
+                            check_failure=failure_cause,
+                            check_failure_at=now,
                         )
-                    cached_latest = picked[0].lstrip("v")
-                    ljson.data["latest_version"] = cached_latest
-                    ljson.data["checked_at"] = now.isoformat()
-                    ljson.data["attempted_at"] = now.isoformat()
-                except (
-                    urllib.error.URLError,
-                    urllib.error.HTTPError,
-                    HTTPException,
-                    OSError,
-                    json.JSONDecodeError,
-                    UnicodeDecodeError,
-                ):
-                    # Network or parse failure: update attempted_at only, fall
-                    # back to cached state. A forced check never answers from
-                    # a cache it just failed to refresh.
-                    ljson.data["attempted_at"] = now.isoformat()
-                    if cached_latest is None or force:
-                        return UpgradeCheckResult(
-                            state="unknown", local=local, latest=cached_latest, install_cmd=None
-                        )
+
+            failure_at = now if failure_cause is not None else None
 
             # Compare local vs cached_latest.
             if cached_latest is None:
                 return UpgradeCheckResult(
-                    state="unknown", local=local, latest=None, install_cmd=None
+                    state="unknown",
+                    local=local,
+                    latest=None,
+                    install_cmd=None,
+                    check_failure=failure_cause,
+                    check_failure_at=failure_at,
                 )
 
             try:
@@ -440,12 +750,25 @@ def check_for_upgrade(
                 latest_v = Version(cached_latest)
             except InvalidVersion:
                 return UpgradeCheckResult(
-                    state="unknown", local=local, latest=cached_latest, install_cmd=None
+                    state="unknown",
+                    local=local,
+                    latest=cached_latest,
+                    install_cmd=None,
+                    check_failure=failure_cause,
+                    check_failure_at=failure_at,
                 )
 
             if latest_v <= local_v:
+                if fetched_ok:
+                    ljson.data["install_failure_cause"] = None
+                    ljson.data["install_failure_at"] = None
                 return UpgradeCheckResult(
-                    state="current", local=local, latest=cached_latest, install_cmd=None
+                    state="current",
+                    local=local,
+                    latest=cached_latest,
+                    install_cmd=None,
+                    check_failure=failure_cause,
+                    check_failure_at=failure_at,
                 )
 
             # Upgrade available. Apply nudge gate: last_nudged_version != latest
@@ -465,6 +788,8 @@ def check_for_upgrade(
                 latest=cached_latest,
                 install_cmd=install_cmd,
                 should_nudge=should_nudge,
+                check_failure=failure_cause,
+                check_failure_at=failure_at,
             )
     except OSError:
         # mkdir / open failure — can't even create the cache file. Bail
@@ -1092,7 +1417,7 @@ def _pipx_environment(argv: list[str]) -> dict[str, str]:
     prefix = _install_prefix()
     if prefix.parent.name != "venvs":
         raise OSError("cannot identify this install's pipx home")
-    env = os.environ.copy()
+    env = _no_prompt_environment(os.environ)
     env["PIPX_HOME"] = str(prefix.parent.parent)
     if argv[1:2] == ["install"] and "--force" in argv:
         install = detect_install()
@@ -1285,6 +1610,8 @@ def run_update(
             output,
             now_tracking,
         )
+    if moved:
+        _record_install_problem(None)
     return UpdateOutcome(
         "updated" if moved else "unchanged",
         old,
@@ -1322,6 +1649,48 @@ def _attempt_state(cache: dict[str, Any], latest: str, now: datetime) -> str | N
     return "in-flight"
 
 
+def _record_install_problem(cause: str | None, *, now: datetime | None = None) -> None:
+    """Record or clear why an automatic install did not run. Best-effort.
+
+    Never call while another `locked_json_rmw(CACHE_PATH)` block is open in the
+    same process.
+    """
+    target_at = (now or datetime.now(timezone.utc)).isoformat() if cause is not None else None
+    try:
+        with locked_json_rmw(CACHE_PATH, default_factory=_empty_cache) as ljson:
+            if not ljson.is_locked:
+                return
+            cache = _normalize_cache(ljson.data)
+            if (
+                cache.get("install_failure_cause") == cause
+                and cache.get("install_failure_at") == target_at
+            ):
+                ljson.write_on_exit = False
+                return
+            cache["install_failure_cause"] = cause
+            cache["install_failure_at"] = target_at
+            ljson.data.clear()
+            ljson.data.update(cache)
+    except Exception:
+        return
+
+
+def _record_check_problem(cause: str, *, now: datetime | None = None) -> None:
+    """Best-effort fallback when `check_for_upgrade` raises an unexpected exception."""
+    now_iso = (now or datetime.now(timezone.utc)).isoformat()
+    try:
+        with locked_json_rmw(CACHE_PATH, default_factory=_empty_cache) as ljson:
+            if not ljson.is_locked:
+                return
+            cache = _normalize_cache(ljson.data)
+            cache["check_failure_cause"] = cause
+            cache["check_failure_at"] = now_iso
+            ljson.data.clear()
+            ljson.data.update(cache)
+    except Exception:
+        return
+
+
 def _claim_install_attempt(latest: str, *, now: datetime | None = None) -> str:
     """Claim the one automatic attempt for `latest` under the cache flock.
 
@@ -1341,8 +1710,20 @@ def _claim_install_attempt(latest: str, *, now: datetime | None = None) -> str:
             state = _attempt_state(cache, latest, now)
             at = _parse_iso(cache.get("install_attempt_at"))
             retry_due = at is not None and now - at >= DEFAULT_INSTALL_RETRY_GAP
-            if state == "in-flight" or (state == "failed" and not retry_due):
+            if state == "in-flight":
                 ljson.write_on_exit = False
+                return state
+            if state == "failed" and not retry_due:
+                if (
+                    cache.get("install_attempt_outcome") is not None
+                    or cache.get("install_failure_cause") is not None
+                ):
+                    ljson.write_on_exit = False
+                else:
+                    cache["install_failure_cause"] = "install-failed"
+                    cache["install_failure_at"] = cache.get("install_attempt_at") or now.isoformat()
+                    ljson.data.clear()
+                    ljson.data.update(cache)
                 return state
             cache["install_attempt_version"] = latest
             cache["install_attempt_at"] = now.isoformat()
@@ -1354,8 +1735,11 @@ def _claim_install_attempt(latest: str, *, now: datetime | None = None) -> str:
         return "unavailable"
 
 
-def _record_install_failed(latest: str) -> None:
+def _record_install_failed(
+    latest: str, *, cause: str | None = "install-failed", now: datetime | None = None
+) -> None:
     """Mark the claimed attempt failed now, without waiting out the grace."""
+    now_iso = (now or datetime.now(timezone.utc)).isoformat()
     try:
         with locked_json_rmw(CACHE_PATH, default_factory=_empty_cache) as ljson:
             if not ljson.is_locked:
@@ -1363,9 +1747,12 @@ def _record_install_failed(latest: str) -> None:
             cache = _normalize_cache(ljson.data)
             if cache.get("install_attempt_version") == latest:
                 cache["install_attempt_outcome"] = "failed"
+            if cause is not None:
+                cache["install_failure_cause"] = cause
+                cache["install_failure_at"] = now_iso
             ljson.data.clear()
             ljson.data.update(cache)
-    except OSError:
+    except Exception:
         return
 
 
@@ -1382,21 +1769,31 @@ def update_or_nudge(
     The caller has finished its sync. Nothing here may change its outcome: an
     install failure is a `mm: notice:`, never an exception or an exit code.
     """
+    stage = "check"
     try:
         result = check_for_upgrade(config)
         if result.state != "upgrade-available" or result.latest is None:
             return
+        stage = "install"
         try:
             handled, failed = _auto_install(
                 config, result, attended=attended, diagnostics=diagnostics
             )
-        except Exception:
+        except Exception as error:
+            _record_install_problem(_unexpected_cause(error))
             handled, failed = False, False
+        stage = "nudge"
         if not handled:
             _nudge_if_due(result, failed_install=failed)
-    except (Exception, KeyboardInterrupt):
+    except KeyboardInterrupt:
+        return
+    except Exception as error:
         # Checking, cache I/O, progress and the fallback nudge are all optional
         # once the caller has completed its sync, including a closed stderr.
+        if stage == "check":
+            _record_check_problem(_unexpected_cause(error))
+        elif stage == "install":
+            _record_install_problem(_unexpected_cause(error))
         return
 
 
@@ -1414,11 +1811,14 @@ def _auto_install(
         return False, False
     install = detect_install()
     if install.kind != "tracking":
+        _record_install_problem("not-tracking")
         return False, False
     if Version(install.version or "") >= Version(result.latest):
+        _record_install_problem(None)
         return True, False
     pipx = find_pipx()
     if pipx is None:
+        _record_install_problem("pipx-missing")
         return False, False
     argv = update_argv(pipx, install)
 
@@ -1431,9 +1831,13 @@ def _auto_install(
                 _spawn_pipx(argv, update_log_path())
             except _PipxBusy:
                 return True, False
-            except (Exception, KeyboardInterrupt):
+            except KeyboardInterrupt:
+                _record_install_failed(result.latest, cause=None)
+                return False, True
+            except Exception:
                 _record_install_failed(result.latest)
                 return False, True
+            _record_install_problem(None)
         return claim in ("claimed", "in-flight"), claim == "failed"
 
     # Attended: the caller released the mm lock. Take it back for the swap so
@@ -1447,8 +1851,10 @@ def _auto_install(
     try:
         install = detect_install()
         if install.kind != "tracking":
+            _record_install_problem("not-tracking")
             return False, False
         if Version(install.version or "") >= Version(result.latest):
+            _record_install_problem(None)
             return True, False
         argv = update_argv(pipx, install)
         claim = _claim_install_attempt(result.latest)
@@ -1463,7 +1869,7 @@ def _auto_install(
         outcome = run_update(install, pipx, latest=result.latest)
     except KeyboardInterrupt:
         if claim == "claimed":
-            _record_install_failed(result.latest)
+            _record_install_failed(result.latest, cause=None)
         _write_update_log(argv, "Automatic update cancelled.\n")
         print(
             "mm: notice: automatic update cancelled; sync outcome is reported separately. "
@@ -1471,9 +1877,10 @@ def _auto_install(
             file=sys.stderr,
         )
         return True, False
-    except Exception:
+    except Exception as error:
         if claim == "claimed":
-            _record_install_failed(result.latest)
+            _record_install_failed(result.latest, cause=None)
+        _record_install_problem(_unexpected_cause(error))
         return False, claim == "claimed"
     finally:
         lockfile.release_lock()
@@ -1481,6 +1888,7 @@ def _auto_install(
         return True, False
     _write_update_log(argv, outcome.output)
     if outcome.status == "updated":
+        _record_install_problem(None)
         if diagnostics:
             print(
                 f"mm: notice: updated mm {outcome.old} → {outcome.new}; "
@@ -1534,11 +1942,13 @@ def last_transition_seen() -> tuple[str, str] | None:
 __all__ = [
     "CACHE_DIR",
     "CACHE_PATH",
+    "CHECK_FAILURE_CAUSES",
     "DEV_BUILD_SENTINEL",
     "INSTALL_CMD",
+    "INSTALL_FAILURE_CAUSES",
     "INSTALL_SPEC",
     "InstallInfo",
-    "TAGS_API_URL",
+    "REPO_URL",
     "UpdateOutcome",
     "UpgradeCheckResult",
     "auto_install_enabled",
@@ -1547,8 +1957,10 @@ __all__ = [
     "detect_install",
     "detect_self_version_transition",
     "emit_nudge_if_due",
+    "find_git",
     "find_pipx",
     "format_upgrade_message",
+    "problem_text",
     "record_nudge",
     "reinstall_cmd",
     "run_transition_hook",
