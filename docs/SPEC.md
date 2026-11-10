@@ -66,8 +66,11 @@ pull-request refs and cached views of old commits that a force-push cannot
 clean, so the rewrite could not remove them (owner: "I didn't realize there
 was no way to scrub the PRs, so basically this is a pointless exercise, we
 should just make sure it stays impersonal moving forward?"). The current tree
-still names machines by role. Earlier text lives in
-`git log -- docs/SPEC.md`.
+still names machines by role. Amended 2026-11-09 by `/project-spec` so an
+attended `mm push` run in a terminal may finish its capture scans up to a scan
+cap of tens of seconds (owner: "2 Yes", then "ok, that makes sense"): O7.2 and
+O8.2 change and no other outcome, target or release policy does. Earlier text
+lives in `git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -259,11 +262,14 @@ manual step.
    for each agent family (Claude, Codex, Grok, Muse and Antigravity), summed
    across the fleet from Claude Code, Codex, Grok Build, Muse and
    Antigravity. Grok Build's runs count under their model's family.
-2. Every attended push captures this machine's usage and git activity within
-   one total time budget. Work left unfinished resumes on later pushes, so
-   capture is complete again within three attended pushes without a recovery
-   command. Capture that stays incomplete longer is a failure that `mm status`
-   reports with its fix.
+2. Every attended push captures this machine's usage and git activity. A
+   push run in a terminal runs each capture scan (repository discovery, the git
+   walk, the token and session scans and the host usage readers) to completion,
+   up to a scan cap that is a setting (default tens of seconds). Work a scan
+   leaves unfinished at the cap resumes on later pushes, so capture is complete
+   again within three attended pushes without a recovery command. A run that
+   stops early reports "catching up (N left)", not a failure. Capture that stays
+   incomplete longer is a failure that `mm status` reports with its fix.
 3. Usage mm cannot read is named as a coverage gap in the retro and in
    `mm status`, never shown as a silent zero.
 4. Evidence: a `retro-fleet` run on the owner's fleet showing complete capture
@@ -277,8 +283,12 @@ manual step.
    O6's growth warning. Progress and diagnostics appear with `--verbose`, in
    `mm status` and in `mm diag`.
 2. Usage and activity capture never changes a push's outcome and prints
-   nothing during a push. Its total time per attended push stays within one
-   configured budget (default 5 s).
+   nothing during a push, except a transient progress line on a terminal once a
+   push has run longer than a few seconds, which clears before the outcome
+   line. An attended `mm push` spends up to the scan cap (O7.2) on capture, and
+   that cap, not the capture budget (default 5 s), bounds its time. `mm autopush`
+   and `mm autopull`, the agent hooks, keep their small budgets and never wait
+   on the cap, so capture never blocks an agent session.
 3. `mm autopush` and `mm autopull` stay silent unless the owner must act;
    their outcomes appear in `mm status`.
 4. `mm status` opens with a one-line verdict (in sync, changes waiting, or
