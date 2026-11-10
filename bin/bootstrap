@@ -187,7 +187,15 @@ ensure_syncthing_at_login() {
       fi
       launch_agents="$HOME/Library/LaunchAgents"
       dest_plist="$launch_agents/$plist_name"
-      if ! { mkdir -p "$launch_agents" && cp "$keg_plist" "$dest_plist" && chmod 0644 "$dest_plist"; }; then
+      tmp_plist=""
+      if ! { mkdir -p "$launch_agents" \
+        && tmp_plist=$(mktemp "$launch_agents/.syncthing.XXXXXX") \
+        && cp "$keg_plist" "$tmp_plist" \
+        && chmod 0644 "$tmp_plist" \
+        && mv -f "$tmp_plist" "$dest_plist"; }; then
+        if [ -n "$tmp_plist" ]; then
+          rm -f "$tmp_plist" 2>/dev/null || true
+        fi
         die "could not register Syncthing to start at login; quit the running Syncthing first" "brew services start syncthing"
       fi
       say "Syncthing is already running; set it to start at login from your next login (~/Library/LaunchAgents/$plist_name)."

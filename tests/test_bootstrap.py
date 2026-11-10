@@ -458,7 +458,7 @@ def harness(tmp_path: Path) -> BootstrapHarness:
     for directory in (home, brewbin, shadow, pipxbin, sysbin, tools, venvs):
         directory.mkdir(parents=True, exist_ok=True)
 
-    for tool_name in ("sed", "id", "chmod", "cp", "ln", "mkdir", "cat"):
+    for tool_name in ("sed", "id", "chmod", "cp", "ln", "mkdir", "cat", "mktemp", "mv", "rm"):
         resolved = shutil.which(tool_name)
         assert resolved, f"required tool {tool_name} not found"
         (tools / tool_name).symlink_to(resolved)
@@ -1208,20 +1208,34 @@ class TestBootstrapSyncthingStart118A:
             else "~/Library/LaunchAgents/sh.brew.syncthing.plist"
         ) in proc.stdout
 
-    @pytest.mark.parametrize("tool_name", ["mkdir", "cp", "chmod"])
+    @pytest.mark.parametrize("tool_name", ["mkdir", "mktemp", "cp", "chmod", "mv"])
     def test_macos_registration_write_failure_has_fix_command(
         self, harness: BootstrapHarness, tool_name: str
     ) -> None:
         self._ready_macos(harness)
         first = harness.run()
         assert first.returncode == 0, first.stdout
-        _make_fake_script(harness.sysbin / tool_name, tool_name, "exit 1\n")
+        body = 'printf "partial plist" > "$2"\nexit 1\n' if tool_name == "cp" else "exit 1\n"
+        _make_fake_script(harness.sysbin / tool_name, tool_name, body)
         proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": "default ok"})
         assert proc.returncode == 1, proc.stdout
         assert _last_line(proc.stdout).endswith(
             "could not register Syncthing to start at login; quit the running Syncthing first. "
             "Run: brew services start syncthing"
         )
+        launch_agents = harness.home / "Library" / "LaunchAgents"
+        plist = launch_agents / "homebrew.mxcl.syncthing.plist"
+        assert not plist.exists(), "a failed registration must not look enabled on retry"
+        assert not list(launch_agents.glob(".syncthing.*"))
+
+        (harness.sysbin / tool_name).unlink()
+        harness.clear_calls()
+        retry = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": "default ok"})
+        assert retry.returncode == 0, retry.stdout
+        assert "set it to start at login from your next login" in retry.stdout
+        assert plist.read_text(encoding="utf-8") == "<plist>syncthing-keg</plist>\n"
+        assert stat.S_IMODE(plist.stat().st_mode) == 0o644
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
 
     def test_macos_broken_login_link_is_not_followed(self, harness: BootstrapHarness) -> None:
         self._ready_macos(harness)
