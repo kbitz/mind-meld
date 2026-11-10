@@ -6,7 +6,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/statusflow.py` — `status` / `diag` / `_collect_diag_state`
 - `src/mind_meld/cli.py` — `PushResult.events_degradations`
 - `src/mind_meld/statusflow.py` — `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
-- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_identity_inputs_digest_for_push` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `HOST_READER_RESERVE_MS` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
+- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_identity_inputs_digest_for_push` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `resolve_attended_capture_cap` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `HOST_READER_RESERVE_MS` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
@@ -19,7 +19,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/attemptlog.py` — local attended-attempt writer, validation and read/render states (65A)
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `_is_cache_stale` / `_store_refresh` / `_persist_or_yield_concurrent` / `_persist_force` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
-- `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS`
+- `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS` / `DEFAULT_ATTENDED_CAPTURE_CAP_MS` / `ATTENDED_CAPTURE_CAP_MAX_MS`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
 Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_adapter_contract.py` (host reader contract), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_agy_usage.py`, `tests/test_diag.py`, `tests/test_root_probers.py` (host-record root probers).
@@ -151,32 +151,43 @@ become a cached empty cwd or advance the resume marker. Deferred changes pin
 fully indexed project inventory incomplete. Newly discovered roots inherit that
 window. Session-metadata indexing remains outside this Track.
 
-**One capture budget and session indexing (Track 85A).** `[retro]
+**One capture budget, attended scan cap, and session indexing (Tracks 85A / 124A).** `[retro]
 capture_budget_ms` (integer, not bool, 250–60000; default 5000 via
-`events_tail.resolve_capture_budget`) bounds total attended capture across the
+`events_tail.resolve_capture_budget`) is the initial attended capture budget, and
+`[retro] attended_capture_cap_ms` (integer, not bool, `effective capture_budget_ms`–60000
+`ATTENDED_CAPTURE_CAP_MAX_MS`; default 30000 `DEFAULT_ATTENDED_CAPTURE_CAP_MS` via
+`events_tail.resolve_attended_capture_cap`, or `capture_budget_ms` when larger) bounds
+total attended push scan time across the
 pre-scan `_capture_host_snapshot` (sweep + inline warm) and `_run_events_tail`
 (discovery, git walk capped at the tail share, token warm, session walk),
-excluding `build_manifest_v2` scan time. When configured it takes precedence
-over legacy `host_usage_interactive_budget_ms`: `resolve_host_read_budget`
-returns the host sweep budget (legacy value or 3000 ms default, capped at
-three fifths of the capture budget by `_host_phase_ms`, `config` source) and
-stashes the
-total for `_capture_host_snapshot`, whose sweep and warm retries share that
+excluding `build_manifest_v2` scan time. When either key is configured (or under the
+default partition when neither key nor legacy `host_usage_interactive_budget_ms` is set),
+`resolve_host_read_budget` returns the host sweep budget (legacy value or 3000 ms default,
+capped at three fifths of the attended scan cap by `_host_phase_ms`, or three fifths of
+`capture_budget_ms` when `scan_cap=False` for `mm init` backfill) and stashes the
+total (`T = resolve_attended_capture_cap(config)[0]` for attended push, `B = resolve_capture_budget(config)[0]`
+for backfill) for `_capture_host_snapshot`, whose sweep and warm retries share that
 phase deadline; warmers receive the remaining `budget_s`/`deadline_s` only
 when `inspect.signature` shows they accept it, so one-arg test patches keep
 working. Elapsed attended host time is recorded in `events_tail` and the tail
-keeps at least two fifths of the capture budget plus whatever the host phase
-left unused (Track 101A; Track 85A split it in half). The tail's git walk, token warm and session walk share ONE absolute
+keeps at least two fifths of `T` plus whatever the host phase
+left unused (Track 101A; Track 85A split it in half). With extension `E = max(0, T - B)`,
+the partitioned attended tail passes `root_discovery_budget_ms = ROOT_DISCOVERY_BUDGET_ATTENDED_MS + E`,
+`git_budget_ms = min(git_walk_budget_ms(quiet=False, since=since) + E, tail_budget_ms)`,
+and `per_repo_cap_ms = PER_REPO_TIMEOUT_CAP_MS + E` (via `_accepted_kwargs`), so setting
+`attended_capture_cap_ms = capture_budget_ms` (`E = 0`) reproduces the pre-124A ceilings
+exactly while the 30 s default cap lets slow repositories and cold warmable readers finish
+in one attended push without re-entering the `mm recapture` advice loop. The tail's git walk, token warm and session walk share ONE absolute
 deadline minted from that share, so the share is spent once across phases,
 not once per phase (if discovery exhausts the deadline, `walk_git_projects`
 records `WALK_SKIP_BUDGET_ABORT` for discovered roots without spawning worker
 threads). With only the legacy interactive key configured, host
 sweep/warm and tail budgets keep their legacy behavior unchanged; with
-neither key the 5000 ms default partitions both phases, so the attended
+no key set the 30000 ms attended cap partitions both phases on attended push (and 5000 ms on `mm init` backfill), so the attended
 session walk is no longer capped at the legacy 500 ms; autopush always keeps
 its fixed 250 ms walk / 250 ms host / 50 ms discovery shares and never warms.
 Config validation checks `host_usage_autopush_budget_ms` against
-`capture_budget_ms` when set and against an explicitly set legacy interactive
+`capture_budget_ms` when set (never `attended_capture_cap_ms`) and against an explicitly set legacy interactive
 value (the legacy rule). When neither key is set, autopush still must not
 exceed the 3000 ms interactive default. When both ceilings apply, autopush
 must not exceed the smaller one.
@@ -492,11 +503,11 @@ Git-walk cost is *monotone in cursor age*. Discovery cost and a zero-root walk a
 
 **Git-walk repository loss is visible.** `walk_git_projects` drops repositories into `skipped` with typed reasons (`budget_abort` / `timeout` / `no_commits` / `git_error` / `raised`). Never interpolate a skip reason into a degradation phrase: git stderr carries branch names and absolute paths onto a synced row. `no_commits` (`rc=128` + "does not have any commits yet") is benign — an empty `git init` directory returns it on every push forever. The session-walk budget flag is named `session_walk_exceeded_budget` so it cannot be mistaken for git-walk loss.
 
-The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositories this push. Run mm recapture --dry-run to check current repository failures, then mm recapture 30d to recover the omitted commits`. It contains no `; ` separator. Status repeats the current-failures check before its `mm diag` link. Dry-run lists each skipped path via `safe_str` and its typed reason, labels `no_commits` benign, and links `GIT_WALK_FAILURES_URL` for non-benign skips. These paths already ride the synced git-snapshot row. The dry-run is a fresh scan on recapture's own walk budget, not evidence about an earlier push: a clean result cannot establish that the earlier capture was complete. Partial recapture gives a same-window retry for Git failures and narrower-window advice for budget aborts; mixed failures show both with separate counts.
+The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositories this push. Run mm recapture --dry-run to check current repository failures, then mm recapture 30d to recover the omitted commits`. It contains no `; ` separator. Status repeats the current-failures check before its `mm diag` link, and the aggregator's `git_budget` health note remedy in `skills/retro_fleet/aggregator.py` names the same `mm recapture --dry-run` and `mm recapture 30d` commands. Dry-run lists each skipped path via `safe_str` and its typed reason, labels `no_commits` benign, and links `GIT_WALK_FAILURES_URL` for non-benign skips. These paths already ride the synced git-snapshot row. The dry-run is a fresh scan on recapture's own walk budget, not evidence about an earlier push: a clean result cannot establish that the earlier capture was complete. Partial recapture gives a same-window retry for Git failures and narrower-window advice for budget aborts; mixed failures show both with separate counts.
 
 **`mm recapture [WINDOW]`** explicitly recovers historical intervals beyond automatic retained catch-up and retries persistent failures. Shape: write git-snapshot rows (marked `origin: recapture`, no mm-push) first, then run the ordinary push path. Catch ``SnapshotError`` from that push the same way interactive ``mm push`` does: print that the recapture was written locally but not synced, then the four-part refusal, exit 1, no traceback. A push that succeeds but **holds** an mm-events file because it was still changing (Track 75A, docs/invariants/sync.md "Complete snapshots") also takes the written-locally-but-not-synced exit 1, with the fix `mm push` once the file settles: any held mm-events path blocks, with no intersection refinement, and a held user file does not. Do **not** add a `recapture_requested` disjunct to the substantive-change gate (that re-opens the v0.12.2 phantom-change path). Do **not** route through `_run_events_backfill`. Window is `Nd`, default `30d` (= init backfill), min `1d`, max `90d`. Partial recovery exits 4 (exit 3 is `pull --conflict-mode fail`). Zero roots writes nothing and exits 1. Retros window by the COMMIT's date, not by when mm captured it: `mm recapture 90d` produces zero visible change on a `mm retro-fleet 7d` card. `_coverage_floor_from_files` still uses the event filename date by design.
 
-**Recapture walks Git on its own budget (Track 97A).** `events.RECAPTURE_PER_REPO_TIMEOUT_MS` (30 s) and `events.RECAPTURE_WALK_BUDGET_MS` (120 s) are chosen floors, not measurements at the 90-day window. `_prepare_recapture` passes both, read at call time, for `mm recapture` and its `--dry-run`. `walk_git_projects(per_repo_timeout_ms=...)` hands that value to every repository verbatim: no `PER_REPO_TIMEOUT_FLOOR_MS`, no `PER_REPO_TIMEOUT_CAP_MS`, no division by the repository count (the budget formula falls below 30 s above 32 repositories). Push, autopush and init pass no override and keep their existing budget selection and the 2 s cap, pinned by `test_push_and_autopush_walk_budgets_and_cap_are_unchanged`; the push inside a real recapture is an ordinary push. Repository discovery runs on `events.RECAPTURE_DISCOVERY_BUDGET_MS` (30 s, Track 106A, read at call time) for `mm recapture`, its `--dry-run` and `mm refresh-identity`, so one run finishes a cold index that attended pushes spread over several. A dry run does not persist, so on a cold index it may spend up to 30 s and keep nothing. When discovery is still `partial` in the last recorded push, `mm status` words its recovery as `Finish repository discovery and recover this Mac's last N days: mm recapture Nd`. If 30 s runs out, recapture's "Retry a narrower window" advice is wrong, because discovery is not windowed (declined scope, revisit if any run exhausts it). A repository that still outruns the budget is skipped as before: `timeout` when it alone ran past its 30 s, `budget_abort` when the walk ran past 120 s, with `Recapture incomplete` and exit 4 (preview: `Preview incomplete`, exit 0). The mm lock covers the walk and, for a real recapture, the subsequent row writes and ordinary push; `recapture` releases it in its `finally` block. While that lock is held, `mm push` refuses with the lock message and autopush records `lock-held`. Separately, interpreter shutdown joins any running worker after the lock is released: a `git log` started near the 120 s walk deadline can add about 30 s before process exit, plus its post-log work. This is not a 150 s bound on lock duration or total command time. The walk prints nothing while it runs.
+**Recapture walks Git on its own budget (Track 97A).** `events.RECAPTURE_PER_REPO_TIMEOUT_MS` (30 s) and `events.RECAPTURE_WALK_BUDGET_MS` (120 s) are chosen floors, not measurements at the 90-day window. `_prepare_recapture` passes both, read at call time, for `mm recapture` and its `--dry-run`. `walk_git_projects(per_repo_timeout_ms=...)` hands that value to every repository verbatim: no `PER_REPO_TIMEOUT_FLOOR_MS`, no `PER_REPO_TIMEOUT_CAP_MS`, no division by the repository count (the budget formula falls below 30 s above 32 repositories). Autopush and init pass no override and keep their existing budget selection and the 2 s cap (`PER_REPO_TIMEOUT_CAP_MS`), while partitioned attended push extends its git walk budget and per-repo timeout cap by `E = max(0, attended_capture_cap_ms - capture_budget_ms)` (2 s when `attended_capture_cap_ms == capture_budget_ms`, 27 s under the 30 s default cap), pinned by `test_push_and_autopush_walk_budgets_and_cap_are_unchanged`; the push inside a real recapture is an ordinary attended push. Repository discovery runs on `events.RECAPTURE_DISCOVERY_BUDGET_MS` (30 s, Track 106A, read at call time) for `mm recapture`, its `--dry-run` and `mm refresh-identity`, so one run finishes a cold index that attended pushes spread over several. A dry run does not persist, so on a cold index it may spend up to 30 s and keep nothing. When discovery is still `partial` in the last recorded push, `mm status` words its recovery as `Finish repository discovery and recover this Mac's last N days: mm recapture Nd`. If 30 s runs out, recapture's "Retry a narrower window" advice is wrong, because discovery is not windowed (declined scope, revisit if any run exhausts it). A repository that still outruns the budget is skipped as before: `timeout` when it alone ran past its 30 s, `budget_abort` when the walk ran past 120 s, with `Recapture incomplete` and exit 4 (preview: `Preview incomplete`, exit 0). The mm lock covers the walk and, for a real recapture, the subsequent row writes and ordinary push; `recapture` releases it in its `finally` block. While that lock is held, `mm push` refuses with the lock message and autopush records `lock-held`. Separately, interpreter shutdown joins any running worker after the lock is released: a `git log` started near the 120 s walk deadline can add about 30 s before process exit, plus its post-log work. This is not a 150 s bound on lock duration or total command time. The walk prints nothing while it runs.
 
 ## Provider and tool root probers (Track 102A)
 

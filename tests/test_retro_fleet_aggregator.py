@@ -6934,6 +6934,8 @@ class TestGitCoverageAndRecapture:
         assert data.git.zero_repo_captures == {}
 
     def test_h2_budget_abort_renders_budget_note_not_gap_note(self, tmp_path):
+        from mind_meld import events_tail
+
         events_dir = tmp_path / "events"
         events_dir.mkdir()
         row = _capture_on(_git_event("dev-a", 0, [_commit("aaa", 1)]), since_days=7, aborts=3)
@@ -6943,7 +6945,14 @@ class TestGitCoverageAndRecapture:
         assert "dev-a" not in data.git.uncovered_git
         out = aggregator.format_retro(data)
         assert "ran out of budget" in out
-        assert "git_capture.recorded.walk_budget_aborts" in out
+        assert (
+            "run `mm recapture --dry-run` to check current repository failures, "
+            "then `mm recapture 30d` to recover the omitted commits."
+        ) in out
+        for cmd in ("mm recapture --dry-run", "mm recapture 30d"):
+            assert cmd in events_tail._GIT_WALK_DEGRADATION
+            assert cmd in out
+        assert "git_capture.recorded.walk_budget_aborts" not in out
         assert "last_push.walk_budget_aborts" not in out
         assert "uncovered interval" not in out
 

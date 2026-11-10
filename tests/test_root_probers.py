@@ -1682,8 +1682,16 @@ def test_attended_discovery_budget_leaves_autopush_and_legacy_unchanged(
         )
         return seen[-1]
 
-    assert run({}, quiet=False) == events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS
+    assert run({}, quiet=False) == events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS + (
+        events_tail.DEFAULT_ATTENDED_CAPTURE_CAP_MS - events_tail.DEFAULT_CAPTURE_BUDGET_MS
+    )
+    eq_cfg = {"retro": {"capture_budget_ms": 5000, "attended_capture_cap_ms": 5000}}
+    assert run(eq_cfg, quiet=False) == events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS
     assert run({}, quiet=True) == events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
+    assert (
+        run({"retro": {"attended_capture_cap_ms": 40000}}, quiet=True)
+        == events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
+    )
     legacy = {"retro": {"host_usage_interactive_budget_ms": 500}}
     assert run(legacy, quiet=False) == events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
 

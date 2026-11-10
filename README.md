@@ -734,7 +734,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - `mm autopush` builds a manifest of the configured sync sources, diffs against the last push, and uploads only what changed. A file that is still changing is held: its previous version, if any, stays published and autopush prints nothing.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error, so they do not block Claude Code (except for the keyring residuals noted [above](#claude-code-integration): other Linux keyring backends, macOS Keychain access dialogs, a stalled D-Bus session).
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest (including this Mac's own manifest vanishing mid-pull), unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. Autopush also records `degraded` when it holds a file that changed, vanished or grew while being read: the previous version, if any, stays published, and the detail says the file is not yet synced ([Snapshot failures](#snapshot-failures)). A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
-- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery keeps a private local project index, and per-repository cursors resume unfinished Git walks on later attended `mm push` runs, including pushes with no user-file edits. Unchanged projects avoid rescanning their session logs. Autopush keeps its own small budgets. An attended push uses one `[retro] capture_budget_ms` (default 5,000 ms) for host capture and activity capture together. `mm status` reports repositories still catching up and `mm diag` exposes `git_capture.fresh.pending_repos`. Persistent failures (three incomplete captures), empty discovery, Git errors, or gaps beyond the 90-day retained event window advise explicit `mm recapture`. Historical degradation breadcrumbs retain their original diagnostic text. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does not mean fleet retro received a new activity event.
+- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery keeps a private local project index, and per-repository cursors resume unfinished Git walks on later attended `mm push` runs, including pushes with no user-file edits. Unchanged projects avoid rescanning their session logs. Autopush keeps its own small budgets. An attended push uses one `[retro] capture_budget_ms` (default 5,000 ms) for host capture and activity capture together, and can spend up to `[retro] attended_capture_cap_ms` (default 30,000 ms, range `capture_budget_ms`–60,000) to finish remaining host warm retries, repository discovery, Git walks and session scans before stopping. `mm status` reports repositories still catching up and `mm diag` exposes `git_capture.fresh.pending_repos`. Persistent failures (three incomplete captures), empty discovery, Git errors, or gaps beyond the 90-day retained event window advise explicit `mm recapture`. Historical degradation breadcrumbs retain their original diagnostic text. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does not mean fleet retro received a new activity event.
 - **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
 
 ## Codex Integration
@@ -2352,18 +2352,27 @@ Set budgets in this Mac's `~/.config/mind-meld/config.toml`:
 ```toml
 [retro]
 capture_budget_ms = 5000
+attended_capture_cap_ms = 30000
 host_usage_autopush_budget_ms = 350
 host_usage_interactive_budget_ms = 3000
 ```
 
-`capture_budget_ms` (range **250–60,000**, default **5,000**) is the one total
-budget for an attended push's usage and activity capture: host reads plus
-inline warming get at most three fifths, and git/session capture keeps the rest plus
-whatever the host phase leaves unused. Each reader after the first keeps a reserve of
+`capture_budget_ms` (range **250–60,000**, default **5,000**) is the initial
+budget for an attended push's usage and activity capture, and
+`attended_capture_cap_ms` (range **`capture_budget_ms`–60,000**, default
+**30,000**, or `capture_budget_ms` when larger) is the scan cap an attended
+push can spend to finish remaining work before stopping: host reads plus
+inline warming get at most three fifths of the attended scan cap, and
+git/session capture keeps the rest plus whatever the host phase leaves unused
+(extending attended root discovery, Git walk, per-repository timeout, and
+session-walk ceilings by `attended_capture_cap_ms - capture_budget_ms` while
+keeping the initial host sweep capped by `host_usage_interactive_budget_ms`).
+Setting `attended_capture_cap_ms = capture_budget_ms` restores
+`capture_budget_ms` as the hard attended ceiling. Each reader after the first keeps a reserve of
 up to 300 ms in the sweep and across the warm retries (at most half the sweep divided
-by the reader count), so one reader's overrun cannot take another's whole read. When it is set it takes precedence
-over `host_usage_interactive_budget_ms` for attended pushes. Autopush keeps
-its own small fixed shares regardless.
+by the reader count), so one reader's overrun cannot take another's whole read. When `capture_budget_ms` or `attended_capture_cap_ms` is set it takes precedence
+over `host_usage_interactive_budget_ms` for attended pushes. Autopush, `mm autopull`, `mm init` backfill, and `mm recapture` keep
+their own budgets regardless.
 
 Autopush defaults to **250 ms** (range **100–5,000**); interactive push and init default to **3,000 ms** (range **250–5,000**).
 All must be integers. Effective autopush must not exceed `capture_budget_ms`

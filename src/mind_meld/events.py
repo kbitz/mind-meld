@@ -2114,6 +2114,7 @@ def walk_git_projects(
     use_repo_cursors: bool = False,
     author_emails: Sequence[str] | None = None,
     per_repo_timeout_ms: int | None = None,
+    per_repo_cap_ms: int | None = None,
 ) -> list[GitSnapshot]:
     """Capture commits since `since` across `roots`. Returns one
     GitSnapshot per push (a SINGLE row aggregating all projects), so the
@@ -2128,7 +2129,7 @@ def walk_git_projects(
     Per-repo timeout (A2):
         max(PER_REPO_TIMEOUT_FLOOR_MS,
             (total_budget_ms * MAX_GIT_WORKERS) // repos_remaining)
-        capped at PER_REPO_TIMEOUT_CAP_MS
+        capped at PER_REPO_TIMEOUT_CAP_MS (or ``per_repo_cap_ms`` when given)
     A caller-supplied ``per_repo_timeout_ms`` replaces that formula: every
     repository gets the value verbatim, with no floor, cap or division by
     repository count. Only ``mm recapture`` passes one; ``total_budget_ms``
@@ -2201,8 +2202,9 @@ def walk_git_projects(
 
     if per_repo_timeout_ms is None:
         n_repos = len(roots)
+        cap_ms = PER_REPO_TIMEOUT_CAP_MS if per_repo_cap_ms is None else per_repo_cap_ms
         per_repo_timeout_ms = min(
-            PER_REPO_TIMEOUT_CAP_MS,
+            cap_ms,
             max(
                 PER_REPO_TIMEOUT_FLOOR_MS,
                 (total_budget_ms * MAX_GIT_WORKERS) // n_repos,
