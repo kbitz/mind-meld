@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.35 | 2026-11-10 | A machine joining the fleet no longer copies gstack's generated Codex install (`skills/gstack/`) from other machines, and a managed `mm init` that has just accepted the fleet folder now waits up to two minutes for the key header and finishes the join in the same run when it arrives. |
 | 1.12.34 | 2026-11-10 | Automatic updates now look for new releases with this machine's own git credentials, so they work while the repository is private, and `mm status` and `mm diag` name the reason when a release check or an automatic update could not run. |
 | 1.12.33 | 2026-11-10 | Attended `mm push` now lets capture scans finish up to `[retro] attended_capture_cap_ms` so usage and commit capture catch up in one push, and `retro-fleet` Git budget advice now recommends `mm recapture --dry-run` followed by `mm recapture 30d`. |
 | 1.12.32 | 2026-11-09 | Bootstrap upgrades an outdated `mm` before checking Syncthing, registers a running default Syncthing for login without launching another instance, and the install command fetches bootstrap through authenticated `gh api`. |
