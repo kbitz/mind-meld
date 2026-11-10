@@ -115,7 +115,7 @@ _Source: manager Ephesus 17's observations on mm 1.12.30, 2026-11-09 (Future ent
 4. `mm autopush` and `mm autopull` use exactly the budgets they use today: tests pin `WALK_TIME_BUDGET_AUTOPUSH_MS`, `ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS`, `HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` and the no-warm rule, and show the new key changes none of them.
 5. The observed loop is reproduced in a test or the PR records, with `mm diag` output (placeholders only), why it cannot be and what the real cause is; after a complete recapture or a completed attended push, the next push prints no `git walk dropped` notice and `mm status` carries no matching advice; a notice that does remain names a remedy a recapture can clear, and the retro's `git_budget` remedy matches it. Tests pin each.
 6. No new command-line flag is added to `mm push`, `mm autopush` or `mm autopull`; the Track's PR says so, citing the decision above.
-7. The PR body names the SPEC O8.2 and O7.2 sentences the cap changes and leaves the quiet-output checkpoint unclaimed; `docs/SPEC.md` is not edited.
+7. The PR body cites SPEC O8.2 and O7.2 as amended on 2026-11-09 (the attended scan cap) and leaves the quiet-output checkpoint unclaimed, because the usage-suffix entry in `docs/roadmap-future.md` still holds it; `docs/SPEC.md` is not edited by this Track.
 8. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
 
 ### Group 125: Scans resume, show progress and say "catching up"
