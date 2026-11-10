@@ -233,14 +233,17 @@ is persisted. `check_for_upgrade` sets `check_failure_cause` and
 `check_failure_at` on a failed fetch and clears both on a successful fetch (the
 fresh-cache and failure-backoff paths leave them untouched), and also clears
 the install failure pair when a successful fetch finds the installed release
-current. `_record_install_problem` (or the open RMW block in
+current. A verified foreground update, including `mm update`, also clears the
+install pair. `_record_install_problem` (or the open RMW block in
 `_record_install_failed` and `_claim_install_attempt` — never a nested flock on
 `CACHE_PATH` in the same process) records `not-tracking`, `pipx-missing`,
 `install-failed`, or `unexpected:<ClassName>`, and clears the install pair when
 the installed version is already at or above latest, when a detached `pipx`
 spawns, or when an attended update completes (`updated`). `auto_install = false`
 records nothing, and cancelling an install keeps the failed attempt without
-adding a failure cause. Readers are `cached_upgrade_view` (read by `mm status`
+adding a failure cause; a gated retry preserves explicit outcomes and causes,
+backfilling `install-failed` only for an expired detached attempt without one.
+Readers are `cached_upgrade_view` (read by `mm status`
 and plain-text `mm diag`, which map causes through `problem_text`) and
 `check_for_upgrade`'s own `UpgradeCheckResult` (read by `mm update` when a
 pinned install's forced check fails).
@@ -318,15 +321,21 @@ existing `GIT_SSH_COMMAND`, to `git config --get core.sshCommand` (probed via
 `_run_git` with a 5 s bound), or to `ssh`. `_fetch_tags` additionally sets
 `LC_ALL=C` for its own git invocation so `_classify_git_failure` reads
 untranslated stderr, and `_run_git` runs in `tempfile.gettempdir()` using the
-`git` binary on `PATH` (`find_git()`, with no `/usr/bin/git` fallback that
-could trigger a macOS Xcode CLT GUI dialog). Bounds: the tag check waits at
-most `CHECK_TIMEOUT_SECONDS` (10 s) and kills the child's process group on
-timeout or cancellation; foreground pipx waits at most `PIPX_TIMEOUT_SECONDS`
+`git` binary on `PATH` (`find_git()`, with no added `/usr/bin/git` fallback).
+Bounds: the tag-list subprocess waits at most `CHECK_TIMEOUT_SECONDS` (10 s),
+after the separate config probe (up to 5 s); each has up to 1 s of process-group
+cleanup on timeout or cancellation, so a complete check may take about 17 s.
+Foreground pipx waits at most `PIPX_TIMEOUT_SECONDS`
 (600 s); detached pipx is bounded by git's low-speed abort and pip's own
 network timeouts. Accepted limits: GUI dialogs raised outside git's environment
 by an OS keyring or macOS Keychain unlock (unlocking the Linux keyring before
-hooks run is an accepted manual step in `docs/SPEC.md`), and a `plink`-style
-`core.sshCommand` receiving `-o BatchMode=yes`.
+hooks run is an accepted manual step in `docs/SPEC.md`), the macOS developer-tools
+shim if `/usr/bin/git` is itself on `PATH` without Command Line Tools, and a
+`plink`-style `core.sshCommand` receiving `-o BatchMode=yes`. With only `GIT_SSH`
+set, git's SSH-command precedence remains unchanged; closed stdin, no controlling
+terminal and disabled askpass enforce non-interaction instead of an added option.
+The detached install has no overall mm deadline; git's HTTP low-speed settings do
+not bound a transport rewritten to SSH.
 
 **Both opt-outs of the check also stop the install.** `auto_install` acts only
 on what the check finds, so `--no-check-version` and `[upgrade] auto_check =
@@ -363,11 +372,12 @@ published on `latest`) mapped onto `INSTALL_SPEC`'s URL via `url.<local>.instead
 - With no `upgrade-state.json` (arms A1 for attended `mm push` and B1 for
   `mm autopush`), `_fetch_tags()` sent an unauthenticated HTTP request to
   `/repos/kbitz/mind-meld/tags?per_page=100`, bypassing git's configuration and
-  credentials: against the private repository it failed with 404 (leaving
+  credentials. The manager's earlier private-repository observation was a 404 (leaving
   `latest_version = null`, `checked_at = null`, `attempted_at` stamped and no
-  claim, matching `linux-a`'s real cache at `1.12.30`), and in the mapped local
-  reproduction it never read the git release repository (`install_attempt_version
-  = null`, `package_version = "9.0.0"`).
+  claim, matching `linux-a`'s real cache at `1.12.30`). During A1/B1 the endpoint
+  was public and returned `latest_version = "1.12.33"`; it still bypassed the
+  mapped git release repository (`install_attempt_version = null`,
+  `package_version = "9.0.0"`). The 404 is historical evidence, not the A1/B1 result.
 - With `upgrade-state.json` seeded to `latest_version = "9.0.1"` and a fresh
   `checked_at` (arms A2 for attended `mm push` and B2 for `mm autopush`), both
   paths claimed `install_attempt_version = "9.0.1"`, ran `pipx upgrade mind-meld`
@@ -383,7 +393,8 @@ leaves alone with a stderr nudge that unattended hooks never surface; whether an
 agent's hook shell sandbox (`README.md`) also blocks network access or ends a
 detached child (candidate 5) cannot be observed in a plain shell and is separated
 on real machines by the persisted `check_failure_cause`, `install_failure_cause`
-and `install_attempt_*` records.
+and `install_attempt_*` records. Cause categories describe failures rather than
+proving their origin: a network sandbox can also emit a permission error.
 
 ## Upgrade nudge (v0.9.5)
 
@@ -465,7 +476,8 @@ and takes the maximum version. Why tags rather than `pyproject.toml` on `main`:
    `install_failure_cause`, and `install_failure_at` before checking
    `latest_version`/`checked_at` so a cache with no prior successful check still
    surfaces its recorded failure (dropping `install_failure` when `auto_install`
-   is off and dropping `not-tracking` once `detect_install().kind == "tracking"`).
+   is off, when the running release is current, and dropping `not-tracking` once
+   `detect_install().kind == "tracking"`).
    Missing, malformed, or contended caches are unknown; status shows one yellow
    line per recorded failure cause with its one fix command last (replacing the
    `unknown (... cache)` line when a check failure is recorded, and reusing the

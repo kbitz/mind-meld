@@ -580,7 +580,7 @@ def cached_upgrade_view(
         )
 
     if install_failure is not None:
-        if not auto_install_enabled(config):
+        if not auto_install_enabled(config) or (valid_latest and not available):
             install_failure = None
             install_failure_at = None
         elif install_failure == "not-tracking" and detect_install().kind == "tracking":
@@ -1610,6 +1610,8 @@ def run_update(
             output,
             now_tracking,
         )
+    if moved:
+        _record_install_problem(None)
     return UpdateOutcome(
         "updated" if moved else "unchanged",
         old,
@@ -1713,8 +1715,8 @@ def _claim_install_attempt(latest: str, *, now: datetime | None = None) -> str:
                 return state
             if state == "failed" and not retry_due:
                 if (
-                    cache.get("install_failure_cause") == "install-failed"
-                    and cache.get("install_failure_at") is not None
+                    cache.get("install_attempt_outcome") is not None
+                    or cache.get("install_failure_cause") is not None
                 ):
                     ljson.write_on_exit = False
                 else:

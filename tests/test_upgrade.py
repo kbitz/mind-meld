@@ -764,6 +764,7 @@ class TestFetchTagsGitAdapter124B:
         start = time.monotonic()
         res = upgrade.check_for_upgrade(force=True)
         elapsed = time.monotonic() - start
+        # gstack-timing-ok: closed stdin must prevent an authentication prompt from waiting.
         assert elapsed < 5.0
         assert res.state == "unknown"
         assert res.check_failure == "not-readable"
@@ -797,6 +798,7 @@ class TestFetchTagsGitAdapter124B:
         start = time.monotonic()
         res = upgrade.check_for_upgrade(force=True)
         elapsed = time.monotonic() - start
+        # gstack-timing-ok: forced 1s subprocess timeout must bound descendant cleanup too.
         assert elapsed < 5.0
         assert res.state == "unknown"
         assert res.check_failure == "network"
@@ -851,6 +853,44 @@ class TestFetchTagsGitAdapter124B:
 
 
 class TestRecordedFailureCauses124B:
+    @pytest.mark.parametrize(
+        "outcome,cause", [("failed", None), ("failed", "unexpected:RuntimeError")]
+    )
+    def test_retry_gate_preserves_explicit_outcome_and_cause(self, outcome, cause):
+        now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+        cache = upgrade._empty_cache()
+        cache.update(
+            install_attempt_version="1.1.0",
+            install_attempt_at=now.isoformat(),
+            install_attempt_outcome=outcome,
+            install_failure_cause=cause,
+            install_failure_at=now.isoformat() if cause else None,
+        )
+        upgrade.CACHE_PATH.write_text(json.dumps(cache))
+        before = upgrade.CACHE_PATH.read_bytes()
+        assert upgrade._claim_install_attempt("1.1.0", now=now) == "failed"
+        assert json.loads(upgrade.CACHE_PATH.read_text())["install_failure_cause"] == cause
+        assert upgrade.CACHE_PATH.read_bytes() == before
+
+    @pytest.mark.parametrize("cause", upgrade.INSTALL_FAILURE_CAUSES + ("unexpected:RuntimeError",))
+    def test_current_view_hides_obsolete_install_failure_without_writing(self, monkeypatch, cause):
+        _set_version(monkeypatch, "1.1.0")
+        now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+        cache = upgrade._empty_cache()
+        cache.update(
+            latest_version="1.1.0",
+            checked_at=now.isoformat(),
+            install_failure_cause=cause,
+            install_failure_at=now.isoformat(),
+        )
+        upgrade.CACHE_PATH.write_text(json.dumps(cache))
+        before = upgrade.CACHE_PATH.read_bytes()
+        view = upgrade.cached_upgrade_view({}, now=now)
+        assert view.state == "current"
+        assert view.install_failure is None
+        assert view.install_failure_at is None
+        assert upgrade.CACHE_PATH.read_bytes() == before
+
     @pytest.mark.parametrize(
         ("cause", "exc_or_tags"),
         [

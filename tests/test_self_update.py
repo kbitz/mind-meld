@@ -3203,6 +3203,15 @@ def test_sync78_cancelled_optional_update_never_asserts_sync_success(
 
 
 class TestTrack124BInstallRecordsAndPinnedRefusal:
+    def test_explicit_update_clears_previous_install_failure(self, pipx_install, monkeypatch):
+        venv = pipx_install()
+        upgrade._record_install_problem("install-failed")
+        _fake_run(monkeypatch, venv, lands="1.3.0")
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        assert _cache()["install_failure_cause"] is None
+        assert _cache()["install_failure_at"] is None
+
     def test_pinned_install_with_not_readable_check_names_cause_and_fix(
         self, pipx_install, monkeypatch
     ):
