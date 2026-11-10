@@ -742,9 +742,9 @@ SQL length to 16 MiB. A hot `-journal` file refuses as `"stale"`. SQLite interru
 (`dev`, `ino`, `size`, `mtime_ns` for main DB and `-wal`) must match (`before_fp == after_fp`);
 any concurrent change raises `_ReadFailure("stale", cause="identity_changed")`.
 The reader scans `SELECT step_index, step_type, status, metadata FROM steps ORDER BY step_index`:
-only `step_type == 15` carries valid token usage (Tag 9 in `steps.metadata`).
-A completed `step_type == 15 AND status == 3` without Tag 9 increments `usage_less_skipped`.
-Any `step_type != 15` carrying nonzero tokens refuses as `"unsupported"`.
+`step_type` 15 and 23 carry valid token usage (Tag 9 in `steps.metadata`) and are counted alike per `tests/fixtures/host_sessions/agy/CONTRACT.md`'s census.
+A completed `step_type in {15, 23} AND status == 3` without Tag 9 increments `usage_less_skipped`.
+Any other `step_type` carrying nonzero tokens refuses as `"unsupported"`.
 Models are resolved from `gen_metadata.data` Tag 1.3 (`model_enum`) -> Tag 1.19 (`model_slug`).
 Turns are deduplicated across DBs by `sha256(f"agy\0{bot_id}")`.
 Cached in `~/.config/mind-meld/agy-host-tokens.json` using forensic replacement
