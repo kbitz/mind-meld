@@ -938,7 +938,8 @@ def _host_skip_phrase(
                 "`[retro] host_usage_autopush_budget_ms`; attended mm push refreshes usage "
                 "and can warm cold readers. "
                 "If it is over what an attended push allows, raise "
-                "`[retro] capture_budget_ms`; host reads get three fifths of it; "
+                "`[retro] attended_capture_cap_ms`; keep it at least `capture_budget_ms`. "
+                "Host capture and warm retries get three fifths of that cap; "
                 f"see {HOST_USAGE_CAPTURE_URL}."
             )
         compare = (
@@ -970,11 +971,11 @@ def _capture_host_snapshot(
 
     Wrappers own notices and persistence; autopush supplies no warm callback.
 
-    Track 85A: with a configured ``capture_budget_ms`` (stashed by
-    ``resolve_host_read_budget``), sweep + inline warm share one phase
-    deadline of at most three fifths of the capture budget (Track 101A);
-    without it (legacy key only) each warm retry keeps its legacy fresh
-    allowance. Attended callers (a warm callback) also hold a reserve for each
+    Tracks 85A/124A: the total stashed by ``resolve_host_read_budget`` is the
+    attended scan cap, or the capture budget for init. Sweep + inline warm
+    share one phase deadline of at most three fifths of that total;
+    legacy-key-only configs instead keep a fresh allowance per warm retry.
+    Attended callers (a warm callback) also hold a reserve for each
     later reader, in the sweep and across the warm retries. Elapsed attended
     time is recorded for the events tail.
     """

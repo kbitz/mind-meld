@@ -2409,9 +2409,11 @@ def test_deadline_remedy_names_the_attended_lever():
         "codex", "deadline", readiness="ready", verb="push", evidence=evidence
     )
     assert "raise `[retro] host_usage_autopush_budget_ms`" in phrase
-    assert "raise `[retro] capture_budget_ms`; host reads get three fifths of it;" in phrase
+    assert "raise `[retro] attended_capture_cap_ms`" in phrase
+    assert "Host capture and warm retries get three fifths of that cap" in phrase
+    assert "keep it at least `capture_budget_ms`" in phrase
     assert "warming" not in phrase
-    assert phrase.index("`[retro] capture_budget_ms`") < phrase.index("see ")
+    assert phrase.index("`[retro] attended_capture_cap_ms`") < phrase.index("see ")
 
     state = {
         "last_reason": "deadline",
@@ -2424,7 +2426,7 @@ def test_deadline_remedy_names_the_attended_lever():
     }
     blocker = statusflow._host_usage_blocker("codex", state, readiness="ready")
     # `safe_str` escapes the Rich markup bracket, so the display form is `\[retro]`.
-    assert "raise `\\[retro] capture_budget_ms`" in blocker
+    assert "raise `\\[retro] attended_capture_cap_ms`" in blocker
     assert blocker.endswith("(first observed 2026-11-01 UTC)")
     # The push-time notice passes no evidence and stays as it was.
     notice = events_tail._host_skip_phrase("codex", "deadline", readiness="ready")
@@ -2856,7 +2858,9 @@ class TestCaptureBudget85A:
         assert result.exit_code == 0
         raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.stdout)
         flat = " ".join(raw.replace("│", " ").split())
-        assert "three fifths of the capture budget" in flat
+        assert "three fifths of the attended scan cap" in flat
+        assert "default thirty seconds" in flat
+        assert "attended_capture_cap_ms" in flat
         assert "at most half of the capture budget" not in flat
 
     @staticmethod

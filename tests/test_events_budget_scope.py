@@ -993,6 +993,9 @@ class TestAttendedCaptureCap124A:
             str(repo_a.resolve()),
             str(repo_b.resolve()),
         }
+        push_row = _mm_events.latest_mm_push_row(events_root / "events", "dev-a")
+        assert push_row is not None
+        assert set(cache["repo_cursors"].values()) == {push_row["ts"]}
 
     def test_fixture_exceeding_attended_cap_stops_reports_and_resumes_from_cursors(
         self, tmp_path, monkeypatch
