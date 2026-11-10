@@ -104,7 +104,6 @@ read_syncthing_login() {
         return 0
       elif [ -L "$HOME/Library/LaunchAgents/$plist_name" ]; then
         st_login="unknown"
-        return 0
       fi
     done
   else

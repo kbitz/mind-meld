@@ -1235,6 +1235,21 @@ class TestBootstrapSyncthingStart118A:
         assert not target.exists()
         assert plist.is_symlink()
 
+    def test_macos_broken_modern_link_does_not_hide_enabled_legacy(
+        self, harness: BootstrapHarness
+    ) -> None:
+        self._ready_macos(harness)
+        launch_agents = harness.home / "Library" / "LaunchAgents"
+        launch_agents.mkdir(parents=True, exist_ok=True)
+        (launch_agents / "sh.brew.syncthing.plist").symlink_to(harness.tmp_path / "missing-plist")
+        legacy = launch_agents / "homebrew.mxcl.syncthing.plist"
+        legacy.write_text("<plist>already-enabled</plist>\n", encoding="utf-8")
+        proc = harness.run(extra_env={"MM_TEST_SYNCTHING_CHECK": "default ok"})
+        assert proc.returncode == 0, proc.stdout
+        assert "Syncthing is running and already starts at login." in proc.stdout
+        assert legacy.read_text(encoding="utf-8") == "<plist>already-enabled</plist>\n"
+        assert not [row for row in harness.calls() if row[:2] == ["brew", "services"]]
+
     @pytest.mark.parametrize(
         ("platform_name", "extra", "expected_tail"),
         [
