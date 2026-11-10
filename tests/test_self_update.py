@@ -3212,23 +3212,81 @@ class TestTrack124BInstallRecordsAndPinnedRefusal:
         assert _cache()["install_failure_cause"] is None
         assert _cache()["install_failure_at"] is None
 
+    # Value: protects=pinned updates name each non-network check cause and refuse pipx;
+    # fails_when=refusal loses the cause-specific remedy or starts reinstalling;
+    # why_new=only not-readable was asserted at this boundary; seam=none;
+    # no_claim=live repository authentication (tag adapter and pipx are faked).
+    @pytest.mark.parametrize(
+        "cause,what,fix",
+        [
+            (
+                "not-readable",
+                "mm could not read the release tags with this machine's git credentials",
+                "Run: gh auth setup-git",
+            ),
+            ("unparseable", "GitHub listed no release tag mm could read", "Run: mm update"),
+            ("git-missing", "git was not found on PATH", "Install git, then run: mm update"),
+            ("unexpected:RuntimeError", "unexpected check error (RuntimeError)", "Run: mm update"),
+        ],
+    )
     def test_pinned_install_with_not_readable_check_names_cause_and_fix(
-        self, pipx_install, monkeypatch
+        self, pipx_install, monkeypatch, cause, what, fix
     ):
         spec = f"{upgrade.REPO_SPEC}@v1.2.0"
-        pipx_install(spec=spec)
+        venv = pipx_install(spec=spec)
+        calls = _fake_run(monkeypatch, venv, lands="1.3.0")
         monkeypatch.setattr(
             upgrade,
             "_fetch_tags",
-            lambda: (_ for _ in ()).throw(upgrade._CheckFailed("not-readable")),
+            lambda: (_ for _ in ()).throw(upgrade._CheckFailed(cause)),
         )
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
         err = _flat(result.stderr)
-        assert "mm could not read the release tags with this machine's git credentials" in err
+        assert what in err
         assert spec in err
-        assert err.endswith("Run: gh auth setup-git")
+        assert err.endswith(fix)
         assert "Could not reach GitHub" not in err
+        assert calls == []
+
+    # Value: protects=under-lock pinned reclassification preserves each check cause and remedy;
+    # fails_when=the late refusal uses generic wording or invokes destructive pipx;
+    # why_new=the existing reclassification test asserts only the network refusal; seam=none;
+    # no_claim=real concurrent installations (metadata change simulates the race).
+    @pytest.mark.parametrize(
+        "cause,what,fix",
+        [
+            (
+                "not-readable",
+                "mm could not read the release tags with this machine's git credentials",
+                "Run: gh auth setup-git",
+            ),
+            ("unparseable", "GitHub listed no release tag mm could read", "Run: mm update"),
+            ("git-missing", "git was not found on PATH", "Install git, then run: mm update"),
+            ("unexpected:RuntimeError", "unexpected check error (RuntimeError)", "Run: mm update"),
+        ],
+    )
+    def test_install_becoming_pinned_names_check_cause_under_lock(
+        self, pipx_install, monkeypatch, cause, what, fix
+    ):
+        venv = pipx_install()
+        calls = _fake_run(monkeypatch, venv, lands="1.3.0")
+
+        def failed_check():
+            _write_metadata(venv, spec=f"{upgrade.REPO_SPEC}@v1.2.0", version="1.2.0")
+            raise upgrade._CheckFailed(cause)
+
+        monkeypatch.setattr(upgrade, "_fetch_tags", failed_check)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 1, result.output
+        err = _flat(result.stderr)
+        assert "The install is now pinned" in err
+        assert what in err
+        assert err.endswith(fix)
+        assert "Could not reach GitHub" not in err
+        assert calls == []
+        lockfile.acquire_lock()
+        lockfile.release_lock()
 
     def test_install_causes_recorded_and_cleared_across_lifecycle(self, pipx_install, monkeypatch):
         # 1) not-tracking is recorded when install is pinned
