@@ -258,9 +258,10 @@ class TestEventsTailBudgetScope:
 
         _stub_fast_walks(monkeypatch)
         monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_INTERACTIVE_MS", 10)
-        # Track 85A: the attended session budget comes from the capture
+        # Track 85A + 124A: the attended session budget comes from the capture
         # partition (two fifths of 20 ms here), not the legacy interactive walk ms.
         monkeypatch.setattr(events_tail, "DEFAULT_CAPTURE_BUDGET_MS", 20)
+        monkeypatch.setattr(events_tail, "DEFAULT_ATTENDED_CAPTURE_CAP_MS", 20)
         # else-branch (no flock); identity gather instant so only the walk is slow.
         monkeypatch.setattr(events_tail, "_decide_token_walk_policy", lambda paths, *, quiet: False)
         monkeypatch.setattr(
@@ -851,3 +852,289 @@ def test_latest_event_rows_ignores_future_clock_skew_for_mm_push_and_git_snapsho
     scan = _mm_events.latest_event_rows(events_dir, "dev-a", {"mm-push", "git-snapshot"})
     assert scan.rows["mm-push"]["ts"] == real_ts
     assert scan.rows["git-snapshot"]["ts"] == real_ts
+
+
+class TestAttendedCaptureCap124A:
+    def test_attended_push_finishes_over_capture_budget_under_cap_and_aborts_when_equal(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """AC2: A fixture needing > capture_budget_ms and <= attended_capture_cap_ms
+        finishes host warm retry, git walk, and session walk in one attended push;
+        setting attended_capture_cap_ms == capture_budget_ms reproduces the aborts
+        and deadline stop."""
+        import mind_meld.host_registry as _mm_host_registry
+        import mind_meld.host_usage as _mm_host_usage
+
+        events_root = tmp_path / "events_root"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(parents=True)
+        sources = _make_sources(events_root, claude_dir)
+        repo_a = _cursor_repo(tmp_path, "repo-a")
+        repo_b = _cursor_repo(tmp_path, "repo-b")
+
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda *_a, **_kw: _mm_events.GitRootDiscovery([repo_a, repo_b], []),
+        )
+        monkeypatch.setattr(
+            _mm_events,
+            "resolve_walk_author_emails",
+            lambda *_a, **_kw: {"user@example.com"},
+        )
+
+        @contextmanager
+        def fake_token_lock(_mode):
+            yield {}
+
+        monkeypatch.setattr(events_tail, "_decide_token_walk_policy", lambda paths, **_kw: True)
+        monkeypatch.setattr(_mm_token_usage, "lock_and_get_files", fake_token_lock)
+        monkeypatch.setattr(
+            _mm_identity,
+            "gather_local_identities",
+            lambda *, allow_refresh=True, root_discovery=None, **kw: ["user@example.com"],
+        )
+
+        # Each repo walk takes 350 ms (> 250 ms equality tail budget, <= 2500 ms cap).
+        def slow_repo_walk(root, since_iso, timeout_ms, author_emails=None):
+            time.sleep(0.35)
+            if timeout_ms < 350:
+                return None, _mm_events.WALK_SKIP_TIMEOUT
+            return (
+                {
+                    "project": root.name,
+                    "local_path": str(root),
+                    "remote_url": None,
+                    "commits": [{"sha": "abc1234", "ts": since_iso, "subject": "work"}],
+                    "branches": ["main"],
+                },
+                None,
+            )
+
+        monkeypatch.setattr(_mm_events, "_walk_one_repo", slow_repo_walk)
+
+        # Session walk takes 120 ms (combined tail > 250 ms capture_budget_ms, <= 2500 ms cap).
+        def slow_session_walk(c_dir, **kwargs):
+            time.sleep(0.12)
+            yield {"projects": [{"project": "p", "sessions": 1}]}
+
+        monkeypatch.setattr(_mm_events, "walk_session_metadata", slow_session_walk)
+
+        # Cold Codex reader: initial sweep hits deadline; warm retry needs >= 0.3 s budget_s.
+        def cold_codex(*, deadline):
+            return _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
+
+        def warm_codex(*, reader="codex", budget_s=0.0):
+            if budget_s < 0.3:
+                return _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
+            return _mm_host_usage.HostUsageResult(
+                {"codex": {"2026-11-10": _mm_host_usage.zero_model_bucket()}},
+                complete=True,
+            )
+
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm_codex)
+        readers = (("codex", cold_codex),)
+
+        # 1. Equality config (cap == capture == 250 ms): host warm stops on deadline,
+        # git walk aborts on budget, and session walk trips budget notice.
+        eq_cfg = {
+            "sync": {"sources": sources},
+            "retro": {"capture_budget_ms": 250, "attended_capture_cap_ms": 250},
+        }
+        eq_host_ms, _ = events_tail.resolve_host_read_budget(eq_cfg, interactive=True)
+        eq_host_cap, _ = events_tail._capture_host_snapshot(
+            "dev-a", readers, host_budget_ms=eq_host_ms, warm_host_cache=lambda _n: None
+        )
+        assert eq_host_cap.dropped == (("codex", "deadline"),)
+        assert eq_host_cap.hosts is None
+
+        eq_deg = events_tail._run_events_tail(
+            eq_cfg,
+            sources,
+            "dev-a",
+            dry_run=False,
+            quiet=False,
+            suppress_host_capture=True,
+        )
+        eq_err = capsys.readouterr().err
+        assert any("git walk dropped" in d for d in eq_deg), eq_deg
+        assert "events tail budget exceeded" in eq_err
+
+        # 2. Cap > capture (capture_budget_ms=250, attended_capture_cap_ms=2500):
+        # warm retry completes Codex, git walk finishes both repos without abort,
+        # session walk does not trip notice, and both repo cursors advance.
+        _write_git_cursor_cache({})
+        cap_cfg = {
+            "sync": {"sources": sources},
+            "retro": {"capture_budget_ms": 250, "attended_capture_cap_ms": 2500},
+        }
+        cap_host_ms, _ = events_tail.resolve_host_read_budget(cap_cfg, interactive=True)
+        cap_host_cap, cap_host_rows = events_tail._capture_host_snapshot(
+            "dev-a", readers, host_budget_ms=cap_host_ms, warm_host_cache=lambda _n: None
+        )
+        assert cap_host_cap.dropped == ()
+        assert cap_host_cap.hosts is not None and "codex" in cap_host_cap.hosts
+        assert len(cap_host_rows) == 1
+
+        cap_deg = events_tail._run_events_tail(
+            cap_cfg,
+            sources,
+            "dev-a",
+            dry_run=False,
+            quiet=False,
+            suppress_host_capture=True,
+        )
+        cap_err = capsys.readouterr().err
+        assert cap_deg == []
+        assert "events tail budget exceeded" not in cap_err
+        cache = _mm_events.read_git_capture_cache()
+        assert cache["incomplete_streak"] == 0
+        assert set(cache["repo_cursors"]) == {
+            str(repo_a.resolve()),
+            str(repo_b.resolve()),
+        }
+        push_row = _mm_events.latest_mm_push_row(events_root / "events", "dev-a")
+        assert push_row is not None
+        assert set(cache["repo_cursors"].values()) == {push_row["ts"]}
+
+    def test_fixture_exceeding_attended_cap_stops_reports_and_resumes_from_cursors(
+        self, tmp_path, monkeypatch
+    ):
+        """AC3: A fixture exceeding attended_capture_cap_ms stops at the cap, reports
+        through the existing degradation path, and finishes from per-repo cursors on
+        the next attended push."""
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root, claude_dir=None)
+        repo_a = _cursor_repo(tmp_path, "repo-a")
+        repo_b = _cursor_repo(tmp_path, "repo-b")
+
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda *_a, **_kw: _mm_events.GitRootDiscovery([repo_a, repo_b], []),
+        )
+        monkeypatch.setattr(
+            _mm_events,
+            "resolve_walk_author_emails",
+            lambda *_a, **_kw: {"user@example.com"},
+        )
+        monkeypatch.setattr(
+            _mm_identity,
+            "gather_local_identities",
+            lambda *, allow_refresh=True, root_discovery=None, **kw: ["user@example.com"],
+        )
+
+        phase = {"run": 1}
+        seen_since: dict[tuple[int, str], str] = {}
+
+        def staged_walk(root, since_iso, timeout_ms, author_emails=None):
+            seen_since[(phase["run"], str(root.resolve()))] = since_iso
+            if phase["run"] == 1 and root == repo_b:
+                time.sleep(0.55)
+            else:
+                time.sleep(0.01)
+            return (
+                {
+                    "project": root.name,
+                    "local_path": str(root),
+                    "remote_url": None,
+                    "commits": [{"sha": "abc1234", "ts": since_iso, "subject": "commit"}],
+                    "branches": ["main"],
+                },
+                None,
+            )
+
+        monkeypatch.setattr(_mm_events, "_walk_one_repo", staged_walk)
+        cfg = {
+            "sync": {"sources": sources},
+            "retro": {"capture_budget_ms": 250, "attended_capture_cap_ms": 300},
+        }
+
+        # Push 1: repo_a completes, repo_b exceeds the 300 ms cap and is budget-aborted.
+        deg1 = events_tail._run_events_tail(
+            cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+        )
+        assert any("git walk dropped 1 repositories" in d for d in deg1), deg1
+        cache1 = _mm_events.read_git_capture_cache()
+        repo_a_cursor_1 = cache1["repo_cursors"][str(repo_a.resolve())]
+        repo_b_cursor_1 = cache1["repo_cursors"][str(repo_b.resolve())]
+        # Completed repo_a advances to the push timestamp; aborted repo_b stays at the 30d floor.
+        assert repo_a_cursor_1 > repo_b_cursor_1
+
+        # Push 2: resumes repo_a from its advanced cursor and repo_b from its retained cursor.
+        phase["run"] = 2
+        deg2 = events_tail._run_events_tail(
+            cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+        )
+        assert deg2 == []
+        cache2 = _mm_events.read_git_capture_cache()
+        assert cache2["incomplete_streak"] == 0
+        assert seen_since[(2, str(repo_a.resolve()))] == repo_a_cursor_1
+        assert seen_since[(2, str(repo_b.resolve()))] == repo_b_cursor_1
+        assert cache2["repo_cursors"][str(repo_b.resolve())] > repo_b_cursor_1
+
+    def test_autopush_init_and_dry_run_unaffected_by_attended_cap(self, tmp_path, monkeypatch):
+        """AC4 & AC10: autopush, mm init backfill, and mm push --dry-run keep their
+        existing budgets and write boundaries regardless of attended_capture_cap_ms."""
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root, claude_dir=None)
+        cfg = {
+            "sync": {"sources": sources},
+            "retro": {"capture_budget_ms": 5000, "attended_capture_cap_ms": 60000},
+        }
+        seen_calls: list[dict] = []
+        real_capture = events_tail._capture_event_snapshots
+
+        def spy(*args, **kwargs):
+            seen_calls.append(kwargs)
+            return real_capture(*args, **kwargs)
+
+        monkeypatch.setattr(events_tail, "_capture_event_snapshots", spy)
+        _stub_fast_walks(monkeypatch)
+        monkeypatch.setattr(
+            _mm_identity,
+            "gather_local_identities",
+            lambda *, allow_refresh=True, root_discovery=None, **kw: [],
+        )
+        monkeypatch.setattr(
+            _mm_identity,
+            "refresh_identity_cache",
+            lambda *, force=False, root_discovery=None: [],
+        )
+
+        # 1. Dry-run captures nothing and calls _capture_event_snapshots zero times.
+        deg_dry = events_tail._run_events_tail(
+            cfg, sources, "dev-a", dry_run=True, quiet=False, suppress_host_capture=False
+        )
+        assert deg_dry == []
+        assert seen_calls == []
+
+        # 2. Autopush (quiet=True) keeps 250 ms walk, 50 ms discovery, 250 ms host, no warm.
+        events_tail._run_events_tail(
+            cfg, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=False
+        )
+        assert len(seen_calls) == 1
+        auto_kw = seen_calls[-1]
+        assert auto_kw["budget_ms"] == _mm_events.WALK_TIME_BUDGET_AUTOPUSH_MS == 250
+        assert (
+            auto_kw["root_discovery_budget_ms"]
+            == _mm_events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
+            == 50
+        )
+        assert auto_kw["host_budget_ms"] == events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS == 250
+        assert auto_kw["warm_host_cache"] is None
+        assert auto_kw["per_repo_cap_ms"] is None
+
+        # 3. mm init backfill (_run_events_backfill) keeps 500 ms walk, 100 ms discovery,
+        # and capture_budget_ms-derived host budget (scan_cap=False).
+        events_tail._run_events_backfill(cfg, sources, "dev-a")
+        assert len(seen_calls) == 2
+        init_kw = seen_calls[-1]
+        assert init_kw["budget_ms"] == _mm_events.WALK_TIME_BUDGET_INTERACTIVE_MS == 500
+        assert (
+            init_kw["root_discovery_budget_ms"]
+            == _mm_events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
+            == 100
+        )
+        assert init_kw["host_budget_ms"] == 3000
+        assert init_kw.get("per_repo_cap_ms") is None

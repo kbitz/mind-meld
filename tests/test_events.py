@@ -3273,9 +3273,12 @@ def test_three_budget_limited_pushes_finish_index_git_and_identity(tmp_path, mon
 
     def one_directory(directory, **kwargs):
         result = reader(directory, **kwargs)
-        # Reach the attended discovery deadline (Track 106A: 1,500 ms) exactly,
-        # still inside the tail deadline so the git walk is not aborted.
-        clock[0] = events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS / 1000.0
+        # Reach the attended discovery deadline (Track 106A: 1,500 ms + cap extension)
+        # exactly, still inside the tail deadline so the git walk is not aborted.
+        extension_s = (
+            events_tail.DEFAULT_ATTENDED_CAPTURE_CAP_MS - events_tail.DEFAULT_CAPTURE_BUDGET_MS
+        ) / 1000.0
+        clock[0] = events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS / 1000.0 + extension_s
         return result
 
     monkeypatch.setattr(events, "_read_cwd_from_latest_jsonl", one_directory)
@@ -3283,7 +3286,9 @@ def test_three_budget_limited_pushes_finish_index_git_and_identity(tmp_path, mon
     monkeypatch.setattr(events_tail, "_decide_token_walk_policy", lambda *a, **kw: False)
     for push in range(3):
         clock[0] = 0.0
-        events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
+        events_tail._run_events_tail(
+            config, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+        )
         row = events.latest_mm_push_row(tmp_path / "activity" / "events", "dev-a")
         assert row is not None
         assert row["git_capture"]["discovery"] == ("partial" if push < 2 else "complete")
@@ -4079,16 +4084,18 @@ def test_recapture_walks_with_its_own_budget(tmp_path, monkeypatch, argv):
     first_budget, first_kw = walks[0]
     assert first_budget == events.RECAPTURE_WALK_BUDGET_MS
     assert first_kw["per_repo_timeout_ms"] == events.RECAPTURE_PER_REPO_TIMEOUT_MS
-    # The ordinary push inside a real recapture keeps the push budgets.
+    # The ordinary push inside a real recapture keeps the attended push cap budget.
+    from mind_meld import events_tail
+
+    max_push_walk_ms = events.WALK_TIME_BUDGET_INTERACTIVE_MS + (
+        events_tail.DEFAULT_ATTENDED_CAPTURE_CAP_MS - events_tail.DEFAULT_CAPTURE_BUDGET_MS
+    )
     for budget, kw in walks[1:]:
         assert "per_repo_timeout_ms" not in kw
-        assert budget <= events.WALK_TIME_BUDGET_INTERACTIVE_MS
+        assert budget <= max_push_walk_ms < events.RECAPTURE_WALK_BUDGET_MS
 
 
-@pytest.mark.parametrize("quiet, budget_ms", [(True, 250), (False, 2 * 250)])
-def test_push_and_autopush_walk_budgets_and_cap_are_unchanged(
-    tmp_path, monkeypatch, quiet, budget_ms
-):
+def test_push_and_autopush_walk_budgets_and_cap_are_unchanged(tmp_path, monkeypatch):
     from mind_meld import events_tail
 
     assert events.WALK_TIME_BUDGET_AUTOPUSH_MS == 250
@@ -4116,13 +4123,32 @@ def test_push_and_autopush_walk_budgets_and_cap_are_unchanged(
 
     monkeypatch.setattr(events, "_walk_one_repo", _capture)
 
+    # Autopush (quiet=True) keeps 250 ms walk budget and 2000 ms per-repo cap.
     events_tail._run_events_tail(
-        {}, sources, "dev-a", dry_run=False, quiet=quiet, suppress_host_capture=True
+        {}, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
     )
-
-    # One repository: (250 * 8) // 1 = 2000 and (2 * 250 * 8) // 1 = 4000, capped to 2000.
-    assert [(budget, "per_repo_timeout_ms" in kw) for budget, kw in walks] == [(budget_ms, False)]
+    assert [(budget, "per_repo_timeout_ms" in kw) for budget, kw in walks] == [(250, False)]
     assert timeouts == [2000]
+
+    # Equality config (cap == capture) reproduces the 500 ms walk budget and 2000 ms per-repo cap.
+    walks.clear()
+    timeouts.clear()
+    eq_cfg = {"retro": {"capture_budget_ms": 5000, "attended_capture_cap_ms": 5000}}
+    events_tail._run_events_tail(
+        eq_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+    )
+    assert [(budget, "per_repo_timeout_ms" in kw) for budget, kw in walks] == [(2 * 250, False)]
+    assert timeouts == [2000]
+
+    # Default attended cap (30 s) extends the attended walk budget by E = 25000 ms (25500 ms)
+    # and the per-repo timeout cap to 27000 ms.
+    walks.clear()
+    timeouts.clear()
+    events_tail._run_events_tail(
+        {}, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+    )
+    assert [(budget, "per_repo_timeout_ms" in kw) for budget, kw in walks] == [(25500, False)]
+    assert timeouts == [27000]
 
 
 def test_repo_slower_than_old_cap_is_captured_by_recapture_and_skipped_by_push(
@@ -4136,8 +4162,8 @@ def test_repo_slower_than_old_cap_is_captured_by_recapture_and_skipped_by_push(
     _init_git_repo(repo)
     _seed_commit(repo)
     _stub_discovery_to(monkeypatch, repo)
-    # The old 2 s cap plus a margin chosen here: slower than push allows, far
-    # inside recapture's 30 s.
+    # The old 2 s cap plus a margin chosen here: slower than equality/autopush allows,
+    # inside the default 30 s attended cap and recapture's 30 s.
     _put_slow_git_first_on_path(tmp_path, monkeypatch, events.PER_REPO_TIMEOUT_CAP_MS / 1000 + 0.5)
 
     prepared = events_tail._prepare_recapture(
@@ -4150,9 +4176,22 @@ def test_repo_slower_than_old_cap_is_captured_by_recapture_and_skipped_by_push(
     assert row["skipped"] == []
     assert [c["subject"] for p in row["projects"] for c in p["commits"]] == ["seed"]
 
-    for quiet in (False, True):
+    # Default attended cap captures the slow repo in one push.
+    attended_deg = events_tail._run_events_tail(
+        {}, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+    )
+    assert attended_deg == []
+    attended_snap = events.latest_event_rows(events_dir, "dev-a", {"git-snapshot"}).rows[
+        "git-snapshot"
+    ]
+    assert attended_snap["skipped"] == []
+    assert [c["subject"] for p in attended_snap["projects"] for c in p["commits"]] == ["seed"]
+
+    # Equality-config attended push and autopush still skip it.
+    eq_cfg = {"retro": {"capture_budget_ms": 5000, "attended_capture_cap_ms": 5000}}
+    for cfg, quiet in ((eq_cfg, False), ({}, True)):
         degradations = events_tail._run_events_tail(
-            {}, sources, "dev-a", dry_run=False, quiet=quiet, suppress_host_capture=True
+            cfg, sources, "dev-a", dry_run=False, quiet=quiet, suppress_host_capture=True
         )
         assert any("git walk dropped 1 repositories" in d for d in degradations), degradations
         snapshot = events.latest_event_rows(events_dir, "dev-a", {"git-snapshot"}).rows[
@@ -4165,6 +4204,90 @@ def test_repo_slower_than_old_cap_is_captured_by_recapture_and_skipped_by_push(
             events.WALK_SKIP_BUDGET_ABORT,
             events.WALK_SKIP_TIMEOUT,
         }
+
+
+def test_recapture_advice_loop_reproduced_under_equality_and_closed_by_default_cap(
+    tmp_path, monkeypatch
+):
+    from mind_meld import events_tail, statusflow
+
+    sources = _recapture_test_sources(tmp_path)
+    events_dir = tmp_path / "mm-events" / "events"
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    for repo in (repo_a, repo_b):
+        _init_git_repo(repo)
+        _seed_commit(repo)
+    monkeypatch.setattr(
+        events,
+        "discover_git_roots",
+        lambda *_a, **_kw: events.GitRootDiscovery([repo_a, repo_b], []),
+    )
+    # Each repo takes ~0.7 s: slower than the 500 ms walk budget, well within the 30 s cap.
+    _put_slow_git_first_on_path(tmp_path, monkeypatch, 0.7)
+
+    eq_cfg = {
+        "sync": {"sources": sources},
+        "retro": {"capture_budget_ms": 5000, "attended_capture_cap_ms": 5000},
+    }
+    default_cfg = {"sync": {"sources": sources}}
+    disc_dict = {"roots": [str(repo_a.resolve()), str(repo_b.resolve())]}
+
+    # 1. Equality-config push aborts both repos on the 500 ms walk budget.
+    deg1 = events_tail._run_events_tail(
+        eq_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+    )
+    assert any("git walk dropped 2 repositories" in d for d in deg1), deg1
+
+    # 2. Recapture succeeds with its 120 s budget and advances both per-repo cursors.
+    recap_since = datetime.now(timezone.utc) - timedelta(days=7)
+    prepared = events_tail._prepare_recapture(eq_cfg, sources, "dev-a", since=recap_since)
+    assert prepared is not None
+    assert prepared.walk_budget_aborts == 0
+    assert prepared.walk_errors == 0
+    events.write_push_event(events_dir, "dev-a", prepared.git_rows)
+    events_tail._commit_recorded_git_rows(
+        events_dir,
+        "dev-a",
+        prepared.git_rows,
+        since=recap_since,
+        complete=True,
+    )
+    cache_after_recap = events.read_git_capture_cache()
+    assert cache_after_recap["incomplete_streak"] == 0
+    assert set(cache_after_recap["repo_cursors"]) == {
+        str(repo_a.resolve()),
+        str(repo_b.resolve()),
+    }
+
+    # 3. Subsequent equality-config pushes (500 ms walk budget) still run git log per repo
+    # and abort on budget (walk_budget_aborts=2, walk_errors=0, pending_repos=2), emitting
+    # the recapture degradation on every push and re-triggering status recapture advice.
+    for _ in range(3):
+        deg2 = events_tail._run_events_tail(
+            eq_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+        )
+        assert any(
+            "git walk dropped 2 repositories this push. Run mm recapture --dry-run" in d
+            for d in deg2
+        ), deg2
+    diag_loop = statusflow._collect_git_capture_diag(eq_cfg, "dev-a", disc_dict)
+    assert diag_loop["recorded"]["walk_budget_aborts"] == 2
+    assert diag_loop["recorded"]["walk_errors"] == 0
+    assert diag_loop["fresh"]["pending_repos"] == 2
+    assert events.read_git_capture_cache()["incomplete_streak"] == 3
+
+    # 4. Under the default 30 s attended cap, the next attended push finishes both repos,
+    # emits no git-walk degradation, advances cursors, and clears mm status / mm diag state.
+    deg3 = events_tail._run_events_tail(
+        default_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+    )
+    assert deg3 == []
+    diag_clear = statusflow._collect_git_capture_diag(default_cfg, "dev-a", disc_dict)
+    assert diag_clear["recorded"]["walk_budget_aborts"] == 0
+    assert diag_clear["recorded"]["walk_errors"] == 0
+    assert diag_clear["fresh"]["pending_repos"] == 0
+    assert events.read_git_capture_cache()["incomplete_streak"] == 0
 
 
 @pytest.mark.parametrize(

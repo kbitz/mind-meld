@@ -2409,9 +2409,11 @@ def test_deadline_remedy_names_the_attended_lever():
         "codex", "deadline", readiness="ready", verb="push", evidence=evidence
     )
     assert "raise `[retro] host_usage_autopush_budget_ms`" in phrase
-    assert "raise `[retro] capture_budget_ms`; host reads get three fifths of it;" in phrase
+    assert "raise `[retro] attended_capture_cap_ms`" in phrase
+    assert "Host capture and warm retries get three fifths of that cap" in phrase
+    assert "keep it at least `capture_budget_ms`" in phrase
     assert "warming" not in phrase
-    assert phrase.index("`[retro] capture_budget_ms`") < phrase.index("see ")
+    assert phrase.index("`[retro] attended_capture_cap_ms`") < phrase.index("see ")
 
     state = {
         "last_reason": "deadline",
@@ -2424,7 +2426,7 @@ def test_deadline_remedy_names_the_attended_lever():
     }
     blocker = statusflow._host_usage_blocker("codex", state, readiness="ready")
     # `safe_str` escapes the Rich markup bracket, so the display form is `\[retro]`.
-    assert "raise `\\[retro] capture_budget_ms`" in blocker
+    assert "raise `\\[retro] attended_capture_cap_ms`" in blocker
     assert blocker.endswith("(first observed 2026-11-01 UTC)")
     # The push-time notice passes no evidence and stays as it was.
     notice = events_tail._host_skip_phrase("codex", "deadline", readiness="ready")
@@ -2706,20 +2708,40 @@ class TestCaptureBudget85A:
             4000,
             "config",
         )
+        assert events_tail.resolve_attended_capture_cap({}) == (30000, "default")
+        assert events_tail.resolve_attended_capture_cap({"retro": {}}) == (30000, "default")
+        assert events_tail.resolve_attended_capture_cap(
+            {"retro": {"attended_capture_cap_ms": 15000}}
+        ) == (15000, "config")
+        assert events_tail.resolve_attended_capture_cap(
+            {"retro": {"capture_budget_ms": 45000}}
+        ) == (45000, "config")
+        assert events_tail.resolve_attended_capture_cap(
+            {"retro": {"capture_budget_ms": 4000, "attended_capture_cap_ms": 4000}}
+        ) == (4000, "config")
 
     def test_capture_budget_takes_precedence_over_legacy_interactive(self):
         # Sweep keeps the legacy value, capped inside the capture phase
-        # (three fifths of capture_budget_ms, enforced in _capture_host_snapshot).
+        # (three fifths of total attended cap, or capture_budget_ms when equal / scan_cap=False).
         config = {"retro": {"capture_budget_ms": 4000, "host_usage_interactive_budget_ms": 300}}
         assert events_tail.resolve_host_read_budget(config, interactive=True) == (
             300,
             "config",
         )
         assert events_tail.resolve_host_read_budget(
-            {"retro": {"capture_budget_ms": 400}}, interactive=True
+            {"retro": {"capture_budget_ms": 400, "attended_capture_cap_ms": 400}},
+            interactive=True,
         ) == (240, "config")
         assert events_tail.resolve_host_read_budget(
+            {"retro": {"capture_budget_ms": 4000, "attended_capture_cap_ms": 4000}},
+            interactive=True,
+        ) == (2400, "config")
+        # Default cap (30 s) keeps the 3 s sweep; scan_cap=False (mm init) uses capture_budget_ms.
+        assert events_tail.resolve_host_read_budget(
             {"retro": {"capture_budget_ms": 4000}}, interactive=True
+        ) == (3000, "config")
+        assert events_tail.resolve_host_read_budget(
+            {"retro": {"capture_budget_ms": 4000}}, interactive=True, scan_cap=False
         ) == (2400, "config")
 
     def test_legacy_budgets_preserved_without_capture_budget(self):
@@ -2734,7 +2756,7 @@ class TestCaptureBudget85A:
         )
 
     def test_autopush_budget_unaffected_by_capture_budget(self):
-        config = {"retro": {"capture_budget_ms": 4000}}
+        config = {"retro": {"capture_budget_ms": 4000, "attended_capture_cap_ms": 20000}}
         assert events_tail.resolve_host_read_budget(config, interactive=False) == (
             250,
             "default",
@@ -2747,8 +2769,8 @@ class TestCaptureBudget85A:
 
     def test_warm_retry_bounded_by_capture_phase(self, monkeypatch):
         """With capture configured, warm gets only the remaining phase budget."""
-        config = {"retro": {"capture_budget_ms": 1000}}
-        host_budget_ms, _ = events_tail.resolve_host_read_budget(config, interactive=True)
+        eq_config = {"retro": {"capture_budget_ms": 1000, "attended_capture_cap_ms": 1000}}
+        host_budget_ms, _ = events_tail.resolve_host_read_budget(eq_config, interactive=True)
         budgets: list[float] = []
 
         def warm(*, reader="codex", budget_s=5.0):
@@ -2764,15 +2786,30 @@ class TestCaptureBudget85A:
             warm_host_cache=lambda _name: None,
         )
         assert budgets, "warm retry did not run"
-        # Phase is three fifths of 1000 ms; the instant sweep leaves just
-        # under 0.6 s.
+        # Phase is three fifths of 1000 ms when cap == capture; instant sweep leaves <= 0.6 s.
         assert all(0.0 < budget <= 0.6 for budget in budgets)
 
+        budgets.clear()
+        default_cap_config = {"retro": {"capture_budget_ms": 1000}}
+        host_budget_ms, _ = events_tail.resolve_host_read_budget(
+            default_cap_config, interactive=True
+        )
+        events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=host_budget_ms,
+            warm_host_cache=lambda _name: None,
+        )
+        assert budgets
+        # Under the 30 s default cap, the host phase is 18 s (three fifths of 30 s).
+        assert all(0.6 < budget <= 18.0 for budget in budgets)
+
     def test_default_partition_fits_inside_capture_budget(self, monkeypatch, tmp_path):
-        """Track 101A: the 3 s attended default is the host share of the 5 s
-        capture budget, so host time plus the tail's floor is the whole budget."""
+        """Track 101A + 124A: equality config keeps the 5 s partition (3 s host + 2 s tail);
+        default cap extends the attended total to 30 s (18 s host phase + 12 s tail floor)."""
         assert events_tail.resolve_host_read_budget({}, interactive=True) == (3000, "default")
         assert events_tail._host_phase_ms(5000) == 3000
+        assert events_tail._host_phase_ms(30000) == 18000
         assert events_tail._host_phase_ms(1) == 1
 
         seen = {}
@@ -2783,18 +2820,32 @@ class TestCaptureBudget85A:
             return real_capture(*args, **kwargs)
 
         monkeypatch.setattr(events_tail, "_capture_event_snapshots", spy)
-        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", 3.0)
         sources = [{"name": "mm-events", "path": str(tmp_path / "mm-events")}]
+        eq_cfg = {"retro": {"capture_budget_ms": 5000, "attended_capture_cap_ms": 5000}}
+
+        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", 3.0)
+        events_tail._run_events_tail(
+            eq_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+        )
+        assert seen["budget_ms"] == 2000, "equality config: suppressed tail after 3.0 s keeps 2 s"
+
+        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", None)
+        events_tail._run_events_tail(
+            eq_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=False
+        )
+        assert seen["budget_ms"] == 2000, "equality config: unsuppressed tail keeps two fifths"
+
+        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", 3.0)
         events_tail._run_events_tail(
             {}, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
         )
-        assert seen["budget_ms"] == 2000, "a suppressed tail after 3.0 s of host time keeps 2 s"
+        assert seen["budget_ms"] == 27000, "default cap: suppressed tail after 3.0 s keeps 27 s"
 
         monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", None)
         events_tail._run_events_tail(
             {}, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=False
         )
-        assert seen["budget_ms"] == 2000, "an unsuppressed tail keeps the two fifths"
+        assert seen["budget_ms"] == 12000, "default cap: unsuppressed tail keeps two fifths (12 s)"
 
     def test_push_help_states_three_fifths_share(self):
         import re
@@ -2807,7 +2858,9 @@ class TestCaptureBudget85A:
         assert result.exit_code == 0
         raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.stdout)
         flat = " ".join(raw.replace("│", " ").split())
-        assert "three fifths of the capture budget" in flat
+        assert "three fifths of the attended scan cap" in flat
+        assert "default thirty seconds" in flat
+        assert "retro.attended_capture_cap_ms" in flat
         assert "at most half of the capture budget" not in flat
 
     @staticmethod
@@ -2982,7 +3035,7 @@ class TestCaptureBudget85A:
         monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", 1.0)
         events_root = tmp_path / "mm-events"
         sources = [{"name": "mm-events", "path": str(events_root)}]
-        config = {"retro": {"capture_budget_ms": 4000}}
+        config = {"retro": {"capture_budget_ms": 4000, "attended_capture_cap_ms": 4000}}
         import time as _time
 
         before = _time.monotonic()
@@ -2999,6 +3052,23 @@ class TestCaptureBudget85A:
         assert seen["git_budget_ms"] <= 3000
         assert before + 2.9 <= seen["session_deadline"] <= _time.monotonic() + 3.0
         assert events_tail._attended_host_elapsed_s is None
+
+        # Default cap (30 s) with capture_budget_ms=4000: elapsed 1s leaves 29s tail share
+        # and extends git_budget_ms by E = 30000 - 4000 = 26000 ms (500 + 26000 = 26500).
+        seen.clear()
+        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", 1.0)
+        before_cap = _time.monotonic()
+        events_tail._run_events_tail(
+            {"retro": {"capture_budget_ms": 4000}},
+            sources,
+            "dev-a",
+            dry_run=False,
+            quiet=False,
+            suppress_host_capture=True,
+        )
+        assert seen["budget_ms"] == 29000
+        assert seen["git_budget_ms"] == 26500
+        assert before_cap + 28.9 <= seen["session_deadline"] <= _time.monotonic() + 29.0
 
     def test_legacy_only_tail_keeps_legacy_budgets(self, monkeypatch, tmp_path):
         seen = {}

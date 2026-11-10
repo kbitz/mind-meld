@@ -15719,3 +15719,40 @@ def test_sync_progress_nested_pause_and_interrupt_do_not_restart_display(monkeyp
     finally:
         progress.stop()
     assert not [t for t in threading.enumerate() if t.name == "mm-sync-spinner" and t.is_alive()]
+
+
+def test_recapture_then_push_and_status_clear_slow_git_loop_under_default_cap(
+    tmp_path, monkeypatch
+):
+    from tests.test_events import _init_git_repo, _put_slow_git_first_on_path, _seed_commit
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    repo_a = tmp_path / "slow-a"
+    repo_b = tmp_path / "slow-b"
+    for repo in (repo_a, repo_b):
+        _init_git_repo(repo)
+        _seed_commit(repo)
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *_a, **_kw: _mm_events.GitRootDiscovery([repo_a, repo_b], []),
+    )
+    # 0.7 s per repo exceeds the old 500 ms interactive walk budget across 2 repos,
+    # while fitting inside recapture's 120 s budget and the 30 s default attended cap.
+    _put_slow_git_first_on_path(tmp_path, monkeypatch, 0.7)
+
+    recap = runner.invoke(app, ["recapture", "7d"])
+    assert recap.exit_code == 0, (recap.stdout, recap.stderr)
+    assert "git walk dropped" not in (recap.stdout + (recap.stderr or ""))
+
+    claude_file = tmp_path / "claude" / "projects" / "-Users-user-myapp" / "memory" / "next.md"
+    claude_file.write_text("follow-up change\n")
+    push = runner.invoke(app, ["push"])
+    assert push.exit_code == 0, (push.stdout, push.stderr)
+    assert "git walk dropped" not in (push.stdout + (push.stderr or ""))
+
+    status = runner.invoke(app, ["status"])
+    assert status.exit_code == 0, (status.stdout, status.stderr)
+    assert "Retro capture:" not in status.stdout
+    assert "mm recapture" not in status.stdout

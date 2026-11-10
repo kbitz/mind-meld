@@ -2646,6 +2646,56 @@ def test_capture_budget_is_autopush_ceiling_when_set():
     assert "must not exceed retro.capture_budget_ms (300)" in str(err.value)
 
 
+@pytest.mark.parametrize("bad", [True, False, 1.5, "30000", 4999, 60001, None])
+def test_invalid_attended_capture_cap_default_capture(bad):
+    with pytest.raises(ConfigError) as err:
+        _validate(_retro_config({"attended_capture_cap_ms": bad}))
+    msg = str(err.value)
+    assert "retro.attended_capture_cap_ms must be an integer between 5000" in msg
+    assert "and 60000" in msg
+    assert f"got {bad}" in msg
+    assert "Fix [retro] attended_capture_cap_ms in ~/.config/mind-meld/config.toml." in msg
+
+
+def test_attended_capture_cap_respects_configured_capture_budget(tmp_path):
+    from mind_meld import config as mm_config
+
+    assert mm_config.DEFAULT_ATTENDED_CAPTURE_CAP_MS == 30000
+    assert mm_config.ATTENDED_CAPTURE_CAP_MAX_MS == 60000
+    # Unset cap accepted with default or explicit capture_budget_ms.
+    _validate(_retro_config({}))
+    _validate(_retro_config({"capture_budget_ms": 45000}))
+    # Equal to capture_budget_ms accepted (including below 5000 when capture_budget_ms is lowered).
+    _validate(_retro_config({"capture_budget_ms": 250, "attended_capture_cap_ms": 250}))
+    _validate(_retro_config({"capture_budget_ms": 5000, "attended_capture_cap_ms": 5000}))
+    _validate(_retro_config({"attended_capture_cap_ms": 30000}))
+    _validate(_retro_config({"attended_capture_cap_ms": 60000}))
+    # Explicit capture_budget_ms above explicit attended_capture_cap_ms rejected.
+    with pytest.raises(ConfigError) as err:
+        _validate(_retro_config({"capture_budget_ms": 10000, "attended_capture_cap_ms": 8000}))
+    assert "between 10000 and 60000, got 8000" in str(err.value)
+    # Autopush ceiling stays anchored to capture_budget_ms, not attended_capture_cap_ms.
+    with pytest.raises(ConfigError, match=r"must not exceed retro\.capture_budget_ms \(300\)"):
+        _validate(
+            _retro_config(
+                {
+                    "capture_budget_ms": 300,
+                    "attended_capture_cap_ms": 30000,
+                    "host_usage_autopush_budget_ms": 400,
+                }
+            )
+        )
+    # load_config normalizes ConfigError for invalid attended_capture_cap_ms.
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        '[device]\nid = "abc"\nname = "Mac"\n\n'
+        f'[storage]\npath = "{tmp_path}"\n\n'
+        "[retro]\nattended_capture_cap_ms = 4000\n"
+    )
+    with pytest.raises(ConfigError, match="retro.attended_capture_cap_ms"):
+        mm_config.load_config(cfg_file)
+
+
 class TestCursorHostConsentRemoved114A:
     @pytest.mark.parametrize("value", [True, "true", 1, [], {}])
     def test_legacy_cursor_host_usage_key_accepted(self, value):

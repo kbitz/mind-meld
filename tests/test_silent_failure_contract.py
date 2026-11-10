@@ -83,6 +83,81 @@ def test_status_retro_capture_nag_names_current_failure_check(tmp_path, monkeypa
     )
 
 
+def test_status_retro_capture_nag_clears_after_complete_push_under_cap(tmp_path, monkeypatch):
+    from datetime import timedelta
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli_module.statusflow.console, "_width", 240)
+    events_dir = tmp_path / "mm-events" / "events"
+    repo = tmp_path / "app-repo"
+    now = datetime.now(timezone.utc)
+    earlier = (now - timedelta(minutes=5)).isoformat()
+    _mm_events.write_push_event(
+        events_dir,
+        "dev-deg",
+        [
+            {
+                "type": "mm-push",
+                "ts": earlier,
+                "git_capture": {
+                    "since": earlier,
+                    "discovery": "complete",
+                    "walk_errors": 1,
+                    "walk_budget_aborts": 0,
+                },
+            }
+        ],
+    )
+    before_status = runner.invoke(app, ["status"])
+    assert before_status.exit_code == 0, before_status.output
+    assert "Retro capture:" in before_status.stdout
+    assert "mm recapture" in before_status.stdout
+
+    # After a completed attended push (or recapture) under the default cap records
+    # walk_budget_aborts=0, walk_errors=0 and advances the repo cursor, status is quiet.
+    completed_ts = now.isoformat()
+    _mm_events.write_push_event(
+        events_dir,
+        "dev-deg",
+        [
+            {
+                "type": "git-snapshot",
+                "ts": completed_ts,
+                "device": "dev-deg",
+                "projects": [{"local_path": str(repo), "commits": []}],
+                "skipped": [],
+                "git_capture": {
+                    "since": earlier,
+                    "discovery": "complete",
+                    "walk_errors": 0,
+                    "walk_budget_aborts": 0,
+                },
+            },
+            {
+                "type": "mm-push",
+                "ts": completed_ts,
+                "git_capture": {
+                    "since": earlier,
+                    "discovery": "complete",
+                    "walk_errors": 0,
+                    "walk_budget_aborts": 0,
+                },
+            },
+        ],
+    )
+    _mm_events.commit_repo_cursors(
+        [{"projects": [{"local_path": str(repo)}], "skipped": []}],
+        since=datetime.fromisoformat(earlier),
+        cursor_ts=now,
+        recorded_ts=now,
+        complete=True,
+    )
+    after_status = runner.invoke(app, ["status"])
+    assert after_status.exit_code == 0, after_status.output
+    assert "Retro capture:" not in after_status.stdout
+    assert "mm recapture" not in after_status.stdout
+
+
 def _verb_crumb(payload: dict, verb: str) -> dict:
     """Read a per-verb last-autorun entry (Track 29A keyed shape)."""
     entry = payload.get(verb)

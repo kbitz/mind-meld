@@ -4790,8 +4790,8 @@ def format_retro(
                 {device_label(d, labels) for d in data.git.git_budget_aborts}
             )
             + " — some repositories were not captured. This is not a missing push.",
-            remedy="On those machines run `mm diag` and inspect "
-            "`git_capture.recorded.walk_budget_aborts`.",
+            remedy="On those machines run `mm recapture --dry-run` to check current "
+            "repository failures, then `mm recapture 30d` to recover the omitted commits.",
         )
     if data.git.uncovered_git:
         note(

@@ -545,6 +545,8 @@ HOST_USAGE_BUDGET_MAX_MS = 5000
 DEFAULT_CAPTURE_BUDGET_MS = 5000
 CAPTURE_BUDGET_MIN_MS = 250
 CAPTURE_BUDGET_MAX_MS = 60000
+DEFAULT_ATTENDED_CAPTURE_CAP_MS = 30000
+ATTENDED_CAPTURE_CAP_MAX_MS = 60000
 
 
 def _validate(config: dict[str, Any]) -> None:
@@ -588,6 +590,15 @@ def _validate(config: dict[str, Any]) -> None:
                     f"config: retro.capture_budget_ms must be an integer between "
                     f"{CAPTURE_BUDGET_MIN_MS} and {CAPTURE_BUDGET_MAX_MS}, got {value}. "
                     f"Fix [retro] capture_budget_ms in ~/.config/mind-meld/config.toml."
+                )
+        if "attended_capture_cap_ms" in retro:
+            value = retro["attended_capture_cap_ms"]
+            min_cap = retro.get("capture_budget_ms", DEFAULT_CAPTURE_BUDGET_MS)
+            if type(value) is not int or not (min_cap <= value <= ATTENDED_CAPTURE_CAP_MAX_MS):
+                raise ConfigError(
+                    f"config: retro.attended_capture_cap_ms must be an integer between "
+                    f"{min_cap} and {ATTENDED_CAPTURE_CAP_MAX_MS}, got {value}. "
+                    f"Fix [retro] attended_capture_cap_ms in ~/.config/mind-meld/config.toml."
                 )
         autopush = retro.get("host_usage_autopush_budget_ms", DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS)
         # capture_budget_ms takes precedence as the attended ceiling, and the

@@ -1396,8 +1396,9 @@ def push(
     Attended pushes also refresh and publish host usage, even when user content
     is up to date. Requires mm-events and a consented host reader.
     Capture runs before content sync. Host sweep and inline warm share at
-    most three fifths of the capture budget (default five seconds), and both
-    readers can be cold. Budgets are not hard timeouts.
+    most three fifths of the attended scan cap (default thirty seconds,
+    retro.attended_capture_cap_ms), and both readers can be cold.
+    Budgets are not hard timeouts.
     Content-changing pushes also run GC on this device's orphaned blobs;
     usage-only pushes leave obsolete blobs for the next content push or mm gc.
 

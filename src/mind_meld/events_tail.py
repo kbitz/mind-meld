@@ -50,6 +50,7 @@ from mind_meld import (
 )
 from mind_meld import config as mm_config
 from mind_meld.config import (
+    DEFAULT_ATTENDED_CAPTURE_CAP_MS,
     DEFAULT_CAPTURE_BUDGET_MS,
     DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS,
     DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS,
@@ -172,6 +173,23 @@ def resolve_capture_budget(config: dict) -> tuple[int, str]:
     return DEFAULT_CAPTURE_BUDGET_MS, "default"
 
 
+def resolve_attended_capture_cap(config: dict) -> tuple[int, str]:
+    """Total attended push scan cap and its source (Track 124A).
+
+    ``[retro] attended_capture_cap_ms`` bounds the total scan time of one
+    attended push (host phase + events tail). Never less than the effective
+    ``capture_budget_ms``; unset keeps the 30 s default from docs/SPEC.md O8.2
+    (or the configured ``capture_budget_ms`` when larger).
+    """
+    capture_ms, capture_source = resolve_capture_budget(config)
+    retro = config.get("retro")
+    if isinstance(retro, dict) and "attended_capture_cap_ms" in retro:
+        return max(capture_ms, retro["attended_capture_cap_ms"]), "config"
+    if capture_ms >= DEFAULT_ATTENDED_CAPTURE_CAP_MS:
+        return capture_ms, capture_source
+    return DEFAULT_ATTENDED_CAPTURE_CAP_MS, "default"
+
+
 def _host_phase_ms(capture_ms: int) -> int:
     """Host phase (sweep + inline warm) share of an attended capture budget.
 
@@ -183,17 +201,22 @@ def _host_phase_ms(capture_ms: int) -> int:
     return max(1, capture_ms * 3 // 5)
 
 
-def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, str]:
+def resolve_host_read_budget(
+    config: dict, *, interactive: bool, scan_cap: bool = True
+) -> tuple[int, str]:
     """Effective per-Mac budget and its source, from an already validated config.
 
-    Attended: a configured ``capture_budget_ms`` takes precedence over the
-    legacy interactive key and the host phase (sweep + inline warm) gets at
-    most three fifths of it; the tail keeps the rest plus whatever the host
-    phase leaves unused. The return value is the host SWEEP budget: the legacy
-    interactive value (or its 3000 ms default) capped at that share. With only
-    the legacy key configured, legacy sweep/warm behavior applies unchanged;
-    with neither key, the 5000 ms capture default partitions the phase.
-    Autopush always keeps its own small fixed share.
+    Attended: a configured ``capture_budget_ms`` or ``attended_capture_cap_ms``
+    takes precedence over the legacy interactive key and the host phase (sweep
+    + inline warm) gets at most three fifths of the total attended scan limit
+    (``resolve_attended_capture_cap`` when ``scan_cap`` is True, else
+    ``resolve_capture_budget`` for ``mm init`` backfill); the tail keeps the
+    rest plus whatever the host phase leaves unused. The return value is the
+    host SWEEP budget: the legacy interactive value (or its 3000 ms default)
+    capped at that share. With only the legacy key configured, legacy
+    sweep/warm behavior applies unchanged; with no key set, the attended scan
+    cap (or 5000 ms capture default when ``scan_cap`` is False) partitions the
+    phase. Autopush always keeps its own small fixed share.
     """
     global _pending_capture_budget_ms
     retro = config.get("retro")
@@ -201,18 +224,28 @@ def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, s
         # An autopush resolve never feeds an attended snapshot; do not let a
         # stale stash survive into an unrelated later capture.
         _pending_capture_budget_ms = None
-    if interactive and isinstance(retro, dict) and "capture_budget_ms" in retro:
-        capture_ms = retro["capture_budget_ms"]
-        _pending_capture_budget_ms = capture_ms
+    if (
+        interactive
+        and isinstance(retro, dict)
+        and ("capture_budget_ms" in retro or (scan_cap and "attended_capture_cap_ms" in retro))
+    ):
+        total_ms = (
+            resolve_attended_capture_cap(config)[0]
+            if scan_cap
+            else resolve_capture_budget(config)[0]
+        )
+        _pending_capture_budget_ms = total_ms
         sweep_ms = retro.get(
             "host_usage_interactive_budget_ms", HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
         )
-        return max(1, min(sweep_ms, _host_phase_ms(capture_ms))), "config"
+        return max(1, min(sweep_ms, _host_phase_ms(total_ms))), "config"
     if interactive:
         _pending_capture_budget_ms = (
             None
             if isinstance(retro, dict) and "host_usage_interactive_budget_ms" in retro
-            else DEFAULT_CAPTURE_BUDGET_MS
+            else (
+                resolve_attended_capture_cap(config)[0] if scan_cap else DEFAULT_CAPTURE_BUDGET_MS
+            )
         )
     setting_name = (
         "host_usage_interactive_budget_ms" if interactive else "host_usage_autopush_budget_ms"
@@ -221,12 +254,16 @@ def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, s
         return retro[setting_name], "config"
     if interactive:
         # Neither key set: the default sweep may not exceed the host phase of
-        # the default capture budget, whatever either default is.
+        # the default total limit, whatever either default is.
+        default_total_ms = (
+            resolve_attended_capture_cap(config)[0] if scan_cap else DEFAULT_CAPTURE_BUDGET_MS
+        )
         return (
             max(
                 1,
                 min(
-                    HOST_USAGE_READ_BUDGET_INTERACTIVE_MS, _host_phase_ms(DEFAULT_CAPTURE_BUDGET_MS)
+                    HOST_USAGE_READ_BUDGET_INTERACTIVE_MS,
+                    _host_phase_ms(default_total_ms),
                 ),
             ),
             "default",
@@ -901,7 +938,8 @@ def _host_skip_phrase(
                 "`[retro] host_usage_autopush_budget_ms`; attended mm push refreshes usage "
                 "and can warm cold readers. "
                 "If it is over what an attended push allows, raise "
-                "`[retro] capture_budget_ms`; host reads get three fifths of it; "
+                "`[retro] attended_capture_cap_ms`; keep it at least `capture_budget_ms`. "
+                "Host capture and warm retries get three fifths of that cap; "
                 f"see {HOST_USAGE_CAPTURE_URL}."
             )
         compare = (
@@ -933,11 +971,11 @@ def _capture_host_snapshot(
 
     Wrappers own notices and persistence; autopush supplies no warm callback.
 
-    Track 85A: with a configured ``capture_budget_ms`` (stashed by
-    ``resolve_host_read_budget``), sweep + inline warm share one phase
-    deadline of at most three fifths of the capture budget (Track 101A);
-    without it (legacy key only) each warm retry keeps its legacy fresh
-    allowance. Attended callers (a warm callback) also hold a reserve for each
+    Tracks 85A/124A: the total stashed by ``resolve_host_read_budget`` is the
+    attended scan cap, or the capture budget for init. Sweep + inline warm
+    share one phase deadline of at most three fifths of that total;
+    legacy-key-only configs instead keep a fresh allowance per warm retry.
+    Attended callers (a warm callback) also hold a reserve for each
     later reader, in the sweep and across the warm retries. Elapsed attended
     time is recorded for the events tail.
     """
@@ -1039,6 +1077,7 @@ def _capture_event_snapshots(
     persist: bool = False,
     use_repo_cursors: bool = False,
     session_deadline: float | None = None,
+    per_repo_cap_ms: int | None = None,
 ) -> CaptureResult:
     """Capture device-stamped snapshots; persist discovery only when requested.
 
@@ -1091,6 +1130,7 @@ def _capture_event_snapshots(
             root_discovery_budget_ms=root_discovery_budget_ms,
             origin=origin,
             deadline_monotonic=session_deadline,
+            per_repo_cap_ms=per_repo_cap_ms,
         )
     except BaseException:
         _pending_capture_budget_ms = None
@@ -1210,6 +1250,7 @@ def _capture_git_rows(
     use_repo_cursors: bool = False,
     deadline_monotonic: float | None = None,
     per_repo_timeout_ms: int | None = None,
+    per_repo_cap_ms: int | None = None,
 ) -> tuple[list[dict], events.GitRootDiscovery, int, int]:
     """Discover roots and walk git, optionally persisting the local project index.
 
@@ -1236,6 +1277,10 @@ def _capture_git_rows(
         walk_kwargs["use_repo_cursors"] = True
     if per_repo_timeout_ms is not None:
         walk_kwargs["per_repo_timeout_ms"] = per_repo_timeout_ms
+    if per_repo_cap_ms is not None:
+        walk_kwargs.update(
+            _accepted_kwargs(events.walk_git_projects, per_repo_cap_ms=per_repo_cap_ms)
+        )
     if roots:
         author_emails = events.resolve_walk_author_emails(config, roots)
         author_emails = identity.union_checked_github_noreply(author_emails)
@@ -1337,6 +1382,7 @@ def _run_events_tail(
         # plus whatever the host phase left unused; autopush keeps its
         # fixed 250 ms walk / 50 ms discovery shares.
         tail_deadline: float | None = None
+        extension_ms = 0
         if quiet:
             budget_ms = events.WALK_TIME_BUDGET_AUTOPUSH_MS
             git_budget_ms = events.git_walk_budget_ms(quiet=True, since=since)
@@ -1347,6 +1393,7 @@ def _run_events_tail(
                 isinstance(retro, dict)
                 and "host_usage_interactive_budget_ms" in retro
                 and "capture_budget_ms" not in retro
+                and "attended_capture_cap_ms" not in retro
             )
             if legacy_only:
                 # Only the legacy key configured: legacy tail budgets and
@@ -1356,15 +1403,18 @@ def _run_events_tail(
                 _attended_host_elapsed_s = None
             else:
                 capture_ms, _capture_source = resolve_capture_budget(config)
+                total_ms, _cap_source = resolve_attended_capture_cap(config)
+                extension_ms = max(0, total_ms - capture_ms)
                 elapsed_ms = int((_attended_host_elapsed_s or 0.0) * 1000)
                 _attended_host_elapsed_s = None
                 if suppress_host_capture:
-                    budget_ms = max(
-                        capture_ms - _host_phase_ms(capture_ms), capture_ms - elapsed_ms
-                    )
+                    budget_ms = max(total_ms - _host_phase_ms(total_ms), total_ms - elapsed_ms)
                 else:
-                    budget_ms = max(1, capture_ms - _host_phase_ms(capture_ms))
-                git_budget_ms = min(events.git_walk_budget_ms(quiet=False, since=since), budget_ms)
+                    budget_ms = max(1, total_ms - _host_phase_ms(total_ms))
+                git_budget_ms = min(
+                    events.git_walk_budget_ms(quiet=False, since=since) + extension_ms,
+                    budget_ms,
+                )
                 # One absolute deadline for git + warm + session walk.
                 tail_deadline = time.monotonic() + budget_ms / 1000.0
 
@@ -1405,7 +1455,7 @@ def _run_events_tail(
             root_discovery_budget_ms=(
                 events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
                 if quiet
-                else events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS
+                else events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS + extension_ms
                 if tail_deadline is not None
                 else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
             ),
@@ -1415,6 +1465,9 @@ def _run_events_tail(
                 else resolve_host_read_budget(config, interactive=not quiet)[0]
             ),
             session_deadline=tail_deadline,
+            per_repo_cap_ms=(
+                events.PER_REPO_TIMEOUT_CAP_MS + extension_ms if tail_deadline is not None else None
+            ),
             # Only the attended path may spend seconds warming each cold reader. On autopush a
             # cold corpus instead converges across pushes, because an aborted
             # scan now keeps its per-file progress.
@@ -1633,7 +1686,7 @@ def _run_events_backfill(
             since=since,
             budget_ms=budget_ms,
             root_discovery_budget_ms=events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS,
-            host_budget_ms=resolve_host_read_budget(config, interactive=True)[0],
+            host_budget_ms=resolve_host_read_budget(config, interactive=True, scan_cap=False)[0],
             # Init already warms the token cache inline and is attended; paying
             # the host warm here means the first push after install inherits a
             # hot cache, exactly as it does for tokens.
