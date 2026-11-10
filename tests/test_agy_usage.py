@@ -959,6 +959,7 @@ def test_nonzero_tokens_on_unexpected_step_types_refuse(tmp_path: Path, unexpect
     }
 
 
+# pregate-literal: AGY_USAGE_CENSUS_HOST_VERSION=1.4.5 intentional old-cache regression input
 @pytest.mark.parametrize("prior_census", ["1.4.5", None])
 def test_older_census_cache_recounts_usage_less_steps(tmp_path: Path, prior_census: str | None):
     # Value: protects=skipped-step counts after a reader census upgrade;

@@ -1,5 +1,6 @@
 # Google Antigravity (`agy`) usage-source contract (census 2026-11-09)
 
+<!-- # pregate-literal: AGY_USAGE_CENSUS_HOST_VERSION=1.4.5 dated first-census provenance, not the current reader version -->
 **Host version: Antigravity 1.5.3** — bound to `host_usage.AGY_USAGE_CENSUS_HOST_VERSION` by `test_agy_contract_census_pin_matches_src_constant`. First census: 2026-10-22 (Antigravity 1.4.5).
 
 Antigravity persists conversations in SQLite databases at `~/.gemini/antigravity-cli/conversations/<cid>.db`, accompanied by optional `-wal`, `-shm`, or `-journal` sidecars.
