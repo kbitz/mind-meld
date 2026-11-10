@@ -2860,7 +2860,7 @@ class TestCaptureBudget85A:
         flat = " ".join(raw.replace("│", " ").split())
         assert "three fifths of the attended scan cap" in flat
         assert "default thirty seconds" in flat
-        assert "attended_capture_cap_ms" in flat
+        assert "retro.attended_capture_cap_ms" in flat
         assert "at most half of the capture budget" not in flat
 
     @staticmethod
