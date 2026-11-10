@@ -6,7 +6,7 @@ Antigravity persists conversations in SQLite databases at `~/.gemini/antigravity
 
 ## Census (2026-11-09, Antigravity 1.5.3)
 
-Counts-only read over 208 `.db` files (one `steps` schema, 0 open errors, step timestamps spanning 2026-11-06 to 2026-11-10 UTC; no transcript text, paths or identifiers read):
+Counts-only read over 208 `.db` files (one `steps` schema, 0 open errors, step timestamps spanning 2026-11-06 to 2026-11-10 UTC; no transcript text read; `bot_id`s compared in memory only, with no paths or identifiers recorded):
 
 | step_type | rows | DBs | statuses | rows with tag 9 | rows with nonzero tokens |
 |---|---|---|---|---|---|
