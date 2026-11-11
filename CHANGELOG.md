@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.36] - 2026-11-11
+
+A push or `mm status` now says `catching up (N left)` when usage or git capture stopped at its time limit with work remaining, and terminal sync waits three seconds before showing transient progress with reader and repository counts.
+
+### Changed
+
+- A push or `mm status` now says `catching up (N left)` when usage or git capture stopped at its time limit with work remaining, instead of calling it skipped or dropped.
+- Terminal sync waits three seconds before showing transient progress; pushes include reader and repository counts.
+- Attended notices and `mm status` describe known remaining usage or Git capture work as `catching up (N left)`, with continuation advice retained in saved run details.
+
 ## [1.12.35] - 2026-11-10
 
 A machine joining the fleet no longer copies gstack's generated Codex install (`skills/gstack/`) from other machines, and a managed `mm init` that has just accepted the fleet folder now waits up to two minutes for the key header and finishes the join in the same run when it arrives.

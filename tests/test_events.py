@@ -4193,7 +4193,12 @@ def test_repo_slower_than_old_cap_is_captured_by_recapture_and_skipped_by_push(
         degradations = events_tail._run_events_tail(
             cfg, sources, "dev-a", dry_run=False, quiet=quiet, suppress_host_capture=True
         )
-        assert any("git walk dropped 1 repositories" in d for d in degradations), degradations
+        expected = (
+            "git walk dropped 1 repositories" if quiet else "git capture catching up (1 left)"
+        )
+        assert any(expected in d or "git walk dropped 1 repositories" in d for d in degradations), (
+            degradations
+        )
         snapshot = events.latest_event_rows(events_dir, "dev-a", {"git-snapshot"}).rows[
             "git-snapshot"
         ]
@@ -4237,7 +4242,7 @@ def test_recapture_advice_loop_reproduced_under_equality_and_closed_by_default_c
     deg1 = events_tail._run_events_tail(
         eq_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
     )
-    assert any("git walk dropped 2 repositories" in d for d in deg1), deg1
+    assert any("git capture catching up (2 left)" in d for d in deg1), deg1
 
     # 2. Recapture succeeds with its 120 s budget and advances both per-repo cursors.
     recap_since = datetime.now(timezone.utc) - timedelta(days=7)
@@ -4262,13 +4267,13 @@ def test_recapture_advice_loop_reproduced_under_equality_and_closed_by_default_c
 
     # 3. Subsequent equality-config pushes (500 ms walk budget) still run git log per repo
     # and abort on budget (walk_budget_aborts=2, walk_errors=0, pending_repos=2), emitting
-    # the recapture degradation on every push and re-triggering status recapture advice.
+    # the catching-up degradation on every push and re-triggering status recapture advice.
     for _ in range(3):
         deg2 = events_tail._run_events_tail(
             eq_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
         )
         assert any(
-            "git walk dropped 2 repositories this push. Run mm recapture --dry-run" in d
+            "git capture catching up (2 left) — the next attended mm push continues it" in d
             for d in deg2
         ), deg2
     diag_loop = statusflow._collect_git_capture_diag(eq_cfg, "dev-a", disc_dict)

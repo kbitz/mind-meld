@@ -1767,8 +1767,10 @@ def _print_retro_capture_status(
     if not recovery_required:
         noun = "repository" if pending == 1 else "repositories"
         qualifier = "known " if pending == 0 else ""
+        catching = f"catching up ({pending} left) — " if pending > 0 else ""
         console.print(
-            f"  [yellow]Retro capture:[/yellow] {pending} {qualifier}{noun} left to catch up."
+            f"  [yellow]Retro capture:[/yellow] {catching}"
+            f"{pending} {qualifier}{noun} left to catch up."
         )
         if projected.get("discovery") == "partial":
             console.print("  Repository discovery is still catching up.")

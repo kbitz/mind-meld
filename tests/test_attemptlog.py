@@ -693,6 +693,52 @@ def test_host_skip_details_keep_safe_reason_and_remedy_without_path():
         assert "/" not in json.dumps(record)
 
 
+def test_sync_run_detail_formatting_never_reads_host_stores(monkeypatch):
+    # Value: protects=run-detail allowlisting never scans unconsented host stores;
+    # fails_when=formatting a detail invokes any host inventory reader;
+    # why_new=existing record tests check saved text rather than reader access;
+    # seam=none; no_claim=the real host filesystem is not accessed
+    from mind_meld import host_registry
+
+    reads = []
+
+    def inventory(reader, **kwargs):
+        reads.append(reader)
+        return {"files_on_disk": 4, "files_cached": 2}
+
+    monkeypatch.setattr(host_registry, "reader_usage_diag", inventory)
+    phrase = "token cache was locked, so tokens and skills are missing"
+    assert attemptlog.run_details([phrase]) == ([phrase], 0)
+    assert reads == []
+
+
+def test_sync_catching_up_details_survive_saved_run_roundtrip():
+    # Value: protects=count-bearing catch-up advice survives saved run inspection;
+    # fails_when=the known-phrase allowlist drops host or git continuation details;
+    # why_new=legacy phrase tests predate count-bearing producer output;
+    # seam=none; no_claim=capture itself is covered by separate CLI tests
+    from mind_meld import events_tail
+
+    host = events_tail._host_skip_phrase(
+        "codex",
+        "deadline",
+        readiness="ready",
+        attended=True,
+        evidence=events_tail.HostReadEvidence(files_cached=1, files_on_disk=3),
+    )
+    git = events_tail._git_walk_degradation(1, 0, attended=True, pending_left=2)
+    saved = sync_record(degradations=[host, git, "git capture catching up (2 left) /private/path"])
+    attemptlog.write_run("push", saved)
+    observed = attemptlog.read_runs()["runs"]["push"]
+    assert observed["degradations"] == [
+        host.replace(events_tail.HOST_USAGE_CAPTURE_URL, "mm diag").replace(
+            "git/session", "git and session"
+        ),
+        git,
+    ]
+    assert observed["omitted_details"] == 1
+
+
 @pytest.mark.parametrize("auto_outcome", [None, [], {}, 1, "new-unknown-outcome"])
 def test_invalid_auto_classification_is_uncertain_not_a_crash(auto_outcome):
     state = attemptlog.project_runs(

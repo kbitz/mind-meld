@@ -88,6 +88,30 @@ def _diagnostic(message: str, degraded: bool = False) -> None:
         pass
 
 
+_PROGRESS: ContextVar[Callable[[str, int, int, str], None] | None] = ContextVar(
+    "events_progress", default=None
+)
+
+
+@contextmanager
+def progress_scope(sink: Callable[[str, int, int, str], None] | None):
+    token = _PROGRESS.set(sink)
+    try:
+        yield
+    finally:
+        _PROGRESS.reset(token)
+
+
+def _progress(phase: str, completed: int, total: int, unit: str) -> None:
+    sink = _PROGRESS.get()
+    if sink is None:
+        return
+    try:
+        sink(phase, completed, total, unit)
+    except (Exception, SystemExit):
+        pass
+
+
 def _exception_detail(error: Exception) -> str:
     # Preserve legacy direct/init diagnostics, but never copy exception messages
     # into a sync invocation's newly scoped diagnostic surface.
@@ -651,11 +675,14 @@ def _capture_host_usage(
     dropped: list[tuple[str, str]] = []
     partial_days: dict[str, frozenset[str]] = {}
     names_in_order = tuple(name for name, _ in readers)
+    total_readers = len(readers)
+    if total_readers:
+        _progress("Capturing host usage", 0, total_readers, "readers")
     for index, (name, read) in enumerate(readers):
         start = now()
         if index == 0 and start >= deadline:
             return HostUsageCapture(None, name, "deadline", invoked=False)
-        later = len(readers) - index - 1
+        later = total_readers - index - 1
         held_back = deadline - reserve_s * later
         reader_deadline = (
             max(held_back, start + max(HOST_READER_GRACE_MS / 1000.0, reserve_s))
@@ -672,20 +699,24 @@ def _capture_host_usage(
             # the breadcrumb calmly promises a retry.
             _diagnostic(f"mm: notice: host reader {name} raised: {_exception_detail(e)}\n")
             dropped.append((name, _HOST_UNKNOWN_REASON))
+            _progress("Capturing host usage", index + 1, total_readers, "readers")
             continue
         if not result.complete:
             reason = result.reason if result.reason in _HOST_READ_REASONS else _HOST_UNKNOWN_REASON
             if reason in _HOST_ABSENT_REASONS:
                 # Not installed, in effect. Drop it silently and keep going —
                 # the row will name only the sources that actually contributed.
+                _progress("Capturing host usage", index + 1, total_readers, "readers")
                 continue
             dropped.append((name, reason))
+            _progress("Capturing host usage", index + 1, total_readers, "readers")
             continue
         contributed.append(name)
         usage_days[name] = frozenset(day for days in result.hosts.values() for day in days)
         if result.partial_days:
             partial_days[name] = frozenset(result.partial_days)
         _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
+        _progress("Capturing host usage", index + 1, total_readers, "readers")
     if contributed or not dropped:
         return HostUsageCapture(
             merged,
@@ -872,6 +903,32 @@ def _no_release_reads_clause(readers: Sequence[str]) -> str:
     )
 
 
+def _capture_skip_phrase(reader: str, reason: str, *, attended: bool) -> str:
+    """Build a notice for a reader the capture caller already consented to.
+
+    Keep inventory reads here, outside the pure formatter also used by run
+    evidence to enumerate its closed vocabulary without any host consent.
+    """
+    evidence = None
+    if attended and reason == "deadline" and reader in HOST_READER_SOURCE_GATE:
+        try:
+            locked = False
+            if reader == "codex":
+                with codex_host.locked_json_snapshot(codex_host.CACHE_PATH, blocking=False) as snap:
+                    locked = snap.state == "lock_failed"
+            diag = {} if locked else host_registry.reader_usage_diag(reader, count_logs=True)
+        except Exception:
+            diag = {}
+        if isinstance(diag, Mapping):
+            evidence = HostReadEvidence(
+                files_on_disk=diag.get("files_on_disk"),
+                files_cached=diag.get("files_cached"),
+            )
+    return _host_skip_phrase(
+        reader, reason, readiness="ready", evidence=evidence, attended=attended
+    )
+
+
 def _host_skip_phrase(
     reader: str,
     reason: str,
@@ -912,6 +969,19 @@ def _host_skip_phrase(
             "to stop retrying."
         )
     if reason == "deadline":
+        left: int | None = None
+        if (
+            evidence is not None
+            and type(evidence.files_on_disk) is int
+            and type(evidence.files_cached) is int
+        ):
+            left = max(0, evidence.files_on_disk - evidence.files_cached)
+        if type(left) is int and left > 0:
+            return (
+                f"{reader} usage catching up ({left} left) — "
+                "content sync and git/session capture unaffected. "
+                f"The next attended mm push continues it; see {HOST_USAGE_CAPTURE_URL}."
+            )
         if attended:
             return (
                 f"{phrase}. Attended warming also exhausted its allowance. "
@@ -1273,6 +1343,8 @@ def _capture_git_rows(
     if use_repo_cursors:
         since = events.effective_capture_since(roots, since)
     walk_kwargs = {} if _DIAGNOSTIC.get() is None else {"diagnostic": _diagnostic}
+    if _PROGRESS.get() is not None:
+        walk_kwargs.update(_accepted_kwargs(events.walk_git_projects, progress=_progress))
     if use_repo_cursors and roots:
         walk_kwargs["use_repo_cursors"] = True
     if per_repo_timeout_ms is not None:
@@ -1314,10 +1386,21 @@ def _capture_git_rows(
     return git_rows, root_discovery, aborts, errs
 
 
-def _git_walk_degradation(aborts: int, errors: int) -> str | None:
+def _git_walk_degradation(
+    aborts: int,
+    errors: int,
+    *,
+    attended: bool = False,
+    pending_left: int | None = None,
+) -> str | None:
     n = aborts + errors
     if n <= 0:
         return None
+    if attended and aborts > 0 and errors == 0 and type(pending_left) is int and pending_left > 0:
+        return (
+            f"git capture catching up ({pending_left} left) — "
+            "the next attended mm push continues it"
+        )
     return _GIT_WALK_DEGRADATION.format(n=n)
 
 
@@ -1541,9 +1624,11 @@ def _run_events_tail(
                 "max_file_size", mm_config.DEFAULT_MAX_FILE_SIZE
             ),
         )
+        cursors_committed = False
         if isinstance(append_result, events.EventAppendSkipped):
             degradations.append("event append skipped (max-file-size)")
         elif events.latest_mm_push_row(events_dir, device_id) == mm_event:
+            cursors_committed = True
             events.commit_repo_cursors(
                 capture.git_rows,
                 since=since,
@@ -1571,7 +1656,22 @@ def _run_events_tail(
         elif not capture.root_discovery.roots and capture.root_discovery.probers_ran:
             degradations.append(_ROOT_DISCOVERY_EMPTY_DEGRADATION)
             _diagnostic(f"mm: notice: {_ROOT_DISCOVERY_EMPTY_DEGRADATION}\n")
-        walk_phrase = _git_walk_degradation(capture.walk_budget_aborts, capture.walk_errors)
+        pending_left = None
+        if not quiet and capture.walk_budget_aborts > 0 and capture.walk_errors == 0:
+            pending_since = datetime.fromisoformat(mm_event["ts"]) if cursors_committed else since
+            pending_left = events.count_pending_repositories(
+                capture.root_discovery.roots, pending_since
+            )
+            if pending_left == 0 and cursors_committed:
+                pending_left = events.count_pending_repositories(
+                    capture.root_discovery.roots, since
+                )
+        walk_phrase = _git_walk_degradation(
+            capture.walk_budget_aborts,
+            capture.walk_errors,
+            attended=not quiet,
+            pending_left=pending_left,
+        )
         if walk_phrase is not None:
             degradations.append(walk_phrase)
             _diagnostic(f"mm: notice: {walk_phrase}\n")
@@ -1601,16 +1701,13 @@ def _run_events_tail(
         # reader/reason when `dropped` is empty.
         if capture.host_capture.dropped:
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
-                phrase = _host_skip_phrase(
-                    dropped_reader, dropped_reason, readiness="ready", attended=not quiet
-                )
+                phrase = _capture_skip_phrase(dropped_reader, dropped_reason, attended=not quiet)
                 degradations.append(phrase)
                 _diagnostic(f"mm: notice: {phrase}\n")
         elif not capture.host_capture.complete:
-            phrase = _host_skip_phrase(
+            phrase = _capture_skip_phrase(
                 capture.host_capture.reader,
                 capture.host_capture.reason,
-                readiness="ready",
                 attended=not quiet,
             )
             degradations.append(phrase)

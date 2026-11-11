@@ -2111,6 +2111,7 @@ def walk_git_projects(
     total_budget_ms: int,
     *,
     diagnostic=None,
+    progress=None,
     use_repo_cursors: bool = False,
     author_emails: Sequence[str] | None = None,
     per_repo_timeout_ms: int | None = None,
@@ -2236,11 +2237,21 @@ def walk_git_projects(
         # 2 unique. The retro card survived it only because `aggregate_git`
         # dedups on (canonical_remote, sha).
         collected: set[Future] = set()
+        if progress is not None:
+            try:
+                progress("Recording activity", 0, len(roots), "repositories")
+            except (Exception, SystemExit):
+                pass
         try:
             for fut in as_completed(futures, timeout=max(0.0, deadline - time.monotonic())):
                 root = futures[fut]
                 collected.add(fut)
                 finished_roots.add(root)
+                if progress is not None:
+                    try:
+                        progress("Recording activity", len(collected), len(roots), "repositories")
+                    except (Exception, SystemExit):
+                        pass
                 # `except Exception` alone: CancelledError and
                 # FuturesTimeoutError are both Exception subclasses, so naming
                 # them added nothing. NOTE two near-misses worth keeping in
