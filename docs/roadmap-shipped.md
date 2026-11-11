@@ -913,3 +913,30 @@ _tombstone: 122_
 - Scope reductions, both attributable: the owner dropped the card's device-name change on 2026-11-09 ("why not default to the device's existing hostname (and give you the option to accept or change)?"), so `initflow._default_device_name` still returns the hostname and the card's acceptance for it (the no-hostname default, its test and the init-devices and README wording) was not delivered; and the PR's scope override deferred the CHANGELOG portions of the scrub to a docs-only PR, which landed as PR #299 (`98a9131`).
 - Closure evidence: the PR's completion matrix records every other obligation VERIFIED (the placeholder substitutions with test meaning preserved, LICENSE, `pyproject.toml` and PROGRESS.md `## Acceptance` left untouched, six init integration tests) and the two reductions above as deferred by the owner; caller-attested full suite 8,887 passed (30 skipped). Recorded as shipped by the 2026-11-09 regeneration (PR #300) on the manager's instruction; verified at `98a9131` that `_default_device_name` is unchanged and `tests/test_initflow.py` carries the added cases.
 - Delivered: source examples, fixtures, tests, docs, history records and the approval file use placeholders in place of the owner's personal identifiers; six `mm init` Syncthing setup paths (twelve cases) have integration tests that pin their stops and the absence of writes; six recorded test gaps closed.
+
+## Individual Track history
+_tombstone: 123, 124, 127_
+
+### Track 123B: Read the Antigravity step type that refuses its usage reader ✓ Shipped (v1.12.31)
+
+- 2026-11-10: merged [PR #304](https://github.com/kbitz/mind-meld/pull/304) (commit `0880fff2cb40a890f8391501e6764569f236229e`); verified land-time Track 123B, original/current Group 123, factory branch `mmm/38593a3b`. Card placed by the 2026-11-09 promotion (`409998d`, PR #301). Plan SHA-256 `5f00e83bdf0f37b53d023c75be61f9a7dd700748b048d7863b408ea4136c083b`. PATCH release.
+- Closure evidence: the review receipt's completion matrix records all 12 preparation obligations VERIFIED, no user deferrals; caller-attested full suite 8,897 passed (30 skipped). Recorded as shipped by the 2026-11-10 regeneration.
+- Delivered: Antigravity usage counts step 23 and refreshes from older censuses; one cross-type deduplication test gap went to Future.
+
+### Track 123A: Make the bootstrap upgrade an outdated mm and keep Syncthing starting at login ✓ Shipped (v1.12.32)
+
+- 2026-11-10: merged [PR #305](https://github.com/kbitz/mind-meld/pull/305) (commit `b6c45540a5d8e2b6eed50c54d501f64bb89522a0`); verified land-time Track 123A, original/current Group 123, factory branch `mmm/ae578399`. Card placed by the 2026-11-09 promotion (`409998d`, PR #301). Plan SHA-256 `d1463d621361f48f6134ad9b6a6bfe98de72cbc04f6e4ce3487fed6827162036`. PATCH release.
+- Closure evidence: the review receipt's completion matrix records 22 obligations VERIFIED and one DEFERRED BY USER: the plan's live check on a Mac (M1), which the owner waived on 2026-11-10 ("Waive it for now, we have one more Mac to add to the fleet eventually, so we can test then"), to run the next time a Mac joins the fleet through bootstrap. Every card acceptance criterion (1 to 8) is VERIFIED. Recorded as shipped by the 2026-11-10 regeneration.
+- Delivered: bootstrap upgrades an outdated mm before checking Syncthing and registers a running default Syncthing for login without launching another instance; two bootstrap test gaps went to Future.
+
+### Track 124A: Let an attended push finish its capture scans within a cap, and stop the recapture advice from looping ✓ Shipped (v1.12.33)
+
+- 2026-11-10: merged [PR #306](https://github.com/kbitz/mind-meld/pull/306) (commit `987f78a83eb9ce17d1a03dd5356b1fd29d9c75da`); verified land-time Track 124A (named in the PR body), original/current Group 124, factory branch `mmm/4dbde89e`. Card placed by the 2026-11-09 promotion (`409998d`, PR #301). Plan SHA-256 `2fe33f2f1058d84000e90e6cfda32373a5c3cc13dc049e7d7bfdc07f69492c2b`. PATCH release.
+- Closure evidence: the final completion matrix records 10 acceptance rows VERIFIED, none partial, missing, unverifiable or deferred; manual testing not required. The PR leaves the quiet-output checkpoint unclaimed and `docs/SPEC.md` unedited, as criterion 7 requires. Recorded as shipped by the 2026-11-10 regeneration.
+- Delivered: attended `mm push` finishes capture within `[retro] attended_capture_cap_ms` (default 30,000 ms) with no new flag; a reproduced slow-Git recapture advice loop clears; one config-combination test gap went to Track 131A.
+
+### Track 127A: Keep gstack's generated Codex install out of sync, and let a managed join wait for the key header ✓ Shipped (v1.12.35)
+
+- 2026-11-11: merged [PR #308](https://github.com/kbitz/mind-meld/pull/308) (commit `a6f3e73c47c38cad101b21ef4b62aa39fa210e81`); verified land-time Track 127A, original/current Group 127, factory branch `mmm/316ac594`. Card placed by the 2026-11-09 promotion (`409998d`, PR #301). Plan SHA-256 `466145df42de1d9a4e2810e15f925e815dc14fd4301486aa51a9697c88457ce5`. PATCH release (PROGRESS.md dates the v1.12.35 row 2026-11-10).
+- Closure evidence: the review receipt's completion matrix records 13 obligations VERIFIED, none partial, missing, unverifiable or deferred by the user. It landed before Tracks 125A and 126A, which its `_blocked-by: Track 126A` had ordered for collision only. Recorded as shipped by the 2026-11-10 regeneration.
+- Delivered: a joining machine no longer copies gstack's generated Codex install (`skills/gstack/`) from peers, and a managed `mm init` waits for the key header after accepting the fleet; four managed-join test gaps went to Track 130B.

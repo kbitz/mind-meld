@@ -44,138 +44,35 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=tests/test_initflow.py] Test gap: managed join wait duration contract
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The recorded-pause tests derive the expected count and delay from production constants; they do not independently pin 120 one-second pauses.
-- **Hypothesis (untested):** Extend the existing timeout assertion with an independent expected count/cadence when changing the wait contract.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** tests/test_initflow.py:977
-- **Evidence:** Read-only coverage audit found the missing branch/assertion; 782 targeted tests passed. No failure was reproduced for this behavior.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/308 at 13239eb (2026-11-10). Revisit on the next Track touching the tagged files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: managed join poll error arrivals
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No test injects corrupt, newer-format or unreadable headers after the initial missing fetch has entered polling.
-- **Hypothesis (untested):** Extend an existing delayed-delivery fixture to exercise immediate refusal and unwritten Mind Meld state for each late error.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/initflow.py:916
-- **Evidence:** Read-only coverage audit found the missing branch/assertion; 782 targeted tests passed. No failure was reproduced for this behavior.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/308 at 13239eb (2026-11-10). Revisit on the next Track touching the tagged files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: managed join unknown peer count
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The managed exact-folder return with an unknown peer count is not exercised by the no-wait tests; owner-managed None bypasses that branch.
-- **Hypothesis (untested):** Supply unknown membership on a managed rerun and verify it stops without polling.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/initflow.py:312
-- **Evidence:** Read-only coverage audit found the missing branch/assertion; 782 targeted tests passed. No failure was reproduced for this behavior.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/308 at 13239eb (2026-11-10). Revisit on the next Track touching the tagged files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: managed join timeout reclassification
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Timeout tests keep folder contents/readability unchanged, leaving the post-wait reclassification branches untested.
-- **Hypothesis (untested):** Deliver in-flight or fleet entries during the wait, or make the directory unreadable at timeout, and check the current-state remedy without writes.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/initflow.py:998
-- **Evidence:** Read-only coverage audit found the missing branch/assertion; 782 targeted tests passed. No failure was reproduced for this behavior.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/308 at 13239eb (2026-11-10). Revisit on the next Track touching the tagged files.
-- **Effort:** ? (user triages in /roadmap)
-
-
-### [review:files=src/mind_meld/upgrade.py|tests/test_upgrade.py] Test gap: git executable disappears after discovery
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The adapter's `FileNotFoundError` classification after `find_git` succeeds lacks a direct test.
-- **Hypothesis (untested):** Extend the exception table with a vanished executable when the next Track touches these files.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/upgrade.py (`_fetch_tags`)
-- **Evidence:** Track 124B coverage audit G1; missing git and other subprocess failures are covered, but this race was not reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/3cee3c6a` (2026-11-10), before PR creation. Revisit on the next change to either tagged path.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/upgrade.py|tests/test_upgrade.py] Test gap: git cancellation cleanup
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Timeout tests exercise process-group cleanup, but direct `KeyboardInterrupt` propagation through `_run_git` is not separately asserted.
-- **Hypothesis (untested):** Inject cancellation while a synthetic git child runs and verify cleanup and propagation.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/upgrade.py (`_run_git`)
-- **Evidence:** Track 124B coverage audit G2; timeout cleanup passed, with no cancellation defect demonstrated.
-- **Context:** Filed by /review-and-prep on branch `mmm/3cee3c6a` (2026-11-10), before PR creation. Revisit on the next change to either tagged path.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/upgrade.py|tests/test_upgrade.py] Test gap: inherited git transfer and batch settings
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Existing batch-mode options and custom HTTP low-speed settings lack dedicated passthrough assertions.
-- **Hypothesis (untested):** Add inherited-value rows to the existing no-prompt environment table.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/upgrade.py (`_no_prompt_environment`)
-- **Evidence:** Track 124B coverage audit G3; default values and SSH-command precedence are tested, with no failure reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/3cee3c6a` (2026-11-10), before PR creation. Revisit on the next change to either tagged path.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/upgrade.py|tests/test_upgrade.py] Test gap: malformed SSH config fallback
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The malformed config-output and missing-git branches of SSH environment construction lack direct cases.
-- **Hypothesis (untested):** Extend the existing fallback table using synthetic malformed output and absent git.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/upgrade.py (`_no_prompt_environment`)
-- **Evidence:** Track 124B coverage audit G4; config-read exceptions are already tested; no fallback defect was observed.
-- **Context:** Filed by /review-and-prep on branch `mmm/3cee3c6a` (2026-11-10), before PR creation. Revisit on the next change to either tagged path.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/statusflow.py|tests/test_diag.py] Test gap: upgrade diagnostic fallback fields
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The new Upgrade check section lacks exact field assertions for unknown/unavailable views, no record, and missing timestamps.
-- **Hypothesis (untested):** Extend the diagnostic rendering cases while retaining cache-byte and no-network assertions.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/statusflow.py (`diag`)
-- **Evidence:** Track 124B coverage audit G6; recorded-cause output and view-failure survival are tested; no incorrect rendering was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/3cee3c6a` (2026-11-10), before PR creation. Revisit on the next change to either tagged path.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_host_usage_snapshot.py] Test gap: attended cap with a legacy sweep preference
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Explicit `attended_capture_cap_ms` and legacy `host_usage_interactive_budget_ms`, without `capture_budget_ms`, are covered separately but not together.
-- **Hypothesis (untested):** Extend the existing precedence test to assert the sweep preference, stashed cap and partitioned tail when the next Track touches these paths.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py:224
-- **Evidence:** Coverage audit of `6fb045c` traced the cap-presence guard and existing tests; no incorrect result was reproduced and no acceptance criterion requires this combination.
-- **Context:** Filed by /review-and-prep for Track 124A at `6fb045c` (2026-11-10); PR creation follows the external full-suite gate. Revisit when either tagged path next changes.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=bin/bootstrap|tests/test_bootstrap.py] Test gap: bootstrap numeric version ordering
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The new numeric version comparison has older-patch, equality and newer-major coverage, but no older-major/minor or multi-digit component cases.
-- **Hypothesis (untested):** Extend the existing listed-version table before the next Track changes these paths.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** bin/bootstrap:69
-- **Evidence:** Coverage audit of `8f8f023` traced the comparison and existing tests; no incorrect result was reproduced.
-- **Context:** Filed by /review-and-prep for Track 123A at `8f8f023` (2026-11-10); the PR and full audit are linked in its review receipt. This records a gap, without promoting the owner's held Future work.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=bin/bootstrap|tests/test_bootstrap.py] Test gap: bootstrap unverifiable version after upgrade
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Post-upgrade validation tests a still-old parsed version, but not a successful pipx command followed by a missing or unparseable listed version.
-- **Hypothesis (untested):** Add a row to the existing post-upgrade validation test when these paths are next changed.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** bin/bootstrap:413
-- **Evidence:** Coverage audit of `8f8f023` found the empty parsed-version guard and no matching fixture case; no defect was reproduced.
-- **Context:** Filed by /review-and-prep for Track 123A at `8f8f023` (2026-11-10); the PR and full audit are linked in its review receipt.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/host_usage.py|tests/test_agy_usage.py] Test gap: Antigravity cross-type turn deduplication
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** The fixtures cover equal and conflicting duplicate step-23 turns across databases, but do not pair step 15 with step 23 using the same `bot_id`.
-- **Hypothesis (untested):** Extend the existing duplicate fixture across types to pin that equal payloads count once and conflicting payloads refuse. The shared type-independent digest already implements this rule; re-verify before adding a test.
-- **Upstream severity:** INFORMATIONAL.
-- **Found in:** `tests/test_agy_usage.py:857`.
-- **Evidence:** Outside structured review and the coverage audit found this missing case; no failing run was reproduced. The real corpus census found no `bot_id` shared by types 15 and 23.
-- **Context:** Filed by `/review-and-prep` on https://github.com/kbitz/mind-meld/pull/304 at `ce4fd43` (2026-11-10). Revisit when the next Track touches either tagged file.
-- **Effort:** ? (user triages in `/roadmap`).
-
 ## Drain records
+
+### Roadmap regeneration — 2026-11-10 (SPEC O8 amended: output consistency; Tracks 123A, 123B, 124A and 127A recorded)
+
+Composed with the `/project-spec` amendment of 2026-11-10 that rewrites O8.1 and adds O8.6 on the owner's words ("go -- make sure all our manually run commands have consistently formatted output -- they all need to look like they come from the same tool"). Run from manager Ephesus 20's brief. Verified at `a6f3e73` (v1.12.35). Track 125A is declared active on factory branch `mmm/f1aea97f` and keeps its label; its approved plan is not changed.
+
+| Item | Disposition |
+|---|---|
+| Brief 1: one progress display for push, pull and update; an update during an attended push or pull is visible | place → Track 130A, blocked by Track 125A (both change `core._SyncProgress`) and by Track 129B (the shared style) |
+| Brief 2: consistency pass over every hand-run command | place → Tracks 129B (name the style; errors, warnings, Typer usage errors; push and pull summaries), 133A (status, gc, diff, log, recapture, update notices) and 130B (init, devices, sources, conflicts, resolve, pull's warnings). Survey at `a6f3e73` in 129B's source note. `install-skills` (already `mm: error:`) and `recover` (errors through `core._error`, which 129B moves) are not carded |
+| Future: "Reconcile SPEC O8.2 with the push outcome line's usage suffix" | place → Track 129B: the target changed (amended O8.1 calls capture internals routine detail), which answers the entry's question; the suffix moves to `--verbose` and status |
+| Track 124B, merged as PR #307 (v1.12.34) with acceptance criteria 1 to 8, 10 and 11 VERIFIED | stays active as Track 125B for criterion 9 only (the post-merge real-machine observation). The automatic update logged on `linux-a` at 2026-11-11 01:55 UTC (1.12.30 to 1.12.35) ran from 1.12.30, before 124B's check, so it does not satisfy criterion 9 |
+| Test gap: managed join wait duration contract; poll error arrivals; unknown peer count; timeout reclassification (PR #308) | place → Track 130B as one S task (its `_touches:` cover `src/mind_meld/initflow.py` and `tests/test_initflow.py`) |
+| Test gap: attended cap with a legacy sweep preference (Track 124A) | place → Track 131A (covers `src/mind_meld/events_tail.py` and `tests/test_host_usage_snapshot.py`). Track 125A also covers both but is in flight with an approved plan |
+| Test gaps: git executable disappears after discovery; git cancellation cleanup; inherited git transfer and batch settings; malformed SSH config fallback (Track 124B) | defer → Future: no Track touches both `src/mind_meld/upgrade.py` and `tests/test_upgrade.py` |
+| Test gap: upgrade diagnostic fallback fields (Track 124B) | defer → Future: no Track touches both `src/mind_meld/statusflow.py` and `tests/test_diag.py` |
+| Test gaps: bootstrap numeric version ordering; bootstrap unverifiable version after upgrade (Track 123A) | defer → Future: no Track touches `bin/bootstrap` |
+| Test gap: Antigravity cross-type turn deduplication (Track 123B) | defer → Future: no Track touches `src/mind_meld/host_usage.py` |
+| Future test gaps whose triggers Track 130B now meets: canonical publication after pull prefetch; late memory-index tidy flush failure; verbose memory-index tidy diagnostics; interrupted pull skips the memory-index tidy; nested Grok conflict-directory symlink; approve when the pending-device read fails | defer, stay: placing them would take Track 130B past the session-weight cap of 6; its implementer may close them while adding tests to those files |
+
+**Shipped and recorded:** Tracks 123B (PR #304, v1.12.31), 123A (PR #305, v1.12.32; the owner waived its Mac live check M1), 124A (PR #306, v1.12.33) and 127A (PR #308, v1.12.35), each with its review receipt's completion matrix. Groups 123, 124 and 127 are retired.
+
+**Renames:** 124B (remainder) → 125B, 126A → 131A, 130A → 132A; new Tracks 129B, 130A, 130B and 133A.
+
+13 inbox items: **5 placed, 8 deferred, 0 killed, 0 discharged**; 1 Future entry promoted. Authored-false rate: 0 / (5 + 0) = 0%.
+
+**Future:** 31 entries before; 1 promoted and removed, 8 added: 38 after.
+
+**Version:** documentation-only change; no bump. The SPEC amendment changes O8's definition; the quiet-output checkpoint stays unaccepted, so the next code release stays PATCH.
 
 ### Roadmap promotion — 2026-11-09 (the bootstrap fix, the attended push's scans and the encountered bugs)
 

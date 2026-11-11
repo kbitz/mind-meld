@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive, and a first install sets Syncthing up itself when Syncthing still has its default configuration (SPEC O2). Tracks 117A to 120A have shipped (v1.12.25 to v1.12.29), which completes O2's setup, approval and per-machine move, and Track 122A (v1.12.30) has since replaced the tree's personal identifiers with placeholders; the Current Plan holds ten Tracks (123A to 130A, and 124B), carded on 2026-11-09, nine of them from Future. On 2026-11-08 the owner dropped the git-history hostname scrub (formerly Track 121A): GitHub keeps pull-request refs and cached views of old commits that a force-push cannot clean, so SPEC no longer makes it a condition of 2.0.0 or of making the repository public again, and the tree instead stays impersonal from here on (Track 122A; the owner dropped its device-name change on 2026-11-09, so `mm init` keeps its hostname default). The owner will decide the path to 2.0 and which Future items to pursue after using the Syncthing fleet for a while; on 2026-11-09 the owner lifted that hold for the bootstrap fix (Track 123A) and the attended push's scans (Tracks 124A to 126A, one Track split in three to fit the size cap), and then ruled that a reproducible bug actually encountered is current, not deferred, which carded the Antigravity reader (123B), joining a machine (127A), the retro's cost and notes (128A, 129A) and two notices that print or advise wrongly (130A); the same day the owner approved carding the automatic update they believe has never worked and that cannot read the private repository (124B, ordered after 123A and placed beside 124A because their files do not meet). The rest of Future stays deferred. On 2026-11-09 the owner moved four machines (two Macs from iCloud Drive, a Linux desktop and an Omarchy laptop) to Syncthing; the eight findings from that move, and the findings from the owner's first `mm retro-fleet 7d` runs on the moved machines, became the Future entries that Tracks 123A to 130A now carry. Left in Future from those runs: rate tiers in price overrides, per-vendor verification dates, the Muse alias question, and whether a reader that never reads a family's records should floor that family's row. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); its qualification, Track 96A, waits in Future for 2.0.0's acceptance.
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Tracks 123A, 123B, 124A and 127A shipped (v1.12.31 to v1.12.35), and Track 124B shipped everything but its post-merge check on a real machine, which is now Track 125B. Track 125A is in flight. On 2026-11-10 the owner amended SPEC O8 ("go -- make sure all our manually run commands have consistently formatted output -- they all need to look like they come from the same tool"): push and pull end with one line per thing that happened, an update during push or pull is visible, and every hand-run command prints in one shared style (O8.1, O8.6). Tracks 129B, 130A, 130B and 133A carry that amendment; 129B also resolves the Future entry about the push outcome's usage suffix. The rest of Future stays deferred. The owner will decide the path to 2.0 after using the Syncthing fleet for a while. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); its qualification, Track 96A, waits in Future for 2.0.0's acceptance.
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -15,143 +15,20 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 - **Publication-status precision requires an observed user problem.** A status/diag publication-evidence Track needs a wrong or permanently unknown status line a user actually saw. A synthetic probe alone does not admit that work.
 - **Syncthing stays owner-managed outside O2 (spec, 2026-11-07).** mm discovers Syncthing and reads its state for `mm status` and `mm diag`, and changes Syncthing's configuration only for O2's setup, approval and introducers on a machine where it found the default configuration. Invite codes, relays, changing a pre-existing configuration, removing dead machines and scan requests are refused until the spec's revisit trigger is observed.
 - **One user, no compatibility work (spec, 2026-10-19).** Commands, config, output and host families may change with a README Upgrading note; only the storage-format refusal gates are kept. A Track that exists only to preserve compatibility is refused.
-- **Output earns its line (spec O8, 2026-10-19).** A Track that adds output to push, pull or the auto commands must show it is the outcome, a failure with its fix, data at risk or an actionable warning; everything else goes to `mm status`, `mm diag` or `--verbose`.
+- **Output earns its line and uses the shared style (spec O8, amended 2026-11-10).** A Track that adds output to push or pull must show it is something that actually happened, a failure with its fix, data at risk or an actionable warning; routine detail (timings, counts of skipped or unchanged items, capture internals) goes to `--verbose`, `mm status` or `mm diag`. The auto commands stay silent unless the owner must act. Any new output on a hand-run command uses the shared style (O8.6) that Track 129B writes down.
 - **Core and extensions (spec, 2026-10-23).** Before a Track changes a host adapter or command group that still lives in `cli.py` or `host_usage.py`, a move-only Track just before it moves that piece into its own module behind a contract test, with no behavior change. No Track moves code that no planned Track changes; there is no one-shot rewrite.
 
 ---
 
 ## In Progress
 
-None declared (2026-11-09). No branch, session or open pull request is active for any Track.
+Track 125A is active on factory branch `mmm/f1aea97f` (item `f1aea97f`), declared 2026-11-10; it pins Group 125. Track 125B joins it in the same launch batch.
 
-## Current Plan
-
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122_
-
-### Group 123: Bootstrap upgrades mm and keeps Syncthing starting at login; Antigravity usage reads
+### Group 125: Scans resume, show progress and say "catching up" ∥ One automatic update observed on a real machine
 
 _Depends on: none_
 
-**This group delivers:** A machine that already has an older mm can be brought forward by rerunning the bootstrap script, and every bootstrap run leaves Syncthing starting at login or says the one command that does it. An owner who uses Antigravity sees its usage in the retro instead of a reader reported as failed.
-
-#### Track 123A: Make the bootstrap upgrade an outdated mm and keep Syncthing starting at login
-_3 tasks . ~250 LOC . low risk . 3 files_
-**Outcome:** Rerunning the bootstrap script on a machine that has an older mm upgrades it before Syncthing is checked, so the Syncthing setup that arrived in v1.12.25 is no longer missing on that machine; and on every path the script either leaves Syncthing starting at login, reports that it already does, or prints the exact command that makes it so. It still never changes Syncthing's configuration and never prompts.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O2 (the bootstrap script and the per-machine move) and its release line ("the bootstrap script and O2's Syncthing setup and approval shipped"). The owner, 2026-11-09, lifting the 2026-11-08 hold for this Track: "1 - sure", on the manager's recommended order (the bootstrap fix first); earlier the same day the owner asked "shouldn't the bootstrap also start syncthing as a service, or offer to?". Hit on two of the four machines moved on 2026-11-09.
-**Done when:** the acceptance list below passes: an installed mm older than the script's own release is upgraded before the Syncthing check, a current mm is not touched, each Syncthing branch ends enabled, reported or with the exact command, and README states the behavior and a working private-repository install line.
-_touches: bin/bootstrap, tests/test_bootstrap.py, README.md_
-_out: 124A_
-_read-first: docs/SPEC.md (O2, Constraints), src/mind_meld/upgrade.py (`update_argv`, `INSTALL_CMD`), src/mind_meld/core.py (`_syncthing_start_command`), src/mind_meld/syncthing.py (`classify_config`)_
-_produces: a bootstrap that leaves an installed mm current and Syncthing enabled at login or named by command_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
-
-_Source: manager Ephesus 17's observations on mm 1.12.30, 2026-11-09 (Future entries "Bootstrap leaves an outdated mm in place and does not ensure Syncthing starts at login (findings 1 and 2)" and "README's install one-liner returns HTTP 404 while the repository is private (finding 3)", promoted here on the owner's word above; the second is folded in because it is the same three files and a docs-only change of a few lines). Verified at `e04cfa0`: `bin/bootstrap` `main` reads `pipx list --short` and, when `mind-meld` is listed, skips the install and only checks pipx's link and `PATH` (`mm_installed=1`), then prints "nothing to change: ... are already installed" when nothing was installed; `start_syncthing_if_default` runs `syncthing.classify_config` from the venv's Python with `-I` and, on any empty or unrecognized answer, prints "could not check Syncthing's configuration, so it was not started; mm diag shows why." and returns; `classify_config` arrived in `3a76b91` (v1.12.25, #289), so an older venv cannot answer; the "already running" branch returns without checking login start, and the pre-existing and could-not-check branches never start or enable it; `core._syncthing_start_command` holds the same two commands (`brew services start syncthing`, `systemctl --user enable --now syncthing.service`); `src/mind_meld/upgrade.py` already upgrades a tracking pipx install in place with `pipx upgrade` and otherwise with `pipx install --force`. README line 12 fetches `https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap` with an unauthenticated `curl -fsSL`, docs/SPEC.md records the repository as private since 2026-11-06, and `tests/test_bootstrap.py` pins the one-liner text (`README_BOOTSTRAP_CMD`). Not re-observed here: the older machine's failure and the 404 (both the manager's). Held in Future although this Track's files meet their triggers, on the owner's instruction that older entries stay there: "Test gap: bootstrap Arch install paths" and "Test gap: bootstrap version, os-release and pipx-link stops"._
-
-- **Upgrade an outdated mm before the Syncthing check** -- When `mind-meld` is already in pipx's list and older than the release this script ships with, upgrade it in the way `upgrade.update_argv` does for the install it finds (in place for a tracking install, `pipx install --force` otherwise), then run the Syncthing check from the upgraded venv; a current mm triggers no pipx install or upgrade, and a failed upgrade ends with one line that says what broke and the fix command last. The plan settles how the script learns its own release (a literal that a test ties to `VERSION`, or the version the upgrade resolves) and states what a machine without network sees. _bin/bootstrap, tests/test_bootstrap.py, ~120 lines._ (M)
-- **Ensure Syncthing starts at login on every path, without a prompt** -- With the default or no configuration: already enabled is reported in one line; running but not enabled is enabled without starting a second instance (on Linux `systemctl --user enable syncthing.service` is the candidate, and the plan settles the macOS equivalent, since `brew services start` also starts the service); not running is started and enabled as today. With a pre-existing configuration, or when the check cannot be made: run nothing and print the exact enable command (`brew services start syncthing` on macOS, `systemctl --user enable --now syncthing.service` on Linux), saying first whether the service is already enabled when that can be read. Syncthing's configuration (REST writes, `config.xml`) is never touched. _bin/bootstrap, tests/test_bootstrap.py, ~100 lines._ (M)
-- **Say it in the README, and fold in the private-repository install line** -- README's Install, step 1 of "Setting up another machine" and the sentence saying `bin/bootstrap` leaves Syncthing untouched on a pre-existing configuration describe the new behavior (the script upgrades an outdated mm; it enables the service but never changes configuration); the Install one-liner and the move steps that run the script show a form that works while the repository is private (the manager's candidate: `gh api 'repos/kbitz/mind-meld/contents/bin/bootstrap?ref=latest' -H 'Accept: application/vnd.github.raw'`, which needs a `gh` login, as the private pipx install already needs git credentials), and `README_BOOTSTRAP_CMD` in the test follows it. _README.md, tests/test_bootstrap.py, ~30 lines._ (S)
-
-**Acceptance:**
-
-1. With a fake pipx whose list shows `mind-meld` older than the script's release, a run upgrades mm before it calls the venv's Python for the Syncthing check, and the check then runs from the upgraded venv; a test pins the call order and the outcome line.
-2. With mm already current, a run makes no `pipx install` or `pipx upgrade` call and still prints the "nothing to change" outcome; a test pins the absence of both calls.
-3. A failed upgrade exits non-zero with what broke and the fix command as the last line printed, leaves the installed mm in place, and never reaches the Syncthing check; a test pins it.
-4. With the default or no Syncthing configuration, on macOS and on Linux (fake `brew`, `systemctl` and `syncthing`): already enabled prints one line saying so and runs no start or enable command; running but not enabled runs an enable command that starts no second instance; not running runs the start-and-enable command as today; a test pins each of the three outcomes per platform.
-5. With a pre-existing configuration, or when the check cannot be made, the script runs no start or enable command, writes nothing to Syncthing (no REST write, no `config.xml` write; tests assert the fakes saw none), exits 0, and prints the exact enable command for the platform; a test pins both cases per platform.
-6. The script asks nothing and reads no input on any path (a test runs every path with stdin closed).
-7. README describes the upgrade, the enable behavior and the working install line for the private repository, `README_BOOTSTRAP_CMD` matches README's text, and no README sentence still says the script leaves the service alone on a pre-existing configuration in a way that contradicts the printed command.
-8. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
-
-#### Track 123B: Read the Antigravity step type that refuses its usage reader
-_1 task . ~150 LOC . medium risk . 3 files_
-**Outcome:** An owner who uses Antigravity sees its usage in `retro-fleet` instead of a reader reported as failed with `last_reason: unsupported`: the reader either counts the step types that carry real usage or skips the ones that do not, decided from a census of real Antigravity data rather than assumed.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O7.3 (usage mm cannot read is a named coverage gap, never a silent zero) and O7.4 (the fleet's retro shows complete usage from every active machine); the ROADMAP standing constraint that a host usage reader needs a real corpus census and the observed host version. The owner, 2026-11-09: "Anything that is a reproducible bug we actually encountered should be current".
-**Done when:** the acceptance list below passes: the census of real Antigravity data is recorded in the reader's CONTRACT.md with the host version, the reader no longer refuses on the step types the census shows, and a step type that truly cannot be read still refuses with the same cause.
-_touches: src/mind_meld/host_usage.py, tests/test_agy_usage.py, tests/fixtures/host_sessions/agy/CONTRACT.md_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, tests/fixtures/host_sessions/agy/CONTRACT.md (Invariants & Refusal Gates), src/mind_meld/host_usage.py (the Antigravity reader's `step_type` check and `_ReadFailure`)_
-_produces: an Antigravity usage reader whose step-type rule rests on a recorded census_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
-
-_Source: manager Ephesus 17's observation on `linux-a`, 2026-11-09 (Future entry "Antigravity reader logs `dropped: unsupported` on this Mac", first logged by manager Ephesus 8 on 2026-11-05 from Track 110A's live push; its advice-contradiction half is Track 130A), promoted on the owner's rule above. Verified at `e04cfa0`: `mm diag --json` `host_usage.agy` reported `last_reason: unsupported` (the manager's reading); `src/mind_meld/host_usage.py` refuses the whole read with `_ReadFailure("unsupported", cause="token_usage_on_unexpected_step_type")` when a row whose `step_type` is not 15 carries nonzero tokens, and `tests/fixtures/host_sessions/agy/CONTRACT.md` records that rule ("Only `step_type == 15` carries valid token usage ... Any row with `step_type != 15` carrying non-zero tokens refuses the reader as `unsupported`"); `tests/test_agy_usage.py::test_token_usage_on_unexpected_step_type_refusal` pins it with a synthetic database, which the ROADMAP constraint says cannot supply qualification. Not known: which step type the owner's real data carries; the census answers it. The census needs a machine that runs Antigravity (the owner's `linux-a`); if the implementing session cannot read one, it stops and asks rather than guessing. The census records step-type numbers, counts, token presence and the host version only, never transcript text or paths. Held in Future although this Track's files meet its trigger, on the owner's instruction that older entries stay there: "Test gap: retained SQLite diagnostic code filtering" (`host_usage.py`, `tests/test_agy_usage.py`)._
-
-- **Census the real step types, then read or skip them** -- On a machine with Antigravity, count which `step_type` values occur in real conversation databases and which carry nonzero token fields, record the numbers and the observed Antigravity version in CONTRACT.md, then change the reader's rule to match: count a step type that carries real usage (deduplicated like step 15), skip one that does not, and keep refusing as `unsupported` for a shape the census shows cannot be read. Synthetic cases extend the census's coverage but do not replace it. _src/mind_meld/host_usage.py, tests/test_agy_usage.py, tests/fixtures/host_sessions/agy/CONTRACT.md, ~150 lines._ (L)
-
-**Acceptance:**
-
-1. CONTRACT.md records, from real Antigravity data, the step types seen, how many rows of each, which carry nonzero tokens, and the Antigravity version observed, with no transcript text, paths or identifiers.
-2. On that real data the reader no longer refuses with `token_usage_on_unexpected_step_type`, and `mm diag --json` `host_usage.agy` no longer reports `last_reason: unsupported` for it (the PR states the before and after with placeholders only).
-3. A step type the census shows carries real usage is counted once per turn (deduplicated across databases), and one that carries none is skipped; tests pin each with fixtures shaped like the census.
-4. A step shape that cannot be read still refuses as `unsupported` with `token_usage_on_unexpected_step_type`, and the existing refusal tests for the other causes are unchanged.
-5. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
-
-### Group 124: An attended push finishes its capture scans ∥ Automatic updates reach the private repository
-
-_Depends on: Group 123_
-
-**This group delivers:** An attended `mm push` finishes the scans it starts, within a cap that is a setting, and no longer advises a recapture that cannot clear. A machine on a tracking pipx install updates itself to a newer release with no `mm update` and no prompt while the repository is private, and `mm status` and `mm diag` say why when a check or an install cannot run.
-
-#### Track 124A: Let an attended push finish its capture scans within a cap, and stop the recapture advice from looping
-_2 tasks . ~430 LOC . medium risk . 12 files_
-**Outcome:** An owner who runs `mm push` in a terminal gets repository discovery, the git walk, the token and session scans and the host usage readers (Codex included) run to completion, up to a safety cap of tens of seconds that is a setting; `mm autopush` and `mm autopull` keep their small budgets exactly. A recapture, or an attended push that has caught up, no longer leaves a push notice that tells the owner to run `mm recapture` again.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O7.2 ("capture is complete again within three attended pushes without a recovery command"; "capture that stays incomplete longer is a failure that `mm status` reports with its fix") and O8.1's bar that a warning's fix works. The owner, 2026-11-09, lifting the 2026-11-08 hold for these Tracks: "1 - sure"; on the second Track, "maybe it should behave different when I am calling from the cli directly? or we can have a no-wait flag that agents use?", and after the manager explained that the hooks already run `mm autopush` and `mm autopull` with their own small budgets while `mm push` from a terminal is the attended path: "ok, that makes sense". No new flag is added (see the decision below).
-**Done when:** the acceptance list below passes: an attended push finishes scans that need more than today's 5 s budget but fit the cap, a stop at the cap is reported and the next push resumes the git walk, autopush and autopull are unchanged, and the recapture-then-push notice no longer loops.
-_touches: src/mind_meld/config.py, src/mind_meld/events_tail.py, src/mind_meld/events.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_config.py, tests/test_events.py, tests/test_events_budget_scope.py, tests/test_silent_failure_contract.py, tests/test_retro_fleet_aggregator.py, tests/test_integration.py, README.md, docs/invariants/events-retro.md_
-_out: 125A_
-_blocked-by: Track 123A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md ("One capture budget and session indexing", the Git-only continuation paragraph), docs/SPEC.md (O7.2, O8.1, O8.2), src/mind_meld/events_tail.py (`resolve_capture_budget`, `_host_phase_ms`, `_run_events_tail`, `_git_walk_degradation`), src/mind_meld/events.py (`git_walk_budget_ms`, `WALK_TIME_BUDGET_*`, `RECAPTURE_*`)_
-_produces: an attended capture cap setting, an attended push whose scans finish, and a push notice that a recapture can clear_
-_session: fresh · effort: high · verify: ./bin/check --affected_
-
-_Source: manager Ephesus 17's observations on mm 1.12.30, 2026-11-09 (Future entries "`mm recapture` does not clear the git-walk-dropped advice (finding 5)", with its retro `git_budget` fold, and "Retro-fleet reports a Codex reader that is still catching up as "failed" (retro-fleet item R2)", whose second direction, letting an attended push finish the backlog, lands here, with its wording in Track 125A and its wire in Track 126A), promoted on the owner's words above. Verified at `e04cfa0`: an attended push's tail takes `capture_ms` from `resolve_capture_budget` (`DEFAULT_CAPTURE_BUDGET_MS` 5000), gives the host reads three fifths (`_host_phase_ms`), and runs discovery, the git walk, token warm and the session walk on one deadline of the other two fifths plus unused host time, with the git walk's own budget `min(events.git_walk_budget_ms(quiet=False, ...), budget_ms)` and `git_walk_budget_ms` returning `WALK_TIME_BUDGET_INTERACTIVE_MS` (500 ms) for every attended push, whatever `capture_budget_ms` is; README's Fleet-retro paragraph says per-repository cursors resume unfinished Git walks on later attended pushes and `mm status` reports repositories still catching up, and `events.count_pending_repositories` reads them. Correction to the Future entry's hypothesis, which still needs a reproduction: `mm recapture` does advance the per-repository cursors when its capture is complete (`events_tail._commit_recorded_git_rows`, called from `cli.py`'s recapture with `complete=` false on discovery loss, walk budget aborts or walk errors), so "no recapture can change that" is not established; what is observed is two machines where `mm recapture 44d` captured 3001 commits and the push inside it again reported "git walk dropped 2 repositories". The retro's `git_budget` note (`aggregator.py`) names budget aborts and says to inspect `mm diag`, so it and the push notice already advise differently. Decision recorded (the owner's "no-wait flag" question): no new flag. The hooks already use `mm autopush` and `mm autopull` with their own small budgets (README, Claude Code Integration), so the split the owner asked about exists as commands; a flag would only duplicate it, and planning must find a concrete case before adding one. The cap is a `[retro]` setting, not a constant, with today's behavior expressible as its values; the project's "stage defaults are settings" habit concerns model and effort defaults and does not strictly apply, but its rule that a default belongs in config applies. SPEC conflict, for the owner: O8.2 says capture's "total time per attended push stays within one configured budget (default 5 s)" and O7.2 says capture completes "within three attended pushes"; a cap above the budget changes both sentences. This Track does not edit SPEC; as Track 78A did for O8.2, it leaves the quiet-output checkpoint unclaimed, and the Future entry "Reconcile SPEC O8.2 and O7.2 with the attended scan cap" holds the wording change for the owner's `/project-spec`._
-
-- **A cap for an attended push's scans, as a setting** -- One new `[retro]` key (integer, validated beside `capture_budget_ms` in `config.py`, the plan names it) bounds how long an attended push may keep scanning after `capture_budget_ms` is spent while a scan still has unfinished work: discovery, the git walk (per-repository and whole-walk timeouts included), token warm, the session walk and the host reader sweep and warm. Default 30,000 ms (the plan may move it within 20 to 60 s with a stated reason); a value equal to `capture_budget_ms` reproduces today's attended behavior, and `mm autopush`, `mm autopull`, init and recapture keep their own budgets unchanged. _src/mind_meld/config.py, src/mind_meld/events_tail.py, src/mind_meld/events.py, tests/test_config.py, tests/test_events_budget_scope.py, tests/test_events.py, README.md, docs/invariants/events-retro.md, ~280 lines._ (L)
-- **Stop the git-walk advice from looping** -- Reproduce the observed loop first, from a fixture with two repositories whose walk exceeds today's 500 ms and from `mm diag`'s `git_capture` block, and record in the PR which cause it was (the budget hypothesis, a cursor that does not advance, or another); then fix it so that, after a recapture or an attended push that completed its walk, the next push prints no `git walk dropped` notice, and so that a notice that remains names a remedy a recapture can clear; the retro's `git_budget` remedy gives the same advice as the push notice. _src/mind_meld/events_tail.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_silent_failure_contract.py, tests/test_retro_fleet_aggregator.py, tests/test_integration.py, ~150 lines._ (M)
-
-**Acceptance:**
-
-1. A new `[retro]` cap key exists with a documented default of 30,000 ms, validation that rejects a non-integer, a boolean and a value below `capture_budget_ms`, and an error that names the key and the fix; tests in `tests/test_config.py` pin each case, and README and `docs/invariants/events-retro.md` name the key.
-2. A fixture whose scans need more than `capture_budget_ms` but fit the cap finishes every scan in one attended push: no git-walk budget abort, no session-walk budget notice, the Codex reader complete rather than stopped by its deadline, and all per-repository cursors advanced; with the cap set equal to `capture_budget_ms`, the same fixture reproduces today's aborts and deadline stop. Tests pin both.
-3. A fixture that exceeds the cap stops at the cap, reports the stop through the existing degradation path, and the next attended push finishes the git walk from the per-repository cursors; a test pins it.
-4. `mm autopush` and `mm autopull` use exactly the budgets they use today: tests pin `WALK_TIME_BUDGET_AUTOPUSH_MS`, `ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS`, `HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` and the no-warm rule, and show the new key changes none of them.
-5. The observed loop is reproduced in a test or the PR records, with `mm diag` output (placeholders only), why it cannot be and what the real cause is; after a complete recapture or a completed attended push, the next push prints no `git walk dropped` notice and `mm status` carries no matching advice; a notice that does remain names a remedy a recapture can clear, and the retro's `git_budget` remedy matches it. Tests pin each.
-6. No new command-line flag is added to `mm push`, `mm autopush` or `mm autopull`; the Track's PR says so, citing the decision above.
-7. The PR body cites SPEC O8.2 and O7.2 as amended on 2026-11-09 (the attended scan cap) and leaves the quiet-output checkpoint unclaimed, because the usage-suffix entry in `docs/roadmap-future.md` still holds it; `docs/SPEC.md` is not edited by this Track.
-8. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
-
-#### Track 124B: Find why automatic updates never installed, check the private repository with the machine's own credentials, and record why an update did not run
-_3 tasks . ~390 LOC . medium risk . 7 files_
-**Outcome:** An owner whose machines run mm on a tracking pipx install finds each one on the newest release after its next push or pull, without running `mm update` and without a credential or git prompt, even though the repository is private. When a check or an install cannot run, `mm status` and `mm diag` say which one and why, where today a failed check leaves no trace. The reason automatic updates never installed on the owner's machines is found by reproduction before anything is fixed.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md Constraints ("Auto-update upgrades a pipx `@latest` install at the end of its next `push`, `pull`, `autopull` or `autopush`, at most once a day"), O7.4 (a peer on an older mm drops the host families and wire fields it does not know, so the fleet's retro is complete only when every machine runs the release that publishes them) and O8.1 (a failure is reported with its fix). The owner, 2026-11-09: "Anything that is a reproducible bug we actually encountered should be current"; "auto daily upgrade has never worked for mm as best as I know"; "I flipped it to private because of the host name leakage -- I can flip it back to public but I don't think that's the issue" (the repository stays private); "right, I ran 'mm update' on the cli" (the explicit command works); and "all approved" to carding this.
-**Done when:** the acceptance list below passes: the cause of the missing installs is named from a real-pipx reproduction, a tracking install one release behind updates itself on an attended push and on an autopush against a repository the unauthenticated tag request cannot read, no path prompts, and each failure to check or install is recorded and shown by `mm status` and `mm diag`.
-_touches: src/mind_meld/upgrade.py, src/mind_meld/statusflow.py, src/mind_meld/cli.py, tests/test_upgrade.py, tests/test_self_update.py, tests/test_diag.py, docs/invariants/auto-upgrade.md_
-_blocked-by: Track 123A_
-_read-first: docs/invariants/README.md, docs/invariants/auto-upgrade.md ("Self-update (v1.3.0)", "Upgrade nudge (v0.9.5)", the read-only callers), docs/archive/self-update-qualification.md (what was never observed), docs/SPEC.md (Constraints, O8), src/mind_meld/upgrade.py (`_fetch_tags`, `check_for_upgrade`, `detect_install`, `update_or_nudge`, `_auto_install`, `_empty_cache`, `_normalize_cache`, `cached_upgrade_view`, `_pipx_environment`), src/mind_meld/cli.py (`update`, the tails of `autopull` and `autopush`, `_auto_command_scope`), src/mind_meld/statusflow.py (the `install_attempt` line)_
-_produces: an upgrade check that reads the private repository with the machine's own credentials and never prompts, and a persisted, status-visible record of why a check or an install did not run_
-_session: fresh · effort: high · verify: ./bin/check --affected_
-
-_Source: manager Ephesus 17's observations on 2026-11-09 and 2026-11-10 (data, not diagnosis), taken to Current Plan on the owner's rule and words above; no Future entry carries it. Verified at `1bb34d7` by reading the code; none of it re-run here, except the tag list read through `gh api` and one `git ls-remote --tags` from this machine, both of which succeeded against the private repository. What the code shows. `upgrade._fetch_tags` sends one unauthenticated `urllib` request to `TAGS_API_URL` (`https://api.github.com/repos/kbitz/mind-meld/tags?per_page=100`) with only a User-Agent and an Accept header, so for a private repository GitHub answers 404 (the manager's curl, 2026-11-10); `check_for_upgrade` catches the error, stamps `attempted_at` and records nothing else. When the cache already holds a `latest_version` the failed fetch falls through to the comparison against that stale value, so a machine whose cache holds a version at or above its own reports `current` and never learns of a newer release, and nothing says the check is failing. The repository went private on 2026-11-06 (docs/SPEC.md, Audience and target). A cause that predates that day is not established by the data: `mac-b`'s cache has `checked_at` 2026-11-06T16:58Z with `latest_version` 1.12.16, a successful check on the day the repository went private, and neither a recorded install attempt (`install_attempt_at` null) nor a nudge since 2026-09-23 (1.1.0), which is what a machine that was already on 1.12.16 at that check would show, and is also what a tail that never ran would show; it shows no machine that was behind, on a tracking install, and failed to install. `linux-a`'s null cache (`checked_at` and `latest_version` null) is consistent with a machine set up after 2026-11-06, for which every check has failed. The reproduction decides which. Candidates the code supports, none observed: (1) `detect_install` returns `tracking` only when pipx's recorded `package_or_url` equals `INSTALL_SPEC` exactly, so an install made by an older command form is `pinned` or `foreign` and gets only the printed nudge; README and `bin/bootstrap` install `git+https://github.com/kbitz/mind-meld.git@latest`, and what pipx records for that string has not been read from a real install; (2) whether `pipx upgrade <venv>` moves a `@latest` install when the branch advances was never observed through the automatic path: the archived qualification records "S13 REQUIRED / PENDING, 0 of 3 checks passed", `_run_pipx` and `_spawn_pipx` refuse under `PYTEST_CURRENT_TEST`, and every test uses a fake pipx (the owner's `mm update` working shows the in-place upgrade works when invoked by hand); (3) `_auto_command_scope` returns before the tail on a missing passphrase, lock contention or a crypto or backend error, and the tail is the only caller of `update_or_nudge` besides attended `push`; (4) the claim gates (`_claim_install_attempt`, 24 h per release). Also verified: `update_or_nudge` ends in `except (Exception, KeyboardInterrupt): return` and `_auto_install` returns `(False, False)` for a non-tracking install or a missing pipx without recording either, so an install that never starts and a check that never succeeds leave no trace; `statusflow` shows only `install_attempt == "failed"`; `mm update` on a tracking install does not depend on the check (it runs `pipx upgrade <venv>` whatever the forced check returned, which is why it works), but on a pinned install it stops with "Could not reach GitHub to check for a newer release" for any failed check, a 404 included. `_pick_latest_tag` reads one page of 100 while the repository has 218 tags; observed through the API on 2026-11-09, page 1 begins at v1.12.30 and ends at v0.12.47 in descending version order, so the newest tag is on page 1 today, but GitHub documents no order (the comment above `TAGS_API_URL` says "unspecified"), so a tag pick that stays on the REST route must not rely on it. Candidate check sources, for the plan to settle with a stated reason: `git ls-remote --tags` over `INSTALL_SPEC`'s URL uses the credentials `pipx install git+https://...` itself uses and has no pagination, so a check that passes cannot disagree with the install that follows (this card's recommendation); `gh api` when `gh` is present; or the REST call with a token. Reader of each new persisted field: `cached_upgrade_view`, shown by `mm status` and `mm diag` (no other reader). Changing the cache's readers and keys follows AGENTS.md's planning rule: `_empty_cache` and `_normalize_cache` backfill missing keys, so an older `upgrade-state.json` reads as unknown rather than failing. SPEC context: the 2026-10-19 constraint that qualification ceremonies are dropped ("A feature in daily use counts as working; misbehavior is filed as a bug") makes this a bug card, so the real-pipx runs below are one reproduction and one fix check in disposable directories, not the archived S13 ceremony with its observers and quiet windows. Placement: after Track 123A on the manager's instruction (123A and 123B are in implementation; this Track is blocked by 123A so it stays out of Group 123, and `bin/roadmap-pack` then puts it beside 124A, whose files it does not touch). README.md is left out of `_touches:` on purpose: it would collide with 124A and every later README Track and push this Track to the end of the plan; if the reproduction shows a README sentence must change (line 514 and the Automatic updates paragraph describe the check as a GitHub tag lookup), the implementer adds README.md to `_touches:` and the card is re-packed. SPEC is not edited._
-
-- **Reproduce the missing install with a real pipx, and name the cause** -- Outside pytest (the guard refuses real pipx there), in a disposable `HOME` and `PIPX_HOME`, install mm from a local release repository (tags, a `latest` branch) that a temporary git config maps onto `INSTALL_SPEC`'s URL with `url.<local path>.insteadOf`, so the recorded `package_or_url` is the real string; publish one newer release; run an attended `mm push`, and in a second disposable home an `mm autopush`. Record per path whether mm checked, claimed, installed, what pipx recorded for the install kind, and what the cache and metadata hold, and name the cause (a candidate above or another) before any fix. Add the cause to `docs/invariants/auto-upgrade.md`. _docs/invariants/auto-upgrade.md, ~40 lines, plus the PR record._ (S)
-- **Check the private repository with the machine's own credentials, and never prompt** -- Replace the unauthenticated tag request with the source the plan settles on (the card recommends `git ls-remote --tags` over the install URL), keep `_pick_latest_tag`'s prerelease, local-version and peeled-ref filtering, and take the highest version from the whole list, so no page boundary can hide the newest tag. Every subprocess the check and the install start gets no terminal input, no askpass program, ssh in batch mode and non-interactive credential helpers (`GIT_TERMINAL_PROMPT=0` and the equivalents the plan names) and stays inside a time bound; a remote that wants credentials the machine lacks fails fast. `mm update` on a pinned install names the recorded cause where it says "Could not reach GitHub". Apply the fix the reproduction's cause calls for if it is not the check itself. _src/mind_meld/upgrade.py, src/mind_meld/cli.py, tests/test_upgrade.py, tests/test_self_update.py, ~190 lines._ (M)
-- **Record why a check or an install did not run, and show it in status and diag** -- Persist in `upgrade-state.json` (keys the plan names, backfilled by `_empty_cache` and `_normalize_cache`) the last check failure and the last reason no install started, each as a fixed cause (repository not readable, network, unparseable answer, git missing, install not tracking, pipx missing, install failed, an unexpected error by its class name only) with its time, cleared by the next success; `update_or_nudge` records instead of swallowing and still raises nothing and sets no exit code. `mm status` prints one line for a recorded cause with the fix last, `mm diag` prints the record, and neither refreshes the cache. Nothing new is printed by `autopull`, `autopush` or an attended push unless the plan shows the owner must act (O8). _src/mind_meld/upgrade.py, src/mind_meld/statusflow.py, tests/test_upgrade.py, tests/test_diag.py, docs/invariants/auto-upgrade.md, ~160 lines._ (M)
-
-**Acceptance:**
-
-1. Before any fix, a reproduction with a real pipx in disposable directories (the PR records it with placeholders only) shows, for a tracking install one release behind that runs an attended `mm push` and for one that runs an `mm autopush`: whether mm checked, claimed an attempt and installed, the install kind pipx recorded, and the cache and metadata afterward. The PR names the cause of the missing installs, from that run or from the candidates in the Source; if both paths install correctly against a reachable repository, it says so and names which candidate the owner's machines' records fit and what separates them. A cause outside this Track's `_touches:` widens them (`roadmap-touches drift`) and the card is re-packed; a cause that needs an owner decision stops the Track and asks.
-2. Against a repository the unauthenticated tag request cannot read (a 404 on that request) and that the machine's own git credentials can read, the check finds the newest stable release and records it; tests pin it with the fake adapter, and pin that prerelease, local-version and peeled tags are skipped and that the newest of more than 100 tags is found whatever order the source lists them in.
-3. After the fix, in the same disposable setup, a tracking install one release behind updates itself on an attended `mm push` and on an `mm autopush` with no `mm update` (the PR shows the metadata version before and after, placeholders only); the automatic path still runs only `pipx upgrade <venv>` and never `pipx install --force`, and tests with the fake pipx keep pinning the claim, the lock order and the daily gate unchanged.
-4. No path prompts: tests pin that each git and pipx subprocess the check and install start has no terminal input, `GIT_TERMINAL_PROMPT=0`, no askpass, ssh in batch mode and non-interactive credential helpers, and that a remote needing credentials the machine does not have fails inside the time bound with a recorded cause and with stdin closed (a fake git that waits on input would hang the test); `mm update` and `bin/bootstrap` are unchanged in what they ask (nothing).
-5. A failed check, an install that is not tracking, a missing pipx and a failed install each leave a record (cause, time) in `upgrade-state.json` that the next success clears; the record holds no path, URL, credential or message text (a fixed cause, or an exception's class name); an older cache file without the keys reads as unknown; `update_or_nudge` raises nothing, sets no exit code and cannot change a sync's outcome even when recording fails; the flock and lock-order rules in the invariants are unchanged. Tests pin each cause and each clearing.
-6. `mm status` prints one line for a recorded cause with the fix last, `mm diag` prints the record, and a status or diag run changes neither the cache nor the network (`COMMAND_INTENTS62` unchanged); `autopull`, `autopush` and an attended push print nothing new unless the plan shows the owner must act, and if so, one line; `mm update` on a pinned install with a failed forced check names the recorded cause rather than "Could not reach GitHub". Tests pin each.
-7. `docs/invariants/auto-upgrade.md` records the named cause, the check's credential source, the no-prompt rule, the new keys with their reader and the rewritten "Version source" paragraph (it still names the unauthenticated `/tags` request and its 100-tag cap).
-8. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
-9. Post-merge, after the next release: on one real machine on a tracking install one release behind, the next push or autopush updates it with no `mm update`, and the observation (`mm --version` before and after, the `upgrade-state.json` fields and `mm status`, placeholders only) is recorded as a Post-merge row. This is one observation, not the dropped S13 ceremony.
-
-### Group 125: Scans resume, show progress and say "catching up"
-
-_Depends on: Group 124_
-
-**This group delivers:** A scan that stops early resumes on the next attended push, a long attended push shows that it is working, and a push or `mm status` on that machine says "catching up (N left)" rather than "failed" or "dropped".
+**This group delivers:** A scan that stops early resumes on the next attended push, a long attended push shows that it is working, and a push or `mm status` on that machine says "catching up (N left)" rather than "failed" or "dropped". The owner sees one of their machines update itself after a release through the release check Track 124B shipped.
 
 #### Track 125A: Resume stopped scans, show progress, and word a deadline stop "catching up (N left)" on the push and in status
 _2 tasks . ~350 LOC . medium risk . 9 files_
@@ -159,13 +36,13 @@ _2 tasks . ~350 LOC . medium risk . 9 files_
 **Supports:** MVP-1 on Syncthing; docs/SPEC.md O7.2 (unfinished work resumes on later pushes), O7.3 (usage mm cannot read is a named coverage gap, not a silent zero) and O8.1 (progress appears transiently; an actionable warning's fix works; a progress state is not a failure). The owner, 2026-11-09: "1 - sure" (the hold lifted for the Tracks carded here), on the manager's second Track whose outcome includes "showing progress when it takes a while" and "a run that stops early reports 'catching up (N left)' rather than 'failed' in push notices, `mm status` and the retro's MM_HEALTH".
 **Done when:** the acceptance list below passes: each scan's early stop resumes on the next attended push, a long push on a terminal shows a transient progress line, and a deadline stop reads "catching up (N left)" in the push notice and `mm status` while errors still read failed.
 _touches: src/mind_meld/events_tail.py, src/mind_meld/core.py, src/mind_meld/statusflow.py, tests/test_host_usage_snapshot.py, tests/test_statusflow.py, tests/test_silent_failure_contract.py, tests/test_integration.py, README.md, docs/invariants/events-retro.md_
-_out: 126A_
+_out: 131A_
 _blocked-by: Track 124A_
 _read-first: docs/invariants/README.md, docs/invariants/events-retro.md, src/mind_meld/core.py (`_SyncProgress`, `_sync_progress_phase`), src/mind_meld/events_tail.py (`_host_skip_phrase`, `_git_walk_degradation`), src/mind_meld/statusflow.py (the Codex "warming" line, `count_pending_repositories` use), src/mind_meld/hosts/codex.py (the `migrating` state and `pending`)_
 _produces: resumable scans with a progress line and "catching up (N left)" wording on the push and in `mm status`_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
 
-_Source: manager Ephesus 17's observations on mm 1.12.30 and retro-fleet run on `linux-a`, 2026-11-09 (Future entry "Retro-fleet reports a Codex reader that is still catching up as "failed" (retro-fleet item R2)", whose first direction lands here, with the retro's side in Track 126A). Verified at `e04cfa0`: `_host_skip_phrase` already separates reason `deadline` and prints "N of M rollouts cached" when `HostReadEvidence` is present, but its text still begins "host-usage snapshot skipped (... deadline)"; `_git_walk_degradation` words budget aborts and errors alike as "git walk dropped {n} repositories this push"; `statusflow` prints "Codex usage capture: warming — N rollouts not yet scanned" for `state: migrating`; `events.count_pending_repositories` gives the repositories left; `_SyncProgress` (`core.py`) is a transient, TTY-only progress display that clears before the outcome line, and `_push_core` already sets its "Recording activity" step before the tail; README's Fleet-retro paragraph states the per-repository resumption, which this Track proves per scan rather than assumes. Not re-observed here: the Codex reader's `files_cached` 852 of `files_on_disk` 1016 on `linux-a` (the manager's reading of `mm diag --json`)._
+_Source: manager Ephesus 17's observations on mm 1.12.30 and retro-fleet run on `linux-a`, 2026-11-09 (Future entry "Retro-fleet reports a Codex reader that is still catching up as "failed" (retro-fleet item R2)", whose first direction lands here, with the retro's side in Track 131A). Verified at `e04cfa0`: `_host_skip_phrase` already separates reason `deadline` and prints "N of M rollouts cached" when `HostReadEvidence` is present, but its text still begins "host-usage snapshot skipped (... deadline)"; `_git_walk_degradation` words budget aborts and errors alike as "git walk dropped {n} repositories this push"; `statusflow` prints "Codex usage capture: warming — N rollouts not yet scanned" for `state: migrating`; `events.count_pending_repositories` gives the repositories left; `_SyncProgress` (`core.py`) is a transient, TTY-only progress display that clears before the outcome line, and `_push_core` already sets its "Recording activity" step before the tail; README's Fleet-retro paragraph states the per-repository resumption, which this Track proves per scan rather than assumes. Not re-observed here: the Codex reader's `files_cached` 852 of `files_on_disk` 1016 on `linux-a` (the manager's reading of `mm diag --json`)._
 
 - **Prove each scan resumes, and show progress while a push takes a while** -- For each scan an early stop can interrupt (git walk per-repository cursors, root-discovery rotation, the Codex per-file cache and the other host readers' caches, the session walk's index), a test stops it partway and shows the next attended push continues from the stored state and finishes within three pushes; where one does not, fix it. When an attended push has run longer than a few seconds on a terminal, the existing transient `_SyncProgress` line names the step and a count (repositories walked, readers read); nothing remains on screen after it clears, and a push that finishes quickly shows none (O8.1). _src/mind_meld/events_tail.py, src/mind_meld/core.py, tests/test_host_usage_snapshot.py, tests/test_integration.py, ~200 lines._ (M)
 - **Word a deadline stop "catching up (N left)" in the push notice and in `mm status`** -- A host reader stopped by its deadline, and a git walk stopped by its budget, read "catching up (N left)" with the count of rollouts, sessions, conversation databases or repositories left, where today's text says skipped or dropped; an error, a permanent reason or an unsupported format keeps its failure wording; README's coverage text follows. _src/mind_meld/events_tail.py, src/mind_meld/statusflow.py, tests/test_silent_failure_contract.py, tests/test_statusflow.py, README.md, docs/invariants/events-retro.md, ~150 lines._ (M)
@@ -180,75 +57,28 @@ _Source: manager Ephesus 17's observations on mm 1.12.30 and retro-fleet run on 
 6. README's coverage text and `docs/invariants/events-retro.md` match the new wording.
 7. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
 
-### Group 126: The retro says "catching up" too
+#### Track 125B: Observe one automatic update on a real machine (Track 124B's post-merge check)
+_1 task . ~10 LOC . low risk . 1 file_
+**Outcome:** The owner has seen one of their own machines, on a tracking install one release behind, update mm on its next push or autopush with no `mm update`, using the credential-based release check Track 124B shipped (v1.12.34).
+**Supports:** MVP-1 on Syncthing; docs/SPEC.md Constraints ("Auto-update upgrades a pipx `@latest` install at the end of its next `push`, `pull`, `autopull` or `autopush`, at most once a day"). Track 124B's acceptance criterion 9, its only open obligation.
+**Done when:** the observation (`mm --version` before and after, the `upgrade-state.json` fields and `mm status`, placeholders only) is recorded as Track 124B's post-merge row.
+_touches: docs/invariants/auto-upgrade.md_
+_session: fresh · effort: low · verify: ./bin/check --affected_
 
-_Depends on: Group 125_
+_Source: Track 124B (PR #307, merged 2026-11-10 at `ea8215b`, v1.12.34) met acceptance criteria 1 to 8; the PR names criterion 9 "the explicitly post-merge real-machine observation". Observed 2026-11-11 01:55 UTC on `linux-a`: `auto-update.log` records an automatic `pipx upgrade` from 1.12.30 to 1.12.35, run by 1.12.30, which predates 124B's check, so it does not satisfy criterion 9. The next release after 1.12.35 gives the first chance for 124B's own code to do it._
 
-**This group delivers:** A fleet retro on any machine tells "a peer's reader is still catching up" apart from "a peer's reader failed", without running `mm diag` on the peer.
+- **Record the observation** -- After the next release, on one machine on a tracking install one release behind, let its next push or autopush update mm, and record `mm --version` before and after, the `upgrade-state.json` fields and `mm status` (placeholders only) as Track 124B's post-merge row; if it does not update, file the cause in TODOS.md. _docs/invariants/auto-upgrade.md only if the observation contradicts it, ~50 lines._ (S)
 
-#### Track 126A: Carry a reader's progress to the retro and word it "catching up (N left)" in `MM_HEALTH`
-_2 tasks . ~300 LOC . medium risk . 9 files_
-**Outcome:** A `retro-fleet` run on one machine says "catching up (N left)" for a peer's host-usage reader or git walk that stopped early on a deadline, says it needs nothing beyond that peer's next attended push, and still says failed for a reader that failed; the Codex token total stays marked a floor until the backlog finishes.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O7.3 (a coverage gap is named, never a silent zero) and O7.4 (the fleet's retro shows complete capture from every active machine). The owner, 2026-11-09: "1 - sure" (the hold lifted for the Tracks carded here), on the manager's second Track whose outcome includes the retro's `MM_HEALTH` saying "catching up (N left)".
-**Done when:** the acceptance list below passes: a pushed row carries the progress only when a reader stopped on its deadline with items left, the retro words it "catching up (N left)" and keeps "failed" for the rest, and a row from a machine without the field reads exactly as today.
-_touches: src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_events.py, tests/test_host_usage_snapshot.py, tests/test_retro_fleet_aggregator.py, tests/test_retro_usage_presentation.py, README.md, docs/invariants/events-retro.md_
-_blocked-by: Track 125A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, src/mind_meld/events.py (`make_host_usage_snapshot`, `host_reader_outcomes`, `EVENTS_SCHEMA_VERSION`), src/mind_meld/skills/retro_fleet/aggregator.py (`_reader_issue_note`, `_host_reader_coverage_notes`, the `git_budget` note)_
-_produces: an additive progress field on pushed host rows and a "catching up (N left)" retro wording_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
 
-_Source: manager Ephesus 17's retro-fleet run on `linux-a`, 2026-11-09 (Future entry "Retro-fleet reports a Codex reader that is still catching up as "failed" (retro-fleet item R2)", whose third direction lands here). Verified at `e04cfa0`: `aggregator._reader_issue_note("degraded", ...)` words every degraded reader "Host-usage reader(s) ... failed on the latest push from ..." because `degraded_sources` on the wire carries reader names only (`events.make_host_usage_snapshot`, `host_reader_outcomes`), and the aggregator's `git_budget` note reads `git_capture.walk_budget_aborts`, a count with no repositories-left figure. The wire field is new, so the AGENTS.md planning rules apply: the reader is named (the aggregator's coverage notes and its `git_budget` note), the counter semantics are stated (a per-reader, per-machine count of items left, never summed across readers or machines and never added to a token total), and older peers' rows without the field keep today's wording. Whether the field needs an `EVENTS_SCHEMA_VERSION` change or stays additive under the existing rule is for the plan to settle from `docs/invariants/events-retro.md`. The missing-snapshot remedy (R4) is Track 129A, not this one._
+## Current Plan
 
-- **Carry the progress onto the wire** -- An additive field on a pushed host-usage row (and a repositories-left figure beside `git_capture`'s budget-abort count) records, per reader, the items left when the reader stopped on its deadline; absent when nothing is left or the reader failed; the aggregator is its named reader, and the invariants record its meaning. _src/mind_meld/events.py, src/mind_meld/events_tail.py, tests/test_events.py, tests/test_host_usage_snapshot.py, docs/invariants/events-retro.md, ~150 lines._ (M)
-- **Word it in the retro's `MM_HEALTH`** -- `_reader_issue_note` and the `git_budget` note say "catching up (N left)" for the readers and machines whose latest row carries the field, say it needs no action beyond that machine's next attended push, and keep "failed" for the rest; rows without the field read as today; README's coverage text follows. _src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_retro_fleet_aggregator.py, tests/test_retro_usage_presentation.py, README.md, ~150 lines._ (M)
-
-**Acceptance:**
-
-1. A pushed host row carries the progress field only when a reader stopped on its deadline with items left; a failed reader, a permanent reason and a finished reader carry none; tests pin each.
-2. A row from a machine without the field is accepted and read exactly as today (the reader still reads "failed" in the retro); a test pins it.
-3. `docs/invariants/events-retro.md` records the field, its reader and its semantics (per reader and per machine, never summed across readers or machines or added to a token total), and the decision on `EVENTS_SCHEMA_VERSION`.
-4. The retro's `MM_HEALTH` on another machine says "catching up (N left)" for a peer whose latest row carries the field, names the machine, says nothing more is needed than that machine's next attended push, and says "failed" for a degraded reader without it; the Codex token total is still marked a floor; tests pin each.
-5. The `git_budget` note says "catching up" with repositories left for a peer whose row carries the figure and keeps today's text otherwise; a test pins both.
-6. README's coverage text matches the new wording.
-7. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
-
-### Group 127: Joining a machine to the fleet
-
-_Depends on: Group 126_
-
-**This group delivers:** A second machine's first pull no longer conflicts on files gstack generates for itself, and a managed join waits briefly for the key header instead of stopping right after it accepted the folder.
-
-#### Track 127A: Keep gstack's generated Codex install out of sync, and let a managed join wait for the key header
-_2 tasks . ~250 LOC . low risk . 7 files_
-**Outcome:** The first pull on a machine that runs gstack's Codex setup produces no conflict under `skills/gstack/` and persists no other machine's absolute path there, and a managed `mm init` that has just accepted the fleet folder waits a short, bounded time for the key header and carries on, instead of stopping for a rerun.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O2 (a machine joins the fleet) and O8.1 (a stop's fix must be needed). The owner, 2026-11-09: "not sure they are files we should be syncing?" (the `skills/gstack` files) and "Anything that is a reproducible bug we actually encountered should be current".
-**Done when:** the acceptance list below passes: `skills/gstack/*` is excluded from the codex source (and from `agy` if gstack writes it there) with peers' copies left in place, and a join whose header arrives during the wait completes in one run while one whose header does not arrive stops exactly as it does today.
-_touches: src/mind_meld/config.py, src/mind_meld/initflow.py, tests/test_config.py, tests/test_initflow.py, docs/invariants/sync.md, docs/invariants/init-devices.md, README.md_
-_blocked-by: Track 126A_
-_read-first: docs/invariants/README.md, docs/invariants/sync.md ("Generated files are not sync data", exclusion rules), docs/invariants/conflicts.md (the pull rule, row 2), docs/invariants/init-devices.md, src/mind_meld/config.py (`DEFAULT_SOURCES`, `_GENERATED_HOST_SKILL_GLOBS`), src/mind_meld/initflow.py (`_managed_join`, `_stop_for_missing_header`, `fetch_crypto_init` in `init`)_
-_produces: a codex source that leaves `skills/gstack/*` alone, and a join that waits for the header after an accepted offer_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
-
-_Source: manager Ephesus 17's observations on mm 1.12.30, 2026-11-09 (Future entries "The codex source syncs gstack's generated Codex install, `skills/gstack/*` (finding 8)" and "A managed `mm init` join can stop for the key header one moment after Syncthing accepts the folder (finding 4)"), promoted on the owner's rule above. Verified at `e04cfa0`: `config.py`'s codex entry excludes `skills/gstack-*` (with a dash), `skills/log-work/*`, `skills/retro-fleet/*`, `skills/.system/*`, plugin caches and `_GENERATED_HOST_SKILL_GLOBS`, which lists five gstack-extend skills and no `skills/gstack/*`; the `agy` entry excludes `skills/gstack-*`, `skills/log-work/*`, `skills/retro-fleet/*` and the same generated list. The observed first pull produced two conflicts, `skills/gstack/.source-path` and `skills/gstack/plan-design-review/SKILL.md` (the manager's report; not re-run here). In `initflow.init`, `_managed_join` returns, `fetch_crypto_init(backend)` runs once with no wait, and `_stop_for_missing_header(full_path, folder, accepted=accepted_share is True, ...)` ends the run with "has not arrived yet ... Wait for Syncthing to deliver it, then run 'mm init' again", writing nothing; a rerun a minute later succeeded. Open questions the first task answers: (a) whether gstack writes `skills/gstack` under `~/.gemini/config` on a machine with Antigravity (not checked; add the glob to `agy` only if it does); (b) the manager found the `.source-path` conflict copy byte-identical to its original, which contradicts the pull rule's "local equals remote is matched" (docs/invariants/conflicts.md row 2): the exclusion removes this path from sync, so the Track checks the rule with a no-base equal-bytes fixture and records the result, and files a TODO rather than fixing if the rule is violated on a still-synced path._
-
-- **Exclude `skills/gstack/*` from the codex source** -- Add `skills/gstack/*` beside `skills/gstack-*` in the codex entry (and in `agy` if gstack writes it there, after checking), with a test in `tests/test_config.py`; exclusion writes no tombstones and leaves a peer's copy and local files in place (sync.md); check the byte-identical conflict-copy question as described in the Source and record the result in the PR; sync.md's generated-files list names the new glob. _src/mind_meld/config.py, tests/test_config.py, docs/invariants/sync.md, ~60 lines._ (S)
-- **Wait briefly for the key header after an accepted offer** -- After `_managed_join` accepted the folder, `init` polls for `mm-crypto-init` for a bounded time (the plan sets the length, a named constant, and the poll interval) before the existing stop; the wait applies only after an accepted offer, ends at once on Ctrl-C with nothing written, and the stop text, its writes (none) and its rerun fix are unchanged when the header does not arrive; README's join steps and init-devices.md say what the wait does. _src/mind_meld/initflow.py, tests/test_initflow.py, docs/invariants/init-devices.md, README.md, ~190 lines._ (M)
-
-**Acceptance:**
-
-1. A fresh codex source built from `DEFAULT_SOURCES` excludes `skills/gstack/SKILL.md`, `skills/gstack/.source-path` and `skills/gstack/plan-design-review/SKILL.md`, and still includes a user-authored skill; tests in `tests/test_config.py` pin each.
-2. A pull on a machine where a peer's manifest still lists `skills/gstack/*` files leaves that machine's local files in place and writes no tombstone or deletion for them; a test pins it (sync.md's exclusion rule).
-3. The PR records whether gstack writes `skills/gstack` under the `agy` source's path and adds the glob there if it does; and records the result of the equal-bytes check for the pull rule, filing a TODO (not a fix) if it finds a violation on a path that is still synced.
-4. With a fake Syncthing that accepts the folder and delivers `mm-crypto-init` after a delay shorter than the wait, `mm init` completes in one run; a test pins it.
-5. With a header that never arrives, `mm init` stops after the wait with today's text, writes no device entry, config or key header, and ends with the rerun fix; with a local-only or missing folder it stops without waiting; Ctrl-C during the wait ends with nothing written. Tests pin each.
-6. README's join steps and `docs/invariants/init-devices.md` describe the wait.
-7. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 127_
 
 ### Group 128: Retro cost is honest
 
-_Depends on: Group 127_
+_Depends on: Group 125_
 
-**This group delivers:** The retro's `≥` cost never uses a rate that can overstate it, and saving a price override says that it saved.
+**This group delivers:** A retro prices the Claude 5.5 models and keeps an extrapolated rate out of its `≥` floor.
 
 #### Track 128A: Price the Claude 5.5 models and keep an extrapolated rate out of the retro's `≥` floor
 _2 tasks . ~300 LOC . medium risk . 6 files_
@@ -276,11 +106,12 @@ _Source: manager Ephesus 17's retro-fleet comparison of `mac-b` and `linux-a`, 2
 6. README's "Pricing refresh and local overrides" shows the confirmation line.
 7. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
 
-### Group 129: Retro notes name the machine and the right remedy
 
-_Depends on: Group 128_
+### Group 129: Retro notes name the machine and the right remedy ∥ One output style for every command
 
-**This group delivers:** The retro's coverage and cost notes say which machine and the remedy that fits its state, and its commit-type mix counts version-prefixed subjects by their type.
+_Depends on: Group 125, Group 128_
+
+**This group delivers:** The retro's floor causes and peer remedy name the machine, and version-prefixed commits classify by type. Every hand-run command prints errors, warnings, notices and fix commands in one written-down form, and `mm push` and `mm pull` end with one line per thing that actually happened.
 
 #### Track 129A: Name the machine in the retro's floor causes and peer remedy, and classify version-prefixed commits
 _3 tasks . ~320 LOC . low risk . 4 files_
@@ -308,19 +139,137 @@ _Source: manager Ephesus 17's retro-fleet feedback and runs on `mac-b` and `linu
 5. docs/invariants/events-retro.md describes the version strip in its classifier sentence.
 6. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
 
-### Group 130: Quiet and consistent notices
+#### Track 129B: Name the shared output style, and end push and pull with one line per thing that happened
+_2 tasks . ~300 LOC . medium risk . 10 files_
+**Outcome:** An owner who runs any mm command by hand sees errors, warnings, notices and fix commands in one form, including a mistyped option, and an `mm push` or `mm pull` that ends with one line for each thing that actually happened and nothing for what did not; routine counts and capture detail move to `--verbose`, `mm status` and `mm diag`.
+**Supports:** MVP-1 on Syncthing; docs/SPEC.md O8.1 and O8.6 as amended 2026-11-10. The owner, 2026-11-10: "make sure all our manually run commands have consistently formatted output -- they all need to look like they come from the same tool" and "I'm fine w/ multiple lines at the end if there's more than one outcome".
+**Done when:** the acceptance list below passes: the style is written down once and every form has one helper, `core._error`, core's warnings and Typer's usage errors print through them, and the push and pull summaries follow amended O8.1.
+_touches: src/mind_meld/core.py, src/mind_meld/cli.py, tests/test_output_style.py (new), tests/test_integration.py, tests/test_projectid.py, tests/test_pullflow.py, tests/test_silent_failure_contract.py, README.md, docs/invariants/README.md, docs/invariants/sync.md_
+_blocked-by: Track 125A_
+_read-first: docs/SPEC.md (O8), docs/invariants/README.md, docs/invariants/sync.md, src/mind_meld/core.py (`_error`, `_sync_warning`, `_sync_diagnostic`, the `[yellow]Warning:` sites), src/mind_meld/cli.py (`_sync_success`, `_sync_failure`, `_emit_sync_outcome`, `_push_core`'s warnings, the verbose `Push complete.` ending)_
+_produces: the shared output style (written down once) and its helpers, which every later output Track uses_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
 
-_Depends on: Group 129_
+_Source: the owner's words of 2026-11-10 (docs/SPEC.md O8 amendment). Survey of hand-run commands' output at `a6f3e73`, run with the installed mm 1.12.35 in a temporary HOME and read from the code: errors take four forms: `core._error` prints `Error: <message>` through Rich (red, wrapped at the terminal width, the fix inline as "run 'mm init' first", seen on `mm status`, `devices`, `gc`, `diff`, `sources`, `conflicts`, `enable-source` and `recover`); `mm push` and `mm pull` print one unwrapped `Push failed [setup-error]: ...; no content published. Run: mm init`; `install-skills` prints `mm: error: ...` (10 sites in `cli.py`); a mistyped option prints Typer's boxed `╭─ Error ─╮` panel. Warnings take two: `[yellow]Warning:[/yellow]` on stdout (4 sites each in `core.py`, `cli.py` and `pullflow.py`) and `mm: warning:` on stderr (64 sites). Fix commands take three: `Run: <command>` (push, pull, `statusflow.py` 21, `initflow.py` 8, `devicesflow.py` 5), "run `<command>`" (`retention.py`, `statusflow.py`, `upgrade.py`, `pullhistory.py`, `events_tail.py`) and "run '<command>'" (`core._error`'s config message). Notices already share `mm: notice:`. Success lines: `mm push` prints plain `Push: ...` while `--verbose` ends `[bold green]Push complete.`; `mm update`, `mm gc` and `mm recapture` end in bold green. The push outcome appends `; usage published` (`_sync_success`) and the pull outcome appends `; N skipped`, which amended O8.1 calls routine detail. This Track promotes the Future entry "Reconcile SPEC O8.2 with the push outcome line's usage suffix", whose question amended O8.1 answers._
+
+- **Write the shared style down once and print every error, warning and notice through it** -- Name the forms in README's output section and in the routing table: the outcome line, `mm: error:`, `mm: warning:` and `mm: notice:` on stderr, and the fix command as `Run: <command>` printed last (the forms most commands already use; the plan confirms or amends them against the survey above). Give each form one helper beside `core._error`; route `core._error`, core's `[yellow]Warning:` sites and the push's own warning lines through them, and make Typer's usage errors print the same error form instead of its panel. _src/mind_meld/core.py, src/mind_meld/cli.py, tests/test_output_style.py (new), tests/test_silent_failure_contract.py, README.md, docs/invariants/README.md, ~170 lines._ (M)
+- **End push and pull with one line per thing that happened** -- `_sync_success` prints one line for each thing that happened (what moved, project memory published under shared names, files held) and drops what did not; `; usage published` and the pull's skipped count move to `--verbose`, `mm status` and `mm diag`; a run that moved nothing keeps its single line; `--verbose` ends with the same summary instead of `Push complete.`; failures keep what broke and the fix command last. _src/mind_meld/cli.py, tests/test_integration.py, tests/test_projectid.py, tests/test_pullflow.py, docs/invariants/sync.md, ~130 lines._ (M)
+
+**Acceptance:**
+
+1. README and the routing table name the outcome, error, warning, notice and fix-command forms; a test prints each through its helper and pins the text.
+2. `mm status`, `mm devices` and `mm push` run with no config give the same error form, with the fix command `Run: mm init` as the last line; a test pins all three.
+3. `mm push --bogus` prints the shared error form with the usage fix, not Typer's panel, and exits 2; a test pins it.
+4. No `[yellow]Warning:` or `[red]Error:` remains in `core.py` or in `cli.py`'s push and pull paths; tests pin the new forms.
+5. A push that publishes content and usage prints one line for the content and no `usage published`; `mm push -v` still shows the usage publication; a pull that applies files and skips some prints no skipped count, which `mm pull -v` and `mm status` still show; a push or pull that moves nothing prints its one line; tests pin each.
+6. A push or pull failure still ends with what broke and `Run: <command>` as the last thing printed and exits non-zero; `mm autopush` and `mm autopull` print nothing new; tests pin both.
+7. The Future entry "Reconcile SPEC O8.2 with the push outcome line's usage suffix" is resolved by this Track; the PR says so and leaves the quiet-output checkpoint for the owner to accept.
+8. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
+
+
+### Group 130: Push, pull and update share one progress display ∥ Setup, sources and conflict commands in the shared style
+
+_Depends on: Group 125, Group 129_
+
+**This group delivers:** `mm push`, `mm pull` and `mm update` show the same spinner, and an update during an attended push or pull shows as a step and its own `Updated mm X -> Y` line. `mm init`, `mm devices`, `mm sources`, `mm conflicts`, `mm resolve` and the pull's warnings use the shared style.
+
+#### Track 130A: Give push, pull and update one progress display, and show an update that runs during a push or pull
+_2 tasks . ~300 LOC . medium risk . 8 files_
+**Outcome:** An owner sees the same spinner whether they run `mm push`, `mm pull` or `mm update`; it clears when done and is followed by the outcome line. When an attended push or pull updates mm, the update shows as a step in that spinner and adds its own `Updated mm X -> Y` line after the sync's line, instead of updating silently.
+**Supports:** MVP-1 on Syncthing; docs/SPEC.md O8.1 and O8.6 as amended 2026-11-10. The owner, 2026-11-10: "I do think that it should show the same update installer when it's updating, like when we run mm update -- it shouldn't update silently" and "when we push and pull, should we show the same spinner? should we change update to look more like push/pull?"
+**Done when:** the acceptance list below passes: one progress class serves all three commands, `mm update`'s progress clears before its outcome line, and an attended update during push or pull shows its step and its own outcome line while hooks, piped output and `--verbose` print what they print today.
+_touches: src/mind_meld/core.py, src/mind_meld/cli.py, src/mind_meld/upgrade.py, tests/test_self_update.py, tests/test_integration.py, README.md, docs/invariants/auto-upgrade.md_
+_blocked-by: Track 125A, Track 129B_
+_read-first: docs/invariants/README.md, docs/invariants/auto-upgrade.md ("Self-update (v1.3.0)"), src/mind_meld/core.py (`_SyncProgress`, `_sync_progress_phase`), src/mind_meld/cli.py (`_run_update_with_progress`, `update`, `_sync_update`, `_sync_outcome`), src/mind_meld/upgrade.py (`update_or_nudge`, `_auto_install`, `run_update`'s `on_progress`)_
+_produces: one progress display for push, pull and update, and an `Updated mm X -> Y` outcome line after an attended sync that updated mm_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
+
+_Source: the owner's words of 2026-11-10. Verified at `a6f3e73`: `core._SyncProgress` (transient, TTY-only, cleared before the outcome line) says in its docstring it copies `_run_update_with_progress`'s Rich columns, ticker and failure isolation, while `cli._run_update_with_progress` builds its own non-transient `Progress`; `mm update` prints `Updating mm X → Y (pipx ...)…` before the spinner and `[bold green]Updated mm X → Y.` after it. During an attended push or pull, `cli._sync_update` calls `upgrade.update_or_nudge(config, attended=True, diagnostics=verbose)`; `_auto_install` runs `run_update` with no `on_progress` and prints its `updating` and `updated` notices only when `diagnostics` is true, so a non-verbose attended update shows no step and no line. This Track changes `core._SyncProgress`, which Track 125A is changing now, hence the block._
+
+- **One progress display for push, pull and update** -- Make `mm update` run its installer through the same progress class as push and pull (transient, terminal-only, cleared when done) and delete the duplicate in `_run_update_with_progress`; the installer's phases and counters become the spinner's step and detail; `mm update` then prints its outcome line in the shared style (`Updated mm X -> Y`, or that mm is already current), and its failures keep what broke and the fix command last. _src/mind_meld/core.py, src/mind_meld/cli.py, tests/test_self_update.py, ~170 lines._ (M)
+- **Show an update during an attended push or pull** -- On a terminal without `--verbose`, an automatic update during `mm push` or `mm pull` shows as a step in the sync's spinner (the installer's progress feeds it) and prints `Updated mm X -> Y` after the sync's outcome line; a failed update prints what broke and `Run: mm update` last without changing the sync's exit code. `mm autopush` and `mm autopull` stay silent; piped output and `--verbose` print what they print today. README and the auto-upgrade invariants describe it. _src/mind_meld/upgrade.py, src/mind_meld/cli.py, tests/test_self_update.py, tests/test_integration.py, README.md, docs/invariants/auto-upgrade.md, ~130 lines._ (M)
+
+**Acceptance:**
+
+1. `_run_update_with_progress` no longer builds its own `Progress`; push, pull and update use one progress class; a test pins it.
+2. On a terminal, `mm update` shows a transient spinner that clears, then one outcome line (`Updated mm X -> Y`, or already current); with output piped it shows no spinner and the same outcome line; a failed update ends with what broke and the fix command; tests pin each.
+3. On a terminal without `--verbose`, an attended `mm push` and `mm pull` that update mm show an update step in the spinner and print `Updated mm X -> Y` after the sync's outcome line; a failed update prints what broke and `Run: mm update` last and the exit code is the sync's; tests pin each.
+4. `mm autopush` and `mm autopull` print nothing for an update; piped attended runs and `--verbose` runs print exactly what they print today; tests pin each.
+5. README and `docs/invariants/auto-upgrade.md` describe the visible update.
+6. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
+
+#### Track 130B: Bring init, devices, sources, conflicts and resolve, and pull's own warnings, to the shared style
+_3 tasks . ~300 LOC . low risk . 10 files_
+**Outcome:** An owner who runs `mm init`, `mm devices`, `mm devices approve`, `mm sources`, `mm enable-source`, `mm disable-source`, `mm conflicts` or `mm resolve`, or reads a warning from `mm pull`, sees the same outcome, warning, error and fix-command forms as `mm push`.
+**Supports:** MVP-1 on Syncthing; docs/SPEC.md O8.6 as amended 2026-11-10. The owner, 2026-11-10: "they all need to look like they come from the same tool".
+**Done when:** the acceptance list below passes: each site the survey names prints in the shared style, with tests pinning the new text.
+_touches: src/mind_meld/initflow.py, src/mind_meld/devicesflow.py, src/mind_meld/sourceflow.py, src/mind_meld/resolveflow.py, src/mind_meld/pullflow.py, tests/test_initflow.py, tests/test_devices_approve.py, tests/test_sourceflow.py, tests/test_conflict_copy.py, tests/test_pullflow.py_
+_blocked-by: Track 129B_
+_read-first: docs/invariants/README.md (the output style Track 129B wrote), docs/invariants/conflicts.md, src/mind_meld/resolveflow.py, src/mind_meld/pullflow.py (the `[yellow]Warning:` sites and `Pull refused:`), src/mind_meld/initflow.py, src/mind_meld/devicesflow.py, src/mind_meld/sourceflow.py_
+_produces: init, devices, sources, conflicts, resolve and pull's warnings in the shared style_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
+
+_Source: the survey in Track 129B's source note, verified at `a6f3e73`. Sites that do not follow the shared style once 129B has moved `core._error`: `pullflow.py` prints four `[yellow]Warning:[/yellow]` lines (peer and unknown-source warnings) and `[red]Pull refused:[/red]`; `resolveflow.py` prints per-file `[red]promote failed:`, `[red]delete failed:` and `[red]read failed:` lines beside four `mm: warning:` lines, and its successes in `[green]`; `initflow.py` (3), `devicesflow.py` (1) and `sourceflow.py` (4) print outcome lines in `[green]` where push prints plain text. `initflow.py` and `devicesflow.py` already end their stops with `Run: <command>`, so their fix commands are not in this Track. `sourceflow.py`'s `[red]N[/red]`/`[green]Y[/green]` table cells are a table, not a message, and stay unless the plan's style says otherwise._
+
+- **Errors and warnings** -- Move pull's `[yellow]Warning:` lines and `Pull refused:` and resolve's per-file failure lines to the shared warning and error forms, keeping data-at-risk warnings visible in quiet mode. _src/mind_meld/pullflow.py, src/mind_meld/resolveflow.py, tests/test_pullflow.py, tests/test_conflict_copy.py, ~120 lines._ (M)
+- **Outcome lines** -- `init`, `devices approve`, `sources`, `enable-source`, `disable-source` and `resolve` end with outcome lines in the shared form. _src/mind_meld/initflow.py, src/mind_meld/devicesflow.py, src/mind_meld/sourceflow.py, src/mind_meld/resolveflow.py, tests/test_initflow.py, tests/test_devices_approve.py, tests/test_sourceflow.py, ~100 lines._ (S)
+- **Close four recorded managed-join test gaps** -- In `tests/test_initflow.py`, pin the wait's 120 one-second pauses with independent values rather than production constants; inject corrupt, newer-format and unreadable headers after polling starts (immediate refusal, no Mind Meld state written); supply an unknown peer count on a managed rerun (stops without polling); and deliver in-flight or fleet entries during the wait, or make the folder unreadable at timeout, checking the current-state remedy with no writes. Recorded gaps, no demonstrated defect; filed by /review-and-prep on PR #308 at `13239eb`, still open at `a6f3e73`. _tests/test_initflow.py, ~80 lines._ (S)
+
+**Acceptance:**
+
+1. Each site in the source note prints the shared form; no `[yellow]Warning:` or `[red]` message prefix remains in the touched files outside tables; tests pin each command's new text.
+2. A pull's data-at-risk warning still prints in quiet mode and under `mm autopull`; a test pins it.
+3. The four managed-join cases in the third task have tests in `tests/test_initflow.py`.
+4. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
+
+
+### Group 131: The retro says "catching up" too
+
+_Depends on: Group 125, Group 129_
+
+**This group delivers:** A fleet retro on any machine tells "a peer's reader is still catching up" apart from "a peer's reader failed", without running `mm diag` on the peer.
+
+#### Track 131A: Carry a reader's progress to the retro and word it "catching up (N left)" in `MM_HEALTH`
+_3 tasks . ~330 LOC . medium risk . 9 files_
+**Outcome:** A `retro-fleet` run on one machine says "catching up (N left)" for a peer's host-usage reader or git walk that stopped early on a deadline, says it needs nothing beyond that peer's next attended push, and still says failed for a reader that failed; the Codex token total stays marked a floor until the backlog finishes.
+**Supports:** MVP-1 on Syncthing; docs/SPEC.md O7.3 (a coverage gap is named, never a silent zero) and O7.4 (the fleet's retro shows complete capture from every active machine). The owner, 2026-11-09: "1 - sure" (the hold lifted for the Tracks carded here), on the manager's second Track whose outcome includes the retro's `MM_HEALTH` saying "catching up (N left)".
+**Done when:** the acceptance list below passes: a pushed row carries the progress only when a reader stopped on its deadline with items left, the retro words it "catching up (N left)" and keeps "failed" for the rest, and a row from a machine without the field reads exactly as today.
+_touches: src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_events.py, tests/test_host_usage_snapshot.py, tests/test_retro_fleet_aggregator.py, tests/test_retro_usage_presentation.py, README.md, docs/invariants/events-retro.md_
+_blocked-by: Track 125A_
+_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, src/mind_meld/events.py (`make_host_usage_snapshot`, `host_reader_outcomes`, `EVENTS_SCHEMA_VERSION`), src/mind_meld/skills/retro_fleet/aggregator.py (`_reader_issue_note`, `_host_reader_coverage_notes`, the `git_budget` note)_
+_produces: an additive progress field on pushed host rows and a "catching up (N left)" retro wording_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
+
+_Source: manager Ephesus 17's retro-fleet run on `linux-a`, 2026-11-09 (Future entry "Retro-fleet reports a Codex reader that is still catching up as "failed" (retro-fleet item R2)", whose third direction lands here). Verified at `e04cfa0`: `aggregator._reader_issue_note("degraded", ...)` words every degraded reader "Host-usage reader(s) ... failed on the latest push from ..." because `degraded_sources` on the wire carries reader names only (`events.make_host_usage_snapshot`, `host_reader_outcomes`), and the aggregator's `git_budget` note reads `git_capture.walk_budget_aborts`, a count with no repositories-left figure. The wire field is new, so the AGENTS.md planning rules apply: the reader is named (the aggregator's coverage notes and its `git_budget` note), the counter semantics are stated (a per-reader, per-machine count of items left, never summed across readers or machines and never added to a token total), and older peers' rows without the field keep today's wording. Whether the field needs an `EVENTS_SCHEMA_VERSION` change or stays additive under the existing rule is for the plan to settle from `docs/invariants/events-retro.md`. The missing-snapshot remedy (R4) is Track 129A, not this one._
+
+- **Carry the progress onto the wire** -- An additive field on a pushed host-usage row (and a repositories-left figure beside `git_capture`'s budget-abort count) records, per reader, the items left when the reader stopped on its deadline; absent when nothing is left or the reader failed; the aggregator is its named reader, and the invariants record its meaning. _src/mind_meld/events.py, src/mind_meld/events_tail.py, tests/test_events.py, tests/test_host_usage_snapshot.py, docs/invariants/events-retro.md, ~150 lines._ (M)
+- **Word it in the retro's `MM_HEALTH`** -- `_reader_issue_note` and the `git_budget` note say "catching up (N left)" for the readers and machines whose latest row carries the field, say it needs no action beyond that machine's next attended push, and keep "failed" for the rest; rows without the field read as today; README's coverage text follows. _src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_retro_fleet_aggregator.py, tests/test_retro_usage_presentation.py, README.md, ~150 lines._ (M)
+- **Close the recorded attended-cap precedence test gap** -- Extend the existing precedence test in `tests/test_host_usage_snapshot.py` so an explicit `attended_capture_cap_ms` with the legacy `host_usage_interactive_budget_ms` and no `capture_budget_ms` pins the sweep preference, the stashed cap and the partitioned tail. Recorded gap, no demonstrated defect; filed by /review-and-prep for Track 124A at `6fb045c`, still open at `a6f3e73`. _tests/test_host_usage_snapshot.py, ~30 lines._ (S)
+**Acceptance:**
+
+1. A pushed host row carries the progress field only when a reader stopped on its deadline with items left; a failed reader, a permanent reason and a finished reader carry none; tests pin each.
+2. A row from a machine without the field is accepted and read exactly as today (the reader still reads "failed" in the retro); a test pins it.
+3. `docs/invariants/events-retro.md` records the field, its reader and its semantics (per reader and per machine, never summed across readers or machines or added to a token total), and the decision on `EVENTS_SCHEMA_VERSION`.
+4. The retro's `MM_HEALTH` on another machine says "catching up (N left)" for a peer whose latest row carries the field, names the machine, says nothing more is needed than that machine's next attended push, and says "failed" for a degraded reader without it; the Codex token total is still marked a floor; tests pin each.
+5. The `git_budget` note says "catching up" with repositories left for a peer whose row carries the figure and keeps today's text otherwise; a test pins both.
+6. README's coverage text matches the new wording.
+7. The attended-cap and legacy-sweep combination has a test in `tests/test_host_usage_snapshot.py`.
+8. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
+
+
+### Group 132: Quiet and consistent notices
+
+_Depends on: Group 129, Group 130, Group 131_
 
 **This group delivers:** `mm recapture` no longer prints one nested-repository line per checkout, and the push and `mm status` give the same advice for an Antigravity record no release can read.
 
-#### Track 130A: Keep recapture's own push quiet about nested repositories, and give the push and status the same Antigravity advice
+#### Track 132A: Keep recapture's own push quiet about nested repositories, and give the push and status the same Antigravity advice
 _2 tasks . ~170 LOC . low risk . 5 files_
 **Outcome:** An owner who runs `mm recapture` is not shown one "skipped: nested git repository" line per checkout, and the push notice and `mm status` give one advice, not two that contradict each other, when Antigravity's record format is one no release reads.
 **Supports:** MVP-1 on Syncthing; docs/SPEC.md O8.1 ("nothing else is printed unless the owner must act") and O7.3. The owner, 2026-11-09: "Anything that is a reproducible bug we actually encountered should be current"; observed as 107 notice lines in one push and as `mm status` and the push notice disagreeing about Antigravity.
 **Done when:** the acceptance list below passes: recapture's inner push prints no nested-repository line, a plain `mm push` and its `-v` and `--dry-run` forms behave as today, and the push notice and `mm status` agree for a format no release reads.
 _touches: src/mind_meld/cli.py, src/mind_meld/events_tail.py, tests/test_integration.py, tests/test_silent_failure_contract.py, docs/invariants/events-retro.md_
-_blocked-by: Track 129A_
+_blocked-by: Track 129A, Track 131A_
 _read-first: docs/invariants/README.md, docs/invariants/sync.md ("Nested git checkouts are frozen"), docs/invariants/events-retro.md, src/mind_meld/cli.py (`_push_core`'s `diagnostics`, `show` and `on_skip`; `recapture`'s `_push_core` call), src/mind_meld/events_tail.py (`_host_skip_phrase`, `_no_release_reads_clause`)_
 _produces: a recapture push that prints no nested-repository notices, and one advice for an unreadable Antigravity format_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
@@ -339,52 +288,80 @@ _Source: manager Ephesus 17's observations on mm 1.12.30, 2026-11-09 (Future ent
 5. docs/invariants/events-retro.md records where the push-side notice gets the upgrade view.
 6. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
 
+
+### Group 133: Status, gc, diff, log and recapture in the shared style
+
+_Depends on: Group 130, Group 132_
+
+**This group delivers:** `mm status`, `mm gc`, `mm diff`, `mm log`, `mm recapture` and the update notices a push prints use the shared style.
+
+#### Track 133A: Bring status, gc, diff, log, recapture and the update notices to the shared style
+_2 tasks . ~220 LOC . low risk . 11 files_
+**Outcome:** An owner who runs `mm status`, `mm gc`, `mm diff`, `mm log` or `mm recapture`, or reads the update notice a push prints, sees the same outcome, warning, error and fix-command forms as push and pull.
+**Supports:** MVP-1 on Syncthing; docs/SPEC.md O8.6 as amended 2026-11-10. The owner, 2026-11-10: "they all need to look like they come from the same tool".
+**Done when:** the acceptance list below passes: each site the survey names prints in the shared style, with tests pinning the new text.
+_touches: src/mind_meld/cli.py, src/mind_meld/retention.py, src/mind_meld/pullhistory.py, src/mind_meld/statusflow.py, src/mind_meld/upgrade.py, tests/test_retention.py, tests/test_gc_events.py, tests/test_pullhistory.py, tests/test_statusflow.py, tests/test_self_update.py, tests/test_integration.py_
+_blocked-by: Track 130A, Track 132A_
+_read-first: docs/invariants/README.md (the output style Track 129B wrote), src/mind_meld/cli.py (`gc`, `diff_cmd`, `recapture`), src/mind_meld/retention.py, src/mind_meld/pullhistory.py, src/mind_meld/statusflow.py, src/mind_meld/upgrade.py (`format_upgrade_message`, `_auto_install`'s failure notice)_
+_produces: status, gc, diff, log, recapture and the update notices in the shared style_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
+
+_Source: the survey in Track 129B's source note, verified at `a6f3e73`. Sites that do not follow the shared style once 129B has moved `core._error`: `mm gc` ends `[bold green]GC complete.[/bold green]` (`cli.py`) and `retention.py` warns in `[yellow]` with "rerun `mm gc`"; `mm recapture` prints a literal `[red]Error:[/red]` and ends `[bold green]Recapture complete.`; `mm diff` warns `[yellow]Warning:[/yellow] remote manifest for ...`; `mm log` (`pullhistory.py`) gives "run `mm update`"; `mm status` gives "(run `mm push`)" in two places beside its own `Run: mm diag`; the update nudge ends "— run `<install command>`" and the failed automatic update "run `mm update`, or `<reinstall>`" (`upgrade.py`). `install-skills` already prints `mm: error:` and `recover` errors through `core._error`, so neither is in this Track._
+
+- **Errors, warnings and fix commands** -- Move the `gc`, `diff`, `recapture`, `log` and `status` warnings and errors listed above, and the update nudge and failure notices, to the shared helpers, with each fix command as `Run: <command>` printed last. _src/mind_meld/cli.py, src/mind_meld/retention.py, src/mind_meld/pullhistory.py, src/mind_meld/statusflow.py, src/mind_meld/upgrade.py, tests/test_retention.py, tests/test_pullhistory.py, tests/test_statusflow.py, tests/test_self_update.py, ~140 lines._ (M)
+- **Outcome lines** -- `mm gc` and `mm recapture` end with an outcome line in the shared form instead of bold green "complete" lines; counts the owner does not act on move behind `-v`. _src/mind_meld/cli.py, tests/test_gc_events.py, tests/test_integration.py, ~80 lines._ (S)
+
+**Acceptance:**
+
+1. Each site in the source note prints the shared form; no `[yellow]Warning:`, `[red]Error:` or "run `...`" fix form remains in the touched files; tests pin each command's new text.
+2. `mm gc` and `mm recapture` end with one outcome line in the shared form; tests pin both.
+3. `mm status` still opens with its one-line verdict (O8.4); a test pins it.
+4. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
+
+
 ### Execution Map
 
 A Group may launch when every Group in its ← set has landed, regardless of document order; document order is priority, not gating.
 
 ```
-- Group 123 ← {}
-- Group 124 ← {123}
-- Group 125 ← {124}
-- Group 126 ← {125}
-- Group 127 ← {126}
-- Group 128 ← {127}
-- Group 129 ← {128}
-- Group 130 ← {129}
+- Group 125 ← {}
+- Group 128 ← {125}
+- Group 129 ← {125, 128}
+- Group 130 ← {125, 129}
+- Group 131 ← {125, 129}
+- Group 132 ← {129, 130, 131}
+- Group 133 ← {130, 132}
 ```
 
 ```
-Group 123: Bootstrap upgrades mm and keeps Syncthing starting at login; Antigravity usage reads
-  +-- Track 123A ......... ~M . 3 tasks
-  +-- Track 123B ......... ~L . 1 task
-
-Group 124: An attended push finishes its capture scans ∥ Automatic updates reach the private repository
-  +-- Track 124A ......... ~L . 2 tasks
-  +-- Track 124B ......... ~M . 3 tasks
-
-Group 125: Scans resume, show progress and say "catching up"
+Group 125: Scans resume, show progress and say "catching up" ∥ One automatic update observed on a real machine   (in progress)
   +-- Track 125A ......... ~M . 2 tasks
-
-Group 126: The retro says "catching up" too
-  +-- Track 126A ......... ~M . 2 tasks
-
-Group 127: Joining a machine to the fleet
-  +-- Track 127A ......... ~M . 2 tasks
+  +-- Track 125B ......... ~S . 1 task
 
 Group 128: Retro cost is honest
   +-- Track 128A ......... ~L . 2 tasks
 
-Group 129: Retro notes name the machine and the right remedy
+Group 129: Retro notes name the machine and the right remedy ∥ One output style for every command
   +-- Track 129A ......... ~M . 3 tasks
+  +-- Track 129B ......... ~M . 2 tasks
 
-Group 130: Quiet and consistent notices
+Group 130: Push, pull and update share one progress display ∥ Setup, sources and conflict commands in the shared style
   +-- Track 130A ......... ~M . 2 tasks
+  +-- Track 130B ......... ~M . 3 tasks
+
+Group 131: The retro says "catching up" too
+  +-- Track 131A ......... ~M . 3 tasks
+
+Group 132: Quiet and consistent notices
+  +-- Track 132A ......... ~M . 2 tasks
+
+Group 133: Status, gc, diff, log and recapture in the shared style
+  +-- Track 133A ......... ~M . 2 tasks
 ```
 
-**Total: 0 phases . 8 groups . 10 tracks remaining.**
+**Total: 0 phases . 7 groups . 10 tracks remaining.**
 
-Tracks 117A, 118A, 119A, 120A and 122A shipped (v1.12.25, v1.12.26, v1.12.28, v1.12.29 and v1.12.30; v1.12.27 was the test-suite retirement, not a Track) and Groups 117 to 120 and 122 are retired. Track 121A, the git-history hostname scrub, was dropped by the owner on 2026-11-08 and Group 121 is retired with it. IDs 95A and 96A stay unused because Future entries cite them.
+Tracks 123A, 123B, 124A and 127A shipped (v1.12.32, v1.12.31, v1.12.33 and v1.12.35) and Groups 123, 124 and 127 are retired; Track 124B shipped v1.12.34 with its post-merge check carried as Track 125B. IDs 95A and 96A stay unused because Future entries cite them.
 
 The 2.0.0 cut is not a Track, and its path is open: the owner will decide how to get to 2.0 after using the Syncthing fleet for a while. SPEC's release line for 2.0.0 is O1 to O4 accepted on the owner's own observation on one Mac and both Linux machines in the Syncthing fleet, with O6 to O8 holding, recorded in PROGRESS.md `## Acceptance`. A Mac not yet moved keeps running on iCloud Drive and holds nothing up. Making the repository public again is a separate owner decision. Problems found while machines move are fixed as they appear.
 
@@ -392,7 +369,7 @@ The 2.0.0 cut is not a Track, and its path is open: the owner will decide how to
 
 ## Future
 
-Deferred: docs/roadmap-future.md (31 items)
+Deferred: docs/roadmap-future.md (38 items)
 
 ## Shipped
 
