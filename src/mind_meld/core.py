@@ -2601,6 +2601,7 @@ class _SyncProgress:
         self._batch_total = 0
         self._pause_depth = 0
         self._stopped = False
+        self._started_at: float | None = None
         self._last_render_at = 0.0
 
     def _can_draw(self) -> bool:
@@ -2616,14 +2617,57 @@ class _SyncProgress:
         except (Exception, SystemExit):
             return False
 
+    def _delay_elapsed_locked(self) -> bool:
+        return (
+            self._started_at is not None
+            and time.monotonic() - self._started_at >= _SYNC_PROGRESS_DELAY_SECONDS
+        )
+
+    def _start_progress_locked(self) -> bool:
+        if self._progress is not None:
+            return True
+        if not self._can_draw():
+            return False
+        measured = self._state.total is not None and self._state.completed is not None
+        detail = (
+            f"{100 * self._state.completed / self._state.total:.1f}% {self._state.detail}".rstrip()
+            if measured
+            else ""
+        )
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}", markup=False),
+            TextColumn("{task.fields[detail]}", markup=False),
+            console=console,
+            transient=True,
+            auto_refresh=False,
+            redirect_stdout=False,
+            redirect_stderr=False,
+        )
+        task = progress.add_task(self._state.phase, total=1, detail=detail)
+        try:
+            progress.start()
+        except (Exception, SystemExit):
+            with suppress(Exception, SystemExit):
+                progress.stop()
+            with suppress(Exception, SystemExit):
+                console.show_cursor(True)  # A failed start can skip Rich's own restore.
+            self._enabled = False
+            return False
+        self._progress = progress
+        self._last_render_at = time.monotonic()
+        self._task = task
+        return True
+
     def _render_locked(self, state: updateprogress.UpdateProgress, *, force: bool = False) -> None:
         self._state = state
-        if (
-            not self._enabled
-            or self._progress is None
-            or self._task is None
-            or self._pause_depth > 0
-        ):
+        if not self._enabled or self._pause_depth > 0:
+            return
+        if self._progress is None:
+            if self._delay_elapsed_locked():
+                self._start_progress_locked()
+            return
+        if self._task is None:
             return
         measured = state.total is not None and state.completed is not None
         detail = f"{100 * state.completed / state.total:.1f}% {state.detail}" if measured else ""
@@ -2650,6 +2694,8 @@ class _SyncProgress:
 
     def start(self, phase: str) -> None:
         with self._lock:
+            if self._started_at is None:
+                self._started_at = time.monotonic()
             self._state = updateprogress.UpdateProgress(phase)
             self._batch_total = 0
             if self._progress is not None:
@@ -2657,41 +2703,29 @@ class _SyncProgress:
                 return
             if not self._can_draw():
                 return
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("{task.description}", markup=False),
-                TextColumn("{task.fields[detail]}", markup=False),
-                console=console,
-                transient=True,
-                auto_refresh=False,
-                redirect_stdout=False,
-                redirect_stderr=False,
-            )
-            task = progress.add_task(phase, total=1, detail="")
+            if self._delay_elapsed_locked() and not self._start_progress_locked():
+                return
+            if self._ticker is not None:
+                return
             stop_ticking = threading.Event()
 
             def tick() -> None:
                 while not stop_ticking.wait(_UPDATE_SPINNER_TICK_SECONDS):
-                    if self._stopped or self._pause_depth > 0 or self._progress is not progress:
-                        continue
+                    with self._lock:
+                        if self._stopped or not self._enabled or self._pause_depth > 0:
+                            continue
+                        if self._progress is None:
+                            if not self._delay_elapsed_locked():
+                                continue
+                            self._start_progress_locked()
+                            continue
+                        progress = self._progress
                     try:
                         progress.refresh()
                     except (Exception, SystemExit):  # First failed draw: timer off.
                         return
 
             ticker = threading.Thread(target=tick, name="mm-sync-spinner", daemon=True)
-            try:
-                progress.start()
-            except (Exception, SystemExit):
-                with suppress(Exception, SystemExit):
-                    progress.stop()
-                with suppress(Exception, SystemExit):
-                    console.show_cursor(True)  # A failed start can skip Rich's own restore.
-                self._enabled = False
-                return
-            self._progress = progress
-            self._last_render_at = time.monotonic()
-            self._task = task
             self._stop_ticking = stop_ticking
             self._ticker = ticker
             try:
@@ -3074,6 +3108,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
 # the current state: phases and counters still change solely on installer
 # output, never on elapsed time.
 _UPDATE_SPINNER_TICK_SECONDS = 0.1
+_SYNC_PROGRESS_DELAY_SECONDS = 3.0
 
 
 _UPDATE_SPINNER_JOIN_SECONDS = 1.0

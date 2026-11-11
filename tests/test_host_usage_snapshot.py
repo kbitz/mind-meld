@@ -2361,24 +2361,33 @@ def test_attended_warm_outcome_is_published_without_third_read(outcome, mixed, m
 @pytest.mark.parametrize("reader", ["codex", "muse"])
 @pytest.mark.parametrize("verb", ["push", "init"])
 @pytest.mark.parametrize("in_diag", [False, True])
-@pytest.mark.parametrize("evidence_state", ["absent", "unknown", "known"])
+@pytest.mark.parametrize("evidence_state", ["absent", "unknown", "known_converged", "known"])
 def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evidence_state):
     from mind_meld.errors import HOST_USAGE_CAPTURE_URL
 
     evidence = None
     if evidence_state != "absent":
         evidence = events_tail.HostReadEvidence()
-    if evidence_state == "known":
+    if evidence_state == "known_converged":
+        evidence = events_tail.HostReadEvidence(250, 300, "2999-01-01T00:00:00+00:00", 51, 51)
+    elif evidence_state == "known":
         evidence = events_tail.HostReadEvidence(250, 300, "2999-01-01T00:00:00+00:00", 50, 51)
     phrase = events_tail._host_skip_phrase(
         reader, "deadline", readiness="ready", verb=verb, evidence=evidence, in_diag=in_diag
     )
+    assert phrase.endswith(f"see {HOST_USAGE_CAPTURE_URL}.")
+    assert "warming" not in phrase
+    if evidence_state == "known":
+        assert phrase == (
+            f"{reader} usage catching up (1 left) — "
+            "content sync and git/session capture unaffected. "
+            f"The next attended mm push continues it; see {HOST_USAGE_CAPTURE_URL}."
+        )
+        return
     assert phrase.startswith(
         f"host-usage snapshot skipped ({reader} deadline) — "
         "content sync and git/session capture unaffected."
     )
-    assert phrase.endswith(f"see {HOST_USAGE_CAPTURE_URL}.")
-    assert "warming" not in phrase
     if evidence is None:
         assert f"this {verb}'s read budget" in phrase
         assert "An attended mm push can warm cold readers" in phrase
@@ -2388,9 +2397,9 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
             "raise `[retro] host_usage_autopush_budget_ms`; attended mm push refreshes usage"
             in phrase
         )
-        if evidence_state == "known":
+        if evidence_state == "known_converged":
             assert "Last read allowed 250 ms; last complete read 300 ms (in the future)" in phrase
-            assert f"50 of 51 {unit} cached" in phrase
+            assert f"51 of 51 {unit} cached" in phrase
         else:
             assert "Last read allowed unknown ms; last complete read unknown ms (unknown)" in phrase
             assert f"unknown of unknown {unit} cached" in phrase
@@ -2404,7 +2413,7 @@ def test_deadline_remedy_names_the_attended_lever():
     import mind_meld.statusflow as statusflow
 
     stamp = "2999-01-01T00:00:00+00:00"
-    evidence = events_tail.HostReadEvidence(2100, 2400, stamp, 50, 51)
+    evidence = events_tail.HostReadEvidence(2100, 2400, stamp, 51, 51)
     phrase = events_tail._host_skip_phrase(
         "codex", "deadline", readiness="ready", verb="push", evidence=evidence
     )
@@ -2421,7 +2430,7 @@ def test_deadline_remedy_names_the_attended_lever():
         "last_deadline_allotted_ms": 2100,
         "last_complete_ms": 2400,
         "last_complete_at": stamp,
-        "files_cached": 50,
+        "files_cached": 51,
         "files_on_disk": 51,
     }
     blocker = statusflow._host_usage_blocker("codex", state, readiness="ready")
@@ -3272,3 +3281,489 @@ class TestCaptureBudget85A:
         assert rows[0]["skipped"] == [
             {"path": str(repo), "reason": events_tail.events.WALK_SKIP_BUDGET_ABORT}
         ]
+
+
+# ---------------------------------------------------------------------------
+# Track 125A: five-scan three-push resume, progress sink, catching-up wording
+# ---------------------------------------------------------------------------
+
+
+def _make_git_root(path: Path) -> Path:
+    (path / ".git" / "objects").mkdir(parents=True, exist_ok=True)
+    (path / ".git" / "refs").mkdir(parents=True, exist_ok=True)
+    (path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    return path.resolve()
+
+
+def test_track_125a_git_walk_resumes_from_stored_cursors_within_three_pushes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time as _time
+
+    cache_path = tmp_path / "git-capture.json"
+    monkeypatch.setattr(events_tail.mm_config, "GIT_CAPTURE_CACHE_PATH", cache_path)
+    monkeypatch.setattr(
+        events_tail.events,
+        "resolve_walk_author_emails",
+        lambda *_a, **_kw: {"user@example.com"},
+    )
+    repos = [_make_git_root(tmp_path / f"repo-{idx}") for idx in range(1, 4)]
+    since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    seen_since: list[tuple[int, str, str]] = []
+    run_idx = {"n": 0}
+
+    def staged_walk(root, since_iso, timeout_ms, author_emails=None):
+        step = run_idx["n"]
+        resolved = str(Path(root).resolve())
+        seen_since.append((step, Path(root).name, since_iso))
+        # On push N (1..3), repo-1..repo-N finish quickly; remaining repos exceed the walk budget.
+        target_fast = {str(r) for r in repos[:step]}
+        if resolved not in target_fast:
+            _time.sleep(0.35)
+        return (
+            {
+                "project": Path(root).name,
+                "local_path": resolved,
+                "remote_url": None,
+                "commits": [{"sha": f"sha{step}", "ts": since_iso, "subject": "work"}],
+                "branches": ["main"],
+            },
+            None,
+        )
+
+    monkeypatch.setattr(events_tail.events, "_walk_one_repo", staged_walk)
+
+    for push_num in (1, 2, 3):
+        run_idx["n"] = push_num
+        rows = events_tail.events.walk_git_projects(
+            repos,
+            since=since,
+            total_budget_ms=150,
+            use_repo_cursors=True,
+        )
+        push_ts = datetime(2026, 10, 2, 0, push_num, tzinfo=timezone.utc)
+        events_tail.events.commit_repo_cursors(
+            rows,
+            since=since,
+            cursor_ts=push_ts,
+            recorded_ts=push_ts.isoformat(),
+            complete=(not rows[0]["skipped"]),
+        )
+        pending = events_tail.events.count_pending_repositories(repos, push_ts)
+        assert pending == 3 - push_num
+
+    cache = events_tail.events.read_git_capture_cache()
+    assert cache["incomplete_streak"] == 0
+    # Push 2 used push 1's advanced cursor for repo-1 and the initial floor for repo-2.
+    push2_by_name = {name: ts for step, name, ts in seen_since if step == 2}
+    assert push2_by_name["repo-1"] == datetime(2026, 10, 2, 0, 1, tzinfo=timezone.utc).isoformat()
+    assert push2_by_name["repo-2"] == since.isoformat()
+
+
+def test_track_125a_root_discovery_resumes_from_stored_state_within_three_pushes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_path = tmp_path / "git-capture.json"
+    monkeypatch.setattr(events_tail.mm_config, "GIT_CAPTURE_CACHE_PATH", cache_path)
+    claude_dir = tmp_path / "claude"
+    monkeypatch.setattr(events_tail.events, "_claude_projects_dir", lambda: claude_dir / "projects")
+    repos = [_make_git_root(tmp_path / f"disc-repo-{idx}") for idx in range(1, 4)]
+    for idx, repo in enumerate(repos, start=1):
+        proj = claude_dir / "projects" / f"proj-{idx}"
+        proj.mkdir(parents=True)
+        (proj / "session.jsonl").write_text(json.dumps({"cwd": str(repo)}) + "\n")
+
+    cfg = {
+        "sync": {
+            "sources": [
+                {"name": "claude", "type": "claude", "path": str(claude_dir)},
+            ]
+        }
+    }
+    original_read_cwd = events_tail.events._read_cwd_from_latest_jsonl
+    probed_dirs: list[tuple[int, str]] = []
+    state = {"push": 0, "calls_this_push": 0, "expired": False}
+
+    def stop_after_one_project(project_dir, *, deadline_monotonic=None):
+        state["calls_this_push"] += 1
+        probed_dirs.append((state["push"], project_dir.name))
+        res = original_read_cwd(project_dir, deadline_monotonic=deadline_monotonic)
+        if state["calls_this_push"] >= 1 and state["push"] < 3:
+            state["expired"] = True
+        return res
+
+    monkeypatch.setattr(events_tail.events, "_read_cwd_from_latest_jsonl", stop_after_one_project)
+    monkeypatch.setattr(
+        events_tail.events,
+        "_deadline_expired",
+        lambda deadline_monotonic: state["expired"],
+    )
+
+    for push_num in (1, 2, 3):
+        state["push"] = push_num
+        state["calls_this_push"] = 0
+        state["expired"] = False
+        disc = events_tail.events.discover_git_roots(
+            cfg,
+            deadline_monotonic=1e12,
+            persist=True,
+            since=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        )
+        cache = events_tail.events.read_git_capture_cache()
+        if push_num < 3:
+            assert disc.exceeded is True
+            assert cache["discovery_resume_after"] is not None
+        else:
+            # Push 3 probes the 3rd project and completes the Claude index.
+            assert set(disc.roots) == set(repos)
+            assert cache["discovery_resume_after"] is None
+
+    # Each project directory was probed once across the 3 pushes (no re-probing of indexed dirs).
+    assert [name for _push, name in probed_dirs] == ["proj-1", "proj-2", "proj-3"]
+
+
+def test_track_125a_codex_reader_resumes_from_stored_cache_within_three_pushes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import time as _time
+
+    from mind_meld import host_usage
+    from mind_meld.hosts import codex as codex_host
+    from tests.test_host_usage import _context, _token, _write_rollout
+
+    cache_path = tmp_path / "host-tokens.json"
+    codex_root = tmp_path / "codex_sessions"
+    monkeypatch.setattr(codex_host, "CACHE_PATH", cache_path)
+    monkeypatch.setattr(codex_host, "CODEX_SESSIONS_PATH", codex_root)
+    monkeypatch.setattr(codex_host, "CODEX_ARCHIVED_SESSIONS_PATH", tmp_path / "no_archive")
+
+    old_mtime = _time.time() - 7200
+    for idx in (1, 2, 3):
+        rollout = _write_rollout(
+            codex_root,
+            f"rollout-2026-08-14T10-00-0{idx}-00000000-0000-0000-0000-00000000000{idx}.jsonl",
+            [
+                _context("gpt-5-codex", turn=f"t-{idx}"),
+                _token(100 * idx, last=(100 * idx, 0, 0, 10 * idx), output=10 * idx),
+            ],
+        )
+        os.utime(rollout, (old_mtime, old_mtime))
+
+    original_read_full = codex_host._read_full_rollout
+    full_reads: list[tuple[int, str]] = []
+    state = {"push": 0, "reads_this_push": 0, "expired": False}
+
+    def one_file_per_push(path, before, deadline):
+        state["reads_this_push"] += 1
+        full_reads.append((state["push"], path.name))
+        entry = original_read_full(path, before, deadline)
+        if state["reads_this_push"] >= 1 and state["push"] < 3:
+            state["expired"] = True
+        return entry
+
+    monkeypatch.setattr(codex_host, "_read_full_rollout", one_file_per_push)
+    monkeypatch.setattr(host_usage, "_expired", lambda _deadline: state["expired"])
+
+    for push_num in (1, 2, 3):
+        state["push"] = push_num
+        state["reads_this_push"] = 0
+        state["expired"] = False
+        result = codex_host.read_codex_usage(root=codex_root, deadline=1e12)
+        state["expired"] = False
+        diag = codex_host.codex_usage_diag()
+        if push_num < 3:
+            assert result.complete is False
+            assert result.reason == "deadline"
+            assert diag["files_cached"] == push_num
+            assert diag["files_on_disk"] == 3
+            assert diag["pending"] == 3 - push_num
+        else:
+            assert result.complete is True
+            assert diag["files_cached"] == 3
+            assert diag["pending"] == 0
+            assert result.tokens_by_day["2026-08-15"]["input"] == 600
+            assert result.tokens_by_day["2026-08-15"]["output"] == 60
+
+    # Each rollout was parsed once across the 3 pushes; cached rollouts were not re-parsed.
+    assert len(full_reads) == 3
+    assert len({name for _push, name in full_reads}) == 3
+
+
+def test_track_125a_muse_reader_resumes_from_stored_cache_within_three_pushes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import time as _time
+
+    from mind_meld import host_usage
+
+    cache_path = tmp_path / "muse-tokens.json"
+    muse_root = tmp_path / "muse_sessions"
+    monkeypatch.setattr(host_usage, "MUSE_CACHE_PATH", cache_path)
+    monkeypatch.setattr(host_usage, "muse_sessions_root", lambda: muse_root)
+
+    now = datetime.now(timezone.utc)
+    old_mtime = _time.time() - 7200
+    for idx in (1, 2, 3):
+        path = muse_root / now.strftime("%Y/%m/%d") / f"s{idx}" / "session.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "id": f"ev-{idx}",
+            "record_type": "event",
+            "payload_type": "runtime.session",
+            "recorded_at": str(int(now.timestamp() * 1_000_000)),
+            "payload": {
+                "event": {
+                    "kind": "model_completed",
+                    "model": "muse-wonder-1.0",
+                    "usage": {
+                        "input_tokens": 100 * idx,
+                        "output_tokens": 10 * idx,
+                        "cached_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "cache_read_tokens": 0,
+                        "reasoning_tokens": 0,
+                    },
+                }
+            },
+        }
+        path.write_text(json.dumps(record) + "\n")
+        os.utime(path, (old_mtime, old_mtime))
+
+    original_read_full = host_usage._read_full_muse_file
+    full_reads: list[tuple[int, str]] = []
+    state = {"push": 0, "reads_this_push": 0, "expired": False}
+
+    def one_muse_file_per_push(path, before, deadline, when):
+        state["reads_this_push"] += 1
+        full_reads.append((state["push"], path.parent.name))
+        entry = original_read_full(path, before, deadline, when)
+        if state["reads_this_push"] >= 1 and state["push"] < 3:
+            state["expired"] = True
+        return entry
+
+    monkeypatch.setattr(host_usage, "_read_full_muse_file", one_muse_file_per_push)
+    monkeypatch.setattr(host_usage, "_expired", lambda _deadline: state["expired"])
+
+    day_key = now.strftime("%Y-%m-%d")
+    for push_num in (1, 2, 3):
+        state["push"] = push_num
+        state["reads_this_push"] = 0
+        state["expired"] = False
+        result = host_usage.read_muse_usage(root=muse_root, deadline=1e12, consented=True)
+        state["expired"] = False
+        diag = host_usage.muse_usage_diag(count_logs=True)
+        if push_num < 3:
+            assert result.complete is False
+            assert result.reason == "deadline"
+            assert diag["files_cached"] == push_num
+            assert diag["files_on_disk"] == 3
+        else:
+            assert result.complete is True
+            assert diag["files_cached"] == 3
+            assert diag["files_on_disk"] == 3
+            assert result.tokens_by_day[day_key]["input"] == 600
+            assert result.tokens_by_day[day_key]["output"] == 60
+
+    assert [name for _push, name in full_reads] == ["s1", "s2", "s3"]
+
+
+def test_track_125a_session_walk_resumes_from_stored_cursor_within_three_pushes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_path = tmp_path / "git-capture.json"
+    monkeypatch.setattr(events_tail.mm_config, "GIT_CAPTURE_CACHE_PATH", cache_path)
+    claude_dir = tmp_path / "claude"
+    for idx in (1, 2, 3):
+        proj = claude_dir / "projects" / f"proj-{idx}"
+        proj.mkdir(parents=True)
+        (proj / "sess.jsonl").write_text(
+            json.dumps({"cwd": f"/Users/user/proj-{idx}", "type": "user"}) + "\n"
+        )
+
+    original_scan_one = events_tail.events._scan_one_project
+    original_rows_digest = events_tail.events._rows_digest
+    scanned: list[tuple[int, str]] = []
+    state = {"push": 0, "scans_this_push": 0, "checks_after_stage": -1}
+
+    def scan_one_per_push(proj_dir, *args, **kwargs):
+        state["scans_this_push"] += 1
+        scanned.append((state["push"], proj_dir.name))
+        return original_scan_one(proj_dir, *args, **kwargs)
+
+    def digest_with_post_stage_trigger(proj_path, rows):
+        res = original_rows_digest(proj_path, rows)
+        if state["scans_this_push"] >= 1 and state["push"] < 3:
+            # Next _deadline_expired is `deadline_hit` for this project (allow),
+            # and the one after that is loop top for the next project (stop).
+            state["checks_after_stage"] = 0
+        return res
+
+    def check_deadline(_deadline_monotonic):
+        if state["checks_after_stage"] < 0:
+            return False
+        state["checks_after_stage"] += 1
+        return state["checks_after_stage"] >= 2
+
+    monkeypatch.setattr(events_tail.events, "_scan_one_project", scan_one_per_push)
+    monkeypatch.setattr(events_tail.events, "_rows_digest", digest_with_post_stage_trigger)
+    monkeypatch.setattr(events_tail.events, "_deadline_expired", check_deadline)
+
+    since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    for push_num in (1, 2, 3):
+        state["push"] = push_num
+        state["scans_this_push"] = 0
+        state["checks_after_stage"] = -1
+        rows = events_tail.events.walk_session_metadata(
+            claude_dir,
+            since=since,
+            deadline_monotonic=1e12,
+            token_cache_files=None,
+            persist=True,
+        )
+        events_tail.events.flush_pending_session_state()
+        cache = events_tail.events.read_git_capture_cache()
+        names = [p["claude_dir"] for p in rows[0]["projects"]]
+        assert len(names) == push_num
+        if push_num < 3:
+            assert cache["session_resume_after"] != {}
+        else:
+            assert sorted(names) == ["proj-1", "proj-2", "proj-3"]
+            assert cache["session_resume_after"] == {}
+
+    assert [name for _push, name in scanned] == ["proj-1", "proj-2", "proj-3"]
+
+
+def test_track_125a_progress_scope_receives_host_and_git_counts_and_isolates_faults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mind_meld import host_usage
+
+    calls: list[tuple[str, int, int, str]] = []
+    readers = (
+        ("codex", lambda *, deadline: host_usage.HostUsageResult({}, complete=True)),
+        ("muse", lambda *, deadline: host_usage.HostUsageResult({}, complete=True)),
+    )
+    with events_tail.progress_scope(lambda phase, c, t, u: calls.append((phase, c, t, u))):
+        events_tail._capture_host_usage(readers, deadline=1e12)
+
+    assert calls == [
+        ("Capturing host usage", 0, 2, "readers"),
+        ("Capturing host usage", 1, 2, "readers"),
+        ("Capturing host usage", 2, 2, "readers"),
+    ]
+
+    calls.clear()
+    repos = [_make_git_root(tmp_path / "r1"), _make_git_root(tmp_path / "r2")]
+    monkeypatch.setattr(
+        events_tail.events,
+        "discover_git_roots",
+        lambda *_a, **_kw: events_tail.events.GitRootDiscovery(repos, []),
+    )
+    monkeypatch.setattr(
+        events_tail.events,
+        "resolve_walk_author_emails",
+        lambda *_a, **_kw: {"user@example.com"},
+    )
+    monkeypatch.setattr(
+        events_tail.events,
+        "_walk_one_repo",
+        lambda root, since_iso, timeout_ms, author_emails=None: (
+            {
+                "project": Path(root).name,
+                "local_path": str(root),
+                "remote_url": None,
+                "commits": [],
+                "branches": ["main"],
+            },
+            None,
+        ),
+    )
+    with events_tail.progress_scope(lambda phase, c, t, u: calls.append((phase, c, t, u))):
+        events_tail._capture_git_rows(
+            {},
+            "dev-a",
+            since=datetime(2026, 10, 1, tzinfo=timezone.utc),
+            walk_budget_ms=500,
+            root_discovery_budget_ms=50,
+        )
+    assert calls == [
+        ("Recording activity", 0, 2, "repositories"),
+        ("Recording activity", 1, 2, "repositories"),
+        ("Recording activity", 2, 2, "repositories"),
+    ]
+
+
+def test_track_125a_codex_deadline_catching_up_matches_diag_pending_and_failures_stay_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import time as _time
+
+    from mind_meld import host_usage
+    from mind_meld.errors import HOST_USAGE_CAPTURE_URL
+    from mind_meld.hosts import codex as codex_host
+    from tests.test_host_usage import _context, _token, _write_rollout
+
+    cache_path = tmp_path / "host-tokens.json"
+    codex_root = tmp_path / "codex_sessions"
+    monkeypatch.setattr(codex_host, "CACHE_PATH", cache_path)
+    monkeypatch.setattr(codex_host, "CODEX_SESSIONS_PATH", codex_root)
+    monkeypatch.setattr(codex_host, "CODEX_ARCHIVED_SESSIONS_PATH", tmp_path / "no_archive")
+
+    old_mtime = _time.time() - 7200
+    for idx in (1, 2, 3):
+        rollout = _write_rollout(
+            codex_root,
+            f"rollout-2026-08-14T10-00-0{idx}-00000000-0000-0000-0000-00000000000{idx}.jsonl",
+            [_context("gpt-5-codex", turn=f"t-{idx}"), _token(100, last=100, output=10)],
+        )
+        os.utime(rollout, (old_mtime, old_mtime))
+
+    # Seed 1 cached rollout out of 3 on disk (2 left).
+    original_read_full = codex_host._read_full_rollout
+    seen = {"count": 0, "expired": False}
+
+    def stop_after_first(path, before, deadline):
+        seen["count"] += 1
+        res = original_read_full(path, before, deadline)
+        seen["expired"] = True
+        return res
+
+    monkeypatch.setattr(codex_host, "_read_full_rollout", stop_after_first)
+    monkeypatch.setattr(host_usage, "_expired", lambda _d: seen["expired"])
+    res = codex_host.read_codex_usage(root=codex_root, deadline=1e12)
+    assert res.complete is False and res.reason == "deadline"
+    seen["expired"] = False
+
+    diag = codex_host.codex_usage_diag()
+    assert diag["pending"] == 2
+
+    # Push notice path (evidence=None, attended=True) fills N from reader_usage_diag.
+    push_phrase = events_tail._host_skip_phrase(
+        "codex", "deadline", readiness="ready", attended=True
+    )
+    expected = (
+        f"codex usage catching up ({diag['pending']} left) — "
+        "content sync and git/session capture unaffected. "
+        f"The next attended mm push continues it; see {HOST_USAGE_CAPTURE_URL}."
+    )
+    assert push_phrase == expected
+
+    # Status/diag blocker path (evidence provided) produces the identical N and wording.
+    ev = events_tail.HostReadEvidence(
+        250, 300, "2026-10-01T00:00:00+00:00", diag["files_cached"], diag["files_on_disk"]
+    )
+    status_phrase = events_tail._host_skip_phrase(
+        "codex", "deadline", readiness="ready", evidence=ev
+    )
+    assert status_phrase == expected
+
+    # Non-deadline reasons (error, permanent, unsupported) still read as failures.
+    for reason in ("partial", "locked", "unavailable", "unreadable_manifest", "unsupported"):
+        failure_phrase = events_tail._host_skip_phrase(
+            "codex", reason, readiness="ready", attended=True, evidence=ev
+        )
+        assert failure_phrase.startswith(f"host-usage snapshot skipped (codex {reason})")
+        assert "catching up" not in failure_phrase

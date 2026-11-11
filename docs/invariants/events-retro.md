@@ -351,11 +351,13 @@ was interrupted. A failed or size-skipped append never advances cursors.
 Attended push may cross the substantive-change gate when Git catch-up is pending,
 including a usage-only refresh or no-content push. Dry runs and autopush retain
 their existing gates. Healthy no-content attended pushes still omit activity.
-`mm status` reports pending repositories and the next `mm push` within the retained
+`mm status` reports `catching up (N left)` for pending repositories and names the next `mm push` within the retained
 90-day window; a floored incomplete cursor, older gap, empty discovery, walk errors
 without budget aborts, or at least three incomplete captures uses the explicit
 recapture remedy. `mm diag` exposes read-only `git_capture.fresh.pending_repos` in
-both formats. Tail degradation literals remain unchanged for breadcrumb consumers.
+both formats. On an attended push, an abort-only walk stop with pending repositories
+words its degradation as `git capture catching up (N left) — the next attended mm push continues it`,
+while quiet autopush tail degradation literals remain unchanged for breadcrumb consumers.
 This Git-only continuation does not replace the other capture budgets or claim
 complete O7.2 acceptance for session metadata or the fleet.
 
@@ -505,7 +507,7 @@ Git-walk cost is *monotone in cursor age*. Discovery cost and a zero-root walk a
 
 **Git-walk repository loss is visible.** `walk_git_projects` drops repositories into `skipped` with typed reasons (`budget_abort` / `timeout` / `no_commits` / `git_error` / `raised`). Never interpolate a skip reason into a degradation phrase: git stderr carries branch names and absolute paths onto a synced row. `no_commits` (`rc=128` + "does not have any commits yet") is benign — an empty `git init` directory returns it on every push forever. The session-walk budget flag is named `session_walk_exceeded_budget` so it cannot be mistaken for git-walk loss.
 
-The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositories this push. Run mm recapture --dry-run to check current repository failures, then mm recapture 30d to recover the omitted commits`. It contains no `; ` separator. Status repeats the current-failures check before its `mm diag` link, and the aggregator's `git_budget` health note remedy in `skills/retro_fleet/aggregator.py` names the same `mm recapture --dry-run` and `mm recapture 30d` commands. Dry-run lists each skipped path via `safe_str` and its typed reason, labels `no_commits` benign, and links `GIT_WALK_FAILURES_URL` for non-benign skips. These paths already ride the synced git-snapshot row. The dry-run is a fresh scan on recapture's own walk budget, not evidence about an earlier push: a clean result cannot establish that the earlier capture was complete. Partial recapture gives a same-window retry for Git failures and narrower-window advice for budget aborts; mixed failures show both with separate counts.
+The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositories this push. Run mm recapture --dry-run to check current repository failures, then mm recapture 30d to recover the omitted commits`. It contains no `; ` separator. On an attended push whose git walk stopped on budget aborts with `walk_errors == 0` and `pending_left > 0` from `events.count_pending_repositories`, `_git_walk_degradation` returns `git capture catching up ({pending_left} left) — the next attended mm push continues it`; any walk error (`walk_errors > 0`), unknown/zero `pending_left`, or quiet `autopush` caller keeps `_GIT_WALK_DEGRADATION`. Status repeats the current-failures check before its `mm diag` link, and the aggregator's `git_budget` health note remedy in `skills/retro_fleet/aggregator.py` names the same `mm recapture --dry-run` and `mm recapture 30d` commands. Dry-run lists each skipped path via `safe_str` and its typed reason, labels `no_commits` benign, and links `GIT_WALK_FAILURES_URL` for non-benign skips. These paths already ride the synced git-snapshot row. The dry-run is a fresh scan on recapture's own walk budget, not evidence about an earlier push: a clean result cannot establish that the earlier capture was complete. Partial recapture gives a same-window retry for Git failures and narrower-window advice for budget aborts; mixed failures show both with separate counts.
 
 Track 124A's two-repository fixture reproduces the loop as budget aborts despite
 recapture advancing both cursors: each push still pays for `git log` per repository.
@@ -1651,11 +1653,19 @@ malformed or skipped view, or a cached newer release, keeps `mm update`. Push,
 init and attempt-record phrases take the default and are unchanged. `partial` takes
 the generic retry sentence naming `mm push` and `mm diag`.
 `deadline` states that this push/init's read did not finish inside its budget.
-Background failures name attended `mm push` warming; an attended caller whose
-warm allowance also expired gets that fact and an `mm diag` diagnostic. When
-that line is not replaced by the unsupported-reader remedy above, status and
-diag include the last allotted budget, last complete read and age, and
-cached/on-disk counts (unknown when unavailable). That conditional remedy
+When `left = max(0, files_on_disk - files_cached)` is a positive integer — from
+`evidence` on `mm status` / `mm diag`, or from a best-effort
+`host_registry.reader_usage_diag(reader, count_logs=True)` lookup when
+`evidence is None and attended` — `_host_skip_phrase` returns
+`<reader> usage catching up (<left> left) — content sync and git/session capture unaffected. The next attended mm push continues it; see <HOST_USAGE_CAPTURE_URL>.`
+(for Codex, `<left>` matches `mm diag`'s `host_usage.codex.pending`). When
+`<left>` is 0 or either count is unknown, or on a quiet non-evidence caller
+(`autopush` / `init`), the fallback branches apply: background failures name
+attended `mm push` warming; an attended caller whose warm allowance also
+expired gets that fact and an `mm diag` diagnostic; and when that line is not
+replaced by the unsupported-reader remedy above, status and diag with
+`left == 0` or unknown counts include the last allotted budget, last complete
+read and age, and cached/on-disk counts (unknown when unavailable). That conditional remedy
 raises `[retro] host_usage_autopush_budget_ms` if the last complete read is
 over the autopush budget, names `[retro] attended_capture_cap_ms` (host capture and
 warm retries get three fifths of it, and it must be at least `capture_budget_ms`)

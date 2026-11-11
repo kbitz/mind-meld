@@ -303,3 +303,154 @@ def test_core_pauses_progress_without_cli_type_dependency():
     finally:
         core._SYNC_OUTPUT.reset(token)
     assert calls == ["pause", "prompt", "resume"]
+
+
+def test_track_125a_status_codex_deadline_shows_catching_up_and_errors_stay_failures(
+    inspection, monkeypatch
+):
+    from mind_meld.hosts import codex as codex_host
+
+    _backend, root = inspection
+    codex_dir = root.parent / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    (codex_dir / "AGENTS.md").write_text("rules\n")
+    cfg = config.load_config()
+    cfg["sync"]["sources"].append(
+        {"name": "codex", "type": "generic", "path": str(codex_dir), "include_files": ["AGENTS.md"]}
+    )
+    mm_events_dir = root.parent / "mm-events"
+    (mm_events_dir / "events").mkdir(parents=True, exist_ok=True)
+    cfg["sync"]["sources"].append(
+        {
+            "name": "mm-events",
+            "type": "generic",
+            "path": str(mm_events_dir),
+            "include_dirs": ["events"],
+        }
+    )
+    config.save_config(cfg)
+
+    def fake_codex_diag():
+        on_disk = 14
+        cached = 10
+        return {
+            "state": "ready",
+            "cache_state": "ok",
+            "complete_once": True,
+            "last_reason": "deadline",
+            "last_reason_since": "2026-10-01T00:00:00+00:00",
+            "last_deadline_allotted_ms": 250,
+            "last_complete_ms": 300,
+            "last_complete_at": "2026-10-01T00:00:00+00:00",
+            "files_cached": cached,
+            "files_on_disk": on_disk,
+            "pending": on_disk - cached,
+            "settled_days": 0,
+            "files_pre_track": 0,
+            "usage_less_skipped": 0,
+            "model_count": 1,
+            "models": ["gpt-5-codex"],
+        }
+
+    monkeypatch.setattr(codex_host, "codex_usage_diag", fake_codex_diag)
+    diag_pending = codex_host.codex_usage_diag()["pending"]
+    assert diag_pending == 4
+
+    res = runner.invoke(app, ["status"])
+    assert res.exit_code == 0, res.output
+    flat = " ".join(res.output.split())
+    assert f"Codex usage capture: codex usage catching up ({diag_pending} left)" in flat
+
+    for error_reason in ("partial", "unavailable", "unsupported"):
+        blocker = statusflow._host_usage_blocker(
+            "codex",
+            {
+                "last_reason": error_reason,
+                "last_reason_since": "2026-10-01T00:00:00+00:00",
+                "files_cached": 10,
+                "files_on_disk": 14,
+            },
+            readiness="ready",
+        )
+        assert f"host-usage snapshot skipped (codex {error_reason})" in blocker
+        assert "catching up" not in blocker
+
+
+def test_track_125a_status_git_capture_catching_up_and_error_shows_failure(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from io import StringIO
+
+    from rich.console import Console
+
+    from mind_meld import events, lockedjson
+
+    cache_path = tmp_path / "git-capture.json"
+    monkeypatch.setattr(config, "GIT_CAPTURE_CACHE_PATH", cache_path)
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    repos = []
+    for name in ("repo-a", "repo-b"):
+        r = tmp_path / name
+        (r / ".git" / "objects").mkdir(parents=True)
+        (r / ".git" / "refs").mkdir(parents=True)
+        (r / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        repos.append(r.resolve())
+
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=5)
+    push_ts = now - timedelta(minutes=1)
+    with lockedjson.locked_json_rmw(cache_path) as state:
+        state.data.update(events._default_git_capture_cache())
+        state.data.update(
+            {
+                "incomplete_streak": 1,
+                "repo_cursors": {str(r): since.isoformat() for r in repos},
+            }
+        )
+    mm_push = events.make_mm_push_event(
+        device="dev-a",
+        mm_version="1.0.0",
+        sources=["claude", "mm-events"],
+        discovery_errors=[],
+        local_emails=["user@example.com"],
+        git_capture=events.make_git_capture(
+            since=since,
+            discovery="complete",
+            walk_budget_aborts=2,
+            walk_errors=0,
+        ),
+    )
+    mm_push["ts"] = push_ts.isoformat()
+    events.write_push_event(events_dir, "dev-a", [mm_push])
+
+    expected_pending = events.count_pending_repositories(repos, push_ts)
+    assert expected_pending == 2
+
+    buf = StringIO()
+    monkeypatch.setattr(statusflow, "console", Console(file=buf, force_terminal=False, width=100))
+    sources = [{"name": "mm-events", "type": "mm-events", "path": str(tmp_path)}]
+    assert statusflow._print_retro_capture_status(sources, "dev-a") is True
+    out = " ".join(buf.getvalue().split())
+    assert f"Retro capture: catching up ({expected_pending} left)" in out
+    assert "Continue capture on this Mac: mm push" in out
+
+    # Error-only stop (walk_budget_aborts=0, walk_errors=1) shows failure and recapture remedy.
+    buf_err = StringIO()
+    monkeypatch.setattr(
+        statusflow, "console", Console(file=buf_err, force_terminal=False, width=100)
+    )
+    mm_push_err = dict(mm_push)
+    mm_push_err["ts"] = now.isoformat()
+    mm_push_err["git_capture"] = events.make_git_capture(
+        since=since,
+        discovery="complete",
+        walk_budget_aborts=0,
+        walk_errors=1,
+    )
+    events.write_push_event(events_dir, "dev-a", [mm_push_err])
+    assert statusflow._print_retro_capture_status(sources, "dev-a") is True
+    err_out = " ".join(buf_err.getvalue().split())
+    assert "Retro capture: incomplete since" in err_out
+    assert "1 repository was skipped." in err_out
+    assert "mm recapture" in err_out
+    assert "catching up (" not in err_out

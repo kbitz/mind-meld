@@ -1192,7 +1192,16 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     token = core._SYNC_OUTPUT.set(state)
     error = None
     try:
-        with events_tail.diagnostic_scope(core._sync_diagnostic):
+        with (
+            events_tail.diagnostic_scope(core._sync_diagnostic),
+            events_tail.progress_scope(
+                lambda phase, completed, total, unit: (
+                    core._sync_progress_start_batch(phase, total, unit)
+                    if completed == 0
+                    else core._sync_progress_advance(1)
+                )
+            ),
+        ):
             yield
     except (Exception, KeyboardInterrupt, SystemExit) as exc:
         error = exc

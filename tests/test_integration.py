@@ -13977,7 +13977,7 @@ def test_status_counts_muse_history_only_for_deadline_progress(status77, monkeyp
     assert len(counts) == (1 if reason == "deadline" else 0)
     output = " ".join(result.output.split())
     if reason == "deadline":
-        assert "0 of 7 session logs cached" in output
+        assert "muse usage catching up (7 left)" in output
     else:
         assert "Muse usage capture: enabled; a prior scan completed successfully" in output
 
@@ -15164,6 +15164,7 @@ class _SyncTerminalBuffer(io.StringIO):
 
 
 def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capture61, monkeypatch):
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
     memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
     (memory / "user_role.md").write_text("updated content")
     (memory / "second.md").write_text("second file")
@@ -15223,6 +15224,7 @@ def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capt
 def test_sync_progress_pull_renders_spinner_phases_and_counters_on_terminal(
     apply_failure_fleet, monkeypatch
 ):
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
     fleet = apply_failure_fleet
     fleet.publish({"alpha.md": b"alpha", "beta.md": b"beta"})
     terminal = _SyncTerminalBuffer()
@@ -15277,6 +15279,7 @@ def test_sync_progress_pull_renders_spinner_phases_and_counters_on_terminal(
 def test_sync_progress_disabled_for_non_tty_verbose_dry_run_and_auto_commands(
     status77, monkeypatch, args
 ):
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
     terminal = _SyncTerminalBuffer()
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(
@@ -15301,6 +15304,7 @@ def test_sync_progress_disabled_for_non_tty_verbose_dry_run_and_auto_commands(
 
 
 def test_sync_progress_forced_color_on_pipe_runs_without_spinner(status77, monkeypatch):
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
     piped = io.StringIO()
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(
@@ -15325,6 +15329,7 @@ def test_sync_progress_forced_color_on_pipe_runs_without_spinner(status77, monke
 
 
 def test_sync_progress_timer_animates_silent_step_and_stops_on_draw_error(status77, monkeypatch):
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
     monkeypatch.setattr(core, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
     failed = threading.Event()
 
@@ -15394,6 +15399,8 @@ def test_sync_progress_timer_animates_silent_step_and_stops_on_draw_error(status
 def test_sync_progress_resilient_to_start_failure_and_blocked_ticker_shutdown(
     status77, monkeypatch
 ):
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
+
     class FlakyTerminal(_SyncTerminalBuffer):
         failed = False
 
@@ -15479,6 +15486,7 @@ def test_sync_progress_resilient_to_start_failure_and_blocked_ticker_shutdown(
 
 
 def test_sync_progress_pauses_around_conflict_prompt_and_warnings(apply_failure_fleet, monkeypatch):
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
     fleet = apply_failure_fleet
     local_file = fleet.memory / "note.md"
     local_file.write_text("local version\n")
@@ -15526,6 +15534,7 @@ def test_sync_progress_pauses_around_conflict_prompt_and_warnings(apply_failure_
 
 
 def test_sync_progress_clears_on_interrupt_and_error(status77, monkeypatch):
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
     terminal = _SyncTerminalBuffer()
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(
@@ -15560,6 +15569,7 @@ def test_sync_progress_clears_on_interrupt_and_error(status77, monkeypatch):
 
 
 def test_sync_progress_upload_counter_spans_sources(capture61, monkeypatch):
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
     memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
     (memory / "user_role.md").write_text("updated content")
     codex_source = next(s for s in capture61["cfg"]["sync"]["sources"] if s["name"] == "codex")
@@ -15614,6 +15624,7 @@ def test_sync_progress_display_faults_preserve_success(status77, monkeypatch, fa
     # fails_when=TTY probing, redraw, resume, or thread-start errors escape;
     # why_new=existing terminal tests cover only initial start and timer refresh failures;
     # seam=none; no_claim=real terminal drivers (Rich is real, failures are injected)
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
     terminal = _SyncTerminalBuffer()
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(
@@ -15684,6 +15695,7 @@ def test_sync_progress_nested_pause_and_interrupt_do_not_restart_display(monkeyp
     # fails_when=an inner pause or exception exit restarts the transient display;
     # why_new=existing warning test resumes normally and interrupt test stops during scan;
     # seam=none; no_claim=full CLI conflict routing (real Rich lifecycle at its owner)
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
     terminal = _SyncTerminalBuffer()
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(
@@ -15756,3 +15768,227 @@ def test_recapture_then_push_and_status_clear_slow_git_loop_under_default_cap(
     assert status.exit_code == 0, (status.stdout, status.stderr)
     assert "Retro capture:" not in status.stdout
     assert "mm recapture" not in status.stdout
+
+
+def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture61, monkeypatch):
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    repo_a = capture61["path"].parent / "repo-prog-a"
+    repo_b = capture61["path"].parent / "repo-prog-b"
+    for repo in (repo_a, repo_b):
+        (repo / ".git" / "objects").mkdir(parents=True)
+        (repo / ".git" / "refs").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+
+    monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery([repo_a.resolve(), repo_b.resolve()], ()),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "resolve_walk_author_emails",
+        lambda *_a, **_kw: {"user@example.com"},
+    )
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    # 1. Push finishing inside the progress delay (default 3.0s) draws nothing to the terminal.
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "read_codex_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "_walk_one_repo",
+        lambda root, since_iso, timeout_ms, author_emails=None: (
+            {
+                "project": Path(root).name,
+                "local_path": str(root),
+                "remote_url": None,
+                "commits": [],
+                "branches": ["main"],
+            },
+            None,
+        ),
+    )
+    fast_terminal = _SyncTerminalBuffer()
+    for mod in (cli_module, pullflow, core):
+        monkeypatch.setattr(
+            mod,
+            "console",
+            Console(file=fast_terminal, force_terminal=True, color_system=None, width=80),
+        )
+    (memory / "fast125.md").write_text("fast push")
+    fast_res = runner.invoke(app, ["push"])
+    assert fast_res.exit_code == 0, fast_res.output
+    assert len(fast_res.stdout.splitlines()) == 1
+    assert fast_terminal.getvalue() == ""
+
+    # 2. Push running longer than the progress delay on a terminal shows phase + reader/repo counts
+    # and clears before the single outcome line.
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.02)
+    monkeypatch.setattr(core, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
+
+    def slow_codex(**kw):
+        time.sleep(0.03)
+        return _mm_host_usage.HostUsageResult({}, complete=True)
+
+    def slow_repo(root, since_iso, timeout_ms, author_emails=None):
+        time.sleep(0.02)
+        return (
+            {
+                "project": Path(root).name,
+                "local_path": str(root),
+                "remote_url": None,
+                "commits": [],
+                "branches": ["main"],
+            },
+            None,
+        )
+
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", slow_codex)
+    monkeypatch.setattr(_mm_events, "_walk_one_repo", slow_repo)
+
+    slow_terminal = _SyncTerminalBuffer()
+    for mod in (cli_module, pullflow, core):
+        monkeypatch.setattr(
+            mod,
+            "console",
+            Console(file=slow_terminal, force_terminal=True, color_system=None, width=80),
+        )
+    (memory / "slow125.md").write_text("slow push")
+    slow_res = runner.invoke(app, ["push"])
+    assert slow_res.exit_code == 0, slow_res.output
+    assert len(slow_res.stdout.splitlines()) == 1
+    assert slow_res.stdout.startswith("Push: 1 content change published")
+    term_out = slow_terminal.getvalue()
+    assert "Capturing host usage" in term_out
+    assert "1/1 readers" in term_out
+    assert "Recording activity" in term_out
+    assert "2/2 repositories" in term_out
+    assert "\x1b[?25h" in term_out
+
+    # 3. Piped output and --verbose leave no progress line even past the delay.
+    piped_buf = io.StringIO()
+    for mod in (cli_module, pullflow, core):
+        monkeypatch.setattr(
+            mod,
+            "console",
+            Console(file=piped_buf, force_terminal=True, color_system=None, width=80),
+        )
+    (memory / "piped125.md").write_text("piped push")
+    piped_res = runner.invoke(app, ["push"])
+    assert piped_res.exit_code == 0, piped_res.output
+    assert len(piped_res.stdout.splitlines()) == 1
+    assert piped_buf.getvalue() == ""
+
+    verbose_terminal = _SyncTerminalBuffer()
+    for mod in (cli_module, pullflow, core):
+        monkeypatch.setattr(
+            mod,
+            "console",
+            Console(file=verbose_terminal, force_terminal=True, color_system=None, width=80),
+        )
+    (memory / "verbose125.md").write_text("verbose push")
+    verbose_res = runner.invoke(app, ["push", "--verbose"])
+    assert verbose_res.exit_code == 0, verbose_res.output
+    assert "\x1b[?25l" not in verbose_terminal.getvalue()
+    assert "1/1 readers" not in verbose_terminal.getvalue()
+
+
+def test_track_125a_attended_pushes_resume_stopped_scans_and_clear_catching_up(
+    capture61, monkeypatch
+):
+    from tests.test_host_usage import _context, _token, _write_rollout
+
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    codex_source = next(s for s in capture61["cfg"]["sync"]["sources"] if s["name"] == "codex")
+    codex_root = Path(codex_source["path"]) / "sessions"
+    monkeypatch.setattr(_mm_codex_host, "CODEX_SESSIONS_PATH", codex_root)
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "CODEX_ARCHIVED_SESSIONS_PATH",
+        Path(codex_source["path"]) / "no_archive",
+    )
+
+    old_mtime = time.time() - 7200
+    for idx in (1, 2):
+        rollout = _write_rollout(
+            codex_root,
+            f"rollout-2026-08-14T10-00-0{idx}-00000000-0000-0000-0000-00000000000{idx}.jsonl",
+            [
+                _context("gpt-5-codex", turn=f"t-{idx}"),
+                _token(100 * idx, last=100 * idx, output=10),
+            ],
+        )
+        os.utime(rollout, (old_mtime, old_mtime))
+
+    repo_a = capture61["path"].parent / "resume-repo-a"
+    repo_b = capture61["path"].parent / "resume-repo-b"
+    for repo in (repo_a, repo_b):
+        (repo / ".git" / "objects").mkdir(parents=True)
+        (repo / ".git" / "refs").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+
+    monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery([repo_a.resolve(), repo_b.resolve()], ()),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "resolve_walk_author_emails",
+        lambda *_a, **_kw: {"user@example.com"},
+    )
+
+    # Cap total attended capture at 300 ms so Push 1 stops partway on both Codex and Git.
+    capture61["cfg"]["retro"] = {"capture_budget_ms": 250, "attended_capture_cap_ms": 300}
+    save_config(capture61["cfg"], capture61["path"])
+
+    original_read_full = _mm_codex_host._read_full_rollout
+    codex_state = {"push": 1}
+
+    def staged_codex_full(path, before, deadline):
+        res = original_read_full(path, before, deadline)
+        if codex_state["push"] == 1:
+            time.sleep(0.25)
+        return res
+
+    def staged_git_repo(root, since_iso, timeout_ms, author_emails=None):
+        if codex_state["push"] == 1 and Path(root).resolve() == repo_b.resolve():
+            time.sleep(0.5)
+        return (
+            {
+                "project": Path(root).name,
+                "local_path": str(Path(root).resolve()),
+                "remote_url": None,
+                "commits": [{"sha": "abc1234", "ts": since_iso, "subject": "work"}],
+                "branches": ["main"],
+            },
+            None,
+        )
+
+    monkeypatch.setattr(_mm_codex_host, "_read_full_rollout", staged_codex_full)
+    monkeypatch.setattr(_mm_events, "_walk_one_repo", staged_git_repo)
+
+    # Push 1 stops partway on Codex (1 of 2 rollouts left) and Git (1 of 2 repos left).
+    (memory / "resume125.md").write_text("push 1")
+    push1 = runner.invoke(app, ["push", "--verbose"])
+    assert push1.exit_code == 0, push1.output
+    assert "codex usage catching up (1 left)" in push1.output
+    assert "git capture catching up (1 left)" in push1.output
+
+    status1 = " ".join(runner.invoke(app, ["status"]).output.split())
+    assert "codex usage catching up (1 left)" in status1
+    assert "Retro capture: catching up (1 left)" in status1
+
+    # Push 2 (even with no new content changes) continues from stored caches and finishes both.
+    codex_state["push"] = 2
+    push2 = runner.invoke(app, ["push"])
+    assert push2.exit_code == 0, push2.output
+
+    status2 = " ".join(runner.invoke(app, ["status"]).output.split())
+    assert "catching up" not in status2
+    assert "Retro capture:" not in status2

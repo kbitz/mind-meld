@@ -3180,3 +3180,192 @@ def test_autopush_degrades_when_deletions_cannot_propagate_or_files_were_left_ou
     crumb = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert crumb["outcome"] == "degraded"
     assert crumb["detail"] == expected
+
+
+# ─── Track 125A: catching-up split vs errors and quiet auto breadcrumbs ────
+
+
+def test_track_125a_git_walk_degradation_split_attended_catching_up_vs_error_and_quiet(
+    tmp_path, monkeypatch
+):
+    from datetime import timedelta
+
+    from mind_meld import config as _mm_cfg
+    from mind_meld import events_tail, lockedjson
+    from mind_meld import identity as _mm_identity
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    cfg = _mm_cfg.load_config()
+    sources = cfg["sync"]["sources"]
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    for repo in (repo_a, repo_b):
+        (repo / ".git" / "objects").mkdir(parents=True)
+        (repo / ".git" / "refs").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    roots = [repo_a.resolve(), repo_b.resolve()]
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *_a, **_kw: _mm_events.GitRootDiscovery(roots, []),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "resolve_walk_author_emails",
+        lambda *_a, **_kw: {"user@example.com"},
+    )
+    monkeypatch.setattr(
+        _mm_identity,
+        "gather_local_identities",
+        lambda *, allow_refresh=True, root_discovery=None, **kw: ["user@example.com"],
+    )
+
+    now = datetime.now(timezone.utc)
+    old_cursor = (now - timedelta(days=5)).isoformat()
+    future_cursor = (now + timedelta(hours=1)).isoformat()
+
+    def seed_cursors():
+        with lockedjson.locked_json_rmw(_mm_cfg.GIT_CAPTURE_CACHE_PATH) as state:
+            state.data.clear()
+            state.data.update(_mm_events._default_git_capture_cache())
+            state.data["repo_cursors"] = {
+                str(repo_a.resolve()): future_cursor,
+                str(repo_b.resolve()): old_cursor,
+            }
+
+    mode = {"skip_reason": _mm_events.WALK_SKIP_BUDGET_ABORT}
+
+    def fake_walk(roots_arg, since, total_budget_ms, **_kw):
+        return [
+            {
+                "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                "type": "git-snapshot",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "device": "",
+                "projects": [
+                    {
+                        "project": "repo-a",
+                        "local_path": str(repo_a.resolve()),
+                        "remote_url": None,
+                        "commits": [],
+                        "branches": ["main"],
+                    }
+                ],
+                "skipped": [{"path": str(repo_b.resolve()), "reason": mode["skip_reason"]}],
+            }
+        ]
+
+    monkeypatch.setattr(_mm_events, "walk_git_projects", fake_walk)
+
+    # 1. Quiet tail (autopush): keeps the exact _GIT_WALK_DEGRADATION literal.
+    seed_cursors()
+    quiet_deg = events_tail._run_events_tail(
+        cfg, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
+    )
+    assert events_tail._GIT_WALK_DEGRADATION.format(n=1) in quiet_deg
+    assert not any("catching up" in d for d in quiet_deg)
+
+    # 2. Attended tail, abort-only: emits catching-up text matching count_pending_repositories.
+    seed_cursors()
+    attended_deg = events_tail._run_events_tail(
+        cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+    )
+    events_dir = Path(next(s["path"] for s in sources if s["name"] == "mm-events")) / "events"
+    mm_push = _mm_events.latest_mm_push_row(events_dir, "dev-a")
+    assert mm_push is not None
+    expected_n = _mm_events.count_pending_repositories(roots, datetime.fromisoformat(mm_push["ts"]))
+    assert expected_n == 1
+    assert (
+        f"git capture catching up ({expected_n} left) — the next attended mm push continues it"
+        in attended_deg
+    )
+
+    # 3. Attended tail, error-only (git_error): keeps the exact _GIT_WALK_DEGRADATION literal.
+    seed_cursors()
+    mode["skip_reason"] = _mm_events.WALK_SKIP_GIT_ERROR
+    err_deg = events_tail._run_events_tail(
+        cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+    )
+    assert events_tail._GIT_WALK_DEGRADATION.format(n=1) in err_deg
+    assert not any("catching up" in d for d in err_deg)
+
+
+def test_track_125a_autopush_and_autopull_keep_quiet_output_and_invariant_breadcrumbs(
+    tmp_path, monkeypatch
+):
+    from mind_meld import config as _mm_cfg
+    from mind_meld import host_usage as _mm_host_usage
+    from mind_meld import token_usage
+    from mind_meld.hosts import codex as _mm_codex_host
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    cfg = _mm_cfg.load_config()
+    sources = cfg["sync"]["sources"]
+    codex_dir = tmp_path / "codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    sources.append(
+        {"name": "codex", "type": "generic", "path": str(codex_dir), "include_files": ["AGENTS.md"]}
+    )
+    (codex_dir / "AGENTS.md").write_text("rules\n")
+    save_config(cfg, tmp_path / "config.toml")
+
+    repo = tmp_path / "repo-auto"
+    (repo / ".git" / "objects").mkdir(parents=True)
+    (repo / ".git" / "refs").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *_a, **_kw: _mm_events.GitRootDiscovery([repo.resolve()], []),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "walk_git_projects",
+        lambda *_a, **_kw: [
+            {
+                "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                "type": "git-snapshot",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "device": "",
+                "projects": [],
+                "skipped": [
+                    {"path": str(repo.resolve()), "reason": _mm_events.WALK_SKIP_BUDGET_ABORT}
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "read_codex_usage",
+        lambda *_a, **_kw: _mm_host_usage._incomplete("deadline"),
+    )
+
+    memory = claude_root / "projects" / "-Users-user-myapp" / "memory"
+    memory.mkdir(parents=True, exist_ok=True)
+    (memory / "auto125.md").write_text("trigger autopush\n")
+    r_push = runner.invoke(app, ["autopush"])
+    assert r_push.exit_code == 0, (r_push.stdout, r_push.stderr)
+    assert (r_push.stdout, r_push.stderr) == ("", "")
+    push_crumb = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert push_crumb["outcome"] == "degraded"
+    assert "git walk dropped 1 repositories this push" in push_crumb["detail"]
+    assert "host-usage snapshot skipped (codex deadline)" in push_crumb["detail"]
+    assert "catching up" not in push_crumb["detail"]
+
+    monkeypatch.setattr(
+        "mind_meld.pullflow._pull_core",
+        lambda *_a, **_kw: pullflow.PullResult(
+            total_written=1,
+            ledger_cause="busy",
+            device_names=["Mac B"],
+            elapsed=0.01,
+        ),
+    )
+    r_pull = runner.invoke(app, ["autopull"])
+    assert r_pull.exit_code == 0, (r_pull.stdout, r_pull.stderr)
+    assert (r_pull.stdout, r_pull.stderr) == ("", "")
+    pull_crumb = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "pull")
+    assert pull_crumb["outcome"] == "degraded"
+    assert pull_crumb["detail"] == "pull ledger unavailable (busy)"
+    assert "catching up" not in pull_crumb["detail"]

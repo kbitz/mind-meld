@@ -957,7 +957,7 @@ class TestAttendedCaptureCap124A:
             suppress_host_capture=True,
         )
         eq_err = capsys.readouterr().err
-        assert any("git walk dropped" in d for d in eq_deg), eq_deg
+        assert any("git capture catching up (2 left)" in d for d in eq_deg), eq_deg
         assert "events tail budget exceeded" in eq_err
 
         # 2. Cap > capture (capture_budget_ms=250, attended_capture_cap_ms=2500):
@@ -1054,7 +1054,7 @@ class TestAttendedCaptureCap124A:
         deg1 = events_tail._run_events_tail(
             cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
         )
-        assert any("git walk dropped 1 repositories" in d for d in deg1), deg1
+        assert any("git capture catching up (1 left)" in d for d in deg1), deg1
         cache1 = _mm_events.read_git_capture_cache()
         repo_a_cursor_1 = cache1["repo_cursors"][str(repo_a.resolve())]
         repo_b_cursor_1 = cache1["repo_cursors"][str(repo_b.resolve())]

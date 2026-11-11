@@ -2875,17 +2875,24 @@ def test_grok_deadline_refreshes_inventory_count_in_status_and_diag(
 
     status = " ".join(runner.invoke(app, ["status"]).output.split())
     assert calls == [False, True]
-    assert (
-        "Grok Build usage capture: enabled — host-usage snapshot skipped (grok deadline)" in status
-    )
     assert "Grok Build usage capture: enabled; a prior scan completed successfully" not in status
-    assert f"5 of {expected_disk} sessions cached" in status
+    if files_on_disk is None:
+        assert (
+            "Grok Build usage capture: enabled — host-usage snapshot skipped (grok deadline)"
+            in status
+        )
+        assert f"5 of {expected_disk} sessions cached" in status
+    else:
+        assert "Grok Build usage capture: enabled — grok usage catching up (3 left)" in status
 
     calls.clear()
     diag = " ".join(runner.invoke(app, ["diag"]).output.split())
     assert calls == [True]
-    assert "grok usage read blocker: host-usage snapshot skipped (grok deadline)" in diag
-    assert f"5 of {expected_disk} sessions cached" in diag
+    if files_on_disk is None:
+        assert "grok usage read blocker: host-usage snapshot skipped (grok deadline)" in diag
+        assert f"5 of {expected_disk} sessions cached" in diag
+    else:
+        assert "grok usage read blocker: grok usage catching up (3 left)" in diag
     assert f"grok sessions cached: 5 of {expected_disk}" in diag
 
 
