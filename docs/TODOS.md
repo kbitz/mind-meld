@@ -44,6 +44,26 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/core.py|tests/test_output_style.py] Test gap: Shared diagnostic stream failures
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Shared warnings and notices have exact-output coverage, but no direct check of a stream failing during their write or flush.
+- **Hypothesis (untested):** Extend existing output tests with a failing stream and verify command results and completed effects survive; re-verify the current sink first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/core.py:168
+- **Evidence:** Read-only coverage audit at `e1c64b0`; existing broken-stream coverage targets the final outcome emitter. No diagnostic-stream failure was reproduced.
+- **Context:** /review-and-prep for Track 129B, branch `mmm/c2c48f3f`, 2026-11-11; PR link belongs to the review receipt. Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/cli.py|tests/test_output_style.py] Test gap: No-argument help keeps framework behavior
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Parser tests cover explicit help and invalid options or commands, but not the root invocation with no arguments and its NoArgsIsHelpError exception path.
+- **Hypothesis (untested):** Extend the parser table with a no-argument invocation and verify ordinary help and its exit semantics without a shared error; re-verify the installed framework behavior first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/cli.py:274
+- **Evidence:** Read-only coverage audit at `e1c64b0`; repository search found no no-argument invocation test. No incorrect help output or exit was demonstrated.
+- **Context:** /review-and-prep for Track 129B, branch `mmm/c2c48f3f`, 2026-11-11; PR link belongs to the review receipt. Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/attemptlog.py|tests/test_attemptlog.py] Test gap: Catch-up detail vocabulary boundaries
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** The saved-run roundtrip covers Codex and Git positive counts plus a path-bearing suffix, but not every registered reader, unknown readers or malformed counts.
