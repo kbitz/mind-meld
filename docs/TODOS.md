@@ -44,6 +44,17 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/attemptlog.py|tests/test_attemptlog.py] Test gap: Catch-up detail vocabulary boundaries
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The saved-run roundtrip covers Codex and Git positive counts plus a path-bearing suffix, but not every registered reader, unknown readers or malformed counts.
+- **Hypothesis (untested):** Extend the existing roundtrip table with all supported readers and zero, negative, nondecimal and near-match inputs; verify the current exact pattern first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/attemptlog.py:421
+- **Evidence:** Static repair-delta coverage audit at `e1be42a`; exact regex and identical four-reader producer/allowlist sets inspected, no incorrect acceptance or rejection demonstrated.
+- **Context:** /review-and-prep for PR #310, 2026-11-11. Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+
 ### [review:files=src/mind_meld/attemptlog.py|tests/test_attemptlog.py] Test gap: Pure formatter lock-access guard
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** The run-detail purity regression spies on diagnostic inventories but not the separate Codex cache-lock probe.
