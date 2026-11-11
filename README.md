@@ -907,7 +907,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm push --dry-run` | Preview publication and deletions (files a recreated scan folder hides are not counted as deletions); changes nothing except the local lock file |
 | `mm pull --dry-run` | Preview what a pull would write, merge, conflict, delete or hold back as `older` (add `--verbose` for why a file with a deletion record is kept: `keep (<reason>)`); changes nothing except the local lock file |
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Retros window by the COMMIT's date, not by when mm captured it |
-| `mm pull` | Pull context; one final outcome. Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)) |
+| `mm pull` | Pull context; one final line per outcome. Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)) |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Open with a scoped verdict comparing local context with this device's last push, then show Syncthing state, each peer's last push and applied state, the latest auto or attended run per verb, and current diagnostics. Peer pushes overdue by more than 24 h warn in every mode. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
@@ -1039,7 +1039,7 @@ Unexpected traces are verbose-only and contain trusted frame identifiers and
 safe errno, with no exception messages, locals, source text or user paths.
 
 Capture receipt, lock release, eligible update, history notice and run-evidence
-notice finish before the final line. Data-at-risk and actionable warnings stay
+notice finish before the final outcome lines. Data-at-risk and actionable warnings stay
 visible: apply/fsync failures, kept conflict copies, corrupt/unsafe peer skips,
 recovery issues, large sync growth, config migration, missing custom mm-events
 folders, unavailable history/run evidence, and update failure/nudges. Successful `autopush` and
@@ -2156,8 +2156,9 @@ and the push counts it as held (`--verbose` names it as not yet synced;
 [Snapshot failures](#snapshot-failures)). Otherwise it still re-encrypts and
 uploads the growing day file, updates last-seen and rewrites the recovery
 sidecar, so `--verbose` shows an upload even on a converged Mac. The outcome
-line counts no user content change: `Push: no content changes; usage published.`
-when publication is verified.
+line counts no user content change: `Push: no content changes.` Verified
+publication appears with `--verbose` as `Host usage published (manifest accepted).`,
+and in `mm status` / `mm diag`.
 A content-changing push records activity once and runs auto-GC. Usage-only
 publication skips this device's blob GC; obsolete blobs wait for the next
 content-changing push or an explicit `mm gc`.
@@ -2190,8 +2191,9 @@ status/diag evidence. Explanatory phase labels include:
 reader was partial, dropped or absent), `(no-row)`, `(capture-failed)`,
 `(append-failed)`, `(max-file-size)`, `(not-published: <cause>)` or
 `(unverified: <reason>)`. Only
-a content-sync failure changes the push exit to 1; its final line reports
-known accepted effects or explicitly unconfirmed publication. Optional capture
+a content-sync failure changes the push exit to 1; its error line reports
+known accepted effects or explicitly unconfirmed publication, followed by a final
+`Run: <command>` line. Optional capture
 failure alone does not change that exit. `not-published` requires proof: `exclude-patterns`, `include-dirs`,
 `file-absent` (no day file in the accepted manifest), or `row-missing` (the accepted
 bytes contain no matching row). Fix exclude/include settings before retrying;

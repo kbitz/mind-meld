@@ -123,7 +123,7 @@ no-source attended push ends `Push: no enabled sources.` and records run cause
 `no-changes`, not `ok`.
 
 Presentation never changes quiet/attended execution, budgets, warming, locks,
-encryption or schemas. In a real terminal (`not verbose and not dry_run and console.is_terminal and console.file.isatty()`), attended `mm push` and `mm pull` render a transient Rich spinner (`_SyncProgress`) with phase labels and measured batch counters (`updateprogress.UpdateProgress`; pull counts per source batch), animated by a 100 ms daemon ticker thread that joins with a bounded timeout on shutdown (`_stop_sync_progress`), repainting per-file advances at ticker rate (phase changes and first/final files paint at once; synchronous refreshes can still wait on terminal output), pauses around mid-run warnings or interactive conflict prompts on the push/pull paths (`_pause_sync_progress`; leaf-module warnings cannot pause it), and clears before the final outcome line. Progress/capture/cache/budget/nested notices are verbose;
+encryption or schemas. In a real terminal (`not verbose and not dry_run and console.is_terminal and console.file.isatty()`), attended `mm push` and `mm pull` render a transient Rich spinner (`_SyncProgress`) with phase labels and measured batch counters (`updateprogress.UpdateProgress`; pull counts per source batch), animated by a 100 ms daemon ticker thread that joins with a bounded timeout on shutdown (`_stop_sync_progress`), repainting per-file advances at ticker rate (phase changes and first/final files paint at once; synchronous refreshes can still wait on terminal output), pauses around mid-run warnings or interactive conflict prompts on the push/pull paths (`_pause_sync_progress`; leaf-module warnings cannot pause it), and clears before the final outcome lines. Progress/capture/cache/budget/nested notices are verbose;
 actual degradations reach existing status/diag evidence, including failures
 without a returned result. Actionable/data-at-risk warnings remain visible in
 all modes before the outcome: growth, migration, missing custom events root,
@@ -624,15 +624,15 @@ corrupt-manifest escape hatch and has nothing to do with these copies.
 
 **Reporting.** An attended pull ends `Pull: 3 files deleted because Mac B deleted
 them; copies in <folder> for 30 days; see <README#recovering-a-deleted-file>.` (the
-origin's sanitized device name, or `peers`; the clause leads when nothing else
-applied, joins `effects` on partial and interrupted runs, and `--verbose` lists the
+origin's sanitized device name, or `peers`; success prints its own outcome line,
+it joins `effects` on partial and interrupted runs, and `--verbose` lists the
 paths). Autopull prints that clause as one `mm:` stderr line (data at risk is never
 quiet-gated) and adds `N files deleted by <origin>; copies in <folder>` to its
 breadcrumb. History gains the `deleted` action (`mm log --action deleted`; the row's
 `extra` holds the folder) and `.mind-meld-log.md` lists deleted files.
 `mm pull --dry-run` predicts `delete` (`totals`: `N would be deleted`) and never
-reaps. `older` (a fast-forward whose remote mtime is older than the local file) adds
-`; N older peer edits not applied` to the outcome line, `mm pull --verbose` lists
+reaps. `older` (a fast-forward whose remote mtime is older than the local file) prints
+`Pull: N older peer edits not applied (mm pull --verbose).` on its own outcome line; `mm pull --verbose` lists
 each `older peer edit not applied: <peer>/<source>/<path>`, and `--dry-run` predicts
 it.
 To accept such an edit, compare both versions, then `touch <file>` and `mm push` on
@@ -696,7 +696,7 @@ plants it.
   not read as a rename.
   It holds only prior paths absent from the scan, so a lost dotfile with every file
   present reports nothing beyond `metadata updated`. The owner must act when it holds
-  files, so the outcome line adds `N files left out because <folder> is new; run mm
+  files, so a separate outcome line says `Push: N files left out because <folder> is new; run mm
   pull to restore them.` (`is missing`, or `cannot be read; restore read access.`),
   and autopush carries it in its breadcrumb.
   `anchor_pending` joins the no-op check, so a push whose only change is a token still
