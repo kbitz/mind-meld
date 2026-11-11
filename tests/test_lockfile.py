@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import errno
 import fcntl
-import io
 import os
 import signal
 import subprocess
@@ -20,7 +19,6 @@ from pathlib import Path
 
 import pytest
 import typer
-from rich.console import Console
 
 from mind_meld import cli, errors, lockfile
 from mind_meld.errors import LockError
@@ -380,20 +378,13 @@ class TestContentionGuidance:
                 child.stdin.close()
             child.wait(timeout=5)
 
-    @pytest.mark.parametrize("width", [80, 60])
     @pytest.mark.parametrize("pid", [424242, None])
-    @pytest.mark.parametrize("terminal", [False, True])
-    def test_error_render_keeps_help_before_final_ps_line(self, monkeypatch, width, pid, terminal):
+    def test_error_render_keeps_help_before_final_ps_line(self, capsys, pid):
         text = lockfile._contention_message(pid)
-        buf = io.StringIO()
-        monkeypatch.setattr(
-            cli.core,
-            "stderr_console",
-            Console(file=buf, width=width, force_terminal=terminal, color_system=None),
-        )
         with pytest.raises(typer.Exit):
             cli._error(text)
-        output = buf.getvalue()
+        output = capsys.readouterr().err
+        assert output.startswith("mm: error: ")
         normalized = "".join(output.split())
         assert errors.LOCK_HELD_URL in normalized
         if pid is None:

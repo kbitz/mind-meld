@@ -7,6 +7,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -152,16 +153,81 @@ class ManifestFetch:
         return self.status == "ok"
 
 
-def _error(msg: str) -> None:
+def _error_line(message: str) -> str:
+    return f"mm: error: {message}"
+
+
+def _fix_line(command: str) -> str:
+    return f"Run: {command}"
+
+
+def _outcome_line(verb: str, text: str) -> str:
+    return f"{verb.title()}: {text}."
+
+
+def _stderr_lines(lines: Iterable[str]) -> None:
+    with suppress(Exception, SystemExit), _pause_sync_progress():
+        stream = stderr_console.file
+        for line in lines:
+            stream.write(safety.safe_terminal_str(line) + "\n")
+        stream.flush()
+
+
+def _warning(message: str) -> None:
+    _stderr_lines((f"mm: warning: {message}",))
+
+
+def _notice(message: str) -> None:
+    _stderr_lines((f"mm: notice: {message}",))
+
+
+def _print_error(message: str, *, fix: str | None = None) -> None:
+    raw_lines = message.split("\n")
+    lines = [_error_line(raw_lines[0]), *raw_lines[1:]]
+    if fix is not None:
+        lines.append(_fix_line(fix))
+    _stderr_lines(lines)
+
+
+def _fix_for(message: str, fallback: str | None = None) -> tuple[str, str | None]:
+    command: str | None
+    if "newer mm" in message or "unsupported format" in message:
+        command = "mm update"
+    elif "mm migrate-config" in message:
+        command = "mm migrate-config"
+    elif "mm init" in message:
+        command = "mm init"
+    elif message.startswith("Device not found"):
+        command = "mm devices"
+    else:
+        command = fallback
+    problem = message
+    if command is not None:
+        escaped = re.escape(command)
+        stripped = re.sub(
+            rf"(?:,? then (?:run |retry )?|(?:(?:\s*—\s*|\.\s+))(?:run|retry) )"
+            rf"[`']?{escaped}[`']?(?:\s+first)?\.?$",
+            "",
+            problem,
+            flags=re.IGNORECASE,
+        )
+        if stripped != problem:
+            problem = stripped.rstrip(". —")
+    return problem, command
+
+
+def _error(msg: str, *, fix: str | None = None) -> None:
     # Route to stderr so quiet-mode autopush/autopull don't leak error text
     # to stdout (violating the one-line-stderr contract). Inside an attended
     # push/pull outcome scope the message is stored instead, and
     # _sync_failure renders it once as the final line.
     state = _SYNC_OUTPUT.get()
     if state is None:
-        stderr_console.print(f"[red]Error:[/red] {safe_str(msg)}")
+        _print_error(msg, fix=fix)
     else:
         state["message"] = msg
+        if fix is not None:
+            state["fix"] = fix
     raise typer.Exit(1)
 
 
@@ -181,11 +247,7 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     """
 
     def _warn(key: str, reason: str) -> None:
-        with _pause_sync_progress():
-            stderr_console.print(
-                "[yellow]Warning:[/yellow] dropped device entry "
-                f"{safe_str(key)} — {safe_str(reason)}"
-            )
+        _warning(f"dropped device entry {key} — {reason}")
 
     return _list_devices_impl(backend, on_drop=_warn)
 
@@ -194,7 +256,8 @@ def _get_config(*, read_only: bool) -> dict:
     try:
         config = load_config()
     except MindMeldError as e:
-        _error(str(e))
+        problem, fix = _fix_for(str(e), None)
+        _error(problem, fix=fix)
         raise  # unreachable, but keeps type checker happy
     # Seam 1 — transition detection. Idempotent within a process; safe to
     # call after every successful load_config. Codex outside voice (D6)
@@ -2338,13 +2401,9 @@ def _recover_prior_manifest(
                 f"{rewrite} from local files, keeping deletion records from the "
                 "local sidecar."
             )
-        with _pause_sync_progress():
-            if quiet:
-                # Rewriting a manifest from conflict copies is data-at-risk work;
-                # autopush must still surface it.
-                print(f"mm: warning: {msg}", file=sys.stderr)
-            else:
-                console.print(f"[yellow]Warning:[/yellow] {msg}")
+        # Rewriting a manifest from conflict copies is data-at-risk work;
+        # always surface to stderr, including under autopush.
+        _warning(msg)
         if sidecar_manifest is None:
             return fetch.manifest
         return reconcile_recovered_prior(_merge_manifests([fetch.manifest, sidecar_manifest]))
@@ -2359,14 +2418,10 @@ def _recover_prior_manifest(
             f"remote manifest {what}; recovered prior state from local "
             f"sidecar ({sidecar.sidecar_path()})."
         )
-        with _pause_sync_progress():
-            if quiet:
-                # Load-bearing: silently swallowing a corrupt-manifest recovery
-                # in autopush leaves the user with no signal that storage is
-                # degrading. Always surface to stderr.
-                print(f"mm: warning: {msg}", file=sys.stderr)
-            else:
-                console.print(f"[yellow]Warning:[/yellow] {msg}")
+        # Load-bearing: silently swallowing a corrupt-manifest recovery
+        # in autopush leaves the user with no signal that storage is
+        # degrading. Always surface to stderr.
+        _warning(msg)
         return reconcile_recovered_prior(sidecar_manifest)
 
     # No sidecar — try peer fallback
@@ -2378,14 +2433,10 @@ def _recover_prior_manifest(
             "Recent local deletions may be lost — verify no files have "
             "resurrected."
         )
-        with _pause_sync_progress():
-            if quiet:
-                # Load-bearing: peer-fallback recovery is the riskiest branch
-                # (recent deletions can be lost). Must reach the user even in
-                # autopush.
-                print(f"mm: warning: {msg}", file=sys.stderr)
-            else:
-                console.print(f"[yellow]Warning:[/yellow] {msg}")
+        # Load-bearing: peer-fallback recovery is the riskiest branch
+        # (recent deletions can be lost). Must reach the user even in
+        # autopush.
+        _warning(msg)
         # Synthetic prior manifest: no prior file list (so fresh-deletion
         # detection is disabled — we have no basis for it), but the
         # carry-forward loop in generate_tombstones() preserves these.
@@ -2913,9 +2964,7 @@ def _release_sync_lock() -> None:
         release_lock()
     except (Exception, SystemExit) as exc:
         _sync_diagnostic("lock release could not be confirmed", True)
-        _sync_warning(
-            f"mm: warning: lock release could not be confirmed ({type(exc).__name__}); run mm diag"
-        )
+        _warning(f"lock release could not be confirmed ({type(exc).__name__}). Run: mm diag")
 
 
 # ── migrate-config ────────────────────────────────────────────────────

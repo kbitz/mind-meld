@@ -363,10 +363,15 @@ reports the number of ignored files as `ignored storage files`. See
 
 **Host usage snapshot compatibility:** an un-upgraded peer drops incoming `host-usage-snapshot` records carrying `"muse"` or `"agy"` until it updates. Content sync is unaffected; upgrade the peer with `mm update` or `pipx upgrade mind-meld` to include its usage in `retro-fleet`.
 
-**Push and pull output (Track 78A):** attended `mm push` and `mm pull` now end
-with one outcome line. Capture, cache, budget, nested-repository and scan
-notices move to `--verbose`; actual degradations remain in `mm status` and
-`mm diag`. Capture failure does not make content sync fail. Actionable and
+**Push and pull output (Tracks 78A / 129B):** attended `mm push` and `mm pull` end
+with one `<Verb>: <what happened>.` outcome line per thing that happened, and
+errors print `mm: error: <what broke>` on stderr followed by `Run: <command>` on
+its own last line (including CLI usage errors, which exit 2 with
+`Run: <command path> --help`). Capture, cache, budget, nested-repository, scan,
+push `usage published` and pull `skipped` details live under `--verbose` (and in
+`mm status` / `mm diag`); an attended push that publishes only usage ends with
+`Push: no content changes.`, and a pull that only skips newer local files ends
+with `Pull: no changes.`. Capture failure does not make content sync fail. Actionable and
 data-at-risk warnings still print before the outcome. Successful automatic
 commands stay silent, including when they move files.
 
@@ -480,7 +485,7 @@ ships as 1.0.1: the upgrade nudge never downgrades.
 **v0.14.9:** the old identity cache becomes stale and refreshes on the next identity read that completes repository discovery; incomplete attempts retry.
 The first push needing that refresh shows `mm: notice: refreshing identity cache (one-off)` with `--verbose`. [Future capture is corrected; previously published rows stay unchanged.](#dropped-repositories-and-ignored-git-environment-variables)
 
-For `Pull incomplete [result-degraded]:` or a per-file warning after upgrading, see [pull failures and remedies](#pull-incomplete--could-not-pull-a-file). No data migration is needed for apply exception containment.
+For `mm: error: Pull incomplete [result-degraded]:` or a per-file warning after upgrading, see [pull failures and remedies](#pull-incomplete--could-not-pull-a-file). No data migration is needed for apply exception containment.
 
 ```bash
 mm update
@@ -926,30 +931,40 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 
 ### Sync outcomes
 
+Commands share five plain-text output forms (Track 129B):
+
+- **Outcome:** `<Verb>: <what happened>.` on stdout, one line per thing that happened (`Push: 3 content changes published.`, `Push: 1 file held.`, `Pull: 3 files applied (1 conflict copy).`).
+- **Error:** `mm: error: <what broke>` on stderr, followed by `Run: <command>` on its own last line.
+- **Warning:** `mm: warning: <what is wrong>` on stderr (one line; data-at-risk warnings are never quiet-gated).
+- **Notice:** `mm: notice: <what changed or was skipped>` on stderr (one line).
+- **Fix command:** `Run: <command>` on its own last line after an error, or ending a one-line warning, notice, or status verdict; CLI usage errors exit **2** with `Run: <command path> --help` instead of a Rich panel.
+
 In an interactive terminal without `--verbose` or `--dry-run`, `mm push` and
 `mm pull` show a transient spinner with live phase labels and file/manifest
 progress counters (`Uploading files 50.0% 1/2 files`, `Reading peer manifests
 50.0% 1/2 manifests`, `Applying files 50.0% 1/2 files` per source batch),
 pausing cleanly for mid-run warnings or conflict prompts on the push/pull
-paths and clearing before the final outcome line. Redirected output (even
+paths and clearing before the final outcome lines. Redirected output (even
 with `FORCE_COLOR`), `--verbose`, `--dry-run`, `autopush`, and `autopull`
 omit the spinner.
 
-Default and verbose commands share the same final logical line; a narrow
-terminal may wrap it visually. Success is on stdout, failure on stderr.
+Default and verbose commands end with the same final outcome lines; a narrow
+terminal may wrap a line visually. Success is on stdout, failure on stderr.
 These examples describe possible results, not commands that guarantee them:
 
 ```text
 $ mm push
-Push: 3 content changes published; 1 held.
+Push: 3 content changes published.
+Push: 1 file held.
 $ mm push --verbose
 Building manifest...
 ...scan, capture and upload details...
-Push: 3 content changes published; 1 held.
+Push: 3 content changes published.
+Push: 1 file held.
 $ mm pull
 mm: warning: ... — 1 conflicts: ...
 mm: 1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner
-Pull: 3 files applied (1 conflict copy); 2 skipped.
+Pull: 3 files applied (1 conflict copy).
 ```
 
 Push counts accepted user-file changes, excluding captured usage rows and held
@@ -962,35 +977,43 @@ because `~/.claude/projects` cannot be listed says
 `Push: project memory not published until Claude's projects folder can be listed.`
 (see [Project memory across machines](#project-memory-across-machines)).
 A held file keeps its previous
-published version, if any; its paths/reasons appear with `--verbose`.
-Verified usage publication appends `; usage published` even without a user
-content change. Other explicit outcomes include `Push: no content changes.`,
+published version, if any, and adds its own outcome line (`Push: 1 file held.` /
+`Push: N files held.`); its paths/reasons appear with `--verbose`.
+Verified usage publication is omitted from the default `mm push` outcome line
+(a push that publishes only usage prints `Push: no content changes.`); inspect
+usage publication with `mm push --verbose` (`Usage published: ...`),
+`mm status`, or `mm diag`. Other explicit outcomes include `Push: no content changes.`,
 `Push: no enabled sources.`, `Pull: no changes.`, `Pull: no peer devices.`
 and `Pull: no enabled sources.`
 Pull counts applications across selected peers/sources, not guaranteed unique
-paths. A deletion a peer made adds `; 3 files deleted because Mac B deleted them;
-copies in ~/.config/mind-meld/deleted/<stamp> for 30 days; see ...#recovering-a-deleted-file`
-(the clause leads the line when nothing else applied, and `peers` replaces the name when
-several machines deleted); `mm pull --verbose` lists the paths. A peer edit held back
-as `older` adds `; 1 older peer edit not applied`. A push whose scan folder was
-recreated says `Push: metadata updated; 12 files left out because
-/home/user/.claude/projects is new; run mm pull to restore them.` Conflict copies are already included in applied files; skipped and failed
+paths. Skipped newer local files are omitted from the default `mm pull` outcome
+line (a pull that only skips newer local files prints `Pull: no changes.`);
+`mm pull --verbose` (`skipped (local newer): N`), `mm status`, and `mm diag`
+show the skipped count. A deletion a peer made prints its own outcome line
+`Pull: 3 files deleted because Mac B deleted them;
+copies in ~/.config/mind-meld/deleted/<stamp> for 30 days; see ...#recovering-a-deleted-file.`
+(`peers` replaces the name when several machines deleted); `mm pull --verbose`
+lists the paths. A peer edit held back as `older` prints `Pull: 1 older peer edit not applied.`.
+A push whose scan folder was recreated prints `Push: metadata updated.` followed by
+`Push: 12 files left out because /home/user/.claude/projects is new; run mm pull to restore them.`
+Conflict copies are already included in applied files; skipped and failed
 outcomes are separate. A scoped pull makes no claim about other sources or peers.
-Content a sync tool has not delivered yet is **waiting**, not failed: the line
-gains `; waiting for 2 files from Mac B` (or `Mac B's manifest`, or `cccccccc's
+Content a sync tool has not delivered yet is **waiting**, not failed: pull prints
+`Pull: waiting for 2 files from Mac B.` (or `Mac B's manifest`, or `cccccccc's
 device entry`), the exit stays 0, and the next pull retries. When a pull also
-failed, the waiting clause comes before `Run:`. `--verbose` lists the waiting
+failed, the waiting clause stays in the `mm: error:` line before `Run:`. `--verbose` lists the waiting
 paths. Attended run summaries in `last-attended-runs.json` do not record a waiting
 count; full pulls record each peer's count in `state.db` for `mm status`, and
 `mm autopull` also records it in the `success` breadcrumb detail.
 Another home's files from a peer still on path
-names add `; 312 files from Mac B wait until it publishes shared names (mm status)`:
+names print `Pull: 312 files from Mac B wait until it publishes shared names (mm status).`:
 the exit stays 0, and they wait on that machine updating, not on delivery.
 
 ```text
 $ mm pull
 mm: warning: ...named failed file and its remedy...
-Pull incomplete [result-degraded]: 12 files applied, 2 failed; completed changes remain; repair the reported failures before one retry. Run: mm diag
+mm: error: Pull incomplete [result-degraded]: 12 files applied, 2 failed; completed changes remain; repair the reported failures before one retry.
+Run: mm diag
 $ mm push
 Push: no content changes.
 $ mm status
@@ -1004,8 +1027,8 @@ The partial pull exits 1. The degraded-capture push exits 0: consult
 [Status verdicts](#status-verdicts) or `mm diag` for the existing capture receipt
 and reader state. No repeated-push escalation counter is implied.
 
-Failures end with the verb, existing cause, safe reason, known effects and one
-`Run:` command. Those cause labels are explanatory, not a stable error-code API.
+Failures print `mm: error: <Verb> <state> [<cause>]: <reason and known effects>`
+followed by `Run: <command>` on its own last line. Those cause labels are explanatory, not a stable error-code API.
 Known completed changes remain; nothing rolls back. Correct the named problem
 before one retry; when effects are unconfirmed, reconcile with read-only
 `mm diag` first. Repeated or unresolved failures need the owner's judgment.
@@ -1932,7 +1955,7 @@ the next `mm push`.
 
 ### Pull incomplete / could not pull a file
 
-One blocked file no longer stops later files, sources, or peers. Each apply warning on stderr names the peer, source, path, cause, and remedy. Completed files stay on disk and in `mm log`; failed files are retried on the next pull. `mm autopull` exits 0 and records `degraded: N file(s) failed`. Attended `mm pull` exits 1 for any failed file, after recovery and cleanup. Read the per-file warnings and final `Pull incomplete [result-degraded]` outcome; repair the named problem before one retry. An unexpected failure or interruption also exits 1 with known completed effects. Unknown effects require read-only diagnosis before retrying.
+One blocked file no longer stops later files, sources, or peers. Each apply warning on stderr names the peer, source, path, cause, and remedy. Completed files stay on disk and in `mm log`; failed files are retried on the next pull. `mm autopull` exits 0 and records `degraded: N file(s) failed`. Attended `mm pull` exits 1 for any failed file, after recovery and cleanup. Read the per-file warnings and final `mm: error: Pull incomplete [result-degraded]: ...` + `Run: mm diag` outcome; repair the named problem before one retry. An unexpected failure or interruption also exits 1 with known completed effects. Unknown effects require read-only diagnosis before retrying.
 
 ```bash
 mm log --verb pull --action failed --limit 10
@@ -1955,7 +1978,7 @@ mm pull
 
 Use the real path from your filesystem: displayed nonprintable characters are visible notation, not a shell argument. `mm disable-source <name>` stops a whole source; a precise `exclude_patterns` glob under the existing source configuration can omit just the unwanted path. Neither option deletes your local file.
 
-A final `Pull interrupted [interrupted]` or `Pull failed [unexpected-error]` line (exit 1) means an interrupt or unexpected error stopped the batch; the line says completed changes remain. Its `Run:` command is `mm diag`. Then run `mm pull` to continue. Choosing `(a)bort` also keeps and records completed changes; pending keep-local mtime decisions are not broadcast. A `mm: notice:` saying a file was written, merged, or a conflict copy saved means publication completed and the named follow-up step encountered an error.
+A final `mm: error: Pull interrupted [interrupted]: ...` or `mm: error: Pull failed [unexpected-error]: ...` line followed by `Run: mm diag` (exit 1) means an interrupt or unexpected error stopped the batch; the line says completed changes remain. Its `Run:` command is `mm diag`. Then run `mm pull` to continue. Choosing `(a)bort` also keeps and records completed changes; pending keep-local mtime decisions are not broadcast. A `mm: notice:` saying a file was written, merged, or a conflict copy saved means publication completed and the named follow-up step encountered an error.
 
 **Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm` and `mm --version`; upgrade to v0.14.17+ before running `mm diag` and `mm push`. If `mm status` shows Git repositories catching up, run `mm push` on that Mac; it resumes pending Git capture even without file edits. Follow its `mm recapture` remedy for persistent failures or history beyond retention, then rerun the retro at a window that includes the recovered commit dates. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
 
@@ -2454,11 +2477,12 @@ can record it again; this notice does not itself become a stored blocker.
 
 A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file or directory, a directory that vanishes while it is being listed, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, a symlink, hard link or non-regular file where a regular file was, or a missing user-source root that was previously published, **refuses the whole push** and keeps the previous snapshot; run `mm push` again after the cause is fixed.
 
-**A file that changes while mm reads it does not stop the push.** mm re-reads it once during the scan. If a file later changes before or during upload verification, mm re-reads it once after the rest of that source has uploaded. If either retry finds it still changing, it is **held**: the previously published version stays published, a file that was never published is left out, nothing is deleted, and the rest of the push goes out. A scan-held file is not read again during upload. The push exits 0 and counts the held files; they go with a later push. The attended outcome line shows the count (`; 2 held`) and `--verbose` lists every path as *not yet synced*. Held files also appear in `mm push --dry-run` (which applies the scan-time hold), and in `mm autopush`'s `mm status` line (autopush prints nothing). A file that keeps changing is held on every push: `exclude_patterns` under that source ends it. A push that is recovering a corrupt, conflict-copy-only or vanished manifest has no accepted version to hold at, so there a still-changing file refuses and names itself.
+**A file that changes while mm reads it does not stop the push.** mm re-reads it once during the scan. If a file later changes before or during upload verification, mm re-reads it once after the rest of that source has uploaded. If either retry finds it still changing, it is **held**: the previously published version stays published, a file that was never published is left out, nothing is deleted, and the rest of the push goes out. A scan-held file is not read again during upload. The push exits 0 and counts the held files; they go with a later push. The attended outcome prints a line for the held count (`Push: 2 files held.`) and `--verbose` lists every path as *not yet synced*. Held files also appear in `mm push --dry-run` (which applies the scan-time hold), and in `mm autopush`'s `mm status` line (autopush prints nothing). A file that keeps changing is held on every push: `exclude_patterns` under that source ends it. A push that is recovering a corrupt, conflict-copy-only or vanished manifest has no accepted version to hold at, so there a still-changing file refuses and names itself.
 
 ```text
 $ mm push
-Push: 1 content change published; 2 held.
+Push: 1 content change published.
+Push: 2 files held.
 
 $ mm push --verbose
 ...
@@ -2466,22 +2490,24 @@ $ mm push --verbose
     gstack:projects/x/log.jsonl
     claude:projects/y/memory/MEMORY.md
   Their previous versions (if any) stay published; they go with a later push.
-Push: 1 content change published; 2 held.
+Push: 1 content change published.
+Push: 2 files held.
 
 $ mm status          # after an autopush that held a file
   Last auto-push: 2026-10-19T15:03:32+00:00 (degraded: 1 file held, not yet synced (still changing): claude:projects/y/memory/MEMORY.md)
 
 $ mm push            # a recovered manifest and a file that will not settle
-Push refused [snapshot-refused]: Cannot publish: source claude, projects/y/memory/MEMORY.md changed while being read. Previous snapshot kept. Wait for the writer to finish; no content published. Run: mm push
+mm: error: Push refused [snapshot-refused]: Cannot publish: source claude, projects/y/memory/MEMORY.md changed while being read. Previous snapshot kept. Wait for the writer to finish; no content published.
+Run: mm push
 ```
 
 | State | You see | Do |
 |---|---|---|
-| Held (still changing, vanished or grew) | `N held` in the outcome; *not yet synced* paths with `--verbose` | Nothing; the prior version stays published. Exclude it if it is always being written. |
+| Held (still changing, vanished or grew) | `Push: N file(s) held.` in the outcome; *not yet synced* paths with `--verbose` | Nothing; the prior version stays published. Exclude it if it is always being written. |
 | Frozen (inside a nested git checkout) | `skipped: nested git repository`; published entries kept | See [Nested git repositories](#nested-git-repositories) for resuming sync or excluding the subtree |
 | Skipped or excluded | `skipped:` lines with `--verbose` | Raise `sync.max_file_size` or adjust the glob |
 | Tombstoned | the deletion is published with the deleted version's hash | Nothing. Other Macs holding exactly those bytes move their copy to a 30-day recovery folder ([Recovering a deleted file](#recovering-a-deleted-file)) |
-| Refused | one final `Push refused [snapshot-refused]: Cannot publish: …` line, previous snapshot kept | The fix in the message. Blobs uploaded before the stop remain as orphans until GC. |
+| Refused | `mm: error: Push refused [snapshot-refused]: Cannot publish: …` followed by `Run: <command>`, previous snapshot kept | The fix in the message. Blobs uploaded before the stop remain as orphans until GC. |
 
 `mm push --dry-run` previews this scan and deletion proof (files a recreated scan folder hides are not counted as deletions) and **changes nothing except the local lock file**; it does not write the `.mind-meld-anchor` token a real push renews. It reports pending directory creation and shared crypto-init reconciliation without performing them. It uses your current config without prompting for migration; run `mm migrate-config` to review recommended updates. It does not preview host-usage capture, the activity row a real push appends, post-push GC of orphaned blobs, or upload re-reads.
 

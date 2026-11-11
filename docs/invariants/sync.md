@@ -4,6 +4,7 @@ Read BEFORE editing any of these:
 
 - `src/mind_meld/pullflow.py` — `_pull_core`
 - `src/mind_meld/cli.py` — `_push_core`
+- `src/mind_meld/cli.py` — `_sync_success` / `_sync_failure` / `_emit_sync_outcome`
 - `src/mind_meld/core.py` — `_SyncProgress` / `_start_sync_progress`
 - `src/mind_meld/core.py` — `_pause_sync_progress` / `_fetch_remote_manifest`
 - `src/mind_meld/core.py` — `_recover_prior_manifest`
@@ -50,9 +51,13 @@ Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (o
 
 ## Attended terminal outcome (Track 78A)
 
-For non-preview push/pull, the outer `_sync_outcome` owns one final plain line:
-success on stdout; failed/incomplete/interrupted/refused on stderr with one
-existing fixing/diagnostic command. Default and verbose share its grammar.
+For non-preview push/pull, the outer `_sync_outcome` owns the final plain-text
+outcome lines (Track 129B): on success, `_sync_success` returns `list[str]` with
+one `core._outcome_line(verb, part)` (`<Verb>: <part>.`) on stdout per thing
+that happened; on failed/incomplete/interrupted/refused, `_sync_failure` returns
+two lines on stderr (`core._error_line(...)` followed by `core._fix_line(...)`,
+i.e., `mm: error: <Verb> <state> [<cause>]: ...` and `Run: <command>` on its own
+last line). Default and verbose share its grammar.
 Flush stdout and stderr before that write, then flush its stream. Delivery to
 a broken pipe is not guaranteed; reporting failure never retries sync or undoes
 known effects. Auth/migration/conflict prompts and read-only previews keep their
@@ -63,7 +68,7 @@ setup/auth -> mm lock -> unchanged core / publication ledger
                         -> invocation-local accepted or recovered result
            -> capture receipt -> unlock -> eligible update
            -> history command_scope notice -> attended run record/notice
-           -> flush streams -> ONE outcome -> explicit exit
+           -> flush streams -> per-thing outcome lines (or 2-line error) -> explicit exit
 ```
 
 Push hands its result off immediately after manifest acceptance, before
@@ -79,30 +84,40 @@ Push display counts are recomputed from accepted user-file diffs after upload
 holds. Existing content_files/content_changed evidence and GC semantics stay
 unchanged; invocation-only published_content_files and metadata/selection/repair
 facts distinguish accepted bytes, metadata, selection and repair. Usage is
-reported only with publication proof, never counted as user files. Held counts
-stay separate; paths/reasons are verbose. Pull uses total_applied with conflict
-copies included and distinct skipped/failed counts, across the selected scope,
-not as unique paths; Track 91A adds a deleted clause and, when non-zero, an
-`older` clause (see "Fast-forward, propagated deletions and anchors (Track 91A)"). No peers/no sources are explicit branch facts.
+reported in `--verbose` (`Usage published: ...`), `mm status`, and `mm diag`
+only with publication proof, never counted as user files, and omitted from the
+default `Push:` outcome line (a push that publishes only usage prints
+`Push: no content changes.`). Held counts print on their own outcome line
+(`Push: 1 file held.` / `Push: N files held.`); paths/reasons are verbose. Pull
+uses total_applied with conflict copies included and distinct skipped/failed
+counts, across the selected scope, not as unique paths; skipped counts are
+omitted from the default `Pull:` outcome line (available in `mm pull -v`,
+`mm status`, and `mm diag`, so a pull that only skips newer local files prints
+`Pull: no changes.`). Track 91A's deleted clause, `older` clause, `waiting`
+clause, and `old_form` clause each emit as their own `Pull: <clause>.` line on
+success (see "Fast-forward, propagated deletions and anchors (Track 91A)"). No
+peers/no sources are explicit branch facts.
 
 A positive failed-file count ends attended pull with
-`Pull incomplete [result-degraded]` and explicit exit 1 **after** writing its
+`mm: error: Pull incomplete [result-degraded]: ...` followed by `Run: mm diag`
+and explicit exit 1 **after** writing its
 existing degraded run record. Autopull retains exit 0, per-file warnings and its
 `N file(s) failed` breadcrumb. Conflict-fail preflight keeps exit 3 before writes.
 Original command failure wins over optional finalizer/output failures; accepted
 or applied effects remain visible. Unknown effects direct read-only diagnosis
 before retry; no blind retry advice or repair guarantee is added.
 
-`_sync_failure` keeps curated refusal text intact, including any alternative
-remedy it names (such as `mm disable-source <name>`), and drops only a trailing
-`then run <cmd>` step that repeats the selected `Run:` command: `mm update`
-(newer/unsupported format), `mm migrate-config`, `mm init`, `mm push` (snapshot
-refusal), else `mm diag`. Conflict-fail preflight selects
+`_sync_failure` delegates remedy selection and trailing-repeat stripping to
+`core._fix_for(msg, default=command)`. It keeps curated refusal text intact,
+including any alternative remedy it names (such as `mm disable-source <name>`),
+and drops only a trailing `then run <cmd>` step that repeats the selected `Run:`
+command: `mm update` (newer/unsupported format), `mm migrate-config`, `mm init`,
+`mm push` (snapshot refusal), else `mm diag`. Conflict-fail preflight selects
 `mm pull --conflict-mode keep-both`, or `mm diag` for predicted local failures. Uncaught `MindMeldError` text is kept; other
 unexpected errors show only their class name. Setup, authentication, lock-held
 and refused stops, and setup/crypto-session errors without a returned result,
 report no content published / no files applied. Counts are singular at 1
-(`1 file applied`, `1 content change published`). The `MINDMELD_PASSPHRASE`
+(`1 file applied`, `1 content change published`, `1 file held`). The `MINDMELD_PASSPHRASE`
 remedy replaces a passphrase error only when stdin is not a terminal. A
 no-source attended push ends `Push: no enabled sources.` and records run cause
 `no-changes`, not `ok`.
@@ -953,7 +968,7 @@ The mm-events rescan replaces its sources, so it takes their holds from its own 
 | **Frozen** (under a nested git checkout) | `skipped: nested git repository`; its published entries are kept | See [Nested git checkouts](#nested-git-checkouts-are-frozen-never-published) for resuming sync or excluding the subtree |
 | **Skipped / excluded** (oversized at the scan, glob, marker) | `skipped:` lines with `--verbose`; excluded paths silent | Raise `sync.max_file_size` or adjust the glob |
 | **Tombstoned** | The deletion record is published (with the deleted version's sha256); a path with a tombstone is never frozen or held | Nothing: the record suppresses restoration of the missing file, and a peer that last synced exactly those bytes from this machine deletes its copy with a 30-day recovery copy (see "Fast-forward, propagated deletions and anchors (Track 91A)"); a peer holding different bytes keeps its file |
-| **Refused** (could not read, enumeration, confinement, missing root, recovered prior with a changing file) | One four-part `Cannot publish: ...` reason in the final `Push refused [snapshot-refused]` line, exit 1, previous snapshot kept | The fix in the message; blobs uploaded before the stop remain as orphans for GC |
+| **Refused** (could not read, enumeration, confinement, missing root, recovered prior with a changing file) | One four-part `Cannot publish: ...` reason in `mm: error: Push refused [snapshot-refused]: ...` followed by `Run: <command>`, exit 1, previous snapshot kept | The fix in the message; blobs uploaded before the stop remain as orphans for GC |
 
 Frozen checkout entries and held files are the **only** sanctioned exceptions to a complete snapshot. A third exception requires revisiting the manifest model, not another special case. Held-only exits: a scan that holds everything takes the existing no-substantive-change exit (no manifest put, sidecar, last_seen or events tail) but returns a `PushResult` carrying `held` and never claims "up to date"; an upload that holds everything still puts the manifest. `mm push --dry-run` applies the scan hold, shows the held count after the per-source summaries, and exits 0; upload re-reads stay unpreviewed. `mm recapture` takes its written-locally-but-not-synced exit when any held path is mm-internal. A file that is written continuously can be held on every push; the held count is visible each time (paths with `--verbose`), and `exclude_patterns` ends it.
 
@@ -1966,7 +1981,7 @@ Directory durability includes each published file's parent and the parent of eve
 
 **Residual windows.** An interrupt between `atomic_write_bytes` returning and `published()` loses that file's row and its parent fsync registration; its bytes are already on disk. Closing that window requires a callback inside the atomic-write primitive and is outside this contract. A second Ctrl-C during recovery can interrupt bookkeeping and replace the first traceback. No rollback is claimed.
 
-Attended pull uses `Pull incomplete [result-degraded]:` for a positive failed-file count. Interrupt and unexpected-error lines say completed changes remain. The legacy `Pull incomplete:` summary, and interrupted/aborted lines that say completed changes were kept, remain only for a direct caller with no outcome owner. Success output never includes "failed". Autopull retains the byte-identical breadcrumb detail `N file(s) failed` and exit 0; its count line explains retry on the next pull. Attended pull exits 1 for per-file failures after finalization (78A). `mm status` points a degraded failed-file breadcrumb back to `mm pull`.
+Attended pull uses `mm: error: Pull incomplete [result-degraded]:` (followed by `Run: mm diag`) for a positive failed-file count. Interrupt and unexpected-error lines say completed changes remain. The legacy `Pull incomplete:` summary, and interrupted/aborted lines that say completed changes were kept, remain only for a direct caller with no outcome owner. Success output never includes "failed". Autopull retains the byte-identical breadcrumb detail `N file(s) failed` and exit 0; its count line explains retry on the next pull. Attended pull exits 1 for per-file failures after finalization (78A). `mm status` points a degraded failed-file breadcrumb back to `mm pull`.
 
 Tests: `tests/test_pull_helpers.py::TestApplyExceptionBoundary53A`, publication/failure matrix tests in that module, `tests/test_integration.py::TestApplyRecovery53A`, and `tests/test_manifest.py::TestLoadManifestApplyMetadata53A`.
 
