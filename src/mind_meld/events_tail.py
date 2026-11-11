@@ -903,6 +903,32 @@ def _no_release_reads_clause(readers: Sequence[str]) -> str:
     )
 
 
+def _capture_skip_phrase(reader: str, reason: str, *, attended: bool) -> str:
+    """Build a notice for a reader the capture caller already consented to.
+
+    Keep inventory reads here, outside the pure formatter also used by run
+    evidence to enumerate its closed vocabulary without any host consent.
+    """
+    evidence = None
+    if attended and reason == "deadline" and reader in HOST_READER_SOURCE_GATE:
+        try:
+            locked = False
+            if reader == "codex":
+                with codex_host.locked_json_snapshot(codex_host.CACHE_PATH, blocking=False) as snap:
+                    locked = snap.state == "lock_failed"
+            diag = {} if locked else host_registry.reader_usage_diag(reader, count_logs=True)
+        except Exception:
+            diag = {}
+        if isinstance(diag, Mapping):
+            evidence = HostReadEvidence(
+                files_on_disk=diag.get("files_on_disk"),
+                files_cached=diag.get("files_cached"),
+            )
+    return _host_skip_phrase(
+        reader, reason, readiness="ready", evidence=evidence, attended=attended
+    )
+
+
 def _host_skip_phrase(
     reader: str,
     reason: str,
@@ -950,21 +976,6 @@ def _host_skip_phrase(
             and type(evidence.files_cached) is int
         ):
             left = max(0, evidence.files_on_disk - evidence.files_cached)
-        elif evidence is None and attended and isinstance(reader, str):
-            try:
-                locked = False
-                if reader == "codex":
-                    with codex_host.locked_json_snapshot(
-                        codex_host.CACHE_PATH, blocking=False
-                    ) as snap:
-                        locked = snap.state == "lock_failed"
-                diag = {} if locked else host_registry.reader_usage_diag(reader, count_logs=True)
-            except Exception:
-                diag = {}
-            on_disk = diag.get("files_on_disk") if isinstance(diag, Mapping) else None
-            cached = diag.get("files_cached") if isinstance(diag, Mapping) else None
-            if type(on_disk) is int and type(cached) is int:
-                left = max(0, on_disk - cached)
         if type(left) is int and left > 0:
             return (
                 f"{reader} usage catching up ({left} left) — "
@@ -1690,16 +1701,13 @@ def _run_events_tail(
         # reader/reason when `dropped` is empty.
         if capture.host_capture.dropped:
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
-                phrase = _host_skip_phrase(
-                    dropped_reader, dropped_reason, readiness="ready", attended=not quiet
-                )
+                phrase = _capture_skip_phrase(dropped_reader, dropped_reason, attended=not quiet)
                 degradations.append(phrase)
                 _diagnostic(f"mm: notice: {phrase}\n")
         elif not capture.host_capture.complete:
-            phrase = _host_skip_phrase(
+            phrase = _capture_skip_phrase(
                 capture.host_capture.reader,
                 capture.host_capture.reason,
-                readiness="ready",
                 attended=not quiet,
             )
             degradations.append(phrase)

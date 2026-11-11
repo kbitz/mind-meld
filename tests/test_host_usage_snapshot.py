@@ -3782,10 +3782,8 @@ def test_track_125a_codex_deadline_catching_up_matches_diag_pending_and_failures
     diag = codex_host.codex_usage_diag()
     assert diag["pending"] == 2
 
-    # Push notice path (evidence=None, attended=True) fills N from reader_usage_diag.
-    push_phrase = events_tail._host_skip_phrase(
-        "codex", "deadline", readiness="ready", attended=True
-    )
+    # Only the consented capture notice path fills N from reader_usage_diag.
+    push_phrase = events_tail._capture_skip_phrase("codex", "deadline", attended=True)
     expected = (
         f"codex usage catching up ({diag['pending']} left) — "
         "content sync and git/session capture unaffected. "

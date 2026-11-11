@@ -391,6 +391,7 @@ def run_details(details: list[str]) -> tuple[list[str], int]:
         for reason in (*get_args(host_usage.Reason), "unavailable", None)
         for attended in (False, True)
     }
+    host_names = "|".join(re.escape(name) for name in events.HOST_USAGE_TOKEN_SOURCES)
     retained, omitted = [], 0
     for detail in details:
         if not isinstance(detail, str):
@@ -414,7 +415,13 @@ def run_details(details: list[str]) -> tuple[list[str], int]:
                     r"events tail failed \([A-Za-z][A-Za-z0-9_]*\)|"
                     r"git walk dropped [0-9]+ repositories this push\. Run mm recapture --dry-run "
                     r"to check current repository failures, then mm recapture 30d "
-                    r"to recover the omitted commits",
+                    r"to recover the omitted commits|"
+                    r"git capture catching up \([1-9][0-9]* left\) — "
+                    r"the next attended mm push continues it|"
+                    rf"(?:{host_names}) usage catching up \([1-9][0-9]* left\) — "
+                    r"content sync and git/session capture unaffected\. "
+                    r"The next attended mm push continues it; see "
+                    rf"{re.escape(events_tail.HOST_USAGE_CAPTURE_URL)}\.",
                     detail,
                 )
             )

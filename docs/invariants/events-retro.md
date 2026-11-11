@@ -49,7 +49,9 @@ scalar occurrence/omission counts capped at 2**53. Only bounded candidates pass
 through attemptlog.run_details/make_run; producer omissions merge into the
 existing omitted_details before write_run validation. Unknown cache-write or
 oversize details are honestly omitted, never encoded as a fabricated known
-reader cause. Existing events_degradations counts retain occurrences without
+reader cause. The run-detail allowlist retains exact count-bearing host and Git
+catch-up phrases; formatting and allowlisting never read any host store.
+Existing events_degradations counts retain occurrences without
 one retained string per file. Readers remain mm status/mm diag; no new log or
 persisted field is added. Empty-repository discovery remains advisory.
 
@@ -1655,8 +1657,9 @@ the generic retry sentence naming `mm push` and `mm diag`.
 `deadline` states that this push/init's read did not finish inside its budget.
 When `left = max(0, files_on_disk - files_cached)` is a positive integer — from
 `evidence` on `mm status` / `mm diag`, or from a best-effort
-`host_registry.reader_usage_diag(reader, count_logs=True)` lookup when
-`evidence is None and attended` — `_host_skip_phrase` returns
+`host_registry.reader_usage_diag(reader, count_logs=True)` lookup in
+`_capture_skip_phrase` for an attended, consented capture reader — the pure
+`_host_skip_phrase` formatter returns
 `<reader> usage catching up (<left> left) — content sync and git/session capture unaffected. The next attended mm push continues it; see <HOST_USAGE_CAPTURE_URL>.`
 (for Codex, `<left>` matches `mm diag`'s `host_usage.codex.pending`). When
 `<left>` is 0 or either count is unknown, or on a quiet non-evidence caller

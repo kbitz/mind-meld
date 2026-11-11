@@ -764,11 +764,7 @@ def _capture_attended_usage(
         notices = []
         for name, _read in readers:
             if name in dropped:
-                notices.append(
-                    events_tail._host_skip_phrase(
-                        name, dropped[name], readiness="ready", attended=True
-                    )
-                )
+                notices.append(events_tail._capture_skip_phrase(name, dropped[name], attended=True))
             elif outcomes.get(name) == "partial":
                 notices.append(f"{name} coverage is partial; mm diag shows the reader's state.")
             elif outcomes.get(name) == "absent":
