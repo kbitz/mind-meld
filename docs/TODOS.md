@@ -44,6 +44,17 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/attemptlog.py|tests/test_attemptlog.py] Test gap: Pure formatter lock-access guard
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The run-detail purity regression spies on diagnostic inventories but not the separate Codex cache-lock probe.
+- **Hypothesis (untested):** Extend that test with a lock-access spy so reintroducing a lock probe without an inventory is independently detected; re-verify the current pure formatter first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_attemptlog.py:697
+- **Evidence:** Outside challenge of `e1be42a`; current formatter has no filesystem or lock calls and no defect was reproduced. Existing test failed before the consent repair and passed afterward.
+- **Context:** /review-and-prep for PR #310, 2026-11-11. Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+
 ### [review:files=src/mind_meld/core.py|tests/test_integration.py] Test gap: Delayed measured progress retains counters
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Delayed startup renders the phase and counters retained before the display becomes visible.
