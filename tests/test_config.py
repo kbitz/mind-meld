@@ -1,6 +1,7 @@
 """Tests for mind_meld.config — TOML load/save, validation."""
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -756,7 +757,9 @@ class TestDefaultSources:
 
         res = CliRunner().invoke(app, ["init", "--help"])
         assert res.exit_code == 0, res.output
-        text = " ".join(res.output.split())
+        # CI colors and boxes the help; codes and borders split the sentence.
+        raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", res.stdout)
+        text = " ".join(raw.replace("│", " ").split())
         assert "waits up to two minutes for Syncthing to deliver mm-crypto-init" in text
         assert "waits until Syncthing delivers" not in text
 
