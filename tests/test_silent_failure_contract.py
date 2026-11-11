@@ -745,8 +745,10 @@ def test_pull_conflict_mode_fail_exits_3_before_writes(tmp_path, monkeypatch):
     assert role.read_text() == snapshot_before
     siblings = list(role.parent.iterdir())
     assert all(".sync-conflict-" not in p.name for p in siblings)
-    # The conflicting files are named, then the refusal is the final stderr line.
-    assert r.stderr.splitlines()[-1].startswith("Pull refused [command-refused]:")
+    # The conflicting files are named, then the refusal and fix are the final stderr lines.
+    err_lines = r.stderr.splitlines()
+    assert err_lines[-2].startswith("mm: error: Pull refused [command-refused]:")
+    assert err_lines[-1] == "Run: mm pull --conflict-mode keep-both"
     assert "role.md" in r.stderr  # the conflicting file is named before the refusal
 
 
@@ -1583,38 +1585,12 @@ def test_error_writes_to_stderr_not_stdout(tmp_path, monkeypatch):
 
     # Exit code 1 from _error's typer.Exit(1).
     assert r.exit_code == 1
-    # The error text must be on stderr.
-    assert "Push failed [setup-error]:" in (r.stderr or "")
+    # The error text must be on stderr in the shared error form.
+    assert "mm: error: Push failed [setup-error]:" in (r.stderr or "")
     # And stdout must be clean — no rich error leakage. Before the fix,
     # stdout would carry a [red]Error:[/red]-expanded string.
     assert "Error:" not in (r.stdout or "")
-
-
-def test_error_preserves_rich_formatting_on_stderr(monkeypatch):
-    """Rich Console(stderr=True) still emits color codes when attached to
-    a real terminal; the forced-terminal option proves the formatting
-    pipeline still runs (color bytes in the captured stream).
-
-    This protects against a naive "just print() to stderr" refactor that
-    would silently drop the [red]Error:[/red] styling for interactive users.
-    """
-    import io
-
-    from rich.console import Console
-
-    # The test explicitly verifies ANSI output. The host's NO_COLOR choice is
-    # correct for normal CLI output but would otherwise override Rich's forced
-    # terminal setup and turn this into an environment-dependent assertion.
-    monkeypatch.delenv("NO_COLOR", raising=False)
-    buf = io.StringIO()
-    c = Console(file=buf, stderr=True, force_terminal=True, color_system="truecolor")
-    c.print("[red]Error:[/red] it blew up")
-    out = buf.getvalue()
-    # Rich emits an ANSI escape for red when force_terminal + color_system
-    # are set. The presence of ESC[ proves styling survived.
-    assert "\x1b[" in out
-    assert "Error:" in out
-    assert "it blew up" in out
+    assert "mm: error:" not in (r.stdout or "")
 
 
 # ─── Group 1 / Track 1A: quiet-path audit fixes ──────────────────────────
@@ -1631,15 +1607,26 @@ def test_autopush_surfaces_corrupt_manifest_sidecar_recovery_in_quiet_mode(tmp_p
     r = runner.invoke(app, ["push"])
     assert r.exit_code == 0, r.stderr
 
+    noop_push = runner.invoke(app, ["autopush"])
+    assert noop_push.exit_code == 0
+    assert (noop_push.stdout, noop_push.stderr) == ("", "")
+    noop_pull = runner.invoke(app, ["autopull"])
+    assert noop_pull.exit_code == 0
+    assert (noop_pull.stdout, noop_pull.stderr) == ("", "")
+
     # Corrupt this device's remote manifest so the next push triggers recovery.
     backend = LocalBackend(tmp_path / "storage")
     backend.put("manifests/dev-a/manifest.json.enc", b"definitely-not-a-real-blob")
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
-    # Sidecar recovery branch fired — must be visible on stderr in quiet mode.
-    assert "corrupt" in (r.stderr or "")
-    assert "sidecar" in (r.stderr or "")
+    assert r.stdout == ""
+    # Sidecar recovery branch fired — must be visible on stderr in quiet mode as one warning line.
+    lines = (r.stderr or "").splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith(
+        "mm: warning: remote manifest corrupt; recovered prior state from local sidecar"
+    )
 
 
 def test_autopull_surfaces_total_failed_count_on_stderr(tmp_path, monkeypatch):

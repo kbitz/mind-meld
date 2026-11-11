@@ -1020,10 +1020,13 @@ CORE_DEFINITIONS = frozenset(
     _config_missing_recommended_excludes
     _count
     _error
+    _error_line
     _fetch_remote_manifest
     _filter_disabled_sources
     _filter_excluded_paths
     _filter_symlinked_paths
+    _fix_for
+    _fix_line
     _freeze_nested_checkout_entries
     _get_config
     _get_passphrase_or_exit
@@ -1035,12 +1038,17 @@ CORE_DEFINITIONS = frozenset(
     _merge_manifests
     _newer_format_message
     _normalize_autorun_breadcrumbs
+    _notice
+    _outcome_line
     _pause_sync_progress
+    _print_error
     _prove_omitted_paths_absent
     _require_published_source_root
     _resolve_all_configured_sources
     _retain_prior_default_sources
+    _stderr_lines
     _stdin_is_terminal
+    _warning
     iter_source_diffs
     """.split()
 )
@@ -1512,7 +1520,7 @@ def test_status_core_single_ownership_and_qualified_calls():
             f"{module}: expected owner inventory {expected}"
         )
         assert _unqualified_owner_calls(source, module) == []
-    assert len(CORE_DEFINITIONS) == 35 + len(PULL_CORE_DEFINITIONS)
+    assert len(CORE_DEFINITIONS) == 43 + len(PULL_CORE_DEFINITIONS)
     assert len(STATUSFLOW_DEFINITIONS) == 31
     assert len(PULLFLOW_DEFINITIONS) == 48
 

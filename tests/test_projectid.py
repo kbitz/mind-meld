@@ -1000,9 +1000,9 @@ def test_switch_push_outcome_lines(mac):
             attended=True,
             result_observer=lambda r: None,
         )
-    assert _sync_success("push", result) == "Push: project memory published under shared names."
+    assert _sync_success("push", result) == ["Push: project memory published under shared names."]
 
-    # When the same push also uploads, one line says both.
+    # When the same push also uploads, each thing gets its own line.
     seed = Machine(mac.fs_root.parent, mac.store, "again", "/Users/user", "77777777")
     seed.checkout("/Users/user/Dev/widgets")
     seed_old_form(seed, {f"{folder}/memory/MEMORY.md": "a\n"})
@@ -1017,10 +1017,11 @@ def test_switch_push_outcome_lines(mac):
             result_observer=lambda r: None,
         )
     assert result.wire_names_published and result.published_content_files == 1
-    assert _sync_success("push", result) == (
-        "Push: 1 content change published; project memory published under shared names."
-    )
-    assert _sync_success("push", PushResult(names_updated=True)) == "Push: project names updated."
+    assert _sync_success("push", result) == [
+        "Push: 1 content change published.",
+        "Push: project memory published under shared names.",
+    ]
+    assert _sync_success("push", PushResult(names_updated=True)) == ["Push: project names updated."]
     del out
 
 
@@ -3370,15 +3371,18 @@ def test_a_held_switch_says_project_memory_is_not_published(linux):
         )
     assert linux.first_byte() == crypto.FORMAT_VERSION
     # The parked folder's file is truthfully reported as left out beside the held switch.
-    line = _sync_success("push", result)
-    assert line.startswith(
-        "Push: project memory not published until Claude's projects folder can be listed; "
+    lines = _sync_success("push", result)
+    assert len(lines) == 2
+    assert (
+        lines[0]
+        == "Push: project memory not published until Claude's projects folder can be listed."
     )
-    assert "1 file left out because" in line and line.endswith("run mm pull to restore them.")
-    assert _sync_success("push", PushResult(published_content_files=1, switch_held=True)) == (
-        "Push: 1 content change published; "
-        "project memory not published until Claude's projects folder can be listed."
-    )
+    assert lines[1].startswith("Push: 1 file left out because ")
+    assert lines[1].endswith("run mm pull to restore them.")
+    assert _sync_success("push", PushResult(published_content_files=1, switch_held=True)) == [
+        "Push: 1 content change published.",
+        "Push: project memory not published until Claude's projects folder can be listed.",
+    ]
 
 
 def test_a_file_deleted_in_a_folder_gone_at_the_switch_can_return_inside_its_checkout(mac, linux):
@@ -3861,7 +3865,7 @@ def test_a_deletion_is_followed_with_one_record_and_a_recovery_copy(trio):
         assert [c.read_text() for c in copies] == ["v0\n"]
         assert copies[0].stat().st_mode & 0o777 == 0o600
         # The pull says what it deleted and where the copy is (O8).
-        line = _sync_success("pull", result)
+        [line] = _sync_success("pull", result)
         assert line.startswith("Pull: 1 file deleted because mac deleted it; copies in ")
         assert "for 30 days" in line and "#recovering-a-deleted-file" in line
 
@@ -4203,7 +4207,7 @@ def test_a_restored_machine_with_an_older_timestamp_is_held_as_older_until_touch
 def _sync_success_line(result) -> str:
     from mind_meld.cli import _sync_success
 
-    return _sync_success("pull", result)
+    return "\n".join(_sync_success("pull", result))
 
 
 # ── a changed home, hash-less records, same-named files ───────────────
@@ -4362,7 +4366,7 @@ def add_source(machine: Machine, kind: str) -> tuple[Path, str, str]:
 
 
 def push_line(machine: Machine, **kwargs) -> tuple[PushResult | None, str]:
-    """An attended push, and the outcome line it would print."""
+    """An attended push, and the outcome lines it would print."""
     from mind_meld.cli import _sync_success
 
     with machine.on():
@@ -4375,7 +4379,7 @@ def push_line(machine: Machine, **kwargs) -> tuple[PushResult | None, str]:
             result_observer=lambda r: None,
             **kwargs,
         )
-    return result, _sync_success("push", result)
+    return result, "\n".join(_sync_success("push", result))
 
 
 @pytest.mark.parametrize("kind", ["claude", "generic", "gstack", "muse"])

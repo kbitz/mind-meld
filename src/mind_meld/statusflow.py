@@ -666,7 +666,7 @@ def status(
                 backend, passphrase, config, read_only=True, pending=pending
             )
         except MindMeldError as e:
-            report["failure"] = "Error: " + safety.safe_terminal_str(str(e))
+            report["failure"] = core._error_line(safety.safe_terminal_str(str(e)))
             raise typer.Exit(1) from e
         for note in pending:
             console.print(safe_str(note))
@@ -925,6 +925,7 @@ def status(
                 )
                 count_labels = {
                     "held": "files not yet synced",
+                    "total_skipped": "skipped (local newer)",
                     "total_failed": "files failed to apply",
                     "corrupt_peer_count": "corrupt peers",
                     "total_skipped_unknown_source": "unknown source pairs",

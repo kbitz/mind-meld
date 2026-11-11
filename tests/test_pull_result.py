@@ -382,8 +382,9 @@ class TestWaitingOutcome:
         r = runner.invoke(app, ["pull"])
 
         assert r.exit_code == 0, (r.stdout, r.stderr)
-        line = r.stdout.strip().splitlines()[-1]
-        assert re.fullmatch(r"Pull: no changes; waiting for \d+ files? from Mac A\.", line), line
+        lines = r.stdout.strip().splitlines()
+        assert lines[-2] == "Pull: no changes."
+        assert re.fullmatch(r"Pull: waiting for \d+ files? from Mac A\.", lines[-1]), lines
 
     def test_waiting_comes_before_the_remedy_when_the_pull_also_failed(self, tmp_path, monkeypatch):
         _setup_real_config(tmp_path, monkeypatch)
@@ -400,8 +401,10 @@ class TestWaitingOutcome:
         r = runner.invoke(app, ["pull"])
 
         assert r.exit_code == 1
-        line = r.stderr.strip().splitlines()[-1]
-        assert "; waiting for 2 files from Mac A. Run: mm diag" in line, line
+        lines = r.stderr.strip().splitlines()
+        assert lines[-2].startswith("mm: error: Pull incomplete [result-degraded]:")
+        assert "; waiting for 2 files from Mac A." in lines[-2], lines
+        assert lines[-1] == "Run: mm diag"
 
     def test_clause_and_detail_forms_and_sanitizing(self):
         result = pullflow.PullResult(
@@ -601,37 +604,39 @@ class TestSyncSuccessLine:
     def test_a_deletion_only_pull_leads_with_the_deletion(self):
         from mind_meld.cli import _sync_success
 
-        assert _sync_success("pull", _deleted(3)) == (
+        assert _sync_success("pull", _deleted(3)) == [
             f"Pull: 3 files deleted because Mac B deleted them; copies in {FOLDER} for 30 days; "
             f"see {URL}."
-        )
+        ]
 
     def test_an_applied_file_leads_and_the_deletion_follows(self):
         from mind_meld.cli import _sync_success
 
-        line = _sync_success("pull", _deleted(2, total_written=2))
-        assert line == (
-            f"Pull: 2 files applied; 2 files deleted because Mac B deleted them; copies in "
-            f"{FOLDER} for 30 days; see {URL}."
-        )
+        lines = _sync_success("pull", _deleted(2, total_written=2))
+        assert lines == [
+            "Pull: 2 files applied.",
+            f"Pull: 2 files deleted because Mac B deleted them; copies in "
+            f"{FOLDER} for 30 days; see {URL}.",
+        ]
 
     def test_older_edits_and_waiting_follow_in_order(self):
         from mind_meld.cli import _sync_success
 
         older = [pullflow.OlderEdit("Mac B", "notes", "a.md")]
         waiting = [pullflow.WaitingPeer("a", "Mac C", files=2)]
-        line = _sync_success(
+        lines = _sync_success(
             "pull", pullflow.PullResult(older=older, total_waiting=2, waiting=waiting)
         )
-        assert line == (
-            "Pull: no changes; 1 older peer edit not applied (mm pull --verbose); "
-            "waiting for 2 files from Mac C."
-        )
+        assert lines == [
+            "Pull: no changes.",
+            "Pull: 1 older peer edit not applied (mm pull --verbose).",
+            "Pull: waiting for 2 files from Mac C.",
+        ]
 
     def test_nothing_to_report_is_still_no_changes(self):
         from mind_meld.cli import _sync_success
 
-        assert _sync_success("pull", pullflow.PullResult()) == "Pull: no changes."
+        assert _sync_success("pull", pullflow.PullResult()) == ["Pull: no changes."]
 
     def test_a_partial_pull_that_deleted_says_so_in_what_remains(self, tmp_path, monkeypatch):
         _setup_real_config(tmp_path, monkeypatch)
@@ -645,9 +650,12 @@ class TestSyncSuccessLine:
         r = runner.invoke(app, ["pull"])
 
         assert r.exit_code == 1
-        line = r.stderr.strip().splitlines()[-1]
+        lines = r.stderr.strip().splitlines()
+        line = lines[-2]
+        assert line.startswith("mm: error: Pull incomplete [result-degraded]:")
         assert "2 files deleted because Mac B deleted them" in line, line
         assert line.index("completed changes remain") < line.index("2 files deleted")
+        assert lines[-1] == "Run: mm diag"
 
 
 class TestLedgerCauseInTheAutopullBreadcrumb:

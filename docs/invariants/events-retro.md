@@ -1938,7 +1938,8 @@ for other callers) carry
 `prerequisites`, `readers` (a row was still written), `no-row`, `capture-failed`,
 `append-failed`, `max-file-size`, `not-published: <cause>`, or
 `unverified: <reason>`; `push-failed` is
-the content-sync stop, an `Error:` line with exit 1. A permanent format failure calls for
+the content-sync stop, an `mm: error:` line with exit 1, followed by its final
+`Run: <command>` line. A permanent format failure calls for
 upgrade; a background deadline can use attended warming, while an exhausted
 attended warm allowance needs an honest diagnostic, not a promise to bypass its
 own budget. Include/exclude failures name the setting to change. Non-publication
