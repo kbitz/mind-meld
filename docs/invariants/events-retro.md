@@ -3527,7 +3527,8 @@ writes remain a labelled unknown and suppress any at-most claim.
 cannot reach OpenAI's >272K prompt threshold: 20,955 events across 789
 rollouts, max observed input 244,361. Codex's `~` rests on that assumption;
 the window is configurable and absent from the wire, so a tripwire is deferred
-in TODOS. Anthropic 4.6+ bills the full 1M context at standard rates. The
+in TODOS. Anthropic 4.6+ bills the full 1M context at standard rates except
+Haiku 5.5, whose accepted standard-rate limitation is documented above. The
 Anthropic rate refresh landed in Track 58A, verified 2026-09-14; 57A's
 host delivery and model-scoped at-most contract remain in force, with the
 details carried by `cost_floor` in `MM_HEALTH`.
