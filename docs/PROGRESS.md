@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.37 | 2026-11-11 | Errors from hand-run commands, including a mistyped option, now print as `mm: error: …` with the fix on a final `Run: <command>` line, and `mm push` and `mm pull` end with one line for each thing that happened. |
 | 1.12.36 | 2026-11-11 | A push or `mm status` now says `catching up (N left)` when usage or git capture stopped at its time limit with work remaining, and terminal sync waits three seconds before showing transient progress with reader and repository counts. |
 | 1.12.35 | 2026-11-10 | A machine joining the fleet no longer copies gstack's generated Codex install (`skills/gstack/`) from other machines, and a managed `mm init` that has just accepted the fleet folder now waits up to two minutes for the key header and finishes the join in the same run when it arrives. |
 | 1.12.34 | 2026-11-10 | Automatic updates now look for new releases with this machine's own git credentials, so they work while the repository is private, and `mm status` and `mm diag` name the reason when a release check or an automatic update could not run. |
