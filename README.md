@@ -931,10 +931,11 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 
 ### Sync outcomes
 
-Commands share five plain-text output forms (Track 129B):
+The shared output style has five plain-text forms (Track 129B). Push/pull and
+the shared error helpers use them; the remaining commands adopt them in later Tracks:
 
 - **Outcome:** `<Verb>: <what happened>.` on stdout, one line per thing that happened (`Push: 3 content changes published.`, `Push: 1 file held.`, `Pull: 3 files applied (1 conflict copy).`).
-- **Error:** `mm: error: <what broke>` on stderr, followed by `Run: <command>` on its own last line.
+- **Error:** `mm: error: <what broke>` on stderr, followed by `Run: <command>` on its own last line when a fix command is supplied.
 - **Warning:** `mm: warning: <what is wrong>` on stderr (one line; data-at-risk warnings are never quiet-gated).
 - **Notice:** `mm: notice: <what changed or was skipped>` on stderr (one line).
 - **Fix command:** `Run: <command>` on its own last line after an error, or ending a one-line warning, notice, or status verdict; CLI usage errors exit **2** with `Run: <command path> --help` instead of a Rich panel.
@@ -981,19 +982,19 @@ published version, if any, and adds its own outcome line (`Push: 1 file held.` /
 `Push: N files held.`); its paths/reasons appear with `--verbose`.
 Verified usage publication is omitted from the default `mm push` outcome line
 (a push that publishes only usage prints `Push: no content changes.`); inspect
-usage publication with `mm push --verbose` (`Usage published: ...`),
+usage publication with `mm push --verbose` (`Host usage published (manifest accepted).`),
 `mm status`, or `mm diag`. Other explicit outcomes include `Push: no content changes.`,
 `Push: no enabled sources.`, `Pull: no changes.`, `Pull: no peer devices.`
 and `Pull: no enabled sources.`
 Pull counts applications across selected peers/sources, not guaranteed unique
 paths. Skipped newer local files are omitted from the default `mm pull` outcome
 line (a pull that only skips newer local files prints `Pull: no changes.`);
-`mm pull --verbose` (`skipped (local newer): N`), `mm status`, and `mm diag`
+`mm pull --verbose` (`N skipped (local newer)`), `mm status`, and `mm diag`
 show the skipped count. A deletion a peer made prints its own outcome line
 `Pull: 3 files deleted because Mac B deleted them;
 copies in ~/.config/mind-meld/deleted/<stamp> for 30 days; see ...#recovering-a-deleted-file.`
 (`peers` replaces the name when several machines deleted); `mm pull --verbose`
-lists the paths. A peer edit held back as `older` prints `Pull: 1 older peer edit not applied.`.
+lists the paths. A peer edit held back as `older` prints `Pull: 1 older peer edit not applied (mm pull --verbose).`
 A push whose scan folder was recreated prints `Push: metadata updated.` followed by
 `Push: 12 files left out because /home/user/.claude/projects is new; run mm pull to restore them.`
 Conflict copies are already included in applied files; skipped and failed

@@ -84,7 +84,7 @@ Push display counts are recomputed from accepted user-file diffs after upload
 holds. Existing content_files/content_changed evidence and GC semantics stay
 unchanged; invocation-only published_content_files and metadata/selection/repair
 facts distinguish accepted bytes, metadata, selection and repair. Usage is
-reported in `--verbose` (`Usage published: ...`), `mm status`, and `mm diag`
+reported in `--verbose` (`Host usage published (manifest accepted).`), `mm status`, and `mm diag`
 only with publication proof, never counted as user files, and omitted from the
 default `Push:` outcome line (a push that publishes only usage prints
 `Push: no content changes.`). Held counts print on their own outcome line
@@ -108,9 +108,9 @@ or applied effects remain visible. Unknown effects direct read-only diagnosis
 before retry; no blind retry advice or repair guarantee is added.
 
 `_sync_failure` delegates remedy selection and trailing-repeat stripping to
-`core._fix_for(msg, default=command)`. It keeps curated refusal text intact,
+`core._fix_for(msg, fallback=command)`. It keeps curated refusal text intact,
 including any alternative remedy it names (such as `mm disable-source <name>`),
-and drops only a trailing `then run <cmd>` step that repeats the selected `Run:`
+and drops only a trailing `then run/retry <cmd>` or `. Run/— run <cmd> first` step that repeats the selected `Run:`
 command: `mm update` (newer/unsupported format), `mm migrate-config`, `mm init`,
 `mm push` (snapshot refusal), else `mm diag`. Conflict-fail preflight selects
 `mm pull --conflict-mode keep-both`, or `mm diag` for predicted local failures. Uncaught `MindMeldError` text is kept; other
