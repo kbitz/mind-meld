@@ -44,6 +44,47 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=tests/test_initflow.py] Test gap: managed join wait duration contract
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The recorded-pause tests derive the expected count and delay from production constants; they do not independently pin 120 one-second pauses.
+- **Hypothesis (untested):** Extend the existing timeout assertion with an independent expected count/cadence when changing the wait contract.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_initflow.py:977
+- **Evidence:** Read-only coverage audit found the missing branch/assertion; 782 targeted tests passed. No failure was reproduced for this behavior.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/308 at 13239eb (2026-11-10). Revisit on the next Track touching the tagged files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: managed join poll error arrivals
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No test injects corrupt, newer-format or unreadable headers after the initial missing fetch has entered polling.
+- **Hypothesis (untested):** Extend an existing delayed-delivery fixture to exercise immediate refusal and unwritten Mind Meld state for each late error.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py:916
+- **Evidence:** Read-only coverage audit found the missing branch/assertion; 782 targeted tests passed. No failure was reproduced for this behavior.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/308 at 13239eb (2026-11-10). Revisit on the next Track touching the tagged files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: managed join unknown peer count
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The managed exact-folder return with an unknown peer count is not exercised by the no-wait tests; owner-managed None bypasses that branch.
+- **Hypothesis (untested):** Supply unknown membership on a managed rerun and verify it stops without polling.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py:312
+- **Evidence:** Read-only coverage audit found the missing branch/assertion; 782 targeted tests passed. No failure was reproduced for this behavior.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/308 at 13239eb (2026-11-10). Revisit on the next Track touching the tagged files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: managed join timeout reclassification
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Timeout tests keep folder contents/readability unchanged, leaving the post-wait reclassification branches untested.
+- **Hypothesis (untested):** Deliver in-flight or fleet entries during the wait, or make the directory unreadable at timeout, and check the current-state remedy without writes.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/initflow.py:998
+- **Evidence:** Read-only coverage audit found the missing branch/assertion; 782 targeted tests passed. No failure was reproduced for this behavior.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/308 at 13239eb (2026-11-10). Revisit on the next Track touching the tagged files.
+- **Effort:** ? (user triages in /roadmap)
+
+
 ### [review:files=src/mind_meld/upgrade.py|tests/test_upgrade.py] Test gap: git executable disappears after discovery
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** The adapter's `FileNotFoundError` classification after `find_git` succeeds lacks a direct test.

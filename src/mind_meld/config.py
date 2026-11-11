@@ -445,8 +445,20 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         # produced 17 conflicts in a single pull, every one of them a file
         # neither machine authored. Codex-specific — OpenCode has no
         # `skills/.system`, so the glob is NOT mirrored onto that entry.
+        # skills/gstack-* matches the flat skills/gstack-<name>/SKILL.md
+        # directories, while skills/gstack/* matches the skills/gstack/ runtime
+        # root that gstack's setup writes under ~/.codex/skills/gstack
+        # (SKILL.md, .source-path with the local checkout path under the user's
+        # home directory, and nested skills/gstack/<skill>/SKILL.md renders;
+        # fnmatch requires the '-' in skills/gstack-*, so skills/gstack/...
+        # slipped past; Track 127A). claude, grok and muse already miss
+        # skills/gstack/ (symlinked repo directory vs hardcoded allowlists),
+        # and gstack's setup writes Antigravity's runtime root under
+        # ~/.gemini/antigravity-cli/skills/gstack (AGY_SKILLS), outside mm's
+        # agy source at ~/.gemini/config.
         "exclude_patterns": [
             "skills/gstack-*",
+            "skills/gstack/*",
             "skills/log-work/*",
             "skills/retro-fleet/*",
             "skills/.system/*",

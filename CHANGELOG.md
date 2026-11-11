@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.35] - 2026-11-10
+
+A machine joining the fleet no longer copies gstack's generated Codex install (`skills/gstack/`) from other machines, and a managed `mm init` that has just accepted the fleet folder now waits up to two minutes for the key header and finishes the join in the same run when it arrives.
+
+### Changed
+
+- A machine joining the fleet no longer copies gstack's generated Codex install (`skills/gstack/`) from other machines, and a managed `mm init` that has just accepted the fleet folder now waits up to two minutes for the key header and finishes the join in the same run when it arrives.
+- Codex sync keeps gstack’s generated skills local; explicit source configs adopt the exclusion through `mm migrate-config`.
+- Managed joins wait up to two minutes for the key header and can complete in one `mm init` run.
+
+### Upgrade notes
+
+- On a machine whose config has an explicit `codex` source (every config `mm init` writes), accept the recommended-exclusions prompt on the next attended `mm push` or `mm pull`, or run `mm migrate-config`, so gstack's generated Codex install stops syncing; files an earlier pull already copied there stay until gstack's own Codex setup rewrites them.
+
 ## [1.12.34] - 2026-11-10
 
 Automatic updates now look for new releases with this machine's own git credentials, so they work while the repository is private, and `mm status` and `mm diag` name the reason when a release check or an automatic update could not run.
