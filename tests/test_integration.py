@@ -15979,7 +15979,8 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
     )
     monkeypatch.setenv("TERM", "xterm-256color")
 
-    # 1. Push finishing inside the progress delay (default 3.0s) draws nothing to the terminal.
+    # 1. Force the pre-delay case without depending on machine speed.
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 1e6)
     monkeypatch.setattr(
         _mm_codex_host,
         "read_codex_usage",
@@ -16014,28 +16015,7 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
 
     # 2. Push running longer than the progress delay on a terminal shows phase + reader/repo counts
     # and clears before the single outcome line.
-    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.02)
-    monkeypatch.setattr(core, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
-
-    def slow_codex(**kw):
-        time.sleep(0.03)
-        return _mm_host_usage.HostUsageResult({}, complete=True)
-
-    def slow_repo(root, since_iso, timeout_ms, author_emails=None):
-        time.sleep(0.02)
-        return (
-            {
-                "project": Path(root).name,
-                "local_path": str(root),
-                "remote_url": None,
-                "commits": [],
-                "branches": ["main"],
-            },
-            None,
-        )
-
-    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", slow_codex)
-    monkeypatch.setattr(_mm_events, "_walk_one_repo", slow_repo)
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0)
 
     slow_terminal = _SyncTerminalBuffer()
     for mod in (cli_module, pullflow, core):
@@ -16084,10 +16064,59 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
     assert "1/1 readers" not in verbose_terminal.getvalue()
 
 
+def test_sync_progress_delayed_start_finishing_after_shutdown_restores_terminal(monkeypatch):
+    # Value: protects=terminal cleanup when delayed display startup outlives shutdown;
+    # fails_when=the ticker publishes a live display after both stop calls;
+    # why_new=blocked-refresh tests start the display before shutdown;
+    # seam=none; no_claim=the operating system terminal driver is simulated
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        core, "console", Console(file=terminal, force_terminal=True, color_system=None, width=80)
+    )
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 1e6)
+    monkeypatch.setattr(core, "_UPDATE_SPINNER_JOIN_SECONDS", 0)
+    entered = threading.Event()
+    release = threading.Event()
+    displays = []
+    original_start = core.Progress.start
+
+    def blocked_start(display):
+        displays.append(display)
+        entered.set()
+        assert release.wait(5), "display startup was not released"
+        return original_start(display)
+
+    monkeypatch.setattr(core.Progress, "start", blocked_start)
+    progress = core._SyncProgress(enabled=True)
+    progress.start("Capturing host usage")
+    ticker = progress._ticker
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0)
+    try:
+        assert entered.wait(5), "ticker did not enter delayed display startup"
+        # Command cleanup and the enclosing outcome boundary both stop it.
+        progress.stop()
+        progress.stop()
+    finally:
+        release.set()
+        ticker.join(timeout=5)
+    try:
+        assert not ticker.is_alive()
+        assert progress._progress is None
+        assert len(displays) == 1
+        rendered = terminal.getvalue()
+        assert "\x1b[?25l" in rendered
+        assert rendered.rfind("\x1b[?25h") > rendered.rfind("\x1b[?25l")
+    finally:
+        for display in displays:
+            display.stop()
+
+
 def test_track_125a_attended_pushes_resume_stopped_scans_and_clear_catching_up(
     capture61, monkeypatch
 ):
     from tests.test_host_usage import _context, _token, _write_rollout
+    from tests.test_host_usage_snapshot import _cooperative_git_stop
 
     memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
     codex_source = next(s for s in capture61["cfg"]["sync"]["sources"] if s["name"] == "codex")
@@ -16130,22 +16159,16 @@ def test_track_125a_attended_pushes_resume_stopped_scans_and_clear_catching_up(
         lambda *_a, **_kw: {"user@example.com"},
     )
 
-    # Cap total attended capture at 300 ms so Push 1 stops partway on both Codex and Git.
-    capture61["cfg"]["retro"] = {"capture_budget_ms": 250, "attended_capture_cap_ms": 300}
-    save_config(capture61["cfg"], capture61["path"])
-
     original_read_full = _mm_codex_host._read_full_rollout
-    codex_state = {"push": 1}
+    codex_state = {"push": 1, "expired": False}
 
     def staged_codex_full(path, before, deadline):
         res = original_read_full(path, before, deadline)
         if codex_state["push"] == 1:
-            time.sleep(0.25)
+            codex_state["expired"] = True
         return res
 
     def staged_git_repo(root, since_iso, timeout_ms, author_emails=None):
-        if codex_state["push"] == 1 and Path(root).resolve() == repo_b.resolve():
-            time.sleep(0.5)
         return (
             {
                 "project": Path(root).name,
@@ -16158,7 +16181,12 @@ def test_track_125a_attended_pushes_resume_stopped_scans_and_clear_catching_up(
         )
 
     monkeypatch.setattr(_mm_codex_host, "_read_full_rollout", staged_codex_full)
+    monkeypatch.setattr(_mm_host_usage, "_expired", lambda _deadline: codex_state["expired"])
     monkeypatch.setattr(_mm_events, "_walk_one_repo", staged_git_repo)
+    _cooperative_git_stop(
+        monkeypatch,
+        lambda root: codex_state["push"] != 1 or Path(root).resolve() == repo_a.resolve(),
+    )
 
     # Push 1 stops partway on Codex (1 of 2 rollouts left) and Git (1 of 2 repos left).
     (memory / "resume125.md").write_text("push 1")
@@ -16173,6 +16201,7 @@ def test_track_125a_attended_pushes_resume_stopped_scans_and_clear_catching_up(
 
     # Push 2 (even with no new content changes) continues from stored caches and finishes both.
     codex_state["push"] = 2
+    codex_state["expired"] = False
     push2 = runner.invoke(app, ["push"])
     assert push2.exit_code == 0, push2.output
 

@@ -2655,8 +2655,19 @@ class _SyncProgress:
             self._enabled = False
             return False
         self._progress = progress
-        self._last_render_at = time.monotonic()
         self._task = task
+        # stop() cannot wait on this lock: terminal startup may block beyond
+        # its bounded ticker join. Publish first, then retire a late display
+        # ourselves so neither ordering can leave a live spinner after shutdown.
+        if self._stopped:
+            self._progress = None
+            self._task = None
+            with suppress(Exception, SystemExit):
+                progress.stop()
+            with suppress(Exception, SystemExit):
+                console.show_cursor(True)
+            return False
+        self._last_render_at = time.monotonic()
         return True
 
     def _render_locked(self, state: updateprogress.UpdateProgress, *, force: bool = False) -> None:

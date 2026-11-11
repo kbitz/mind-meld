@@ -3295,11 +3295,39 @@ def _make_git_root(path: Path) -> Path:
     return path.resolve()
 
 
+def _cooperative_git_stop(monkeypatch, can_finish):
+    """Exercise the real collection/cursor path with controlled pending futures."""
+    from concurrent.futures import Future
+
+    class Executor:
+        def __init__(self, **_kwargs):
+            self.futures = []
+
+        def submit(self, fn, root, *args):
+            future = Future()
+            self.futures.append(future)
+            if can_finish(root):
+                future.set_result(fn(root, *args))
+            return future
+
+        def shutdown(self, **_kwargs):
+            for future in self.futures:
+                future.cancel()
+
+    def collect(futures, *, timeout):
+        for future in futures:
+            if future.done():
+                yield future
+        if any(not future.done() for future in futures):
+            raise events_tail.events.FuturesTimeoutError
+
+    monkeypatch.setattr(events_tail.events, "ThreadPoolExecutor", Executor)
+    monkeypatch.setattr(events_tail.events, "as_completed", collect)
+
+
 def test_track_125a_git_walk_resumes_from_stored_cursors_within_three_pushes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import time as _time
-
     cache_path = tmp_path / "git-capture.json"
     monkeypatch.setattr(events_tail.mm_config, "GIT_CAPTURE_CACHE_PATH", cache_path)
     monkeypatch.setattr(
@@ -3316,10 +3344,6 @@ def test_track_125a_git_walk_resumes_from_stored_cursors_within_three_pushes(
         step = run_idx["n"]
         resolved = str(Path(root).resolve())
         seen_since.append((step, Path(root).name, since_iso))
-        # On push N (1..3), repo-1..repo-N finish quickly; remaining repos exceed the walk budget.
-        target_fast = {str(r) for r in repos[:step]}
-        if resolved not in target_fast:
-            _time.sleep(0.35)
         return (
             {
                 "project": Path(root).name,
@@ -3332,6 +3356,7 @@ def test_track_125a_git_walk_resumes_from_stored_cursors_within_three_pushes(
         )
 
     monkeypatch.setattr(events_tail.events, "_walk_one_repo", staged_walk)
+    _cooperative_git_stop(monkeypatch, lambda root: root in repos[: run_idx["n"]])
 
     for push_num in (1, 2, 3):
         run_idx["n"] = push_num
@@ -3693,6 +3718,23 @@ def test_track_125a_progress_scope_receives_host_and_git_counts_and_isolates_fau
         ("Recording activity", 1, 2, "repositories"),
         ("Recording activity", 2, 2, "repositories"),
     ]
+
+    def broken_sink(*_args):
+        raise RuntimeError("display unavailable")
+
+    expected_usage = events_tail._capture_host_usage(readers, deadline=1e12)
+    with events_tail.progress_scope(broken_sink):
+        actual_usage = events_tail._capture_host_usage(readers, deadline=1e12)
+        git_rows, _discovery, aborts, errors = events_tail._capture_git_rows(
+            {},
+            "dev-a",
+            since=datetime(2026, 10, 1, tzinfo=timezone.utc),
+            walk_budget_ms=500,
+            root_discovery_budget_ms=50,
+        )
+    assert actual_usage == expected_usage
+    assert {p["project"] for p in git_rows[0]["projects"]} == {"r1", "r2"}
+    assert (aborts, errors) == (0, 0)
 
 
 def test_track_125a_codex_deadline_catching_up_matches_diag_pending_and_failures_stay_failures(
