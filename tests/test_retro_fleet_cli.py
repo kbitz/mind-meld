@@ -322,6 +322,11 @@ class TestPricingFlags:
             timeout=30,
         )
         assert result.returncode == 0, result.stderr
+        assert (
+            "Pricing: saved new-model to this machine's pricing cache (default location).\n"
+            in result.stderr
+        )
+        assert "Pricing:" not in result.stdout
         saved = json.loads((tmp_path / ".config/mind-meld/pricing-cache.json").read_text())
         assert saved["models"]["new-model"]["input"] == 1
 
@@ -356,7 +361,128 @@ class TestPricingFlags:
             timeout=30,
         )
         assert result.returncode == 0, result.stderr
+        assert "Pricing: saved new-model and marked verified " in result.stderr
+        assert "in this machine's pricing cache (set by MM_PRICING_CACHE_PATH).\n" in result.stderr
+        assert "Pricing:" not in result.stdout
         saved = json.loads(cache.read_text())
         assert saved["models"]["new-model"]["input"] == 1
         assert saved["models"]["new-model"]["verified_date"] == saved["verified_date"]
         assert not tu.PRICING_CACHE_PATH.exists()
+
+    def test_set_model_price_confirmation_stderr_and_unchanged_stdout(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mind_meld.skills.retro_fleet import aggregator
+
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
+
+        rc = aggregator.main(
+            [
+                "7d",
+                "--no-author-filter",
+                "--set-model-price",
+                "model-b=1,.2,0,3",
+                "--set-model-price",
+                "model-a=2,.1,.25,4",
+            ]
+        )
+        first = capsys.readouterr()
+        assert rc == 0
+
+        rc2 = aggregator.main(["7d", "--no-author-filter"])
+        second = capsys.readouterr()
+        assert rc2 == 0
+
+        expected_line = (
+            "Pricing: saved model-a, model-b to this machine's pricing cache "
+            "(set by MM_PRICING_CACHE_PATH).\n"
+        )
+        assert first.out == second.out
+        assert "Pricing:" not in first.out
+        assert first.err == expected_line + second.err
+
+    def test_mark_pricing_verified_confirmation_stderr_and_unchanged_stdout(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mind_meld import token_usage as tu
+        from mind_meld.skills.retro_fleet import aggregator
+
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
+
+        rc = aggregator.main(["7d", "--no-author-filter", "--mark-pricing-verified"])
+        first = capsys.readouterr()
+        assert rc == 0
+
+        rc2 = aggregator.main(["7d", "--no-author-filter"])
+        second = capsys.readouterr()
+        assert rc2 == 0
+
+        saved = json.loads(tu.PRICING_CACHE_PATH.read_text())
+        stamped = saved["verified_date"]
+        expected_line = (
+            f"Pricing: marked verified {stamped} in this machine's pricing cache "
+            "(set by MM_PRICING_CACHE_PATH).\n"
+        )
+        assert first.out == second.out
+        assert "Pricing:" not in first.out
+        assert first.err == expected_line + second.err
+
+    def test_combined_set_and_mark_verified_emits_single_confirmation_line(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mind_meld import token_usage as tu
+        from mind_meld.skills.retro_fleet import aggregator
+
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
+
+        rc = aggregator.main(
+            [
+                "7d",
+                "--no-author-filter",
+                "--set-model-price",
+                "new-model=1,.2,0,3",
+                "--mark-pricing-verified",
+            ]
+        )
+        first = capsys.readouterr()
+        assert rc == 0
+
+        rc2 = aggregator.main(["7d", "--no-author-filter"])
+        second = capsys.readouterr()
+        assert rc2 == 0
+
+        saved = json.loads(tu.PRICING_CACHE_PATH.read_text())
+        stamped = saved["verified_date"]
+        expected_line = (
+            f"Pricing: saved new-model and marked verified {stamped} in this machine's "
+            "pricing cache (set by MM_PRICING_CACHE_PATH).\n"
+        )
+        assert first.out == second.out
+        assert "Pricing:" not in first.out
+        assert first.err == expected_line + second.err
+
+    def test_aggregator_main_write_failure_keeps_exact_error_without_confirmation(
+        self, monkeypatch, capsys
+    ):
+        from mind_meld import token_usage as tu
+        from mind_meld.skills.retro_fleet import aggregator
+
+        def fail(*args, **kwargs):
+            raise OSError("read-only cache")
+
+        monkeypatch.setattr(tu, "update_pricing_cache", fail)
+        rc = aggregator.main(["7d", "--mark-pricing-verified"])
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        assert "Pricing:" not in captured.err
+        assert captured.err == (
+            f"mm: could not write pricing cache at {tu.PRICING_CACHE_PATH}: read-only cache. "
+            "Fix: mm retro-fleet 7d --mark-pricing-verified\n"
+        )

@@ -1262,8 +1262,9 @@ happened on.
   Do not describe an unavailable cell as a priced floor.
 - A priced model retained at zero tokens is not a priced basis.
   `_agent_row_cost` returns unavailable unless some non-excluded model has
-  nonzero volume under a resolved card, so a zero-token priced id cannot turn
-  an otherwise unpriced row into `≥$0`.
+  nonzero volume under a resolved card (and, when the row is a floor, under a
+  non-extrapolated resolved card), so a zero-token priced id or an
+  extrapolated-only floor row cannot turn an otherwise unpriced row into `≥$0`.
 
 #### The health payload replaced the Notes section
 
@@ -3411,8 +3412,8 @@ models to `PRICING` unless they actually show up in fleet data. Pinned by
 `test_retired_model_prices_at_current_family_tier`.
 
 **`PRICING` is an OVERRIDE table.** It shipped empty at v0.12.13's first
-draft. After Track 58A it carries Opus 4/4.0/4.1, Sonnet 4/4.0/4.5/4.6,
-and Fable/Mythos 5.1 cards
+draft. After Track 58A and Track 128A it carries Opus 5.5, Opus 4/4.0/4.1,
+Sonnet 5.5, Sonnet 4/4.0/4.5/4.6, Haiku 5.5, and Fable/Mythos 5.1 cards
 whose rates differ from the family fallback. Date-suffix normalization makes
 Opus/Sonnet `-4` reachable; the published `-4-0` aliases remain reachable too.
 A per-model entry that *duplicates* its family recreates the
@@ -3420,8 +3421,15 @@ multi-site drift this release removed: an Opus rate change would need N
 identical edits plus the tier, and missing one would silently price
 some models at the old rate. Add an entry ONLY when a model permanently
 departs from its tier; `test_pricing_holds_no_redundant_entries` fails
-the build if an entry duplicates its family. Sonnet 5's `$2/$10` is now
-standard pricing, verified 2026-09-14;
+the build if an entry duplicates its family. Opus 5.5 is `$4/$20` with a 0.05x
+cache read (`$0.20/MTok`); Sonnet 5.5 keeps `$2/$10` input/output with a 0.05x
+cache read (`$0.10/MTok`); Haiku 5.5 is `$0.10/$0.50` (standard rate for prompts
+up to 100k tokens). Requests above 100k prompt tokens (including cache reads
+and writes) bill at five times every rate in that Haiku card; the retro does
+not apply that tier, so its estimate understates such usage. The owner
+explicitly accepted the standard-rate card on 2026-11-11 and kept tier-aware
+pricing deferred to R6. Sonnet 5's `$2/$10` is now
+standard pricing, verified 2026-09-14 and re-verified 2026-11-11;
 the scheduled `$3/$15` increase was cancelled. Sonnet 4.x retains `$3/$15`
 overrides. Fable/Mythos 5.1 uses a 0.025x cache read ($0.25/MTok), while
 5.0's family tiers remain at 0.1x ($1/MTok), preserving the conservative
@@ -3524,7 +3532,7 @@ host delivery and model-scoped at-most contract remain in force, with the
 details carried by `cost_floor` in `MM_HEALTH`.
 
 Provenance is per vendor. Anthropic uses `PRICING_LAST_UPDATED`
-(2026-09-14), OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-10-27), xAI `PRICING_XAI_LAST_UPDATED`
+(2026-11-11), OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-10-27), xAI `PRICING_XAI_LAST_UPDATED`
 (2026-11-05), Google `PRICING_GOOGLE_LAST_UPDATED` (2026-10-22), and Muse
 `PRICING_MUSE_LAST_UPDATED` (2026-10-27), with Muse's source in
 `PRICING_MUSE_SOURCE_URL` (https://dev.meta.ai/docs/pricing-rate-limits).
@@ -3589,7 +3597,11 @@ the passive reader nor the explicit writer can crash on one. A generic
 write-failure retry fix reconstructs the requested `--set-model-price` and
 `--mark-pricing-verified` arguments. Invalid specifications exit 2 with sanitized input and a fixing
 example; explicit lock/read/write failures exit 1 with sanitized stderr and
-one fixing command. Tests isolate the cache, including CLI subprocesses.
+one fixing command. A successful `--set-model-price` and/or
+`--mark-pricing-verified` write prints one `Pricing:` confirmation line to
+stderr (naming the saved model IDs and/or stamped date and the cache location
+class, `default location` or `set by MM_PRICING_CACHE_PATH`, never the path
+itself) and nothing new to stdout; failure text is unchanged. Tests isolate the cache, including CLI subprocesses.
 To reset the overlay, remove the selected cache file while no pricing update
 is running, then rerun: bundled rates and verification dates apply again.
 
@@ -3627,15 +3639,23 @@ never an unpriced label.
 
 `floor_prices` lives beside `resolve_prices`: Anthropic uses the minimum 5m
 cache-write rate (1.25x input), vendor literal cards are unchanged. One floor
-condition makes **every priced model in that agent row** use floor cards;
-`_section_costs` computes models and total from that same basis. Since 1.1 host tokens are summed
+condition makes **every verified priced model in that agent row** use floor cards;
+`_section_costs` computes models and total from that same basis. Under a floor
+(`≥`), models priced by family or positional extrapolation (`_priced_by_extrapolation`:
+`resolve_prices(m) is not None and not is_verified_model(m)`, excluding
+`COST_EXCLUDED_MODELS`) are left out of `_floor_costs` and contribute nothing
+to the `≥` figure, while still being named under `pricing_extrapolated` in
+`MM_HEALTH`; a floor row whose only priced volume is extrapolated (or whose
+non-extrapolated priced models have zero volume) renders `—` and emits
+`cost_unavailable`, never `≥$0`. Since 1.1 host tokens are summed
 fleet-wide per agent rather than kept as per-machine subtotals; see the
 unified-agents renderer contract for the possible-overlap detector and its
 limits. Floors are computed per AGENT row. Model-specific pricing causes stay
 with their family; partial/failed-reader coverage applies to every family
 because the missing models cannot be attributed. The markers are `~` estimate, `≥` floor of
 a priced subtotal under bundled assumptions — **not a guaranteed billing
-minimum** — and `—` unavailable, never zero. Estimates may extrapolate. Claude
+minimum** — and `—` unavailable, never zero. Estimates (`~`) may extrapolate at
+the family rate; floors (`≥`) never do. Claude
 coverage gaps floor the Claude row. The five-line `RATE_MARKER_LEGEND` no
 longer renders; the same definitions live in `MM_HEALTH`'s `pricing.basis`.
 `tokens_incomplete` names missing Claude coverage and its remedy; `cost_floor`

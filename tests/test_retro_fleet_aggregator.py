@@ -7976,3 +7976,225 @@ class TestCheckpointCommitsNeverCount:
         project, error = mm_events._walk_one_repo(repo, since, 5000)
         assert error is None and project is not None
         assert [c["subject"] for c in project["commits"]] == ["feat: real"]
+
+
+# ---------------------------------------------------------------------------
+# Track 128A — Claude 5.5 rate cards, floor extrapolation exclusion, and
+# cross-machine override parity.
+# ---------------------------------------------------------------------------
+
+
+class TestTrack128APricingAndFloorExtrapolation:
+    def _claude_data(self, by_model: dict[str, dict[str, int]]) -> aggregator.RetroData:
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.fleet.devices_known = 1
+        data.fleet.devices_active = {"dev-a"}
+        data.sessions.active_days = {"2026-04-22"}
+        data.sessions.token_devices = {"dev-a": NOW}
+        data.sessions.tokens_by_model = by_model
+        data.sessions.total_input_tokens = sum(b["input"] for b in by_model.values())
+        data.sessions.total_cache_read_tokens = sum(b["cache_read"] for b in by_model.values())
+        data.sessions.total_cache_create_tokens = sum(b["cache_create"] for b in by_model.values())
+        data.sessions.total_output_tokens = sum(b["output"] for b in by_model.values())
+        return data
+
+    def _claude_row(self, data: aggregator.RetroData) -> aggregator.FleetAgentRow:
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        return next(r for r in usage.rows if r.key == "claude")
+
+    def _claude_table_line(self, out: str) -> str:
+        return next(line for line in out.splitlines() if line.startswith("| Claude |"))
+
+    def test_claude_5_5_models_never_emit_pricing_extrapolated(self):
+        by_model = {
+            "claude-opus-5-5": _usage(100_000),
+            "claude-sonnet-5-5": _usage(100_000),
+            "claude-haiku-5-5": _usage(100_000),
+        }
+        data = self._claude_data(by_model)
+        out = aggregator.format_retro(data)
+        assert _health_entry(out, "pricing_extrapolated") is None
+        assert not aggregator._extrapolation_notes(by_model, scope="Claude")
+
+    def test_r1_extrapolated_model_left_out_of_floor_and_named_in_health(self, monkeypatch):
+        from mind_meld import token_usage as tu
+
+        real_opus = tu.floor_prices("claude-opus-5")
+        real_haiku = tu.floor_prices("claude-haiku-5-5")
+        assert real_opus is not None and real_haiku is not None
+
+        patched_pricing = dict(tu.PRICING)
+        patched_pricing.pop("claude-haiku-5-5")
+        monkeypatch.setattr(tu, "PRICING", patched_pricing)
+        monkeypatch.setattr(tu, "VERIFIED_MODEL_IDS", tu.VERIFIED_MODEL_IDS - {"claude-haiku-5-5"})
+
+        opus_bucket = {"input": 100_000, "cache_read": 0, "cache_create": 0, "output": 0}
+        haiku_bucket = {"input": 2_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
+        by_model = {
+            "claude-opus-5": opus_bucket,
+            "claude-haiku-5-5": haiku_bucket,
+            "claude-future-9-9": _usage(50_000),
+        }
+        data = self._claude_data(by_model)
+        row = self._claude_row(data)
+
+        expected_opus_floor = tu._cost_under(real_opus, opus_bucket)
+        real_subtotal = expected_opus_floor + tu._cost_under(real_haiku, haiku_bucket)
+        extrapolated_haiku_floor = tu.floor_prices("claude-haiku-5-5")
+        assert extrapolated_haiku_floor is not None
+        overstated_subtotal = expected_opus_floor + tu._cost_under(
+            extrapolated_haiku_floor, haiku_bucket
+        )
+        assert overstated_subtotal > real_subtotal
+
+        total, is_floor = aggregator._agent_row_cost(row)
+        assert is_floor is True
+        assert total == pytest.approx(expected_opus_floor)
+        assert total <= real_subtotal
+
+        out = aggregator.format_retro(data)
+        expected_cell = "≥" + aggregator._format_usd(expected_opus_floor, bound="floor")
+        assert f"| {expected_cell} |" in self._claude_table_line(out)
+        assert _health_entry(out, "cost_floor") is not None
+        extrap = _health_entry(out, "pricing_extrapolated")
+        assert extrap is not None
+        assert "claude-haiku-5-5" in extrap["detail"]
+        assert "`≥` floors leave these models out." in extrap["detail"]
+
+    def test_all_extrapolated_floor_row_renders_unavailable_and_keeps_extrapolation_health(self):
+        data = self._claude_data(
+            {
+                "claude-opus-6": _usage(1_000_000),
+                "claude-future-9-9": _usage(1_000_000),
+            }
+        )
+        row = self._claude_row(data)
+        assert aggregator._agent_row_cost(row) == (None, False)
+        out = aggregator.format_retro(data)
+        assert "| — |" in self._claude_table_line(out)
+        assert "≥$0" not in out
+        assert _health_entry(out, "cost_unavailable") is not None
+        assert _health_entry(out, "cost_floor") is None
+        extrap = _health_entry(out, "pricing_extrapolated")
+        assert extrap is not None
+        assert "claude-opus-6" in extrap["detail"]
+
+    def test_floor_row_with_zero_verified_and_nonzero_extrapolated_is_unavailable_not_zero(self):
+        data = self._claude_data(
+            {
+                "claude-opus-5": _usage(0),
+                "claude-opus-6": _usage(1_000_000),
+                "claude-future-9-9": _usage(1_000_000),
+            }
+        )
+        row = self._claude_row(data)
+        assert aggregator._agent_row_cost(row) == (None, False)
+        out = aggregator.format_retro(data)
+        assert "| — |" in self._claude_table_line(out)
+        assert "≥$0" not in out
+        assert _health_entry(out, "cost_unavailable") is not None
+        assert _health_entry(out, "cost_floor") is None
+        extrap = _health_entry(out, "pricing_extrapolated")
+        assert extrap is not None
+        assert "claude-opus-6" in extrap["detail"]
+
+    def test_non_floor_row_with_verified_and_extrapolated_model_keeps_family_estimate(self):
+        from mind_meld import token_usage as tu
+
+        by_model = {
+            "claude-opus-5": _usage(1_000_000),
+            "claude-opus-6": _usage(1_000_000),
+        }
+        data = self._claude_data(by_model)
+        row = self._claude_row(data)
+        expected_total, _ = tu.estimate_cost(by_model)
+        total, is_floor = aggregator._agent_row_cost(row)
+        assert is_floor is False
+        assert total == pytest.approx(expected_total)
+        out = aggregator.format_retro(data)
+        expected_cell = "~" + aggregator._format_usd(expected_total, bound="estimate")
+        assert f"| {expected_cell} |" in self._claude_table_line(out)
+
+    def test_floored_codex_row_excludes_positional_fallback_and_names_it_in_health(self):
+        from mind_meld import token_usage as tu
+
+        day = "2026-04-22"
+        astra_bucket = _usage(1_000_000)
+        sol_bucket = _usage(1_000_000)
+        hosts = {"codex": {day: _usage(2_000_000)}}
+        ev = _host_event(
+            "dev-a",
+            "2026-04-28T12:00:00+00:00",
+            hosts=hosts,
+            extra={
+                "partial_sources": ["codex"],
+                "tokens_by_day": {
+                    day: {
+                        **_usage(2_000_000),
+                        "by_model": {
+                            "gpt-6-astra": astra_bucket,
+                            "gpt-6.2-sol": sol_bucket,
+                        },
+                    }
+                },
+            },
+        )
+        data = _econ_data([ev])
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        codex_row = next(r for r in usage.rows if r.key == "codex")
+        astra_floor = tu.floor_prices("gpt-6-astra")
+        assert astra_floor is not None
+        expected_floor = tu._cost_under(astra_floor, astra_bucket)
+        total, is_floor = aggregator._agent_row_cost(codex_row)
+        assert is_floor is True
+        assert total == pytest.approx(expected_floor)
+        out = aggregator.format_retro(data)
+        extrap = _health_entry(out, "pricing_extrapolated")
+        assert extrap is not None
+        assert "gpt-6.2-sol" in extrap["detail"]
+
+    @pytest.mark.parametrize("floor_fixture", [False, True])
+    def test_identical_claude_5_5_cost_with_and_without_matching_local_override(
+        self, floor_fixture
+    ):
+        from mind_meld import token_usage as tu
+
+        models_55 = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
+        by_model: dict[str, dict[str, int]] = {
+            "claude-opus-5-5": {
+                "input": 250_000,
+                "cache_read": 500_000,
+                "cache_create": 100_000,
+                "output": 40_000,
+            },
+            "claude-sonnet-5-5": {
+                "input": 400_000,
+                "cache_read": 800_000,
+                "cache_create": 150_000,
+                "output": 60_000,
+            },
+            "claude-haiku-5-5": {
+                "input": 1_200_000,
+                "cache_read": 2_000_000,
+                "cache_create": 300_000,
+                "output": 120_000,
+            },
+        }
+        if floor_fixture:
+            by_model["claude-future-9-9"] = _usage(50_000)
+
+        data = self._claude_data(by_model)
+        assert tu.active_cached_model_ids() == []
+        cost_without = aggregator._agent_row_cost(self._claude_row(data))
+        line_without = self._claude_table_line(aggregator.format_retro(data))
+
+        tu.update_pricing_cache(
+            {m: tuple(tu.resolve_prices(m)[f] for f in tu._PRICING_RATE_FIELDS) for m in models_55}
+        )
+        assert tu.active_cached_model_ids() == sorted(models_55)
+
+        cost_with = aggregator._agent_row_cost(self._claude_row(data))
+        line_with = self._claude_table_line(aggregator.format_retro(data))
+        assert cost_with[1] is floor_fixture
+        assert cost_with[0] == pytest.approx(cost_without[0])
+        assert line_with == line_without
