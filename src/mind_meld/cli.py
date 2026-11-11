@@ -32,6 +32,7 @@ from rich.progress import (
     TextColumn,
 )
 from rich.table import Table
+from typer.core import TyperGroup
 
 from mind_meld import (
     __version__,
@@ -262,8 +263,41 @@ class PushResult:
     anchor_warnings: list[str] = field(default_factory=list)
 
 
+_USAGE_ERROR_CLS = next(cls for cls in typer.BadParameter.__mro__ if cls.__name__ == "UsageError")
+
+
+class _SharedStyleGroup(TyperGroup):
+    """Render Click/Typer usage errors in the shared plain stderr style."""
+
+    @staticmethod
+    def _handle_usage_error(exc: Exception) -> None:
+        if type(exc).__name__ == "NoArgsIsHelpError":
+            raise exc
+        ctx = getattr(exc, "ctx", None)
+        cmd_path = (
+            ctx.command_path if ctx is not None and getattr(ctx, "command_path", None) else "mm"
+        )
+        core._print_error(exc.format_message(), fix=f"{cmd_path} --help")
+        raise typer.Exit(getattr(exc, "exit_code", 2)) from exc
+
+    def make_context(
+        self, info_name: str | None, args: list[str], parent: Any = None, **extra: Any
+    ) -> Any:
+        try:
+            return super().make_context(info_name, args, parent=parent, **extra)
+        except _USAGE_ERROR_CLS as exc:
+            self._handle_usage_error(exc)
+
+    def invoke(self, ctx: Any) -> Any:
+        try:
+            return super().invoke(ctx)
+        except _USAGE_ERROR_CLS as exc:
+            self._handle_usage_error(exc)
+
+
 app = typer.Typer(
     name="mm",
+    cls=_SharedStyleGroup,
     help="Mind Meld — sync Claude Code sessions and other sources across machines.",
     add_completion=True,
     # `mm init` frames hold the passphrase; a traceback must never print it.
@@ -964,10 +998,10 @@ def _sync_update(config: dict, *, verbose: bool) -> None:
     try:
         upgrade.update_or_nudge(config, attended=True, diagnostics=verbose)
     except (Exception, KeyboardInterrupt):
-        core._sync_warning("mm: notice: automatic update did not complete; run mm update")
+        core._notice("automatic update did not complete. Run: mm update")
 
 
-def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) -> str:
+def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) -> list[str]:
     if verb == "push":
         result = result if isinstance(result, PushResult) else PushResult()
         published_files = result.published_content_files
@@ -999,13 +1033,11 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
                 parts = ["project memory published under shared names"]
             else:
                 parts.append("project memory published under shared names")
-        if result.host_usage_published:
-            parts.append("usage published")
         if result.held:
-            parts.append(f"{len(result.held)} held")
+            parts.append(core._count(len(result.held), "file held", "files held"))
         if result.left_out_clause:
             parts.append(result.left_out_clause.rstrip("."))
-        return "Push: " + "; ".join(parts) + "."
+        return [core._outcome_line(verb, part) for part in parts]
     assert isinstance(result, pullflow.PullResult)
     deleted = pullflow.deleted_clause(result)
     lead = (
@@ -1022,17 +1054,16 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
     if result.total_conflicted:
         word = "copy" if result.total_conflicted == 1 else "copies"
         lead += f" ({result.total_conflicted} conflict {word})"
-    if result.total_skipped:
-        lead += f"; {result.total_skipped} skipped"
+    parts = [lead]
     if deleted and result.total_applied:
-        lead += f"; {deleted}"
+        parts.append(deleted)
     if clause := pullflow.older_clause(result):
-        lead += f"; {clause}"
+        parts.append(clause)
     if clause := pullflow.waiting_clause(result):
-        lead += f"; {clause}"
+        parts.append(clause)
     if clause := pullflow.old_form_clause(result):
-        lead += f"; {clause}"
-    return "Pull: " + lead + "."
+        parts.append(clause)
+    return [core._outcome_line(verb, part) for part in parts]
 
 
 def _compact_sync_trace(exc: BaseException) -> str:
@@ -1059,7 +1090,7 @@ def _compact_sync_trace(exc: BaseException) -> str:
     )
 
 
-def _sync_failure(verb: str, state: dict, error: BaseException | None) -> str:
+def _sync_failure(verb: str, state: dict, error: BaseException | None) -> list[str]:
     run = state.get("run", {})
     result = run.get("result")
     record = state.get("record", {})
@@ -1104,20 +1135,12 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> str:
     elif message:
         # Known CLI refusals already have curated location/problem text. Keep the
         # problem, select its existing remedy, and avoid repeating command prose.
-        if "newer mm" in message or "unsupported format" in message:
-            command = "mm update"
-        elif "mm migrate-config" in message:
-            command = "mm migrate-config"
-        elif "mm init" in message:
-            command = "mm init"
-        elif message.startswith("Device not found"):
-            command = "mm devices"
-        elif cause == "snapshot-refused":
-            command = "mm push"
         # Keep the curated text intact (it may name an alternative remedy such
         # as mm disable-source); only drop a trailing step that repeats Run:.
-        reason = message.split(" See https:")[0].strip()
-        reason = re.sub(rf",? then (?:run |retry )?[`']?{re.escape(command)}[`']?\.?$", ".", reason)
+        fallback = state.get("fix") or ("mm push" if cause == "snapshot-refused" else "mm diag")
+        reason, selected = core._fix_for(message.split(" See https:")[0].strip(), fallback)
+        assert selected is not None
+        command = selected
     elif isinstance(error, MindMeldError) and str(error):
         # Curated library text; sanitized and bounded below.
         reason = str(error).split(" See https:")[0]
@@ -1129,6 +1152,8 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> str:
             if error is not None
             else "command stopped"
         )
+    if state.get("fix"):
+        command = state["fix"]
     if isinstance(result, pullflow.PullResult):
         effects = (
             f"{core._count(result.total_applied, 'file', 'files')} applied; "
@@ -1163,10 +1188,13 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> str:
         effects = "effects unconfirmed; reconcile before retrying"
     # One logical line; bound peer/config text without treating display as identity.
     reason = safety.safe_terminal_str(reason)[:384].rstrip(". ")
-    return f"{verb.title()} {kind} [{cause}]: {reason}; {effects}. Run: {command}"
+    return [
+        core._error_line(f"{verb.title()} {kind} [{cause}]: {reason}; {effects}."),
+        core._fix_line(command),
+    ]
 
 
-def _emit_sync_outcome(message: str, *, failed: bool) -> None:
+def _emit_sync_outcome(lines: Iterable[str], *, failed: bool) -> None:
     # Rich wrapping is deliberately bypassed. Flush both pipes before the last
     # write so stderr=STDOUT at process spawn preserves the observed order.
     for stream in (sys.stdout, sys.stderr):
@@ -1174,7 +1202,8 @@ def _emit_sync_outcome(message: str, *, failed: bool) -> None:
             stream.flush()
     stream = sys.stderr if failed else sys.stdout
     with suppress(Exception, SystemExit):
-        stream.write(safety.safe_terminal_str(message) + "\n")
+        for line in lines:
+            stream.write(safety.safe_terminal_str(line) + "\n")
         stream.flush()
 
 
@@ -1531,18 +1560,13 @@ def push(
                         if not result.host_usage_published:
                             raise
                         problem = (core._SYNC_OUTPUT.get() or {}).get("message", "GC refused")
-                        with core._pause_sync_progress():
-                            stderr_console.print(
-                                "mm: warning: Host usage was published; "
-                                f"post-publication GC stopped. {safe_str(problem)} "
-                                "Run mm gc for details."
-                            )
+                        core._warning(
+                            "Host usage was published; "
+                            f"post-publication GC stopped. {problem.rstrip('.')}. Run: mm gc"
+                        )
                     except (OSError, MindMeldError) as e:
                         result.maintenance_failures += 1
-                        with core._pause_sync_progress():
-                            stderr_console.print(
-                                f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
-                            )
+                        core._warning(f"GC skipped ({e}). Run: mm gc")
             except (KeyboardInterrupt, typer.Abort):
                 # Only a storage-error record may carry errno.
                 stop_cause, stop_errno = "interrupted", None
@@ -1556,10 +1580,10 @@ def push(
                         try:
                             attemptlog.write(attempt.outcome)
                         except (Exception, SystemExit) as e:
-                            core._sync_warning(
-                                "mm: notice: could not durably record this attended "
+                            core._notice(
+                                "could not durably record this attended "
                                 "capture attempt at "
-                                f"{safe_str(core._home_relative_path(attemptlog.record_path()))} "
+                                f"{core._home_relative_path(attemptlog.record_path())} "
                                 f"({type(e).__name__}); check mm status"
                             )
                 finally:
@@ -1615,10 +1639,7 @@ def _ensure_device_registered(
     try:
         register_device(backend, device_id, device_name)
     except Exception as e:
-        with core._pause_sync_progress():
-            stderr_console.print(
-                f"mm: warning: device entry self-heal failed ({type(e).__name__}): {e}"
-            )
+        core._warning(f"device entry self-heal failed ({type(e).__name__}): {e}")
         raise
 
 
@@ -1674,7 +1695,7 @@ def _record_push_anchor_observations(observations: list[dict], *, attended: bool
         warnings.append(f"sync observations unavailable ({failure}); inspect with mm diag")
     if attended:
         for warning in warnings:
-            core._print_apply_warning(f"mm: notice: {warning}.")
+            core._notice(f"{warning}.")
     return warnings
 
 
@@ -1894,13 +1915,9 @@ def _warn_push_growth(source_diffs: list) -> None:
     )
     if large:
         detail = "; ".join(f"{path} ({count} new files)" for path, count in large[:3])
-        with core._pause_sync_progress():
-            print(
-                "mm: warning: large sync growth: "
-                + safety.safe_terminal_str(detail)
-                + ". Check these subtrees before adding more files to sync.",
-                file=sys.stderr,
-            )
+        core._warning(
+            f"large sync growth: {detail}. Check these subtrees before adding more files to sync."
+        )
 
 
 def _push_core(
@@ -1963,8 +1980,7 @@ def _push_core(
     ]
     for src in skipped_internal:
         message = _config_module._missing_custom_mm_events_message(src["path"])
-        with core._pause_sync_progress():
-            print(f"mm: warning: {safety.safe_terminal_str(message)}", file=sys.stderr)
+        core._warning(message)
         events_degradations.append(message)
     if skipped_internal:
         resolution = replace(
@@ -1993,18 +2009,9 @@ def _push_core(
                     may_create=may_create,
                 )
         except Exception as e:
-            with core._pause_sync_progress():
-                stderr_console.print(
-                    f"mm: notice: retro-fleet skill installation failed: "
-                    f"{type(e).__name__}: {safe_str(e)}"
-                )
+            core._notice(f"retro-fleet skill installation failed: {type(e).__name__}: {e}")
     if not resolution.selected and not skipped_internal:
-        msg = "no sync sources found. Run 'mm init' to configure."
-        with core._pause_sync_progress():
-            if quiet:
-                print(f"mm: warning: {msg}", file=sys.stderr)
-            else:
-                console.print(f"[yellow]Warning:[/yellow] {msg}")
+        core._warning("no sync sources found. Run: mm init")
         return (
             PushResult(no_sources=True, events_degradations=events_degradations)
             if result_observer is not None
@@ -2046,12 +2053,7 @@ def _push_core(
     intended_names.update(src["name"] for src in sources)
     _refuse_unavailable_selected_sources(resolution, remote_manifest, sources)
     if not sources and not skipped_internal:
-        msg = "no sync sources found. Run 'mm init' to configure."
-        with core._pause_sync_progress():
-            if quiet:
-                print(f"mm: warning: {msg}", file=sys.stderr)
-            else:
-                console.print(f"[yellow]Warning:[/yellow] {msg}")
+        core._warning("no sync sources found. Run: mm init")
         return (
             PushResult(no_sources=True, events_degradations=events_degradations)
             if result_observer is not None
@@ -2096,12 +2098,7 @@ def _push_core(
             # Autopush stays silent; attended push, preview, status and diag report it.
             if show and path not in skipped_repos:
                 skipped_repos.add(path)
-                with core._pause_sync_progress():
-                    print(
-                        "mm: notice: skipped: nested git repository "
-                        f"{safety.safe_terminal_str(path)}",
-                        file=sys.stderr,
-                    )
+                core._notice(f"skipped: nested git repository {path}")
             return
         skipped.append((path, reason))
         if verbose and not quiet:
@@ -2360,10 +2357,8 @@ def _push_core(
                 if show:
                     _print_usage_push_mode(result)
             except Exception as e:
-                print(
-                    "mm: notice: could not print usage refresh mode "
-                    f"({type(e).__name__}); check mm status",
-                    file=sys.stderr,
+                core._notice(
+                    f"could not print usage refresh mode ({type(e).__name__}); check mm status"
                 )
             return result
         return _push_result_or_none(
@@ -2703,20 +2698,15 @@ def _push_core(
     ledger_exc = core.commit_ledger(ledger) or ledger_exc
     result.ledger_cause = core.ledger_cause(ledger_exc)
     if unwritable_roots and attended:
-        with core._pause_sync_progress():
-            for folder in unwritable_roots[:3]:
-                print(
-                    f"mm: notice: deletions under {safety.safe_terminal_str(folder)} will not "
-                    "propagate; restore write access, then mm push",
-                    file=sys.stderr,
-                )
-    if result.ledger_cause and attended:
-        with core._pause_sync_progress():
-            print(
-                f"mm: notice: pull ledger unavailable ({result.ledger_cause}); "
-                f"deletions are paused. See {LEDGER_URL}.",
-                file=sys.stderr,
+        for folder in unwritable_roots[:3]:
+            core._notice(
+                f"deletions under {folder} will not propagate; restore write access, then mm push"
             )
+    if result.ledger_cause and attended:
+        core._notice(
+            f"pull ledger unavailable ({result.ledger_cause}); "
+            f"deletions are paused. See {LEDGER_URL}."
+        )
     if attempt is not None:
         attempt.content_accepted = True
     if result_observer is not None:
@@ -2733,11 +2723,10 @@ def _push_core(
             if show and not retro_catchup_pending:
                 _print_usage_push_mode(result)
         except OSError as e:
-            with core._pause_sync_progress():
-                stderr_console.print(
-                    f"mm: warning: Content sync reached manifest acceptance; "
-                    f"post-publication maintenance failed: {safe_str(e)}. Run mm status."
-                )
+            core._warning(
+                "Content sync reached manifest acceptance; "
+                f"post-publication maintenance failed: {e}. Run: mm status"
+            )
     # Write sidecar (best-effort: failure warns but does not abort push;
     # the remote manifest succeeded, so peers still have a path to recovery).
     # Warn on both paths: without the sidecar, future corruption recovery
@@ -2747,20 +2736,11 @@ def _push_core(
         sidecar.write(local_manifest)
     except (OSError, StorageError) as e:
         result.maintenance_failures += 1
-        with core._pause_sync_progress():
-            if quiet:
-                print(
-                    f"mm: warning: failed to write recovery sidecar "
-                    f"({sidecar.sidecar_path()}): {e}. Push succeeded; future "
-                    f"corruption recovery will fall back to peer devices.",
-                    file=sys.stderr,
-                )
-            else:
-                console.print(
-                    f"[yellow]Warning:[/yellow] failed to write recovery sidecar "
-                    f"({sidecar.sidecar_path()}): {e}. Push succeeded; future "
-                    f"corruption recovery will fall back to peer devices."
-                )
+        core._warning(
+            f"failed to write recovery sidecar "
+            f"({sidecar.sidecar_path()}): {e}. Push succeeded; future "
+            f"corruption recovery will fall back to peer devices."
+        )
 
     try:
         update_last_seen(backend, device_id)
@@ -2769,11 +2749,10 @@ def _push_core(
         result.maintenance_failures += 1
         if not attended:
             raise
-        with core._pause_sync_progress():
-            stderr_console.print(
-                f"mm: warning: Content sync reached manifest acceptance; "
-                f"post-publication maintenance failed: {safe_str(e)}. Run mm diag."
-            )
+        core._warning(
+            "Content sync reached manifest acceptance; "
+            f"post-publication maintenance failed: {e}. Run: mm diag"
+        )
 
     elapsed = time.time() - start
     result.elapsed = elapsed

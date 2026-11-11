@@ -496,7 +496,7 @@ attended push's conditional activity tail and exit contract, read
 12. **Propagated deletions.** A local file absent from a remote manifest is never deleted just because it is absent. Only a peer's own, active, hash-carrying tombstone deletes it, and only when this machine's last-synced base for that peer equals the hash and the local bytes hash to it (and the guards in sync invariants hold). The file is moved into `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>` and kept at least 30 days; a record without a hash, or a file whose bytes differ, is never deleted. The deleting machine holds the only record; a machine that followed it mints none.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
 14. Release lockfile.
-15. Print the final outcome with applied, skipped, deleted, older-edit and waiting counts; real failures still make attended pull incomplete. Verbose output retains written / merged / skipped / conflicted / failed / waiting detail.
+15. Print one final outcome line per thing that happened, including applied, deleted, older-edit and waiting counts; omit skipped counts from these lines. Real failures still make attended pull incomplete. Verbose output retains written / merged / skipped / conflicted / failed / waiting detail; `mm status` and `mm diag` also retain skipped counts.
 
 ### `mm gc`
 
@@ -889,7 +889,7 @@ Usage-capture warnings go to stderr with `prerequisites: <state>`, `readers`,
 `not-published: <cause>` tokens and an actionable remedy; most also state the
 content-sync outcome and link the [host usage
 capture](README.md#host-usage-capture) section. Capture failures do
-not stop content sync. `push-failed` is a content-sync stop (an `Error:` line,
+not stop content sync. `push-failed` is a content-sync stop (an `mm: error:` line,
 exit 1), not a capture-only exit.
 
 ### Error Hierarchy (`mind-meld/errors.py`)
@@ -912,9 +912,12 @@ Snapshot refusals use a four-part message: location (source/path), problem, pres
 
 ### Error Message Format
 
-All user-facing errors follow: `[operation]: [what failed] — [why]. [what to do]`
+Shared CLI error helpers print `mm: error: <what broke>` on stderr, with
+`Run: <command>` on its own last line when the caller supplies a fix command.
+Attended push/pull failures use this form; remaining command output conversion
+is tracked separately (see [Sync outcomes](README.md#sync-outcomes)).
 
-Examples:
+Illustrative problem messages, rather than exact CLI transcripts:
 - `push: failed to write blob abc123.enc — disk full. Free space on iCloud Drive.`
 - `pull: failed to decrypt manifest — GCM tag mismatch. Wrong passphrase or corrupt data. Re-push from source device.`
 - `push: skipped large-artifact.png (67MB) — exceeds max_file_size (50MB). Increase sync.max_file_size in config.toml to include it.`

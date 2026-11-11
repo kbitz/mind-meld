@@ -200,7 +200,7 @@ def test_unknown_source_name_exits_1_and_writes_nothing(cfg, command):
     before = cfg.read_bytes()
     result = runner.invoke(app, [command, "definitely-unknown"])
     assert result.exit_code == 1, result.output
-    assert result.stderr.startswith("Error: unknown source 'definitely-unknown'")
+    assert result.stderr.startswith("mm: error: unknown source 'definitely-unknown'")
     assert result.stdout == ""
     assert cfg.read_bytes() == before
     assert not seen_sources.seen_path().exists()

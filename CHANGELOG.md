@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.37] - 2026-11-11
+
+Errors from hand-run commands, including a mistyped option, now print as `mm: error: …` with the fix on a final `Run: <command>` line, and `mm push` and `mm pull` end with one line for each thing that happened.
+
+### Changed
+
+- Errors from hand-run commands, including a mistyped option, now print as `mm: error: …` with the fix on a final `Run: <command>` line, and `mm push` and `mm pull` end with one line for each thing that happened instead of one joined line.
+- Attended `mm push` and `mm pull` print each outcome on its own line.
+- Shared diagnostics use plain stderr text, with available error remedies on a final `Run:` line; usage errors exit 2 with a help command.
+
+### Upgrade notes
+
+- Anything that reads `mm push` or `mm pull` output must expect several outcome lines, failures that start with `mm: error:` and end with a separate `Run:` line, and no `; usage published` or skipped count on the summary (`mm push -v`, `mm pull -v`, `mm status` and `mm diag` still show them).
+
 ## [1.12.36] - 2026-11-11
 
 A push or `mm status` now says `catching up (N left)` when usage or git capture stopped at its time limit with work remaining, and terminal sync waits three seconds before showing transient progress with reader and repository counts.

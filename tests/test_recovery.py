@@ -90,8 +90,10 @@ class TestRecoverPriorManifest:
             fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=quiet, dry_run=dry_run
         )
         captured = capsys.readouterr()
-        # Autopush (quiet) must still surface this data-at-risk rewrite.
-        text = " ".join((captured.err if quiet else captured.out).split())
+        # Autopush (quiet) and attended runs both surface this data-at-risk rewrite on stderr.
+        assert captured.out == ""
+        text = " ".join(captured.err.split())
+        assert "mm: warning:" in text
         assert "held only by conflict copies" in text
         assert ("mm push would rewrite it" in text) == dry_run
         if has_sidecar:
@@ -896,7 +898,7 @@ class TestListDevicesShapeValidation:
         assert len(result) == 1
         assert result[0]["device_id"] == "g"
         # Warnings for both drops, each on its own "line" — not batched.
-        assert captured.err.count("Warning:") == 2
+        assert captured.err.count("mm: warning:") == 2
         assert "bad-json.json" in captured.err
         assert "bad-shape.json" in captured.err
 

@@ -266,26 +266,23 @@ class TestFinalOutputSinks:
     def _console(buf: io.StringIO) -> Console:
         return Console(file=buf, force_terminal=False, width=200)
 
-    def test_error_renders_exception_text_as_literal_rich_text(self, monkeypatch):
+    def test_error_renders_exception_text_as_literal_rich_text(self, capsys):
         import typer
 
         from mind_meld import cli
 
-        buf = io.StringIO()
-        monkeypatch.setattr(cli.core, "stderr_console", self._console(buf))
         with pytest.raises(typer.Exit):
             cli._error("bad \x1b]52;c;ZXZpbA==\x07[red]configuration[/red]")
 
-        out = buf.getvalue()
+        out = capsys.readouterr().err
         assert "\x1b" not in out
         assert "ZXZpbA==" not in out
         assert "[red]configuration[/red]" in out
+        assert out.startswith("mm: error: ")
 
-    def test_dropped_device_warning_renders_peer_fields_as_literal(self, monkeypatch):
+    def test_dropped_device_warning_renders_peer_fields_as_literal(self, monkeypatch, capsys):
         from mind_meld import cli
 
-        buf = io.StringIO()
-        monkeypatch.setattr(cli.core, "stderr_console", self._console(buf))
         evil = "peer\x1b]52;c;ZXZpbA==\x07[red]name[/red]"
 
         def fake_list_devices_impl(_backend, *, on_drop):
@@ -295,10 +292,11 @@ class TestFinalOutputSinks:
         monkeypatch.setattr(cli.core, "_list_devices_impl", fake_list_devices_impl)
         assert cli._list_devices_warn(object()) == []
 
-        out = buf.getvalue()
+        out = capsys.readouterr().err
         assert "\x1b" not in out
         assert "ZXZpbA==" not in out
         assert "[red]name[/red]" in out
+        assert out.startswith("mm: warning: dropped device entry ")
 
     def test_status_renders_peer_device_fields_as_literal(self, monkeypatch, tmp_path: Path):
         from mind_meld import cli
@@ -356,27 +354,15 @@ class TestFinalOutputSinks:
         assert "[red]name[/red]" in out
         assert "peerid" in out
 
-    def test_error_nested_st_probe_has_no_esc_or_c1(self, monkeypatch):
+    def test_error_nested_st_probe_has_no_esc_or_c1(self, capsys):
         import typer
 
         from mind_meld import cli
 
-        buf = io.StringIO()
-        monkeypatch.setattr(
-            cli.core,
-            "stderr_console",
-            Console(
-                file=buf,
-                force_terminal=True,
-                color_system=None,
-                highlight=False,
-                width=200,
-            ),
-        )
         with pytest.raises(typer.Exit):
             cli._error(f"bad {_NESTED_OSC_ST}[red]configuration[/red]")
 
-        out = buf.getvalue()
+        out = capsys.readouterr().err
         _assert_no_esc_or_c1(out)
         assert "[red]configuration[/red]" in out
         assert "bad" in out

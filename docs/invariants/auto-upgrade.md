@@ -20,13 +20,13 @@ Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updatep
 
 ## Sync tail output and eligibility (Track 78A)
 
-Attended non-preview push/pull defer their one terminal outcome until capture
+Attended non-preview push/pull defer their terminal outcome lines until capture
 receipt, unlock, eligible update, history command_scope notice and attended run
 record/notice have finished. Successful `updating`/`updated` chatter is verbose-only
 for these callers (`diagnostics=` defaults preserve direct callers). Standalone
 `mm update` is unchanged. A foreground update can delay the final outcome; no
 latency improvement is claimed. Actionable failure/nudge/cancellation notices
-still precede the final line. Cancellation never asserts that sync succeeded:
+still precede the final outcome lines. Cancellation never asserts that sync succeeded:
 its outcome belongs to the outer sync command.
 
 Eligibility is independent of presentation: a failed attended push that acquired
