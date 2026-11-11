@@ -237,13 +237,24 @@ aggregator's render side reference this string."""
 # Pricing (per-million-token rates in USD, list price)
 # ---------------------------------------------------------------------------
 
-PRICING_LAST_UPDATED = "2026-09-14"
+PRICING_LAST_UPDATED = "2026-11-11"
 """Date the Anthropic rates below were last verified against Anthropic's
-public pricing page. Rendered onto the Claude token-block caveat line so
-the reader can judge staleness themselves. Deliberately NOT a threshold:
-mm has no network by design, so this table cannot self-update and a
-"warn after N months" rule would be a verdict the code has not earned.
-The v0.12.13 miss was three months inside a six-month window.
+public pricing page (https://platform.claude.com/docs/en/about-claude/pricing).
+Rendered onto the Claude token-block caveat line so the reader can judge
+staleness themselves. Deliberately NOT a threshold: mm has no network by
+design, so this table cannot self-update and a "warn after N months" rule
+would be a verdict the code has not earned. The v0.12.13 miss was three
+months inside a six-month window.
+
+2026-11-11 reading for the Claude 5.5 models (USD per MTok: input, cache_read,
+5m cache_create, 1h cache_create, output):
+  claude-opus-5-5:   $4.00, $0.20 (0.05x input), $5.00, $8.00, $20.00
+  claude-sonnet-5-5: $2.00, $0.10 (0.05x input), $2.50, $4.00, $10.00
+  claude-haiku-5-5:  $0.10, $0.01 (0.1x input),  $0.125, $0.20, $0.50
+(Haiku 5.5 standard rate is for prompts up to 100k tokens; prompts over 100k
+tokens bill $0.50/$0.05/$0.625/$1.00/$2.50. ``claude-opus-4-0`` and
+``claude-sonnet-4-0`` alias the page's ``Claude Opus 4`` and ``Claude Sonnet 4``
+rows, first verified 2026-09-14 and re-verified 2026-11-11.)
 
 This is the Anthropic date only. OpenAI rates have
 ``PRICING_OPENAI_LAST_UPDATED``. One date over two vendors' tables would
@@ -286,8 +297,9 @@ overview establishes the rate level. No cache-write price is published;
 nonzero writes suppress the ceiling."""
 
 # Cache read/write multipliers. Anthropic prices both as fixed multiples
-# of a model's input rate — a cache read at 0.1x input (0.025x for
-# Fable/Mythos 5.1), a cache write at 1.25x (5m TTL) or 2x (1h TTL).
+# of a model's input rate — a cache read at 0.1x input (0.05x for Opus 5.5
+# and Sonnet 5.5; 0.025x for Fable/Mythos 5.1), a cache write at 1.25x
+# (5m TTL) or 2x (1h TTL).
 # Both verified against the published pricing table on
 # PRICING_LAST_UPDATED.
 #
@@ -303,6 +315,7 @@ nonzero writes suppress the ceiling."""
 _CACHE_WRITE_MULT = 2.0
 _CACHE_WRITE_FLOOR_MULT = 1.25
 _CACHE_READ_MULT = 0.1
+_CACHE_READ_MULT_OPUS_SONNET_55 = 0.05
 _CACHE_READ_MULT_FABLE_MYTHOS_51 = 0.025
 
 
@@ -335,7 +348,8 @@ def _tier(
 # build on one.
 #
 # The Opus family is NOT rate-uniform across generations: 4.0 and 4.1
-# billed $15/$75, and the tier dropped to $5/$25 at 4.5. Without these
+# billed $15/$75, the tier dropped to $5/$25 at 4.5, and Opus 5.5 bills
+# $4/$20 with a 0.05x cache read ($0.20/MTok). Without these
 # overrides a `claude-opus-4-1` record resolves to the modern tier and
 # prices 3x LOW under a confident `~` — where before v0.12.13 it was
 # unpriced and raised a loud `>=` plus a Notes line. That is a downgrade
@@ -344,17 +358,25 @@ def _tier(
 # (Caught by the /review adversarial pass; the claim that retired models
 # never appear in live data was asserted, not checked.)
 #
+# Sonnet 5.5 keeps $2/$10 input/output like Sonnet 5, but lowers cache read
+# from 0.1x ($0.20/MTok) to 0.05x ($0.10/MTok). Haiku 5.5 drops from the
+# Haiku 4.5 tier's $1/$5 to $0.10/$0.50 (standard rate for prompts up to 100k
+# tokens).
+#
 # Claude 3-era ids need no entry: `claude-3-opus-20240229` normalizes to
 # `claude-3-opus`, whose segment 1 is "3" — not a family — so it stays
 # unpriced and surfaces honestly.
 PRICING: dict[str, dict[str, float]] = {
+    "claude-opus-5-5": _tier(4.0, 20.0, cache_read_mult=_CACHE_READ_MULT_OPUS_SONNET_55),
     "claude-opus-4-1": _tier(15.0, 75.0),
     "claude-opus-4-0": _tier(15.0, 75.0),
     "claude-opus-4": _tier(15.0, 75.0),
+    "claude-sonnet-5-5": _tier(2.0, 10.0, cache_read_mult=_CACHE_READ_MULT_OPUS_SONNET_55),
     "claude-sonnet-4-6": _tier(3.0, 15.0),
     "claude-sonnet-4-5": _tier(3.0, 15.0),
     "claude-sonnet-4": _tier(3.0, 15.0),
     "claude-sonnet-4-0": _tier(3.0, 15.0),
+    "claude-haiku-5-5": _tier(0.10, 0.50),
     "claude-fable-5-1": _tier(10.0, 50.0, cache_read_mult=_CACHE_READ_MULT_FABLE_MYTHOS_51),
     "claude-mythos-5-1": _tier(10.0, 50.0, cache_read_mult=_CACHE_READ_MULT_FABLE_MYTHOS_51),
 }
@@ -375,11 +397,15 @@ PRICING: dict[str, dict[str, float]] = {
 # Recording the provenance is the point: the bug being fixed here was a
 # rate nobody had ever re-checked, so a tier with no citation is the same
 # failure waiting to recur.
-#   fable / mythos  $10 / $50   (Claude Fable 5, Claude Mythos 5)
-#   opus            $5  / $25   (Opus 5, 4.8, 4.7, 4.6, 4.5 — NOT 4.1/4.0,
-#                                which billed $15/$75; see PRICING above)
-#   sonnet          $2  / $10   (Sonnet 5 standard; scheduled increase cancelled)
-#   haiku           $1  / $5    (Haiku 4.5)
+#   fable / mythos  $10 / $50   (Claude Fable 5, Claude Mythos 5; 5.1 uses
+#                                0.025x cache read in PRICING above)
+#   opus            $5  / $25   (Opus 5, 4.8, 4.7, 4.6, 4.5 — NOT 5.5 at
+#                                $4/$20 with 0.05x cache read or 4.1/4.0 at
+#                                $15/$75; see PRICING above)
+#   sonnet          $2  / $10   (Sonnet 5 standard; 5.5 uses 0.05x cache read
+#                                and 4.x uses $3/$15 in PRICING above)
+#   haiku           $1  / $5    (Haiku 4.5; Haiku 5.5 uses $0.10/$0.50 in
+#                                PRICING above)
 MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
     "fable": _tier(10.0, 50.0),
     "mythos": _tier(10.0, 50.0),
@@ -450,12 +476,15 @@ VERIFIED_MODEL_IDS = frozenset(
         "claude-opus-4-7",
         "claude-opus-4-8",
         "claude-opus-5",
+        "claude-opus-5-5",
         "claude-sonnet-4",
         "claude-sonnet-4-0",
         "claude-sonnet-4-5",
         "claude-sonnet-4-6",
         "claude-sonnet-5",
+        "claude-sonnet-5-5",
         "claude-haiku-4-5",
+        "claude-haiku-5-5",
         "claude-fable-5",
         "claude-fable-5-1",
         "claude-mythos-5",
@@ -841,14 +870,20 @@ class PricingCacheUnreadableError(OSError):
     """The existing pricing cache cannot be trusted; removing it is the fix."""
 
 
+_DEFAULT_PRICING_CACHE_PATH = Path.home() / ".config/mind-meld/pricing-cache.json"
 PRICING_CACHE_PATH = Path(
-    os.environ.get("MM_PRICING_CACHE_PATH") or Path.home() / ".config/mind-meld/pricing-cache.json"
+    os.environ.get("MM_PRICING_CACHE_PATH") or _DEFAULT_PRICING_CACHE_PATH
 ).expanduser()
 _PRICING_MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
 _PRICING_RATE_FIELDS = ("input", "cache_read", "cache_create", "output")
 PRICING_CACHE_MAX_MODELS = 128
 _PRICING_CACHE_MAX_MODELS = PRICING_CACHE_MAX_MODELS
 _PRICING_CACHE_MEMO: tuple[tuple[str, int, int], dict[str, Any]] | None = None
+
+
+def is_default_pricing_cache_path() -> bool:
+    """Return whether the active ``PRICING_CACHE_PATH`` is the default path."""
+    return PRICING_CACHE_PATH.expanduser() == _DEFAULT_PRICING_CACHE_PATH.expanduser()
 
 
 def vendor_model_family(model: str) -> str | None:
@@ -1037,7 +1072,7 @@ def parse_model_price(spec: str) -> tuple[str, tuple[float, ...]]:
 
 def update_pricing_cache(
     model_prices: dict[str, tuple[float, ...]], mark_verified: bool = False
-) -> None:
+) -> str | None:
     """Persist explicit updates under exclusive flock; every failed write raises."""
     global _PRICING_CACHE_MEMO
     for model, rates in model_prices.items():
@@ -1049,7 +1084,7 @@ def update_pricing_cache(
         ):
             raise ValueError("invalid model id or four finite USD/MTok rates")
     if not model_prices and not mark_verified:
-        return
+        return None
     today = datetime.now(timezone.utc).date().isoformat()
     fsutil.refuse_real_state_write_under_pytest(PRICING_CACHE_PATH)
     with locked_json_rmw(PRICING_CACHE_PATH, on_contention="block") as locked:
@@ -1103,6 +1138,7 @@ def update_pricing_cache(
     _PRICING_CACHE_MEMO = None
     if locked.write_error is not None:
         raise locked.write_error
+    return today
 
 
 def _bundled_prices(model: str) -> dict[str, float] | None:

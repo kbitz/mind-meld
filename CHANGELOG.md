@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.38] - 2026-11-11
+
+`mm retro-fleet` prices Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 at their own rates, leaves family-extrapolated rates out of any `≥` cost, and confirms a successful `--set-model-price` or `--mark-pricing-verified` with one `Pricing:` line on stderr.
+
+### Changed
+
+- `mm retro-fleet` prices Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 at their own rates, leaves family-extrapolated rates out of any `≥` cost, and confirms a successful `--set-model-price` or `--mark-pricing-verified` with one `Pricing:` line on stderr.
+- `retro-fleet` bundles standard pricing for Claude Opus, Sonnet and Haiku 5.5.
+- Cost floors exclude extrapolated rates and show unavailable when no verified priced volume exists.
+- `--set-model-price` and `--mark-pricing-verified` confirm successful updates on stderr.
+
+### Upgrade notes
+
+- Local price overrides for Claude models that are dated before the new bundled Anthropic pricing date stop applying, so the bundled rates take over; set one again only if the vendor's rate still differs.
+
 ## [1.12.37] - 2026-11-11
 
 Errors from hand-run commands, including a mistyped option, now print as `mm: error: …` with the fix on a final `Run: <command>` line, and `mm push` and `mm pull` end with one line for each thing that happened.

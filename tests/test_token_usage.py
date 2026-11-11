@@ -2612,7 +2612,28 @@ def test_verified_ids_cover_overrides_and_live_families():
     }
     assert set(tu.PRICING) | set(tu.PRICING_FAMILY_BY_MODEL) | live <= tu.VERIFIED_MODEL_IDS
     assert all(tu.resolve_prices(m) is not None for m in tu.VERIFIED_MODEL_IDS)
-    assert tu.PRICING_LAST_UPDATED == "2026-09-14"
+    assert tu.PRICING_LAST_UPDATED == "2026-11-11"
+
+
+@pytest.mark.parametrize(
+    "model,family,expected_rates,expected_floor_write",
+    [
+        ("claude-opus-5-5", "opus", (4.0, 0.20, 8.0, 20.0), 5.0),
+        ("claude-sonnet-5-5", "sonnet", (2.0, 0.10, 4.0, 10.0), 2.5),
+        ("claude-haiku-5-5", "haiku", (0.10, 0.01, 0.20, 0.50), 0.125),
+    ],
+)
+def test_claude_5_5_bundled_cards_and_verification(
+    model, family, expected_rates, expected_floor_write
+):
+    card = tu.resolve_prices(model)
+    assert card == pytest.approx(dict(zip(tu._PRICING_RATE_FIELDS, expected_rates, strict=True)))
+    floor = tu.floor_prices(model)
+    assert floor is not None
+    assert floor["cache_create"] == pytest.approx(expected_floor_write)
+    assert model in tu.VERIFIED_MODEL_IDS
+    assert tu.is_verified_model(model)
+    assert tu.model_family(model) == family
 
 
 @pytest.mark.parametrize("model", sorted(tu.VERIFIED_MODEL_IDS) + ["claude-opus-99"])

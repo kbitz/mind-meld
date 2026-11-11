@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.38 | 2026-11-11 | `mm retro-fleet` prices Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 at their own rates, leaves family-extrapolated rates out of any `≥` cost, and confirms a successful `--set-model-price` or `--mark-pricing-verified` with one `Pricing:` line on stderr. |
 | 1.12.37 | 2026-11-11 | Errors from hand-run commands, including a mistyped option, now print as `mm: error: …` with the fix on a final `Run: <command>` line, and `mm push` and `mm pull` end with one line for each thing that happened. |
 | 1.12.36 | 2026-11-11 | A push or `mm status` now says `catching up (N left)` when usage or git capture stopped at its time limit with work remaining, and terminal sync waits three seconds before showing transient progress with reader and repository counts. |
 | 1.12.35 | 2026-11-10 | A machine joining the fleet no longer copies gstack's generated Codex install (`skills/gstack/`) from other machines, and a managed `mm init` that has just accepted the fleet folder now waits up to two minutes for the key header and finishes the join in the same run when it arrives. |

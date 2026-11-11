@@ -1429,7 +1429,9 @@ Legend:
 
 - `~` is an estimate; it may use a family-extrapolated rate, named in `MM_HEALTH`.
 - `≥` is a floor of the priced subtotal under bundled rate assumptions,
-  never a guaranteed billing minimum. Causes include unpriced models,
+  never a guaranteed billing minimum. A floor never uses a family-extrapolated
+  rate; such a model is left out of the floor and named in `MM_HEALTH`. Causes
+  include unpriced models,
   incomplete coverage, dropped readers, unattributed tokens and an unknown
   long-context tier, and are named per agent in `MM_HEALTH`.
 - `—` is unavailable, not zero.
@@ -1438,7 +1440,9 @@ An agent with no priceable model shows `—`, never a confident `$0`. A priced m
 
 `--dump-host-usage` carries the per-machine inputs (`tokens_by_day` and coverage); bundled rates and any local pricing overrides are not in the dump.
 
-**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-10-27 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-11-05 ([grok-4.7 rates](https://docs.x.ai/developers/models/grok-4.7), [grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-10-22 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-10-27 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The `/retro-fleet` skill can check vendor docs and supply local overrides before rendering its second pass.
+**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-11-11 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-10-27 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-11-05 ([grok-4.7 rates](https://docs.x.ai/developers/models/grok-4.7), [grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-10-22 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-10-27 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The `/retro-fleet` skill can check vendor docs and supply local overrides before rendering its second pass.
+
+**Haiku 5.5 limitation.** The bundled card uses the rates for prompts up to 100,000 tokens. Anthropic charges five times those rates for each request above that threshold, counting all input tokens, including cache reads and writes. The retro does not apply that tier, so its Haiku 5.5 estimate understates such usage. Tier-aware pricing is deferred to R6.
 
 **Pricing refresh and local overrides.** `MM_HEALTH.pricing.refresh_due` asks the skill to check prices when verification is more than seven days behind the report's UTC end date, or an active in-window model is unverified (including a priced family extrapolation). `effective_verified_date` is the newer of the oldest of all five bundled vendor dates and the cache's top-level `verified_date`. `unpriced_model_ids` and `unverified_model_ids` identify the models needing attention; `cached_model_ids` lists active overrides. Zero-volume and cost-excluded models do not trigger a model refresh.
 
@@ -1446,6 +1450,14 @@ After checking official vendor docs, supply repeatable overrides in **USD per mi
 
 ```bash
 mm retro-fleet 7d --set-model-price 'gpt-6.1-sol=2.00,0.10,2.50,10.00'
+```
+
+Each successful pricing-cache update writes one confirmation line to `stderr` (`default location` or `set by MM_PRICING_CACHE_PATH`), leaving `stdout` unchanged so `mm retro-fleet 7d > retro.md` keeps the retro alone:
+
+```text
+Pricing: saved gpt-6.1-sol to this machine's pricing cache (default location).
+Pricing: marked verified 2026-11-11 in this machine's pricing cache (default location).
+Pricing: saved gpt-6.1-sol and marked verified 2026-11-11 in this machine's pricing cache (default location).
 ```
 
 `--set-model-price` dates that model's card today (UTC). Add `--mark-pricing-verified` only after checking the vendor pricing docs for the refresh; it dates the whole-table verification today. Setting a model alone never marks the table verified. If offline or the docs do not establish a rate, keep the bundled/family fallback, retain unpriced or extrapolated caveats, and do not pass `--mark-pricing-verified`.

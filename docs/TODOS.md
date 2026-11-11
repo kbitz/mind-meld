@@ -44,6 +44,23 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_fleet_cli.py] Test gap: Pricing confirmation model summary cap
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Successful pricing confirmations have exact-output coverage with at most two model IDs, but no case reaches the eight-name display cap and omitted-count suffix.
+- **Hypothesis (untested):** Extend the existing confirmation test with nine distinct IDs and assert eight sorted names, `(+1 more)`, all nine persisted cards, one stderr outcome and unchanged stdout; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:5085
+- **Evidence:** Testing specialist and coverage audit of `e2093c2` found the gap statically; the focused 1,002-test run passed and no incorrect cap behavior was reproduced.
+- **Context:** /review-and-prep for Track 128A, branch `mmm/b55d92a7`, 2026-11-11; the PR link belongs to the review receipt. Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/token_usage.py|tests/test_token_usage.py] Recheck Fable and Mythos 5.2 cards when observed
+- **Description:** The vendor pricing page lists Fable/Mythos 5.2 at rates different from the bundled family fallback. Track 128A is limited to three Claude 5.5 cards; no fleet use of the 5.2 IDs was established during its review.
+- **Hypothesis (untested):** If either ID appears in the owner's fleet, verify its exact spelling and current vendor rates before adding a distinct card and verification entry.
+- **Evidence:** Read-only adversarial review of `e2093c2` and the Anthropic pricing page on 2026-11-11. Current fallback and extrapolation notices behave as designed; this is not a demonstrated regression.
+- **Context:** /review-and-prep for Track 128A. This can wait for observed fleet use; that observation is the revisit trigger, not the model's availability alone.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/core.py|tests/test_output_style.py] Test gap: Shared diagnostic stream failures
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Shared warnings and notices have exact-output coverage, but no direct check of a stream failing during their write or flush.

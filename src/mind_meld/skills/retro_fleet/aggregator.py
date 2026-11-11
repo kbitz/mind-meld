@@ -3240,12 +3240,22 @@ def _section_costs(by_model: dict, *, floor: bool) -> tuple[float, dict[str, flo
     return total, costs
 
 
+def _priced_by_extrapolation(model: str) -> bool:
+    """Return whether ``model`` resolves only through unverified family/positional fallback."""
+    return (
+        model not in token_usage.COST_EXCLUDED_MODELS
+        and token_usage.resolve_prices(model) is not None
+        and not token_usage.is_verified_model(model)
+    )
+
+
 def _floor_costs(by_model: dict, costs: dict) -> tuple[float, dict[str, float]]:
     """Reprice an already resolved model set without repeating warnings or estimates."""
     floors = {
         model: token_usage._cost_under(card, by_model[model])
         for model in costs
-        if (card := token_usage.floor_prices(model)) is not None
+        if not _priced_by_extrapolation(model)
+        and (card := token_usage.floor_prices(model)) is not None
     }
     return sum(floors.values()), floors
 
@@ -3308,10 +3318,7 @@ def _extrapolation_notes(by_model: dict, *, scope: str) -> list[str]:
     models = [
         m
         for m, bucket in by_model.items()
-        if token_usage.sum_bucket(bucket) > 0
-        and token_usage.resolve_prices(m) is not None
-        and m not in token_usage.COST_EXCLUDED_MODELS
-        and not token_usage.is_verified_model(m)
+        if token_usage.sum_bucket(bucket) > 0 and _priced_by_extrapolation(m)
     ]
     notes: list[str] = []
     if models:
@@ -3321,7 +3328,8 @@ def _extrapolation_notes(by_model: dict, *, scope: str) -> list[str]:
             + "): "
             + _format_unpriced_model_ids(models)
             + ". These ids were not verified on the bundled rate date; upgrade the rendering Mac "
-            "for newly verified rates. The ~ or >= marker may include this assumption."
+            "for newly verified rates. `~` estimates use the family rate; `≥` floors leave these "
+            "models out."
         )
     return notes
 
@@ -4147,17 +4155,18 @@ def _agent_row_cost(row: FleetAgentRow) -> tuple[float | None, bool]:
     """``(total, is_floor)``; ``None`` when nothing in the row is priceable."""
     if not row.counters_known or not row.by_model:
         return None, False
-    # A priced model retained at zero tokens must not turn an all-unpriced
-    # row into ``≥$0``. Availability needs nonzero volume under a resolved card.
+    floor = bool(agent_row_floor_causes(row))
+    # A priced model retained at zero tokens (or an extrapolated model excluded
+    # from a floor) must not turn a row with no priced basis into ``≥$0``.
     if not any(
         isinstance(bucket, dict)
         and model not in token_usage.COST_EXCLUDED_MODELS
         and token_usage.resolve_prices(model) is not None
+        and not (floor and _priced_by_extrapolation(model))
         and token_usage.sum_bucket(bucket) > 0
         for model, bucket in row.by_model.items()
     ):
         return None, False
-    floor = bool(agent_row_floor_causes(row))
     total, costs = _section_costs(row.by_model, floor=floor)
     if not costs:
         return None, False
@@ -4492,7 +4501,8 @@ def _render_health_block(
             "basis": (
                 "Historical usage is repriced at bundled rates plus active local cache overrides. "
                 "Not subscription spend. `~` is an estimate, `≥` a floor, `—` unavailable "
-                "(never zero). Anthropic cache writes use the 1-hour rate for estimates and "
+                "(never zero). Floors leave out models priced by family extrapolation. "
+                "Anthropic cache writes use the 1-hour rate for estimates and "
                 "the 5-minute rate for floors. Fast-mode turns on Opus 5 / 4.8 bill at 2x "
                 "and are priced here at standard rates."
             ),
@@ -5033,7 +5043,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if model_prices or args.mark_pricing_verified:
         try:
-            token_usage.update_pricing_cache(model_prices, mark_verified=args.mark_pricing_verified)
+            stamped = token_usage.update_pricing_cache(
+                model_prices, mark_verified=args.mark_pricing_verified
+            )
         except OSError as exc:
             if isinstance(exc, token_usage.PricingCacheUnreadableError) or isinstance(
                 exc, (IsADirectoryError, NotADirectoryError)
@@ -5063,6 +5075,32 @@ def main(argv: list[str] | None = None) -> int:
                 + "\n"
             )
             return 1
+        location = (
+            "default location"
+            if token_usage.is_default_pricing_cache_path()
+            else "set by MM_PRICING_CACHE_PATH"
+        )
+        date_str = safety.safe_terminal_str(stamped or "")
+        ordered = sorted({safety.safe_terminal_str(m) for m in model_prices if m})
+        shown = ordered[:_UNPRICED_MODEL_NOTE_CAP]
+        ids = ", ".join(shown)
+        extra = len(ordered) - len(shown)
+        if extra:
+            ids += f" (+{extra} more)"
+        if model_prices and args.mark_pricing_verified:
+            sys.stderr.write(
+                f"Pricing: saved {ids} and marked verified {date_str} "
+                f"in this machine's pricing cache ({location}).\n"
+            )
+        elif model_prices:
+            sys.stderr.write(
+                f"Pricing: saved {ids} to this machine's pricing cache ({location}).\n"
+            )
+        else:
+            sys.stderr.write(
+                f"Pricing: marked verified {date_str} in this machine's pricing cache "
+                f"({location}).\n"
+            )
 
     if args.no_save:
         # stderr, not stdout: the documented recipe redirects stdout
