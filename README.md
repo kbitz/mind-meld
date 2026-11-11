@@ -573,7 +573,7 @@ mm push    # upload configured agent context
 
 ```bash
 # Every other machine:
-mm init    # on default config: asks for the fleet machine's Syncthing device ID, pairs, prints this machine's ID and the approval command; once approved and the key header arrives, verifies the passphrase, writes .stignore, registers this device, pulls
+mm init    # on default config: asks for the fleet machine's Syncthing device ID, pairs, prints this machine's ID and the approval command; once approved, accepts the folder offer and waits up to 2 minutes for the key header (Ctrl-C stops the wait without writing Mind Meld data), then verifies the passphrase, writes .stignore, registers this device, pulls
 mm push    # publishes this machine's own files
 ```
 
@@ -584,7 +584,7 @@ mm pull --dry-run   # preview: changes nothing except the lock file
 mm pull    # download from another device, any time
 ```
 
-Plain `mm init` never creates a key header and stops until the fleet's key header (`mm-crypto-init`) has arrived in the folder. Wait for Syncthing to finish delivering it, then run `mm init` again.
+Plain `mm init` never creates a key header. If `mm-crypto-init` is present, it verifies the passphrase and joins immediately. If it is missing on a machine where `mm` manages Syncthing, an accepted folder offer (or an already-shared fleet folder with a peer) starts a wait of up to two minutes; other missing-header cases stop immediately. Ctrl-C stops the wait. A timeout or Ctrl-C writes no device entry, `config.toml` or key header; Syncthing keeps its accepted share and continues delivering files. Once the header arrives, run `mm init` again.
 
 Config lives at `~/.config/mind-meld/config.toml` — not tied to your current directory. Install `mm` anywhere, run from anywhere; it always syncs the sources configured in your global config.
 
@@ -598,7 +598,7 @@ To add another Mac or an Arch-based Linux machine to a Syncthing fleet (for a Ma
 2. On Linux, install `libsecret` and `gnome-keyring` and unlock the login keyring in your desktop session before hooks run (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)).
 3. Run Claude Code once so `~/.claude` exists.
 4. Run `mm init` on the new machine:
-   - **Default Syncthing configuration (managed by `mm`):** choose an empty storage folder (normally `~/Sync/mind-meld`) and paste the Syncthing device ID of a machine already in the fleet (printed by `mm init --new-fleet` on the first machine, or shown in Syncthing's **Actions > Show ID**). `mm init` adds that fleet machine as an introducer, removes the unshared empty stock Default Folder at `~/Sync` when `~/Sync/mind-meld` sits inside it, and prints this machine's Syncthing device ID plus the approval command (`mm devices approve <device-id>`) to run on a fleet machine where `mm` manages Syncthing (on an owner-managed fleet machine `mm devices approve` changes nothing and points to [Configuring Syncthing yourself](#configuring-syncthing-yourself)). After running `mm devices approve <device-id>` on the fleet machine (or approving by hand), rerun `mm init` on the new machine: it accepts the folder offer with mm's options, and once Syncthing delivers the key header (`mm-crypto-init`), verifies the **same passphrase**, writes `(?d)tmp*.tmp` to `.stignore`, registers the new device, and pulls.
+   - **Default Syncthing configuration (managed by `mm`):** choose an empty storage folder (normally `~/Sync/mind-meld`) and paste the Syncthing device ID of a machine already in the fleet (printed by `mm init --new-fleet` on the first machine, or shown in Syncthing's **Actions > Show ID**). `mm init` adds that fleet machine as an introducer, removes the unshared empty stock Default Folder at `~/Sync` when `~/Sync/mind-meld` sits inside it, and prints this machine's Syncthing device ID plus the approval command (`mm devices approve <device-id>`) to run on a fleet machine where `mm` manages Syncthing (on an owner-managed fleet machine `mm devices approve` changes nothing and points to [Configuring Syncthing yourself](#configuring-syncthing-yourself)). After running `mm devices approve <device-id>` on the fleet machine (or approving by hand), rerun `mm init` on the new machine: it accepts the folder offer with mm's options, waits up to two minutes for Syncthing to deliver the key header (`mm-crypto-init`; Ctrl-C stops the wait; a timeout or Ctrl-C writes no device entry, `config.toml` or key header, while Syncthing keeps syncing, so rerun `mm init` once delivery finishes), verifies the **same passphrase**, writes `(?d)tmp*.tmp` to `.stignore`, registers the new device, and pulls.
    - **Pre-existing Syncthing configuration (owner-managed):** `mm init` changes nothing in Syncthing and names [Configuring Syncthing yourself](#configuring-syncthing-yourself). Pair the machines, share the `mind-meld` folder at `~/Sync/mind-meld` with the [Syncthing folder options](#syncthing-folder-options), add `(?d)tmp*.tmp` to `~/Sync/mind-meld/.stignore`, wait for Syncthing to deliver `mm-crypto-init`, and rerun `mm init`.
 5. If the folder is still syncing blobs after `mm init` finishes, run `mm pull` again when delivery finishes.
 6. `mm push` — publishes anything this machine has that the others don't; push is what shares this machine's own files.

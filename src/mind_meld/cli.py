@@ -679,11 +679,11 @@ def init(
     Plain 'mm init' joins: on a default Syncthing configuration it asks for a
     fleet machine's Syncthing device ID, adds that device as introducer, prints
     this machine's device ID and 'mm devices approve <id>' to run on the fleet
-    machine, accepts the 'mind-meld' folder offer once shared, and waits until
-    Syncthing delivers mm-crypto-init (if the header has not arrived it stops and
-    writes nothing to the Mind Meld store; it never creates a key header). Once
-    your passphrase verifies, it writes .stignore, registers this device, saves
-    config and pulls.
+    machine, accepts the 'mind-meld' folder offer once shared, and waits up to
+    two minutes for Syncthing to deliver mm-crypto-init (if the header has not
+    arrived after the wait it stops and writes nothing to the Mind Meld store;
+    it never creates a key header). Once your passphrase verifies, it writes
+    .stignore, registers this device, saves config and pulls.
 
     Running init again on a configured machine asks before it replaces this
     device's entry.

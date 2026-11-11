@@ -69,8 +69,22 @@ should just make sure it stays impersonal moving forward?"). The current tree
 still names machines by role. Amended 2026-11-09 by `/project-spec` so an
 attended `mm push` run in a terminal may finish its capture scans up to a scan
 cap of tens of seconds (owner: "2 Yes", then "ok, that makes sense"): O7.2 and
-O8.2 change and no other outcome, target or release policy does. Earlier text
-lives in `git log -- docs/SPEC.md`.
+O8.2 change and no other outcome, target or release policy does. Amended
+2026-11-10 by `/project-spec` to rewrite O8.1 and add O8.6, on the owner's
+words: "I do think that it should show the same update installer when it's
+updating, like when we run mm update -- it shouldn't update silently if that
+makes sense"; "when we push and pull, should we show the same spinner? should
+we change update to look more like push/pull? just want things to be
+consistent"; "I'm fine w/ multiple lines at the end if there's more than one
+outcome -- it doesn't have to be one line"; "i think you probably overindexed
+at one point -- eveyrthing used to be overly verbose -- there is a sensible
+middle ground"; and "go -- make sure all our manually run commands have
+consistently formatted output -- they all need to look like they come from
+the same tool". Push and pull end with one line per thing that happened,
+including mm updating itself, and every hand-run command shares one output
+style; Purpose's one-line sentence follows. O8.2 to O8.5, the target,
+audience and release policy are unchanged. Earlier text lives in
+`git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -85,7 +99,8 @@ several machines:
    machine as one fleet: tokens, cost, active days and commits from Claude
    Code, Codex, Grok Build, Muse and Antigravity.
 
-A command either succeeds, in one line, or says what broke and how to fix it.
+A command either says briefly what happened, or says what broke and how to fix
+it, and every command says it in the same style.
 
 2.0 moves the transport from iCloud Drive to a Syncthing folder so the
 owner's two Linux machines join the fleet. It keeps the 1.x store (each
@@ -275,13 +290,16 @@ manual step.
 4. Evidence: a `retro-fleet` run on the owner's fleet showing complete capture
    from every active machine, recorded in PROGRESS.md `## Acceptance`.
 
-### O8: Every command reports one outcome
-1. `mm push` and `mm pull` end with one line on success that says what moved.
-   On failure the last thing printed says what broke and the one command that
-   fixes it, and interactive commands exit non-zero. Nothing else is printed
-   unless the owner must act: data at risk, or an actionable warning such as
-   O6's growth warning. Progress and diagnostics appear with `--verbose`, in
-   `mm status` and in `mm diag`.
+### O8: Every command reports its outcomes briefly, in one style
+1. `mm push` and `mm pull` end with a short summary: one line for each thing
+   that actually happened, such as what moved or mm updating itself, and
+   nothing for what didn't happen. On failure the last thing printed says
+   what broke and the command that fixes it, and interactive commands exit
+   non-zero. Nothing else is printed unless the owner must act: data at risk,
+   or an actionable warning such as O6's growth warning. Routine detail
+   (timings, counts of skipped or unchanged items, capture internals) stays
+   in `--verbose`, `mm status` and `mm diag`. Progress shows on a terminal
+   while it runs and clears when done.
 2. Usage and activity capture never changes a push's outcome and prints
    nothing during a push, except a transient progress line on a terminal once a
    push has run longer than a few seconds, which clears before the outcome
@@ -295,6 +313,10 @@ manual step.
    the action needed) and shows only the latest run of each kind.
 5. Evidence: tests pin the success, failure and degraded-capture output, and
    the owner's own pushes.
+6. Every command the owner runs by hand presents its output in one shared
+   style (the same spinner, outcome lines, warning and error forms, notice
+   prefix and fix-command form), so they all read as one tool. The agent
+   hooks stay silent (O8.3).
 
 ## Planned after 2.0
 

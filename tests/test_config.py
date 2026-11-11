@@ -1,6 +1,7 @@
 """Tests for mind_meld.config — TOML load/save, validation."""
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -646,6 +647,7 @@ class TestDefaultSources:
         assert codex["include_files"] == ["AGENTS.md"]
         assert codex["exclude_patterns"] == [
             "skills/gstack-*",
+            "skills/gstack/*",
             "skills/log-work/*",
             "skills/retro-fleet/*",
             "skills/.system/*",
@@ -655,6 +657,111 @@ class TestDefaultSources:
             "plugins/.remote-plugin-install-staging/*",
             *_GENERATED_HOST_SKILL_GLOBS,
         ]
+
+    def test_codex_default_source_excludes_gstack_runtime_root_and_keeps_user_skill(self, tmp_path):
+        """Criterion 1 (Track 127A): a fresh codex source built from DEFAULT_SOURCES
+        excludes skills/gstack/SKILL.md, skills/gstack/.source-path and
+        skills/gstack/plan-design-review/SKILL.md, and still includes a
+        user-authored skill."""
+        from mind_meld import manifest
+        from mind_meld.config import get_default_source
+
+        source = get_default_source("codex")
+        assert source is not None
+        source["path"] = str(tmp_path / "codex")
+        all_paths = (
+            "skills/gstack/SKILL.md",
+            "skills/gstack/.source-path",
+            "skills/gstack/plan-design-review/SKILL.md",
+            "skills/my-skill/SKILL.md",
+        )
+        for rel in all_paths:
+            path = Path(source["path"]) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(rel, encoding="utf-8")
+
+        walked = manifest.walk_generic_source(source)
+        assert set(walked) == {"skills/my-skill/SKILL.md"}
+
+        control = {
+            **source,
+            "exclude_patterns": [p for p in source["exclude_patterns"] if p != "skills/gstack/*"],
+        }
+        assert set(manifest.walk_generic_source(control)) == set(all_paths)
+
+    def test_explicit_codex_config_migrates_gstack_runtime_exclude_without_tombstones(
+        self, tmp_path, monkeypatch
+    ):
+        """Criterion 8 (Track 127A): an explicit codex source that lacks
+        skills/gstack/* is named by the recommended-excludes check,
+        mm migrate-config appends the glob and keeps the owner's own
+        exclusions, and the next manifest mints no tombstone for the newly
+        excluded paths."""
+        from mind_meld import config, manifest
+
+        default = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")
+        source = {
+            **default,
+            "path": str(tmp_path / "codex"),
+            "exclude_patterns": [p for p in default["exclude_patterns"] if p != "skills/gstack/*"]
+            + ["custom/*"],
+        }
+        gstack_rels = (
+            "skills/gstack/SKILL.md",
+            "skills/gstack/.source-path",
+            "skills/gstack/plan-design-review/SKILL.md",
+        )
+        for rel in (*gstack_rels, "skills/my-skill/SKILL.md"):
+            path = Path(source["path"]) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(rel, encoding="utf-8")
+        path = tmp_path / "config.toml"
+        cfg_data = {
+            "device": {"id": "abc123", "name": "review"},
+            "storage": {"path": str(tmp_path / "store")},
+            "sync": {"sources": [source]},
+        }
+        save_config(cfg_data, path)
+        monkeypatch.setattr(config, "CONFIG_PATH", path)
+        assert core._config_missing_recommended_excludes(load_config(path)) == ["codex"]
+
+        prior = manifest.build_manifest_v2("abc123", "review", [source])
+        assert set(prior["sources"]["codex"]["files"]) == {
+            *gstack_rels,
+            "skills/my-skill/SKILL.md",
+        }
+        before = path.read_bytes()
+        assert core._migrate_config_core(yes=True, dry_run=True) is False
+        assert path.read_bytes() == before
+        assert core._migrate_config_core(yes=True, dry_run=False) is True
+        migrated_cfg = load_config(path)
+        assert core._config_missing_recommended_excludes(migrated_cfg) == []
+        migrated = migrated_cfg["sync"]["sources"][0]
+        assert "skills/gstack/*" in migrated["exclude_patterns"]
+        assert "custom/*" in migrated["exclude_patterns"]
+        assert core._migrate_config_core(yes=True, dry_run=False) is False
+
+        local = manifest.build_manifest_v2("abc123", "review", [migrated])
+        filtered = core._filter_excluded_paths(prior, {"codex": migrated["exclude_patterns"]})
+        assert set(local["sources"]["codex"]["files"]) == {"skills/my-skill/SKILL.md"}
+        assert manifest.generate_tombstones(local, filtered, "abc123") == {}
+        for rel in gstack_rels:
+            assert (Path(source["path"]) / rel).is_file()
+
+    def test_init_help_names_bounded_wait_for_key_header(self):
+        """Criterion 10 (Track 127A): mm init --help names the bounded two-minute
+        wait instead of saying init 'waits until Syncthing delivers mm-crypto-init'."""
+        from typer.testing import CliRunner
+
+        from mind_meld.cli import app
+
+        res = CliRunner().invoke(app, ["init", "--help"])
+        assert res.exit_code == 0, res.output
+        # CI colors and boxes the help; codes and borders split the sentence.
+        raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", res.stdout)
+        text = " ".join(raw.replace("│", " ").split())
+        assert "waits up to two minutes for Syncthing to deliver mm-crypto-init" in text
+        assert "waits until Syncthing delivers" not in text
 
     def test_host_managed_plugin_trees_are_excluded_but_authored_plugins_are_not(self):
         import fnmatch

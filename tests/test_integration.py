@@ -1707,6 +1707,193 @@ class TestExcludePatterns5C:
         assert result.exit_code == 0, result.output
         assert blob_path.exists(), "GC filtered its own manifest and orphaned an excluded reference"
 
+    def test_codex_pull_ignores_peer_gstack_runtime_root_entries_and_mints_no_tombstones(
+        self, tmp_path, monkeypatch
+    ):
+        """Criterion 2 (Track 127A): a pull on a machine where a peer's manifest
+        still lists skills/gstack/* files leaves that machine's local files in
+        place and writes no tombstone or deletion for them."""
+        from mind_meld import statedb
+
+        storage_dir = tmp_path / "storage"
+        codex_a = tmp_path / "a" / ".codex"
+        codex_b = tmp_path / "b" / ".codex"
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+
+        default_codex = config_module.get_default_source("codex")
+        assert default_codex is not None
+        pre_127a_excludes = [p for p in default_codex["exclude_patterns"] if p != "skills/gstack/*"]
+
+        files_a = {
+            "skills/gstack/SKILL.md": "# gstack router (mac)\n",
+            "skills/gstack/.source-path": "/Users/user/.claude/skills/gstack\n",
+            "skills/gstack/plan-design-review/SKILL.md": "# plan-design-review (mac)\n",
+            "skills/my-skill/SKILL.md": "# hand-authored skill\n",
+        }
+        files_b = {
+            "skills/gstack/SKILL.md": "# gstack router (linux)\n",
+            "skills/gstack/.source-path": "/home/user/.claude/skills/gstack\n",
+            "skills/gstack/plan-design-review/SKILL.md": "# plan-design-review (linux)\n",
+        }
+        for rel, body in files_a.items():
+            p = codex_a / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body, encoding="utf-8")
+        for rel, body in files_b.items():
+            p = codex_b / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body, encoding="utf-8")
+            self._backdate(p)
+
+        config_a = tmp_path / "config_a.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "sources": [
+                        {
+                            **default_codex,
+                            "path": str(codex_a),
+                            "exclude_patterns": pre_127a_excludes,
+                        }
+                    ]
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_a,
+        )
+        config_b = tmp_path / "config_b.toml"
+        save_config(
+            {
+                "device": {"id": "dev-b", "name": "B"},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "sources": [
+                        {
+                            **default_codex,
+                            "path": str(codex_b),
+                        }
+                    ]
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_b,
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        def activate_device(tag: str, cfg: Path) -> None:
+            self._activate(monkeypatch, cfg)
+            state_dir = tmp_path / f"state_{tag}"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", state_dir)
+            monkeypatch.setattr(statedb, "DB_DIR", state_dir)
+
+        activate_device("a", config_a)
+        res_push_a = runner.invoke(app, ["push"])
+        assert res_push_a.exit_code == 0, res_push_a.output
+        remote_a = self._remote72b(backend, "dev-a")
+        assert set(remote_a["sources"]["codex"]["files"]) == set(files_a)
+
+        activate_device("b", config_b)
+        res_pull_b = runner.invoke(app, ["pull"])
+        assert res_pull_b.exit_code == 0, res_pull_b.output
+        assert (codex_b / "skills/my-skill/SKILL.md").read_text(encoding="utf-8") == (
+            files_a["skills/my-skill/SKILL.md"]
+        )
+        for rel, body in files_b.items():
+            assert (codex_b / rel).read_text(encoding="utf-8") == body
+        assert list(codex_b.rglob("*sync-conflict-*")) == []
+
+        res_push_b = runner.invoke(app, ["push"])
+        assert res_push_b.exit_code == 0, res_push_b.output
+        remote_b = self._remote72b(backend, "dev-b")
+        assert set(remote_b["sources"]["codex"]["files"]) == {"skills/my-skill/SKILL.md"}
+        assert remote_b.get("tombstones", {}) == {}
+
+        activate_device("a", config_a)
+        res_pull_a = runner.invoke(app, ["pull"])
+        assert res_pull_a.exit_code == 0, res_pull_a.output
+        for rel, body in files_a.items():
+            assert (codex_a / rel).read_text(encoding="utf-8") == body
+        assert list(codex_a.rglob("*sync-conflict-*")) == []
+
+    def test_equal_bytes_on_synced_path_never_writes_conflict_copy(self, tmp_path, monkeypatch):
+        """Criterion 3 (Track 127A): equal-bytes check on a synced path.
+        (a) A fresh machine with a readable empty ledger holding bytes equal to
+            a peer's published copy (older or newer mtime) writes no conflict copy.
+        (b) Two peers publishing identical new bytes for a path the puller lacks
+            writes the file once and writes no conflict copy."""
+        from mind_meld import statedb
+
+        storage_dir = tmp_path / "storage"
+        backend = self._bootstrap(storage_dir)
+        for did, dname in (("dev-a", "A"), ("dev-b", "B"), ("dev-c", "C")):
+            register_device(backend, did, dname)
+
+        default_codex = config_module.get_default_source("codex")
+        assert default_codex is not None
+        roots: dict[str, Path] = {}
+        configs: dict[str, Path] = {}
+        for tag, did, dname in (("a", "dev-a", "A"), ("b", "dev-b", "B"), ("c", "dev-c", "C")):
+            root = tmp_path / tag / ".codex"
+            root.mkdir(parents=True, exist_ok=True)
+            cfg = tmp_path / f"config_{tag}.toml"
+            save_config(
+                {
+                    "device": {"id": did, "name": dname},
+                    "storage": {"path": str(storage_dir)},
+                    "sync": {"sources": [{**default_codex, "path": str(root)}]},
+                    "crypto": {"argon2_memory_kb": MEMORY_KB},
+                },
+                cfg,
+            )
+            roots[tag] = root
+            configs[tag] = cfg
+
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        def activate_device(tag: str) -> None:
+            self._activate(monkeypatch, configs[tag])
+            state_dir = tmp_path / f"state_{tag}"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", state_dir)
+            monkeypatch.setattr(statedb, "DB_DIR", state_dir)
+
+        same_older = "skills/my-skill/older.md"
+        same_newer = "skills/my-skill/newer.md"
+        shared_two_peers = "skills/my-skill/from-two-peers.md"
+        for rel in (same_older, same_newer, shared_two_peers):
+            p_a = roots["a"] / rel
+            p_a.parent.mkdir(parents=True, exist_ok=True)
+            p_a.write_text(f"shared content for {rel}\n", encoding="utf-8")
+
+        p_c = roots["c"] / shared_two_peers
+        p_c.parent.mkdir(parents=True, exist_ok=True)
+        p_c.write_text(f"shared content for {shared_two_peers}\n", encoding="utf-8")
+
+        for rel in (same_older, same_newer):
+            p_b = roots["b"] / rel
+            p_b.parent.mkdir(parents=True, exist_ok=True)
+            p_b.write_text(f"shared content for {rel}\n", encoding="utf-8")
+        self._backdate(roots["b"] / same_older, seconds=7200)
+        future = time.time() + 120
+        os.utime(roots["b"] / same_newer, (future, future))
+
+        activate_device("a")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        activate_device("c")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        activate_device("b")
+        res_pull = runner.invoke(app, ["pull"])
+        assert res_pull.exit_code == 0, res_pull.output
+        assert list(roots["b"].rglob("*sync-conflict-*")) == []
+        for rel in (same_older, same_newer, shared_two_peers):
+            assert (roots["b"] / rel).read_text(encoding="utf-8") == (f"shared content for {rel}\n")
+
 
 class TestIncludePatternsAllowlist:
     """Allowlist narrowing must behave like exclusion, never like deletion.
