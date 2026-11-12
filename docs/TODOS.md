@@ -44,6 +44,16 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/cli.py|tests/test_self_update.py] Test gap: Deferred update output stream failures
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The deferred update emitter suppresses stream flush/write failures, but no test populates its update display while the output stream fails.
+- **Hypothesis (untested):** Extend terminal sync coverage with an output stream that fails during the deferred update line, then assert no retry or sync exit-code change. Re-verify the reachable seam first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/cli.py:1214
+- **Evidence:** Read-only coverage audit of Track 130A found 29 of 30 changed paths protected, with no failure reproduced for this path.
+- **Context:** /review-and-prep for Track 130A, branch `mmm/29c37ce6`, at `459828f`, 2026-11-12; PR link belongs to its review receipt. Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_usage_presentation.py] Test gap: Malformed registry container guards
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Peer-version tests vary version values and conflicting records, but do not directly exercise malformed registry containers, records or device IDs.
