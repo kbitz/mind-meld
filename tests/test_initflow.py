@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from unittest.mock import Mock
 
 import pytest
 import typer
@@ -1613,6 +1614,9 @@ def test_managed_join_poll_stops_immediately_on_corrupt_newer_or_unreadable_head
     }
     real_fetch = initflow.fetch_crypto_init
     fail_unreadable = False
+    delivered_tree = None
+    keyring_store = Mock()
+    monkeypatch.setattr(initflow, "store_passphrase_in_keyring", keyring_store)
 
     def fetch_maybe_unreadable(backend):
         if fail_unreadable:
@@ -1622,7 +1626,7 @@ def test_managed_join_poll_stops_immediately_on_corrupt_newer_or_unreadable_head
     monkeypatch.setattr(initflow, "fetch_crypto_init", fetch_maybe_unreadable)
 
     def pause_and_plant(seconds: float) -> None:
-        nonlocal fail_unreadable
+        nonlocal fail_unreadable, delivered_tree
         pauses.append(seconds)
         storage.mkdir(parents=True, exist_ok=True)
         if arrival == "corrupt":
@@ -1632,6 +1636,7 @@ def test_managed_join_poll_stops_immediately_on_corrupt_newer_or_unreadable_head
         else:
             (storage / "mm-crypto-init").write_bytes(b"unreadable-peer-bytes")
             fail_unreadable = True
+        delivered_tree = _tree(storage)
 
     monkeypatch.setattr(initflow, "_pause", pause_and_plant)
 
@@ -1646,6 +1651,8 @@ def test_managed_join_poll_stops_immediately_on_corrupt_newer_or_unreadable_head
     assert not config.CONFIG_PATH.exists()
     assert not (storage / ".stignore").exists()
     assert _device_keys(LocalBackend(storage)) == []
+    keyring_store.assert_not_called()
+    _assert_nothing_written(storage, delivered_tree)
     if arrival == "corrupt":
         assert "is corrupt" in text
         assert "never reinitialize" in text
@@ -1653,6 +1660,7 @@ def test_managed_join_poll_stops_immediately_on_corrupt_newer_or_unreadable_head
     elif arrival == "newer":
         assert "was written by a newer mm (format 0x03) or is damaged" in text
         assert "newer-or-damaged-storage-format" in text
+        assert (storage / "mm-crypto-init").read_bytes() == bytes([3]) + b"\x00" * 64
     else:
         assert "cannot read the storage folder" in text
         assert "Permission denied" in text
@@ -1669,6 +1677,9 @@ def test_managed_join_rerun_with_unknown_peer_count_skips_wait_and_prompts(
     config.save_syncthing_record(my_id)
     fake_syncthing.set_folder(storage, peers=[(peer_id, "mac-b", True)], write_stignore=False)
     fake_syncthing.bodies.clear()
+    before = _tree(storage)
+    keyring_store = Mock()
+    monkeypatch.setattr(initflow, "store_passphrase_in_keyring", keyring_store)
 
     real_read_state = syncthing.read_state
 
@@ -1713,6 +1724,8 @@ def test_managed_join_rerun_with_unknown_peer_count_skips_wait_and_prompts(
     assert not (storage / "mm-crypto-init").exists()
     assert not (storage / ".stignore").exists()
     assert _device_keys(LocalBackend(storage)) == []
+    keyring_store.assert_not_called()
+    _assert_nothing_written(storage, before)
 
 
 @pytest.mark.parametrize("post_wait_state", ["in_flight", "fleet", "unreadable"])
@@ -1726,29 +1739,29 @@ def test_managed_join_reclassifies_folder_after_header_wait_timeout(
     config.save_syncthing_record(my_id)
     fake_syncthing.set_folder(storage, peers=[(peer_id, "mac-b", True)], write_stignore=False)
     fake_syncthing.bodies.clear()
-    real_classify = initflow._classify_folder
+    real_scandir = os.scandir
     fail_classify = False
+    delivered_tree = None
+    keyring_store = Mock()
+    monkeypatch.setattr(initflow, "store_passphrase_in_keyring", keyring_store)
 
-    def classify_maybe_unreadable(path):
-        if fail_classify:
-            return initflow._Folder(
-                exists=True,
-                error=PermissionError(errno.EACCES, "Permission denied"),
-            )
-        return real_classify(path)
+    def scandir_maybe_unreadable(path):
+        if fail_classify and os.fspath(path) == os.fspath(storage):
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_scandir(path)
 
-    monkeypatch.setattr(initflow, "_classify_folder", classify_maybe_unreadable)
+    monkeypatch.setattr(os, "scandir", scandir_maybe_unreadable)
 
     def pause_and_mutate_at_timeout(seconds: float) -> None:
-        nonlocal fail_classify
+        nonlocal fail_classify, delivered_tree
         pauses.append(seconds)
         if len(pauses) == 120:
             if post_wait_state == "in_flight":
                 (storage / ".syncthing.mm-crypto-init.tmp").write_bytes(b"partial")
             elif post_wait_state == "fleet":
                 (storage / "data").mkdir(parents=True, exist_ok=True)
-            else:
-                fail_classify = True
+            delivered_tree = _tree(storage)
+            fail_classify = post_wait_state == "unreadable"
 
     monkeypatch.setattr(initflow, "_pause", pause_and_mutate_at_timeout)
 
@@ -1763,6 +1776,9 @@ def test_managed_join_reclassifies_folder_after_header_wait_timeout(
     assert not (storage / "mm-crypto-init").exists()
     assert not (storage / ".stignore").exists()
     assert _device_keys(LocalBackend(storage)) == []
+    keyring_store.assert_not_called()
+    fail_classify = False
+    _assert_nothing_written(storage, delivered_tree)
     if post_wait_state == "in_flight":
         assert "still receiving files from Syncthing ('.syncthing.mm-crypto-init.tmp')" in text
     elif post_wait_state == "fleet":

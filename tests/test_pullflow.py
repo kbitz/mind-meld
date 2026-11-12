@@ -3861,7 +3861,7 @@ def test_cli_autopull_surfaces_data_at_risk_warnings_on_stderr(fleet, monkeypatc
     from typer.testing import CliRunner
 
     from mind_meld import config as config_mod
-    from mind_meld.cli import app
+    from mind_meld import cli
 
     cfg_path = fleet.root / "config.toml"
     config_mod.save_config(fleet.config, cfg_path)
@@ -3885,7 +3885,7 @@ def test_cli_autopull_surfaces_data_at_risk_warnings_on_stderr(fleet, monkeypatc
     devices.update_last_seen(fleet.backend, THIRD)
     fleet.backend.put(manifest_key(THIRD), b"not-valid-ciphertext")
 
-    res = CliRunner().invoke(app, ["autopull"])
+    res = CliRunner().invoke(cli.app, ["autopull"])
     assert res.exit_code == 0, (res.stdout, res.stderr)
     assert res.stdout == ""
     err_lines = res.stderr.splitlines()
@@ -3897,3 +3897,7 @@ def test_cli_autopull_surfaces_data_at_risk_warnings_on_stderr(fleet, monkeypatc
         "mm: warning: skipping unknown source 'mystery-src' from Peer B - "
         "not configured locally" in err_lines
     )
+    crumb = cli._read_autorun_breadcrumbs()["pull"]
+    assert crumb["outcome"] == "degraded"
+    assert "1 corrupt peer manifest(s)" in crumb["detail"]
+    assert "1 unknown source(s)" in crumb["detail"]

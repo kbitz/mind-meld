@@ -1629,6 +1629,8 @@ class TestResolveExitCode:
 
         result = CliRunner().invoke(app, ["resolve"])
         assert result.exit_code == 1, (result.stdout, result.stderr)
+        assert "mm: error: rename failed:" in result.stderr
+        assert result.stderr.endswith("mm: error: Resolved 0 of 1; 1 failed.\nRun: mm resolve\n")
 
 
 class TestPredictPullOutcome:
@@ -3714,6 +3716,25 @@ class TestConflictOwnershipDiscovery:
         assert str(unreadable) in captured.err
         assert "\x1b" not in captured.err
         assert "[31m" not in captured.err
+
+        # The read-only command must retain the same discovery warning without
+        # migrating or renaming any sidecar.
+        names_before = sorted(p.name for p in memory.iterdir())
+
+        def read_config(*, read_only):
+            assert read_only is True
+            return config
+
+        monkeypatch.setattr(core, "_get_config", read_config)
+        result = CliRunner().invoke(app, ["conflicts"])
+        assert result.exit_code == 0, result.output
+        assert result.stderr.startswith(
+            "mm: warning: conflict sidecar unreadable (left in place): "
+        )
+        assert "\x1b" not in result.stderr
+        assert sorted(p.name for p in memory.iterdir()) == names_before
+        assert unreadable.read_bytes() == b"A remote"
+        assert readable.read_bytes() == b"B remote"
 
     def test_ownerless_promote_refuses_without_mutation_and_continues_walk(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
