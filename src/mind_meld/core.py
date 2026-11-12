@@ -2630,16 +2630,26 @@ def _print_apply_warning(message: str) -> None:
 # ── push ──────────────────────────────────────────────────────────────
 
 
-class _SyncProgress:
-    """Transient terminal spinner and counter display for attended push/pull.
+def _console_is_terminal() -> bool:
+    """True only when console writes to a live terminal fd (not FORCE_COLOR on a pipe)."""
+    try:
+        return bool(console.is_terminal and console.file.isatty())
+    except (Exception, SystemExit):
+        return False
 
-    Uses the same Rich columns, 100ms ticker thread, and display-failure
-    isolation as `_run_update_with_progress`, with `transient=True` so the
-    working line clears before warnings, prompts, or the final outcome line.
+
+class _SyncProgress:
+    """Transient terminal spinner and counter display for push, pull, and mm update.
+
+    The one transient, terminal-only progress display for attended push/pull and
+    installer steps (through `_installer_progress`), with a 100ms ticker thread,
+    display-failure isolation, and `transient=True` so the working line clears
+    before warnings, prompts, or the final outcome line.
     """
 
-    def __init__(self, *, enabled: bool) -> None:
+    def __init__(self, *, enabled: bool, delay: float | None = None) -> None:
         self._enabled = enabled
+        self._delay = delay
         self._lock = threading.RLock()
         self._progress: Progress | None = None
         self._task: Any = None
@@ -2658,21 +2668,11 @@ class _SyncProgress:
     def _can_draw(self) -> bool:
         # A closed/replaced stdout makes isatty() raise; that is a display
         # failure, never a sync failure.
-        try:
-            return (
-                self._enabled
-                and not self._stopped
-                and console.is_terminal
-                and console.file.isatty()
-            )
-        except (Exception, SystemExit):
-            return False
+        return self._enabled and not self._stopped and _console_is_terminal()
 
     def _delay_elapsed_locked(self) -> bool:
-        return (
-            self._started_at is not None
-            and time.monotonic() - self._started_at >= _SYNC_PROGRESS_DELAY_SECONDS
-        )
+        delay = _SYNC_PROGRESS_DELAY_SECONDS if self._delay is None else self._delay
+        return self._started_at is not None and time.monotonic() - self._started_at >= delay
 
     def _start_progress_locked(self) -> bool:
         if self._progress is not None:
@@ -2802,6 +2802,16 @@ class _SyncProgress:
             self._batch_total = 0
             self._render_locked(updateprogress.UpdateProgress(phase), force=True)
 
+    def show(self, state: updateprogress.UpdateProgress) -> None:
+        with self._lock:
+            self._batch_total = 0
+            self._render_locked(state, force=True)
+
+    @property
+    def drawing(self) -> bool:
+        with self._lock:
+            return self._progress is not None
+
     def start_batch(self, phase: str, total: int, unit: str) -> None:
         with self._lock:
             self._batch_phase = phase
@@ -2895,6 +2905,17 @@ class _SyncProgress:
         if progress is not None and (ticker is None or not ticker.is_alive()):
             with suppress(Exception, SystemExit):
                 progress.stop()
+
+
+@contextmanager
+def _installer_progress(label: str):
+    """Run an installer step under the shared transient terminal progress display."""
+    progress = _SyncProgress(enabled=True, delay=0.0)
+    try:
+        progress.start(label)
+        yield progress.show if progress.drawing else None
+    finally:
+        progress.stop()
 
 
 def _current_sync_progress() -> _SyncProgress | None:

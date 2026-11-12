@@ -3205,7 +3205,6 @@ class TestApplyExceptionBoundary53A:
             progress.add_task.return_value = 1
             return progress
 
-        monkeypatch.setattr(cli, "Progress", capture)
         monkeypatch.setattr(pullflow, "Progress", capture)
         monkeypatch.setattr(core, "Progress", capture)
         monkeypatch.setattr(cli.console, "_force_terminal", True)
@@ -3271,7 +3270,6 @@ class TestApplyExceptionBoundary53A:
         monkeypatch.setattr(cli.console, "_force_terminal", True)
         progress = MagicMock()
         progress.stop.side_effect = SystemExit(17)
-        monkeypatch.setattr(cli, "Progress", lambda *a, **kw: progress)
         monkeypatch.setattr(pullflow, "Progress", lambda *a, **kw: progress)
         monkeypatch.setattr(core, "Progress", lambda *a, **kw: progress)
         run, _, _, _ = prepare([("file.txt", b"a", None)], verbose=True)

@@ -15718,8 +15718,8 @@ def test_sync_progress_resilient_to_start_failure_and_blocked_ticker_shutdown(
     drawing = threading.Event()
     release_draw = threading.Event()
     tickers, displays, stopped = [], [], []
-    original_refresh = cli_module.Progress.refresh
-    original_stop = cli_module.Progress.stop
+    original_refresh = core.Progress.refresh
+    original_stop = core.Progress.stop
 
     def refresh(progress):
         if not displays:
@@ -15734,8 +15734,8 @@ def test_sync_progress_resilient_to_start_failure_and_blocked_ticker_shutdown(
         stopped.append(progress)
         return original_stop(progress)
 
-    monkeypatch.setattr(cli_module.Progress, "refresh", refresh)
-    monkeypatch.setattr(cli_module.Progress, "stop", stop)
+    monkeypatch.setattr(core.Progress, "refresh", refresh)
+    monkeypatch.setattr(core.Progress, "stop", stop)
     sp = core._SyncProgress(enabled=True)
     sp.start("Unlocking storage")
     try:
@@ -15922,9 +15922,9 @@ def test_sync_progress_display_faults_preserve_success(status77, monkeypatch, fa
     if fault == "isatty":
         monkeypatch.setattr(terminal, "isatty", fail)
     elif fault == "update":
-        monkeypatch.setattr(cli_module.Progress, "update", fail)
+        monkeypatch.setattr(core.Progress, "update", fail)
     elif fault == "resume":
-        original_start = cli_module.Progress.start
+        original_start = core.Progress.start
         starts = []
 
         def start(progress):
@@ -15933,7 +15933,7 @@ def test_sync_progress_display_faults_preserve_success(status77, monkeypatch, fa
                 fail()
             return original_start(progress)
 
-        monkeypatch.setattr(cli_module.Progress, "start", start)
+        monkeypatch.setattr(core.Progress, "start", start)
         original_build = cli_module.build_manifest_v2
 
         def build(*args, **kwargs):
