@@ -72,8 +72,9 @@ Four things are still true and still matter:
 2. **`≥` is a floor, `~` is an estimate, `—` is unavailable — never zero.**
    Every dollar cell carries one. `cost_floor` explains a priced `≥` subtotal;
    `cost_unavailable` explains a visible row with no priced basis. Legacy
-   inclusive counters use `legacy_counters`, with affected machines and an
-   upgrade remedy, and never carry numeric or extrapolated pricing claims.
+   inclusive counters use `legacy_counters`, with affected machines and a
+   refresh remedy; upgrade advice requires a last reported push below the
+   attended-capture floor. They never carry numeric or extrapolated pricing claims.
 3. **Sources still differ.** Claude's tokens come from Claude Code session
    logs; Codex, Grok Build, Muse, and Antigravity come from each machine's local agent ledger. Both are
    fleet sums; both can double-count a migrated home directory. The detector
@@ -408,8 +409,9 @@ The aggregator's default is `~/.local/share/mind-meld/events/`.
   removed: they keyed on unreadable 8-hex ids and invited exactly the
   cross-machine summation they warned against. Machine-level forensics belong
   in `mm diag`.
-- **It does not include sessions from peers on pre-v0.11.0 mm.** `MM_HEALTH`
-  names them under `sessions_incomplete`.
+- **It does not include session totals from legacy v=1 snapshots.** `MM_HEALTH`
+  reports them under `sessions_incomplete`; an old snapshot does not prove the
+  peer's current mm version.
 - **It does not save output to a file.** `> /tmp/retro.md` is the save story.
 - **It does not read `active days` as sessions, prompts, hours, or intensity.**
   It is a count of distinct UTC days on which that agent moved a counter.
