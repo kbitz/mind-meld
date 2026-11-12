@@ -68,13 +68,15 @@ import re
 import shlex
 import subprocess
 import sys
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from heapq import nsmallest
 from pathlib import Path
 from typing import Literal, get_args
+
+from packaging.version import InvalidVersion, Version
 
 from mind_meld import events as mm_events
 from mind_meld import host_registry, host_usage, identity, safety, token_usage
@@ -179,10 +181,105 @@ Below this floor a converged mm push reports success without refreshing usage.
 The older host-snapshot schema floor alone cannot qualify a refresh remedy.
 """
 
+_ATTENDED_USAGE_FLOOR_VERSION = Version(ATTENDED_USAGE_MIN_VERSION)
 
-def _attended_usage_remedy() -> str:
+
+def _parse_recorded_version(raw: object) -> Version | None:
+    """Parse a registry ``last_seen_version`` string, or return ``None`` when unknown."""
+    if not isinstance(raw, str) or len(raw) > _CLASSIFY_LEN_CAP:
+        return None
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+    try:
+        return Version(cleaned)
+    except InvalidVersion:
+        return None
+
+
+def _device_versions(fleet: FleetState | None) -> dict[str, Version | None]:
+    """Map registered ``device_id`` to parsed ``last_seen_version`` or ``None``.
+
+    Duplicate records for the same ``device_id`` with conflicting parsed versions
+    degrade to ``None`` (unknown, never proven old).
+    """
+    if fleet is None or not isinstance(fleet.devices_known_list, list):
+        return {}
+    out: dict[str, Version | None] = {}
+    conflicts: set[str] = set()
+    for rec in fleet.devices_known_list:
+        if not isinstance(rec, dict):
+            continue
+        device = rec.get("device_id")
+        if not isinstance(device, str) or not device:
+            continue
+        parsed = _parse_recorded_version(rec.get("last_seen_version"))
+        if device in conflicts:
+            continue
+        if device in out and out[device] != parsed:
+            conflicts.add(device)
+            out[device] = None
+        else:
+            out[device] = parsed
+    return out
+
+
+def _is_peer_below_attended_floor(
+    device: str | None,
+    versions: Mapping[str, Version | None] | None = None,
+    *,
+    fleet: FleetState | None = None,
+) -> bool:
+    """True only when registry evidence proves ``device`` last pushed below the floor."""
+    if not isinstance(device, str) or not device:
+        return False
+    resolved = versions if versions is not None else _device_versions(fleet)
+    ver = resolved.get(device)
+    return ver is not None and ver < _ATTENDED_USAGE_FLOOR_VERSION
+
+
+def _attended_usage_remedy(
+    *,
+    device: str | None = None,
+    devices: Iterable[str] | None = None,
+    fleet: FleetState | None = None,
+    versions: Mapping[str, Version | None] | None = None,
+    labels: dict[str, str] | None = None,
+    delivery: bool = False,
+) -> str:
+    target_devices: set[str] = set()
+    if isinstance(device, str) and device:
+        target_devices.add(device)
+    if devices is not None:
+        target_devices.update(d for d in devices if isinstance(d, str) and d)
+    resolved_versions = versions if versions is not None else _device_versions(fleet)
+    old_devices = {d for d in target_devices if _is_peer_below_attended_floor(d, resolved_versions)}
+    other_devices = target_devices - old_devices
+    base_clause = (
+        "run `mm push` on the machine, or wait for Syncthing to deliver"
+        if delivery
+        else "run `mm push` on the machine"
+    )
+    if not old_devices:
+        return base_clause
+    if not other_devices:
+        upgrade_clause = (
+            f"last reported push was below {ATTENDED_USAGE_MIN_VERSION} — "
+            f"upgrade mind-meld to {ATTENDED_USAGE_MIN_VERSION}+ on that machine, "
+            "verify with `mm --version`, then run `mm push`"
+        )
+        if delivery:
+            return f"{base_clause} ({upgrade_clause})"
+        return upgrade_clause
+    resolved_labels = labels if labels is not None else (device_labels(fleet) if fleet else {})
+    old_names = _format_coverage_peer_names({device_label(d, resolved_labels) for d in old_devices})
+    other_names = _format_coverage_peer_names(
+        {device_label(d, resolved_labels) for d in other_devices}
+    )
     return (
-        f"upgrade mind-meld to {ATTENDED_USAGE_MIN_VERSION}+ on that Mac, "
+        f"for {other_names}, {base_clause}; "
+        f"for {old_names} (last reported push below {ATTENDED_USAGE_MIN_VERSION}), "
+        f"upgrade mind-meld to {ATTENDED_USAGE_MIN_VERSION}+ on that machine, "
         "verify with `mm --version`, then run `mm push`"
     )
 
@@ -712,6 +809,7 @@ def aggregate_agent_usage(
 
     lo, hi = _window_day_keys(data.since, data.until)
     labels = device_labels(data.fleet)
+    versions = _device_versions(data.fleet)
     rows: list[FleetAgentRow] = []
 
     # --- Claude: the Claude Code session corpus, whole. Not re-bucketed by
@@ -738,6 +836,12 @@ def aggregate_agent_usage(
     # the class of drift this Track removed everywhere else.
     claude_tokens = sum(token_usage.sum_bucket(b) for b in claude_by_model.values())
     if claude_tokens > 0:
+        claude_coverage_peers = _token_coverage_peers(data.sessions)
+        claude_coverage_names = (
+            _format_coverage_peer_names({device_label(d, labels) for d in claude_coverage_peers})
+            if claude_coverage_peers
+            else ""
+        )
         rows.append(
             FleetAgentRow(
                 key="claude",
@@ -748,8 +852,8 @@ def aggregate_agent_usage(
                 machines=len(data.sessions.token_devices),
                 counters_known=True,
                 floor_causes=(
-                    ("token coverage is incomplete on some machines",)
-                    if _token_coverage_peers(data.sessions)
+                    (f"token coverage is incomplete on {claude_coverage_names}",)
+                    if claude_coverage_peers
                     else ()
                 ),
             )
@@ -763,6 +867,7 @@ def aggregate_agent_usage(
     fam_counters_known: dict[str, bool] = {}
     fam_legacy_devices: dict[str, set[str]] = {}
     fam_causes: dict[str, set[str]] = {}
+    fam_reader_causes: dict[str, dict[tuple[str, tuple[str, ...]], set[str]]] = {}
     activity_devices = set(data.sessions.token_devices) if rows else set()
 
     for device, snap in inventory.by_device.items():
@@ -805,9 +910,10 @@ def aggregate_agent_usage(
             )
             token_usage.merge_usage_bucket(dest, usage)
 
-        # Every floor cause the pre-1.1 per-device cell named — but attributed
-        # PER FAMILY, not per machine. A Mac running both readers publishes one
-        # snapshot covering both, so a machine-scoped cause list put Grok's
+        # Every floor cause the pre-1.1 per-device cell named — attributed
+        # PER FAMILY (while keeping the reporting machine's name on machine-
+        # specific causes). A machine running both readers publishes one
+        # snapshot covering both, so a family-blind cause list put Grok's
         # "logs do not record per-request prompt sizes" on the Codex row, which
         # is a claim about a different vendor's log format.
         shared: set[str] = set()
@@ -819,15 +925,26 @@ def aggregate_agent_usage(
         if residual:
             # Genuinely cross-family: `tokens_by_day` day totals are not
             # family-partitioned, so unattributed residue cannot be blamed on
-            # one family. Shared is the honest scope.
-            shared.add("some tokens were not attributed to a named model (the per-day model cap)")
+            # one family. Shared across touched families on this machine is
+            # the honest scope.
+            shared.add(
+                f"{device_label(device, labels)}: "
+                "some tokens were not attributed to a named model (the per-day model cap)"
+            )
         unusable_coverage = (snap.partial_reason or snap.degraded_reason) and not (
             snap.partial or snap.degraded
         )
         if snap.tokens_by_day is None and touched:
             shared.add(
                 f"{device_label(device, labels)}: "
-                + _host_detail_phrase(snap.detail, snap.detail_reason, device=device)
+                + _host_detail_phrase(
+                    snap.detail,
+                    snap.detail_reason,
+                    device=device,
+                    fleet=data.fleet,
+                    versions=versions,
+                    labels=labels,
+                )
             )
         coverage_unknown = bool(
             snap.partial or snap.degraded or snap.partial_reason or snap.degraded_reason
@@ -847,15 +964,17 @@ def aggregate_agent_usage(
 
         per_family: dict[str, set[str]] = {}
         for fam, readers in _reader_scope(snap.partial).items():
-            per_family.setdefault(fam, set()).add(
-                "a host declared totals incomplete ("
-                + ", ".join(_reader_display_labels(tuple(readers)))
-                + ")"
-            )
+            reader_labels = _reader_display_labels(tuple(readers))
+            if reader_labels:
+                fam_reader_causes.setdefault(fam, {}).setdefault(
+                    ("partial", reader_labels), set()
+                ).add(device)
         for fam, readers in _reader_scope(snap.degraded).items():
-            per_family.setdefault(fam, set()).add(
-                "a host reader failed (" + ", ".join(_reader_display_labels(tuple(readers))) + ")"
-            )
+            reader_labels = _reader_display_labels(tuple(readers))
+            if reader_labels:
+                fam_reader_causes.setdefault(fam, {}).setdefault(
+                    ("degraded", reader_labels), set()
+                ).add(device)
         if unusable_coverage:
             # An empty reader list is not "no problem". The machine contributed
             # no family to attach the warning to, and a healthy peer would
@@ -892,6 +1011,19 @@ def aggregate_agent_usage(
             fam_causes.setdefault(family, set()).update(causes_here)
         if active_here:
             activity_devices.add(device)
+
+    for family, grouped in fam_reader_causes.items():
+        for (kind, reader_labels), devices in grouped.items():
+            machines_txt = _format_coverage_peer_names({device_label(d, labels) for d in devices})
+            readers_txt = ", ".join(reader_labels)
+            if kind == "partial":
+                fam_causes.setdefault(family, set()).add(
+                    f"{machines_txt}: a host declared totals incomplete ({readers_txt})"
+                )
+            else:
+                fam_causes.setdefault(family, set()).add(
+                    f"{machines_txt}: a host reader failed ({readers_txt})"
+                )
 
     for key, label in AGENT_ROW_ORDER:
         existing = next((r for r in rows if r.key == key), None)
@@ -1232,6 +1364,7 @@ _COMMIT_TYPE_KEYWORDS: tuple[str, ...] = (
 
 
 _COMMIT_TYPE_RE = re.compile(r"^([a-z]+)(?:\([^)]*\))?!?:")
+_COMMIT_VERSION_PREFIX_RE = re.compile(r"^v[0-9]+(?:\.[0-9]+)*\s+")
 
 
 _CLASSIFY_LEN_CAP = 256
@@ -1243,11 +1376,14 @@ text. The classifier only inspects the prefix anyway."""
 
 def _classify_commit_subject(subject: object) -> str:
     """Return the conventional-commit keyword (``feat``/``fix``/...) or
-    ``other``. Tolerant of non-string / empty / unprefixed subjects.
-    Inspects only the first ``_CLASSIFY_LEN_CAP`` chars."""
+    ``other``. Tolerant of non-string / empty / unprefixed subjects, and
+    strips at most one leading ``v<digits>(.<digits>)*`` release prefix
+    before matching. Inspects only the first ``_CLASSIFY_LEN_CAP`` chars."""
     if not isinstance(subject, str) or not subject:
         return "other"
-    m = _COMMIT_TYPE_RE.match(subject[:_CLASSIFY_LEN_CAP].strip().lower())
+    bounded = subject[:_CLASSIFY_LEN_CAP].strip().lower()
+    bounded = _COMMIT_VERSION_PREFIX_RE.sub("", bounded, count=1)
+    m = _COMMIT_TYPE_RE.match(bounded)
     if m is None:
         return "other"
     kw = m.group(1)
@@ -2105,7 +2241,15 @@ def _accept_counter_semantics(raw: object) -> str | None:
     return mm_events.COUNTER_SEMANTICS_DISJOINT_V1
 
 
-def _host_detail_phrase(detail: str, reason: str | None, *, device: str | None = None) -> str:
+def _host_detail_phrase(
+    detail: str,
+    reason: str | None,
+    *,
+    device: str | None = None,
+    fleet: FleetState | None = None,
+    versions: Mapping[str, Version | None] | None = None,
+    labels: dict[str, str] | None = None,
+) -> str:
     """Problem + cause + fix for host per-model detail status.
 
     Modeled on ``events_tail._host_skip_phrase``. A raw reason token tells
@@ -2113,11 +2257,17 @@ def _host_detail_phrase(detail: str, reason: str | None, *, device: str | None =
     """
     if detail == "present":
         return "per-model host tokens present"
+    remedy = _attended_usage_remedy(
+        device=device,
+        fleet=fleet,
+        versions=versions,
+        labels=labels,
+    )
     if reason == "legacy_counters":
         who = f"Not available for `{_safe_short(device)}`" if device else "Not available"
         return (
-            f"{who}: a Mac reported token counters in an older format; "
-            f"{_attended_usage_remedy()}, then re-run `mm retro-fleet`."
+            f"{who}: a machine reported token counters in an older format; "
+            f"{remedy}, then re-run `mm retro-fleet`."
         )
     causes = {
         "active_days_mismatch": "the day set did not match the family totals",
@@ -2132,7 +2282,7 @@ def _host_detail_phrase(detail: str, reason: str | None, *, device: str | None =
     else:
         cause = causes.get(reason, "unrecognized per-model detail")
         problem = f"per-model host tokens dropped ({reason}) — {cause}"
-    return f"{problem}; {_attended_usage_remedy()}; run `mm diag` if it persists."
+    return f"{problem}; {remedy}; run `mm diag` if it persists."
 
 
 def _host_coverage_phrase(kind: str, sources: tuple[str, ...], reason: str | None) -> str:
@@ -3327,9 +3477,9 @@ def _extrapolation_notes(by_model: dict, *, scope: str) -> list[str]:
             + _safe_short(scope)
             + "): "
             + _format_unpriced_model_ids(models)
-            + ". These ids were not verified on the bundled rate date; upgrade the rendering Mac "
-            "for newly verified rates. `~` estimates use the family rate; `≥` floors leave these "
-            "models out."
+            + ". These ids were not verified on the bundled rate date; upgrade the rendering "
+            "machine for newly verified rates. `~` estimates use the family rate; `≥` floors "
+            "leave these models out."
         )
     return notes
 
@@ -3834,16 +3984,26 @@ def _agent_coverage_notes(
     if not isinstance(inventory, HostUsageInventory):
         return []
 
-    labels = labels or {}
+    labels = labels or device_labels(data.fleet)
+    versions = _device_versions(data.fleet)
     notes: list[str] = []
     snaps = [s for s in inventory.by_device.values() if isinstance(s, HostDeviceSnapshot)]
 
     if not snaps:
         if inventory.devices_without_accepted_row:
+            missing = set(inventory.devices_without_accepted_row)
+            missing_names = _format_coverage_peer_names({device_label(d, labels) for d in missing})
+            remedy = _attended_usage_remedy(
+                devices=missing,
+                fleet=data.fleet,
+                versions=versions,
+                labels=labels,
+                delivery=True,
+            )
             notes.append(
                 f"No agent-log snapshots yet from "
-                f"{len(inventory.devices_without_accepted_row)} machine(s) — "
-                f"{_attended_usage_remedy()}."
+                f"{len(missing)} machine(s) ({missing_names}; unknown, not zero) — "
+                f"{remedy}."
             )
         else:
             # Reachable whenever the device registry is unavailable:
@@ -3853,7 +4013,8 @@ def _agent_coverage_notes(
             # attended-refresh remedy in health.
             notes.append(
                 "No agent-log snapshots were accepted from any machine — "
-                f"for each Mac that should publish usage, {_attended_usage_remedy()}."
+                "for each machine that should publish usage, "
+                f"{_attended_usage_remedy(delivery=True)}."
             )
     else:
         if view is None:
@@ -3864,23 +4025,36 @@ def _agent_coverage_notes(
                 machines_known=data.fleet.devices_known,
             )
         any_reader = any(s.consulted for s in snaps)
+        snap_devices = [s.device for s in snaps]
         if not any_reader:
             # `token_sources` records readers that contributed to THIS push,
             # not readers merely selected by the consent gate. An empty list
             # can therefore mean no source is enabled OR that every selected
             # reader had no attributable metadata ledger; do not misdiagnose
             # the latter as a consent failure.
+            remedy = _attended_usage_remedy(
+                devices=snap_devices,
+                fleet=data.fleet,
+                versions=versions,
+                labels=labels,
+            )
             notes.append(
                 "No agent-log reader contributed on any machine. If no source is enabled, "
                 "enable with `mm enable-source codex` (or `grok`, `muse`, or `agy`), then "
-                f"{_attended_usage_remedy()}; readers with no attributable local ledger "
+                f"{remedy}; readers with no attributable local ledger "
                 "are also omitted."
             )
         elif not view.any_activity:
             if all(s.stale for s in snaps):
+                remedy = _attended_usage_remedy(
+                    devices=snap_devices,
+                    fleet=data.fleet,
+                    versions=versions,
+                    labels=labels,
+                )
                 notes.append(
                     "Agent-log snapshots all predate this window — "
-                    f"for each affected machine, {_attended_usage_remedy()} "
+                    f"for each affected machine, {remedy} "
                     "for current agent activity."
                 )
             else:
@@ -3890,9 +4064,18 @@ def _agent_coverage_notes(
                     "older mm still reports last-touch totals rather than per-turn ones."
                 )
         if inventory.devices_without_accepted_row:
+            missing = set(inventory.devices_without_accepted_row)
+            missing_names = _format_coverage_peer_names({device_label(d, labels) for d in missing})
+            remedy = _attended_usage_remedy(
+                devices=missing,
+                fleet=data.fleet,
+                versions=versions,
+                labels=labels,
+                delivery=True,
+            )
             notes.append(
-                f"{len(inventory.devices_without_accepted_row)} machine(s) have no agent-log "
-                f"snapshot (unknown, not zero) — {_attended_usage_remedy()}."
+                f"{len(missing)} machine(s) ({missing_names}) have no agent-log "
+                f"snapshot (unknown, not zero) — {remedy}."
             )
 
     # Named devices and unidentified rows are counted separately. `HostReject.device`
@@ -3910,9 +4093,16 @@ def _agent_coverage_notes(
             who.append(f"{named} machine(s)")
         if unnamed:
             who.append(f"{unnamed} unidentified row(s)")
+        rejected_ids = {row.device for row in inventory.rejected if row.device}
+        remedy = _attended_usage_remedy(
+            devices=rejected_ids,
+            fleet=data.fleet,
+            versions=versions,
+            labels=labels,
+        )
         notes.append(
             f"Agent-log snapshots from {' plus '.join(who)} were rejected "
-            f"({reasons}) — upgrade those machines; a version mismatch is the usual cause."
+            f"({reasons}) — {remedy}; run `mm diag` if it persists."
         )
 
     # Coverage notes are orthogonal to "why is the block quiet": a machine
@@ -3920,15 +4110,26 @@ def _agent_coverage_notes(
     # existing tree keeps complexity down and preserves most-actionable-first
     # ordering of the quiet-block notes above. Aggregate across machines;
     # never one line per device.
-    notes.extend(_host_reader_coverage_notes(snaps, labels))
+    notes.extend(
+        _host_reader_coverage_notes(
+            snaps,
+            labels,
+            fleet=data.fleet,
+            versions=versions,
+        )
+    )
     return notes
 
 
 def _host_reader_coverage_notes(
-    snaps: list[HostDeviceSnapshot], labels: dict[str, str] | None = None
+    snaps: list[HostDeviceSnapshot],
+    labels: dict[str, str] | None = None,
+    *,
+    fleet: FleetState | None = None,
+    versions: Mapping[str, Version | None] | None = None,
 ) -> list[str]:
     """One aggregated note per coverage class, never one per device."""
-    labels = labels or {}
+    labels = labels or (device_labels(fleet) if fleet else {})
     notes: list[str] = []
     degraded_note = _reader_issue_note(
         "degraded",
@@ -3948,10 +4149,16 @@ def _host_reader_coverage_notes(
     if stale:
         names = _format_coverage_peer_names({device_label(s.device, labels) for s in stale})
         oldest = min(s.as_of for s in stale).date().isoformat()
+        remedy = _attended_usage_remedy(
+            devices=[s.device for s in stale],
+            fleet=fleet,
+            versions=versions,
+            labels=labels,
+        )
         notes.append(
             f"Host-usage captures from {names} predate this window "
-            f"(oldest {oldest} UTC) — {_attended_usage_remedy()}, "
-            "then `mm status`; pull again on this Mac."
+            f"(oldest {oldest} UTC) — {remedy}, "
+            "then `mm status`; pull again on this machine."
         )
     return notes
 
@@ -4694,6 +4901,7 @@ def format_retro(
             remedy="Inspect `mm devices` and `mm retro-fleet --dump-host-usage` to confirm "
             "overlap before deregistering a retired device, then re-run.",
         )
+    versions = _device_versions(data.fleet)
     for row in agent_usage.rows:
         if not row.has_volume:
             continue
@@ -4701,6 +4909,12 @@ def format_retro(
             machines = {device_label(d, labels) for d in row.legacy_devices}
             affected = (
                 _format_coverage_peer_names(machines) if machines else "a contributing machine"
+            )
+            legacy_remedy = _attended_usage_remedy(
+                devices=row.legacy_devices,
+                fleet=data.fleet,
+                versions=versions,
+                labels=labels,
             )
             note(
                 "legacy_counters",
@@ -4710,7 +4924,7 @@ def format_retro(
                 agent=row.label,
                 machines=sorted(machines)[:MAX_TOKEN_COVERAGE_PEER_NAMES],
                 machines_omitted=max(0, len(machines) - MAX_TOKEN_COVERAGE_PEER_NAMES),
-                remedy=f"On the named machines, {_attended_usage_remedy()}.",
+                remedy=f"On the named machines, {legacy_remedy}.",
             )
         else:
             causes = agent_row_floor_causes(row)
@@ -4734,11 +4948,17 @@ def format_retro(
                         causes=list(causes),
                     )
     if data.sessions.pre_v2_peers:
+        sessions_remedy = _attended_usage_remedy(
+            devices=data.sessions.pre_v2_peers,
+            fleet=data.fleet,
+            versions=versions,
+            labels=labels,
+        )
         note(
             "sessions_incomplete",
-            f"{len(data.sessions.pre_v2_peers)} peer(s) on pre-v0.11.0 emit delta-semantics "
+            f"{len(data.sessions.pre_v2_peers)} peer(s) published pre-v0.11.0 delta-semantics "
             "session snapshots; their session totals are omitted rather than double-counted.",
-            remedy="Upgrade mm on those machines.",
+            remedy=f"On those machines, {sessions_remedy}.",
         )
     token_coverage_peers = _token_coverage_peers(data.sessions)
     if token_coverage_peers:
@@ -4747,11 +4967,19 @@ def format_retro(
             reasons.append("pre-v0.11.0 session schema")
         if data.sessions.pre_token_peers:
             reasons.append("pre-v0.11.14 OR cold token cache")
+        token_peer_names = _format_coverage_peer_names(
+            {device_label(d, labels) for d in token_coverage_peers}
+        )
+        tokens_remedy = _attended_usage_remedy(
+            devices=token_coverage_peers,
+            fleet=data.fleet,
+            versions=versions,
+            labels=labels,
+        )
         note(
             "tokens_incomplete",
-            f"Claude token coverage is incomplete on "
-            f"{_format_coverage_peer_names(token_coverage_peers)}: {' + '.join(reasons)}.",
-            remedy="Run `mm push` on those machines; upgrade if it persists.",
+            f"Claude token coverage is incomplete on {token_peer_names}: {' + '.join(reasons)}.",
+            remedy=f"On those machines, {tokens_remedy}; run `mm diag` if it persists.",
         )
     if data.skills.pre_skills_peers:
         note(

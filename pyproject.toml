@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mind-meld"
-version = "1.12.38"
+version = "1.12.39"
 description = "Sync AI coding-agent context across machines through a Syncthing folder, end-to-end encrypted"
 readme = "README.md"
 license = "MIT"

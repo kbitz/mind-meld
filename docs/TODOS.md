@@ -44,6 +44,16 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_usage_presentation.py] Test gap: Malformed registry container guards
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Peer-version tests vary version values and conflicting records, but do not directly exercise malformed registry containers, records or device IDs.
+- **Hypothesis (untested):** Extend the registry evidence matrix to confirm invalid shapes remain unknown; re-verify the reachable inputs first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:204
+- **Evidence:** Read-only coverage audit of Track 129A found untested early guards, with no product failure reproduced.
+- **Context:** /review-and-prep for Track 129A, branch `mmm/bbafbd93`, 2026-11-12; PR link belongs to its review receipt. Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_fleet_cli.py] Test gap: Pricing confirmation model summary cap
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Successful pricing confirmations have exact-output coverage with at most two model IDs, but no case reaches the eight-name display cap and omitted-count suffix.

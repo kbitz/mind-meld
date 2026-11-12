@@ -1222,19 +1222,27 @@ do not automatically discard a device or ledger based on equal totals.
 
 `FleetAgentRow.floor_causes` is the fleet-wide successor to the per-device
 cause list `_device_economics_cell` built. Collapsing a per-machine table into
-one row must not drop the REASON a number is a floor — only the machine it
-happened on.
+one row must not drop either the REASON a number is a floor or the machine
+whose snapshot caused it.
 
-- Causes are attributed **per family, not per machine.** One Mac running both
-  readers publishes ONE snapshot; a machine-scoped cause list put Grok's "logs
-  do not record per-request prompt sizes" onto the Codex row, which is a claim
-  about a different vendor's log format.
+- Causes are attributed **per family**, while naming the reporting machine on
+  machine-specific causes. One machine running both readers publishes ONE
+  snapshot; a family-blind cause list put Grok's "logs do not record
+  per-request prompt sizes" onto the Codex row, which is a claim about a
+  different vendor's log format.
 - Reader coverage causes (`partial_sources`, `degraded_sources`) apply to
   **all families**, even families this machine contributed no data for. The
   wire carries no reader-to-model attribution, and a failed or partial reader
   cannot establish which families are missing. Do not infer ownership from
   a reader name or from the families that happened to contribute. The simple,
   conservative result is `≥` on every agent's available priced subtotal.
+  Each family groups reader causes by `(kind, _reader_display_labels)` across
+  contributing machines and formats the affected machine list with
+  `_format_coverage_peer_names` (`"<machines>: a host declared totals
+  incomplete (<readers>)"` / `"<machines>: a host reader failed (<readers>)"`),
+  so two machines with different failed reader sets stay distinct while
+  machines sharing the same kind and reader set merge into one bounded sentence
+  per reader set without crowding `MAX_AGENT_FLOOR_CAUSES`.
   Only snapshots eligible for the requested window propagate reader causes;
   stale inventory remains available for diagnostics without repricing current rows.
   Unusable coverage metadata is the same scope: a snapshot that carries
@@ -1247,14 +1255,19 @@ happened on.
 - `residual` (the per-day model cap leaving unattributable tokens) is
   genuinely cross-family — `tokens_by_day` day totals are not
   family-partitioned — so it is shared across every family the snapshot
-  touched.
+  touched, prefixed with the reporting machine's label (`"<machine>: some
+  tokens were not attributed to a named model (the per-day model cap)"`).
+  Claude session coverage causes also name the affected peer(s) (`"token
+  coverage is incomplete on <machines>"`).
 - **Legacy inclusive counters render `—`, never a number.** `counters_known`
   is False when any contributing snapshot lacks `disjoint-v1`. Inclusive
   counters run up to ~2x HIGH: the one caveat that points the wrong way, and
   therefore the one that stays a rendered marker rather than moving into the
-  health payload. `legacy_counters` names the affected machine(s) and uses the
-  attended-capture version floor in its peer-upgrade remedy. Legacy rows skip
-  numeric token/pricing and pricing-extrapolation health details as well.
+  health payload. `legacy_counters` names the affected machine(s) and routes
+  its remedy through `_attended_usage_remedy`, citing the attended-capture
+  version floor only when registry evidence shows an affected peer last pushed
+  below `ATTENDED_USAGE_MIN_VERSION`. Legacy rows skip numeric token/pricing
+  and pricing-extrapolation health details as well.
 - **Pricing health matches the visible cost cell.** Emit `cost_floor` only
   when the row has a priced subtotal rendered with `≥`. A visible non-legacy
   row with no priced basis renders `—` and emits `cost_unavailable`, retaining
@@ -1441,15 +1454,25 @@ note (git). They aggregate across machines. Remedy is `mm diag` on the
 named machine inspecting `host_usage.<reader>` — never a bare `mm push`.
 Absence of the field produces no upgrade nag.
 
-**Two-tier version floor (64A amendment).** `HOST_SNAPSHOT_MIN_VERSION`
-(`v0.12.32`) is the first host-snapshot schema release.
-`ATTENDED_USAGE_MIN_VERSION` (`v0.14.17`) is the first release that refreshes
-usage on every attended push. A converged push below that floor reports
-success while doing no capture. Every fleet remedy that calls for a refresh
-uses `_attended_usage_remedy`: upgrade the producing Mac to the attended floor,
-verify `mm --version`, then run `mm push` and verify with `mm status`.
-Tag-pinned pipx installs can remain old after `pipx upgrade`; README supplies
-the force-install fallback. Both producer and renderer must upgrade for the
+**Two-tier version floor (64A amendment, 129A evidence gate).**
+`HOST_SNAPSHOT_MIN_VERSION` (`v0.12.32`) is the first host-snapshot schema
+release. `ATTENDED_USAGE_MIN_VERSION` (`v0.14.17`) is the first release that
+refreshes usage on every attended push. A converged push below that floor
+reports success while doing no capture. Every fleet remedy that calls for a
+refresh uses `_attended_usage_remedy`, which gates peer-upgrade advice on
+positive registry evidence (`FleetState.devices_known_list[*].last_seen_version`
+parsed with `packaging.version.Version` strictly below
+`ATTENDED_USAGE_MIN_VERSION`). When a peer's version is unknown, missing,
+malformed, conflicting across duplicate registry records, or at/above the
+floor, the remedy asks to `"run \`mm push\` on the machine"` (or, for
+missing-snapshot notes, names the missing machine(s) and says `"run \`mm push\`
+on the machine, or wait for Syncthing to deliver"`). Only when registry
+evidence shows a target peer last pushed below `ATTENDED_USAGE_MIN_VERSION`
+does the remedy instruct upgrading mind-meld to `v0.14.17+` on that machine,
+verifying with `mm --version`, and running `mm push` (naming the old subset in
+mixed groups). No retro diagnostic says `"Mac"` for a machine. Tag-pinned pipx
+installs can remain old after `pipx upgrade`; README supplies the
+force-install fallback. Both producer and renderer must upgrade for the
 init-origin counting fix.
 
 #### Acceptor and schema
@@ -2506,7 +2529,7 @@ see `docs/designs/host-parity.md`.
 
 v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is counted regardless of mtime. The aggregator picks the LATEST v=2 snapshot per `(device, source_root, claude_dir)` — produces an accurate point-in-time sessions count for the rendering machine's view of the fleet. mm-push and git-snapshot rows keep delta semantics (commits since last push, dedup-by-sha aggregator side); only sessions-snapshot semantics changed.
 
-**Mixed-fleet transition rule.** Pre-v0.11.0 peers still emit v=1 sessions rows. The retro-fleet aggregator treats v=1 sessions as below-threshold and surfaces "Sessions count incomplete: peer X is on pre-v0.11.0" as part of the fleet-incomplete breadcrumb. Numbers are honestly low, never overcounted. Once the fleet rolls to v0.11.0, every peer emits v=2 and the count is exact.
+**Mixed-fleet transition rule.** A retained v=1 sessions row records pre-v0.11.0 delta semantics, not the peer's current binary. The aggregator omits its session total and reports `sessions_incomplete` in `MM_HEALTH`; its refresh remedy follows the registry-evidence rule above. A new v=2 capture supplies usable totals; the legacy health marker remains while a v=1 row is in the requested window.
 
 **`since` parameter retained for API stability.** `walk_session_metadata(claude_dir, since, *, deadline_monotonic)` still accepts `since` to keep the call-site signature stable; the value is now ignored (suppressed via `# noqa: ARG001`). A future v=3 schema can re-introduce delta semantics with a new field name without breaking callers.
 
@@ -2886,7 +2909,7 @@ The retro-fleet output has two artifacts with different production paths:
 
 `aggregate_git` collects four additional views in the same per-commit pass — keeping the iteration single-pass (no second walk) and the data dataclass-bound for renderer simplicity:
 
-- **`commit_types: CommitTypes`** — conventional-commit prefix counts (`feat`/`fix`/`refactor`/`test`/`chore`/`docs`/`perf`/`style`/`build`/`ci`/`revert`/`other`). `_classify_commit_subject` matches the regex `^([a-z]+)(?:\([^)]*\))?!?:` so scoped (`fix(cli):`) and breaking (`feat!:`) variants normalize to the bare keyword. Subjects that don't match the pattern bucket as `other`.
+- **`commit_types: CommitTypes`** — conventional-commit prefix counts (`feat`/`fix`/`refactor`/`test`/`chore`/`docs`/`perf`/`style`/`build`/`ci`/`revert`/`other`). `_classify_commit_subject` slices the subject to `_CLASSIFY_LEN_CAP` (256 chars), strips/lowercases it, strips at most one leading whitespace-delimited release version prefix matching `^v[0-9]+(?:\.[0-9]+)*\s+` (`_COMMIT_VERSION_PREFIX_RE`), and then matches `^([a-z]+)(?:\([^)]*\))?!?:` (`_COMMIT_TYPE_RE`) so scoped (`fix(cli):`), breaking (`feat!:`), and version-prefixed (`v1.2.3 fix(core): y`, `v0.0.7.0 feat: ...`) subjects normalize to the bare keyword. Subjects that don't match the pattern (including bare version tags or malformed/prerelease/repeated version prefixes) bucket as `other`.
 - **`hourly: dict[int, int]`** — 24-hour histogram in local time. Renderer caps at TOP_N_HOURS (5) peak rows.
 - **`bursts: CommitBursts`** — 45-min-gap clustering. Naming is intentional: "commit bursts" not "sessions" — the heuristic counts commit clusters, not cognitive flow, and a real coding session that stops for lunch / debugging without commits / deep think will fragment into multiple bursts. The honest framing avoids collision with Claude Code "sessions" already counted via `SessionsAggregate.total_sessions`. Buckets: deep ≥50min, medium 20–50min, micro <20min. Single-commit bursts have span 0 and land in micro.
 - **`ship: ShipOfWeek`** — single highest-LOC commit (max `add+del`). Pure data; the LLM picks up subject + repo + sha for the card synthesis.
