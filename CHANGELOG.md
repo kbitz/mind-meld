@@ -2,6 +2,17 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.39] - 2026-11-12
+
+`mm retro-fleet` names affected machines in coverage causes, gives missing snapshots a push-or-delivery remedy, and recognizes version-prefixed conventional commits.
+
+### Changed
+
+- `mm retro-fleet` names affected machines in coverage causes, gives missing snapshots a push-or-delivery remedy, and recognizes version-prefixed conventional commits.
+- `mm retro-fleet` names affected machines and groups matching reader failures in coverage-floor explanations.
+- Missing-snapshot guidance names machines, and upgrade advice requires recorded peer-version evidence.
+- Numeric version prefixes are recognized when classifying conventional commit subjects.
+
 ## [1.12.38] - 2026-11-11
 
 `mm retro-fleet` prices Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 at their own rates, leaves family-extrapolated rates out of any `≥` cost, and confirms a successful `--set-model-price` or `--mark-pricing-verified` with one `Pricing:` line on stderr.
