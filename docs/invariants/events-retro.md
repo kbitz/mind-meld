@@ -2529,7 +2529,7 @@ see `docs/designs/host-parity.md`.
 
 v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is counted regardless of mtime. The aggregator picks the LATEST v=2 snapshot per `(device, source_root, claude_dir)` — produces an accurate point-in-time sessions count for the rendering machine's view of the fleet. mm-push and git-snapshot rows keep delta semantics (commits since last push, dedup-by-sha aggregator side); only sessions-snapshot semantics changed.
 
-**Mixed-fleet transition rule.** A retained v=1 sessions row records pre-v0.11.0 delta semantics, not the peer's current binary. The aggregator omits its session total and reports `sessions_incomplete` in `MM_HEALTH`; its refresh remedy follows the registry-evidence rule above. A new v=2 capture replaces the legacy view.
+**Mixed-fleet transition rule.** A retained v=1 sessions row records pre-v0.11.0 delta semantics, not the peer's current binary. The aggregator omits its session total and reports `sessions_incomplete` in `MM_HEALTH`; its refresh remedy follows the registry-evidence rule above. A new v=2 capture supplies usable totals; the legacy health marker remains while a v=1 row is in the requested window.
 
 **`since` parameter retained for API stability.** `walk_session_metadata(claude_dir, since, *, deadline_monotonic)` still accepts `since` to keep the call-site signature stable; the value is now ignored (suppressed via `# noqa: ARG001`). A future v=3 schema can re-introduce delta semantics with a new field name without breaking callers.
 
