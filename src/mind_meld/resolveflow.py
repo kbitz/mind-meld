@@ -32,7 +32,6 @@ import difflib
 import hashlib
 import os
 import secrets
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,7 +53,7 @@ from mind_meld.conflictdiff import (
     render_verdict,
 )
 from mind_meld.conflictmtime import _bump_canonical_mtime_post_resolve, _stat_mtime_btime
-from mind_meld.consoles import console, stderr_console
+from mind_meld.consoles import console
 from mind_meld.devices import lookup_device_by_short_id
 from mind_meld.errors import LEDGER_URL, StorageError
 from mind_meld.manifest import (
@@ -70,7 +69,7 @@ from mind_meld.manifest import (
     parse_conflict_device_short,
 )
 from mind_meld.merge import lcs_merge
-from mind_meld.safety import safe_str
+from mind_meld.safety import safe_str, safe_terminal_str
 
 # v0.9.2 inversion ship date (CHANGELOG). Unprefixed sidecars whose
 # filename timestamp is on or after this are post-inversion mints.
@@ -248,17 +247,11 @@ def _migrate_pre_inversion_conflict(path: Path) -> Path:
     try:
         path.rename(new_path)
     except OSError as e:
-        # safe_str both: the sidecar filename derives from a peer-supplied
+        # Both path and exception reach the terminal through core._warning ->
+        # safe_terminal_str: the sidecar filename derives from a peer-supplied
         # manifest rel_path stem, and manifest._validate_rel_path rejects only
-        # NUL / absolute / ".." / drive-letter — ESC passes through. Without
-        # this, a peer holding the storage passphrase can land an OSC-52 payload
-        # in a filename that reaches the terminal unstripped. Every other print
-        # in this module was already sanitized; this was the one hole, carried
-        # over from cli.py.
-        stderr_console.print(
-            f"[yellow]warning:[/yellow] failed to migrate pre-inversion conflict "
-            f"file {safe_str(path)} — {safe_str(e)}"
-        )
+        # NUL / absolute / ".." / drive-letter — ESC passes through.
+        core._warning(f"failed to migrate pre-inversion conflict file {path} \u2014 {e}")
         return path
     return new_path
 
@@ -352,10 +345,8 @@ def _find_conflict_files(
                 try:
                     is_regular = conflict_path.is_file()
                 except OSError as e:
-                    print(
-                        "mm: warning: conflict sidecar unreadable (left in place): "
-                        f"{safe_str(conflict_path)} \u2014 {safe_str(e)}",
-                        file=sys.stderr,
+                    core._warning(
+                        f"conflict sidecar unreadable (left in place): {conflict_path} \u2014 {e}"
                     )
                     continue
                 if not is_regular:
@@ -404,10 +395,9 @@ def _find_conflict_files(
                     try:
                         is_regular = conflict_path.is_file()
                     except OSError as e:
-                        print(
-                            "mm: warning: conflict sidecar unreadable (left in place): "
-                            f"{safe_str(conflict_path)} \u2014 {safe_str(e)}",
-                            file=sys.stderr,
+                        core._warning(
+                            "conflict sidecar unreadable (left in place): "
+                            f"{conflict_path} \u2014 {e}"
                         )
                         continue
                     if not is_regular:
@@ -538,8 +528,8 @@ def _record_resolution(
         return
 
     def notice(cause: str) -> None:
-        core._print_apply_warning(
-            f"mm: notice: resolution kept; settled base not recorded ({cause}); "
+        core._notice(
+            f"resolution kept; settled base not recorded ({cause}); "
             f"a later pull may conflict again. See {LEDGER_URL}."
         )
 
@@ -651,29 +641,49 @@ def _resolve_interactive_loop(
             if choice in ("p", "promote"):
                 target_canonical = manifest._canonical_for_conflict(cpath)
                 if target_canonical is None:
-                    console.print(
-                        "  [red]promote failed:[/red] cannot reconstruct a "
-                        "canonical name for this sidecar"
+                    core._print_error(
+                        f"promote failed: {safe_terminal_str(cpath.name)} \u2014 "
+                        "cannot reconstruct a canonical name for this sidecar"
                     )
                     failed += 1
                 else:
                     try:
                         cpath.rename(target_canonical)
                         console.print(
-                            f"  [green]promoted[/green] "
-                            f"{safe_str(cpath.name)} -> {safe_str(target_canonical.name)}"
+                            core._outcome_line(
+                                "resolve",
+                                f"promoted {safe_terminal_str(cpath.name)} -> "
+                                f"{safe_terminal_str(target_canonical.name)}",
+                            ),
+                            markup=False,
+                            highlight=False,
+                            soft_wrap=True,
                         )
                         resolved += 1
                     except OSError as e:
-                        console.print(f"  [red]promote failed:[/red] {safe_str(e)}")
+                        core._print_error(
+                            f"promote failed: {safe_terminal_str(cpath.name)} \u2014 "
+                            f"{safe_terminal_str(e)}"
+                        )
                         failed += 1
             elif choice in ("d", "delete"):
                 try:
                     cpath.unlink()
-                    console.print(f"  [red]deleted[/red] {safe_str(cpath.name)}")
+                    console.print(
+                        core._outcome_line(
+                            "resolve",
+                            f"deleted {safe_terminal_str(cpath.name)}",
+                        ),
+                        markup=False,
+                        highlight=False,
+                        soft_wrap=True,
+                    )
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]delete failed:[/red] {safe_str(e)}")
+                    core._print_error(
+                        f"delete failed: {safe_terminal_str(cpath.name)} \u2014 "
+                        f"{safe_terminal_str(e)}"
+                    )
                     failed += 1
             # else: skip (default)
             continue
@@ -695,7 +705,9 @@ def _resolve_interactive_loop(
             canonical_bytes = canonical.read_bytes()
             cpath_bytes = cpath.read_bytes()
         except OSError as e:
-            console.print(f"  [red]read failed:[/red] {safe_str(e)}")
+            core._print_error(
+                f"read failed: {safe_terminal_str(cpath.name)} \u2014 {safe_terminal_str(e)}"
+            )
             failed += 1
             continue
 
@@ -882,11 +894,10 @@ def _resolve_interactive_loop(
             # remote depending on inversion era). Exact-match (not startswith):
             # otherwise "cancel" / "continue" would trip the rejection.
             if choice in ("c", "f"):
-                print(
-                    "mm: error: input letters 'c' and 'f' are no longer accepted. "
+                core._print_error(
+                    "input letters 'c' and 'f' are no longer accepted. "
                     "Use (l)ocal to keep your local edits or (r)emote to keep "
-                    "the other machine's bytes. (Old labels removed in v0.9.0.)",
-                    file=sys.stderr,
+                    "the other machine's bytes. (Old labels removed in v0.9.0.)"
                 )
                 raise typer.Exit(1)
 
@@ -933,12 +944,21 @@ def _resolve_interactive_loop(
                     cpath.rename(canonical)
                     _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
                     console.print(
-                        f"  [green]kept local; promoted[/green] "
-                        f"{safe_str(cpath.name)} -> {safe_str(canonical.name)}"
+                        core._outcome_line(
+                            "resolve",
+                            f"kept local; promoted {safe_terminal_str(cpath.name)} -> "
+                            f"{safe_terminal_str(canonical.name)}",
+                        ),
+                        markup=False,
+                        highlight=False,
+                        soft_wrap=True,
                     )
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]rename failed:[/red] {safe_str(e)}")
+                    core._print_error(
+                        f"rename failed: {safe_terminal_str(cpath.name)} \u2014 "
+                        f"{safe_terminal_str(e)}"
+                    )
                     failed += 1
             else:
                 # Post-inversion: canonical IS local — drop the remote sidecar.
@@ -946,11 +966,20 @@ def _resolve_interactive_loop(
                     cpath.unlink()
                     _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
                     console.print(
-                        f"  [green]kept local; discarded remote[/green] {safe_str(cpath.name)}"
+                        core._outcome_line(
+                            "resolve",
+                            f"kept local; discarded remote {safe_terminal_str(cpath.name)}",
+                        ),
+                        markup=False,
+                        highlight=False,
+                        soft_wrap=True,
                     )
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]delete failed:[/red] {safe_str(e)}")
+                    core._print_error(
+                        f"delete failed: {safe_terminal_str(cpath.name)} \u2014 "
+                        f"{safe_terminal_str(e)}"
+                    )
                     failed += 1
         elif choice in ("r", "remote"):
             if is_pre_inversion:
@@ -958,23 +987,41 @@ def _resolve_interactive_loop(
                 try:
                     cpath.unlink()
                     console.print(
-                        f"  [green]kept remote; discarded local[/green] {safe_str(cpath.name)}"
+                        core._outcome_line(
+                            "resolve",
+                            f"kept remote; discarded local {safe_terminal_str(cpath.name)}",
+                        ),
+                        markup=False,
+                        highlight=False,
+                        soft_wrap=True,
                     )
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]delete failed:[/red] {safe_str(e)}")
+                    core._print_error(
+                        f"delete failed: {safe_terminal_str(cpath.name)} \u2014 "
+                        f"{safe_terminal_str(e)}"
+                    )
                     failed += 1
             else:
                 # Post-inversion: sidecar HOLDS remote bytes — promote over local.
                 try:
                     cpath.rename(canonical)
                     console.print(
-                        f"  [green]kept remote; promoted[/green] "
-                        f"{safe_str(cpath.name)} -> {safe_str(canonical.name)}"
+                        core._outcome_line(
+                            "resolve",
+                            f"kept remote; promoted {safe_terminal_str(cpath.name)} -> "
+                            f"{safe_terminal_str(canonical.name)}",
+                        ),
+                        markup=False,
+                        highlight=False,
+                        soft_wrap=True,
                     )
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]rename failed:[/red] {safe_str(e)}")
+                    core._print_error(
+                        f"rename failed: {safe_terminal_str(cpath.name)} \u2014 "
+                        f"{safe_terminal_str(e)}"
+                    )
                     failed += 1
         elif choice in ("m", "merge"):
             # (m)erge accept: write merged_bytes to canonical, drop sidecar.
@@ -990,8 +1037,9 @@ def _resolve_interactive_loop(
             try:
                 fsutil.atomic_write_bytes(canonical, merged_bytes, fsync=False)
             except (OSError, StorageError) as e:
-                console.print(
-                    f"  [red]merge write failed:[/red] {safe_str(canonical.name)} — {safe_str(e)}"
+                core._print_error(
+                    f"merge write failed: {safe_terminal_str(canonical.name)} \u2014 "
+                    f"{safe_terminal_str(e)}"
                 )
                 failed += 1
                 continue
@@ -1001,19 +1049,31 @@ def _resolve_interactive_loop(
             try:
                 cpath.unlink()
             except OSError as e:
-                print(
-                    f"mm: warning: merged result written; sidecar unlink "
-                    f"failed: {safe_str(cpath.name)} — {safe_str(e)}",
-                    file=sys.stderr,
+                core._warning(
+                    f"merged result written; sidecar unlink failed: {cpath.name} \u2014 {e}"
                 )
             if merge_conflicts == 0:
-                console.print(f"  [cyan]merged[/cyan] {safe_str(canonical.name)} (clean LCS merge)")
+                console.print(
+                    core._outcome_line(
+                        "resolve",
+                        f"merged {safe_terminal_str(canonical.name)} (clean LCS merge)",
+                    ),
+                    markup=False,
+                    highlight=False,
+                    soft_wrap=True,
+                )
             else:
                 console.print(
-                    f"  [cyan]merged[/cyan] {safe_str(canonical.name)} "
-                    f"(contains {merge_conflicts} <<<<<<< region"
-                    f"{'s' if merge_conflicts != 1 else ''}; "
-                    f"resolve in editor)"
+                    core._outcome_line(
+                        "resolve",
+                        f"merged {safe_terminal_str(canonical.name)} "
+                        f"(contains {merge_conflicts} <<<<<<< region"
+                        f"{'s' if merge_conflicts != 1 else ''}; "
+                        f"resolve in editor)",
+                    ),
+                    markup=False,
+                    highlight=False,
+                    soft_wrap=True,
                 )
             resolved += 1
         elif choice in ("p", "promote"):
@@ -1043,13 +1103,22 @@ def _resolve_interactive_loop(
             try:
                 target = _promote_conflict_file(cpath, target)
             except OSError as e:
-                console.print(f"  [red]promote failed:[/red] {safe_str(e)}")
+                core._print_error(
+                    f"promote failed: {safe_terminal_str(cpath.name)} \u2014 {safe_terminal_str(e)}"
+                )
                 failed += 1
             else:
                 if not is_pre_inversion and peer_mtime > 0.0:
                     _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
                 console.print(
-                    f"  [green]promoted[/green] {safe_str(cpath.name)} -> {safe_str(target.name)}"
+                    core._outcome_line(
+                        "resolve",
+                        f"promoted {safe_terminal_str(cpath.name)} -> "
+                        f"{safe_terminal_str(target.name)}",
+                    ),
+                    markup=False,
+                    highlight=False,
+                    soft_wrap=True,
                 )
                 resolved += 1
                 # Warn if the promoted file landed outside the source's sync
@@ -1057,11 +1126,9 @@ def _resolve_interactive_loop(
                 # names -- a from-/local- name will never be one of them).
                 src_cfg = sources_by_name.get(src_name)
                 if src_cfg is not None and not _promote_target_will_sync(src_cfg, target):
-                    print(
-                        f"mm: warning: {safe_str(target.name)} is under an "
-                        f"include_files source and will not sync until you add "
-                        f"it to config.",
-                        file=sys.stderr,
+                    core._warning(
+                        f"{target.name} is under an include_files source and will not "
+                        "sync until you add it to config."
                     )
         elif choice in ("a", "abort"):
             raise typer.Abort()
@@ -1085,9 +1152,17 @@ def _resolve_interactive_loop(
             )
 
     if failed:
-        console.print(f"\n[bold]Resolved {resolved} of {len(hits)}; {failed} failed.[/bold]")
+        core._print_error(
+            f"Resolved {resolved} of {len(hits)}; {failed} failed.",
+            fix="mm resolve",
+        )
     else:
-        console.print(f"\n[bold]Resolved {resolved} of {len(hits)}.[/bold]")
+        console.print(
+            core._outcome_line("resolve", f"resolved {resolved} of {len(hits)}"),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
     return resolved, failed
 
 

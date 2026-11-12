@@ -292,8 +292,8 @@ def test_corrupt_blob_failure_lines_and_counts(fleet, monkeypatch, mode):
             "wrong root_salt in mm-crypto-init, or corrupt blob. "
             "Verify mm-crypto-init integrity if other decrypts also fail."
         )
-        assert cause in " ".join(output[0].split())
-        assert output[1] == ""
+        assert cause not in " ".join(output[0].split())
+        assert output[1] == f"mm: error: {cause}\n"
         summary = "  notes: 1 failed\n    - note.md\n"
         if mode == "direct":
             summary += (
@@ -321,7 +321,7 @@ def test_fail_mode_refuses_apply_but_characterizes_migration_and_history(
     with pytest.raises(typer.Exit) as stopped:
         _run(fleet, monkeypatch, mode, refusal=refusal, conflict_mode="fail", dry_run=dry_run)
     assert stopped.value.exit_code == 3
-    warning = "mm: conflict notes/note.md (from Peer B)\n"
+    warning = "mm: warning: conflict notes/note.md (from Peer B)\n"
     if dry_run:
         warning += "Nothing was changed except the local lock file (dry run).\n"
     assert refusal == {"summaries": [("", "")], "output": ("", warning)}
@@ -3616,3 +3616,284 @@ def test_a_cursor_write_failure_is_one_notice_and_never_fails_the_pull(fleet, mo
     assert len(notices) == 1
     assert "peer push record not saved (busy);" in notices[0]
     assert "mm status may show an earlier pull." in notices[0]
+
+
+# ── Track 130B: shared error, warning, and outcome style in pullflow ──
+
+
+class TestDownloadAndApply:
+    @pytest.mark.parametrize(
+        "branch",
+        ("bad-blob-key", "decrypt-failed", "escape-root", "content-check"),
+    )
+    @pytest.mark.parametrize("quiet", (False, True))
+    def test_download_and_apply_per_file_error_branches(
+        self, fleet, monkeypatch, capsys, branch, quiet
+    ):
+        rel = "note-[red]tag[/red]\x1b]52;c;ZGF0YQ==\x07\nextra.md"
+        safe_rel = "note-[red]tag[/red]\\nextra.md"
+        data = b"peer content\n"
+        good_sha = _sha(data)
+        enc = crypto.encrypt(data, PASSPHRASE, MEMORY_KB)
+        fleet.backend.put(blob_key(PEER, good_sha), enc)
+
+        if branch == "bad-blob-key":
+            info = {"sha256": "../bad\x1b[31m\nsha", "size": len(data)}
+        elif branch == "decrypt-failed":
+            fleet.backend.put(blob_key(PEER, good_sha), enc[:-1] + bytes([enc[-1] ^ 1]))
+            info = {"sha256": good_sha, "size": len(data)}
+        elif branch == "escape-root":
+            rel = "../escape-[red]tag[/red]\x1b[31m\n.md"
+            safe_rel = "../escape-[red]tag[/red]\\n.md"
+            info = {"sha256": good_sha, "size": len(data)}
+        else:
+            info = {"sha256": _sha(b"different content\n"), "size": len(data)}
+            fleet.backend.put(blob_key(PEER, info["sha256"]), enc)
+
+        reporter = pullflow._ApplyReporter(
+            peer_id=PEER,
+            device_name="Peer B",
+            src_name=NOTES,
+            outcomes=pullflow._empty_outcomes(),
+            touched_parents=set(),
+            ledger=pullplan.Ledger(),
+            pending_inline_bumps={},
+            line_indexes={},
+        )
+        token = core._SYNC_OUTPUT.set({"verbose": False, "diagnostics": [], "progress": None})
+        try:
+            pullflow._download_and_apply(
+                backend=fleet.backend,
+                base_path=fleet.local,
+                to_download={rel: info},
+                source_device_id=PEER,
+                passphrase=PASSPHRASE,
+                memory_kb=MEMORY_KB,
+                verbose=True,
+                quiet=quiet,
+                reporter=reporter,
+            )
+        finally:
+            core._SYNC_OUTPUT.reset(token)
+
+        captured = capsys.readouterr()
+        assert reporter.outcomes["failed"] == [rel]
+        assert captured.out == ""
+        if quiet:
+            assert captured.err == ""
+        else:
+            lines = captured.err.splitlines()
+            assert len(lines) == 1
+            assert "\x1b" not in lines[0]
+            if branch == "bad-blob-key":
+                assert lines[0].startswith(
+                    f"mm: error: bad blob key (local preserved): {safe_rel} \u2014 "
+                )
+            elif branch == "decrypt-failed":
+                assert lines[0].startswith(f"mm: error: decrypt failed: {safe_rel} \u2014 ")
+            elif branch == "escape-root":
+                assert lines[0] == f"mm: error: rejected (would escape source root): {safe_rel}"
+            else:
+                assert lines[0] == (
+                    f"mm: error: content check failed: {safe_rel} does not match the "
+                    f"sending snapshot. Local file kept. see {errors.SNAPSHOT_FAILURES_URL}."
+                )
+
+
+@pytest.mark.parametrize(
+    "outcome,label,expected_fix",
+    [
+        ("conflict", "conflict", "mm pull --conflict-mode keep-both"),
+        ("may fail", "may fail (unreadable local destination)", "mm diag"),
+    ],
+)
+@pytest.mark.parametrize("mode", MODES)
+def test_preflight_conflicts_direct_fallback_and_non_duplication(
+    capsys, outcome, label, expected_fix, mode
+):
+    pred = pullplan.PullPrediction(
+        device_id=PEER,
+        device_name="Peer [red]B[/red]\x1b[31m\n2",
+        src_name="notes\n1",
+        rel_path="sub/note.md",
+        outcome=outcome,
+        reason="" if outcome == "conflict" else "unreadable local destination",
+    )
+    state = {"verbose": False, "diagnostics": [], "progress": None} if mode == "attended" else None
+    token = core._SYNC_OUTPUT.set(state)
+    try:
+        pullflow._print_preflight_conflicts([pred], quiet=(mode == "quiet"))
+    finally:
+        core._SYNC_OUTPUT.reset(token)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    expected_warn = f"mm: warning: {label} notes\\n1/sub/note.md (from Peer [red]B[/red]\\n2)"
+    err_lines = captured.err.splitlines()
+    if mode in ("attended", "quiet"):
+        assert err_lines == [expected_warn]
+    else:
+        assert err_lines == [
+            expected_warn,
+            "mm: error: Pull refused: 1 file(s) would conflict or may fail.",
+            f"Run: {expected_fix}",
+        ]
+
+
+def test_verbose_deletion_prints_shared_outcome_line(fleet, monkeypatch):
+    _setup_deletion(fleet, "note.md")
+    result, _, (out, err) = _run(fleet, monkeypatch, "attended", verbose=True)
+    assert result.total_deleted == 1
+    assert err == ""
+    assert "Pull: deleted note.md (a peer deleted it).\n" in out
+    assert "[red]" not in out
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("own_vanished", "newer_version", "corrupt_peer", "unknown_source", "fsync_warning"),
+)
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("dry_run", (False, True))
+def test_summary_data_at_risk_warnings_across_modes_and_dry_run(capsys, kind, mode, dry_run):
+    hostile = "bad[red]tag[/red]\x1b]52;c;ZGF0YQ==\x07\nline2"
+    clean = "bad[red]tag[/red]\\nline2"
+    corrupt_peers: list[pullflow._CorruptPeer] = []
+    unknown_sources: list[pullflow._UnknownSourceWarning] = []
+    fsync_warnings: list[pullflow._FsyncWarning] = []
+
+    if kind == "own_vanished":
+        corrupt_peers.append(
+            pullflow._CorruptPeer(device_name="Self", device_id=hostile, own_vanished=True)
+        )
+        expected = (
+            f"mm: warning: this device's manifest ({clean}) vanished during the read - "
+            "its deletion records were not applied, so files deleted on this Mac "
+            "may have come back from peers. Check them before the next mm push."
+        )
+    elif kind == "newer_version":
+        corrupt_peers.append(
+            pullflow._CorruptPeer(
+                device_name=hostile,
+                device_id="dev-2",
+                newer_version=99,
+            )
+        )
+        expected = "mm: warning: " + core._newer_format_message(99, f"manifest for {clean} (dev-2)")
+    elif kind == "corrupt_peer":
+        corrupt_peers.append(pullflow._CorruptPeer(device_name=hostile, device_id="dev-2"))
+        expected = (
+            f"mm: warning: manifest for device {clean} (dev-2) "
+            "is corrupt - skipping pull from this device."
+        )
+    elif kind == "unknown_source":
+        unknown_sources.append(
+            pullflow._UnknownSourceWarning(device_name="Peer B", src_name=hostile)
+        )
+        expected = (
+            f"mm: warning: skipping unknown source '{clean}' from Peer B - not configured locally"
+        )
+    else:
+        fsync_warnings.append(
+            pullflow._FsyncWarning(parent_dir=Path(f"/tmp/{hostile}"), error="EIO\x1b[31m\nbad")
+        )
+        expected = f"mm: warning: durability fsync failed on /tmp/{clean} \u2014 EIO\\nbad"
+
+    state = {"verbose": False, "diagnostics": [], "progress": None} if mode == "attended" else None
+    token = core._SYNC_OUTPUT.set(state)
+    try:
+        pullflow._print_pull_summary(
+            pullflow.PullResult(),
+            corrupt_peers,
+            unknown_sources,
+            fsync_warnings,
+            [],
+            quiet=(mode == "quiet"),
+            verbose=False,
+            dry_run=dry_run,
+        )
+    finally:
+        core._SYNC_OUTPUT.reset(token)
+
+    captured = capsys.readouterr()
+    if mode != "direct" or dry_run:
+        assert captured.out == ""
+    else:
+        assert "warning" not in captured.out.lower()
+    err_lines = captured.err.splitlines()
+    assert err_lines == [expected]
+    assert "\x1b" not in captured.err
+
+
+@pytest.mark.parametrize("mode", ("attended", "quiet"))
+def test_bookkeeping_and_manifest_cleanup_warnings_use_shared_stderr_helper(
+    fleet, monkeypatch, mode
+):
+    fleet.config["sync"]["sources"][0]["type"] = "claude"
+    peer, _ = _seed(fleet, {"projects/demo/memory/note.md": b"peer content\n"})
+    mkey = manifest_key(PEER)
+    copy_key = mkey.replace("manifest.json.enc", f"manifest.json.{CONFLICT_STAMP}.enc")
+    fleet.backend.put(copy_key, fleet.backend.get(mkey))
+
+    monkeypatch.setattr(
+        pullflow,
+        "write_sync_log",
+        lambda *_a, **_kw: (_ for _ in ()).throw(OSError("log boom\x1b[31m\n2")),
+    )
+    monkeypatch.setattr(
+        core,
+        "_cleanup_conflict_copies",
+        lambda *_a, **_kw: (_ for _ in ()).throw(OSError("cleanup boom\x1b[31m\n2")),
+    )
+
+    _, summaries, (out, err) = _run(fleet, monkeypatch, mode)
+    assert summaries == [("", "")]
+    assert "warning" not in out.lower()
+    err_lines = err.splitlines()
+    assert "mm: warning: sync log write failed: log boom\\n2" in err_lines
+    assert (
+        "mm: warning: manifest conflict-copy cleanup failed for Peer B: cleanup boom\\n2"
+        in err_lines
+    )
+
+
+def test_cli_autopull_surfaces_data_at_risk_warnings_on_stderr(fleet, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mind_meld import config as config_mod
+    from mind_meld.cli import app
+
+    cfg_path = fleet.root / "config.toml"
+    config_mod.save_config(fleet.config, cfg_path)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", cfg_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+    peer, _ = _seed(fleet, {"note.md": b"peer content\n"})
+    peer["sources"]["mystery-src"] = {
+        "type": "generic",
+        "files": {
+            "secret.md": {
+                "sha256": _sha(b"peer content\n"),
+                "size": 13,
+                "mtime": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    }
+    _republish(fleet, peer)
+
+    devices.register_device(fleet.backend, THIRD, "Broken Peer")
+    devices.update_last_seen(fleet.backend, THIRD)
+    fleet.backend.put(manifest_key(THIRD), b"not-valid-ciphertext")
+
+    res = CliRunner().invoke(app, ["autopull"])
+    assert res.exit_code == 0, (res.stdout, res.stderr)
+    assert res.stdout == ""
+    err_lines = res.stderr.splitlines()
+    assert (
+        "mm: warning: manifest for device Broken Peer (cccccccc) "
+        "is corrupt - skipping pull from this device." in err_lines
+    )
+    assert (
+        "mm: warning: skipping unknown source 'mystery-src' from Peer B - "
+        "not configured locally" in err_lines
+    )

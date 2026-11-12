@@ -58,7 +58,8 @@ NEW_FLEET_OUTCOME = (
     "as the root of a Syncthing folder, run 'mm init' on the other machines, and run 'mm push'."
 )
 JOIN_OUTCOME = (
-    "Pulling now; if the folder is still syncing, run 'mm pull' again when delivery finishes."
+    "Init: Mind Meld initialized. Pulling now; if the folder is still syncing, "
+    "run 'mm pull' again when delivery finishes."
 )
 STIGNORE = f"{initflow.STIGNORE_LINE}\n"
 
@@ -141,6 +142,7 @@ def test_new_fleet_empty_folder(env):
     assert result.exit_code == 0, result.output
     assert "mm-crypto-init bootstrapped" in text
     assert "Device registered: Mac A" in text
+    assert f"Init: Mind Meld initialized. Share {storage} {NEW_FLEET_OUTCOME}" in text
     assert text.endswith(NEW_FLEET_OUTCOME)
     assert backend.exists("mm-crypto-init")
     assert (storage / ".stignore").read_text() == STIGNORE
@@ -682,8 +684,11 @@ def test_managed_new_fleet_removes_default_folder_creates_mm_folder_before_heade
     assert (storage / "mm-crypto-init").is_file()
     assert (storage / ".stignore").read_text() == STIGNORE
     assert config.CONFIG_PATH.is_file()
-    assert f"This machine's Syncthing device ID is {my_id}." in text
-    assert "paste this ID when it asks." in text
+    assert (
+        f"Init: Mind Meld initialized. This machine's Syncthing device ID is {my_id}. "
+        "Run 'mm push' here, then run 'mm init' on each other machine "
+        "and paste this ID when it asks."
+    ) in text
 
 
 def test_managed_new_fleet_outside_default_folder_skips_delete(
@@ -974,9 +979,7 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     }
     run2, text2 = _run(f"{storage}\n{peer_id}\n")
     assert run2.exit_code == 1, run2.output
-    assert pauses == [initflow.HEADER_POLL_SECONDS] * (
-        initflow.HEADER_WAIT_SECONDS // initflow.HEADER_POLL_SECONDS
-    )
+    assert pauses == [1] * 120
     assert "Waiting up to 2 minutes for Syncthing to deliver the key header" in text2
     assert "Syncthing has accepted the fleet folder" in text2
     assert "Wait for Syncthing to deliver it, then run 'mm init' again." in text2
@@ -1557,7 +1560,7 @@ def test_managed_join_rerun_on_already_shared_folder_waits_for_header(
     # Sub-run A: header never arrives -> full wait, no device-ID prompt, no REST writes.
     res_timeout, text_timeout = _run(f"{storage}\n")
     assert res_timeout.exit_code == 1, res_timeout.output
-    assert len(pauses) == initflow.HEADER_WAIT_SECONDS // initflow.HEADER_POLL_SECONDS
+    assert pauses == [1] * 120
     assert "Waiting up to 2 minutes for Syncthing to deliver the key header" in text_timeout
     assert "Syncthing has accepted the fleet folder" in text_timeout
     assert fake_syncthing.bodies == []
@@ -1585,3 +1588,219 @@ def test_managed_join_rerun_on_already_shared_folder_waits_for_header(
     assert (storage / ".stignore").read_text() == STIGNORE
     assert config.CONFIG_PATH.is_file()
     assert len(_device_keys(LocalBackend(storage))) == 2
+
+
+# ── Track 130B: shared output style & managed-join gap tests ─────────
+
+
+@pytest.mark.parametrize("arrival", ["corrupt", "newer", "unreadable"])
+def test_managed_join_poll_stops_immediately_on_corrupt_newer_or_unreadable_header(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses, arrival
+):
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+        "mind-meld": {
+            "offeredBy": {
+                peer_id: {
+                    "label": "Mind Meld",
+                    "receiveEncrypted": False,
+                    "remoteEncrypted": False,
+                }
+            }
+        }
+    }
+    real_fetch = initflow.fetch_crypto_init
+    fail_unreadable = False
+
+    def fetch_maybe_unreadable(backend):
+        if fail_unreadable:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_fetch(backend)
+
+    monkeypatch.setattr(initflow, "fetch_crypto_init", fetch_maybe_unreadable)
+
+    def pause_and_plant(seconds: float) -> None:
+        nonlocal fail_unreadable
+        pauses.append(seconds)
+        storage.mkdir(parents=True, exist_ok=True)
+        if arrival == "corrupt":
+            (storage / "mm-crypto-init").write_bytes(b"not-valid-json{")
+        elif arrival == "newer":
+            (storage / "mm-crypto-init").write_bytes(bytes([3]) + b"\x00" * 64)
+        else:
+            (storage / "mm-crypto-init").write_bytes(b"unreadable-peer-bytes")
+            fail_unreadable = True
+
+    monkeypatch.setattr(initflow, "_pause", pause_and_plant)
+
+    # No device name, passphrase or source answers in stdin: any prompt after
+    # polling would fail on EOF.
+    result, text = _run(f"{storage}\n{peer_id}\n")
+
+    assert result.exit_code == 1, result.output
+    assert pauses == [1]
+    assert "Device name" not in text
+    assert config.load_syncthing_record() == my_id
+    assert not config.CONFIG_PATH.exists()
+    assert not (storage / ".stignore").exists()
+    assert _device_keys(LocalBackend(storage)) == []
+    if arrival == "corrupt":
+        assert "is corrupt" in text
+        assert "never reinitialize" in text
+        assert (storage / "mm-crypto-init").read_bytes() == b"not-valid-json{"
+    elif arrival == "newer":
+        assert "was written by a newer mm (format 0x03) or is damaged" in text
+        assert "newer-or-damaged-storage-format" in text
+    else:
+        assert "cannot read the storage folder" in text
+        assert "Permission denied" in text
+        assert (storage / "mm-crypto-init").read_bytes() == b"unreadable-peer-bytes"
+
+
+def test_managed_join_rerun_with_unknown_peer_count_skips_wait_and_prompts(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
+):
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+    storage.mkdir(parents=True, exist_ok=True)
+    config.save_syncthing_record(my_id)
+    fake_syncthing.set_folder(storage, peers=[(peer_id, "mac-b", True)], write_stignore=False)
+    fake_syncthing.bodies.clear()
+
+    real_read_state = syncthing.read_state
+
+    def read_state_unknown_peers(path, *args, **kwargs):
+        st = real_read_state(path, *args, **kwargs)
+        assert st.state == "ok"
+        assert st.folder_id == "mind-meld"
+        return syncthing.SyncthingState(
+            state=st.state,
+            cause=st.cause,
+            config_dir=st.config_dir,
+            gui_address=st.gui_address,
+            folder_id=st.folder_id,
+            folder_label=st.folder_label,
+            folder_path=st.folder_path,
+            folder_paused=st.folder_paused,
+            folder_state=st.folder_state,
+            connected_peers=None,
+            total_peers=None,
+            disconnected_peers=(),
+            files_to_fetch=st.files_to_fetch,
+            bytes_to_fetch=st.bytes_to_fetch,
+            pull_errors=st.pull_errors,
+            options=st.options,
+            problems=st.problems,
+            stignore=st.stignore,
+        )
+
+    monkeypatch.setattr(syncthing, "read_state", read_state_unknown_peers)
+
+    result, text = _run(f"{storage}\n")
+
+    assert result.exit_code == 1, result.output
+    assert pauses == []
+    assert "Waiting up to 2 minutes" not in text
+    assert "Syncthing device ID" not in text
+    assert "the key header (mm-crypto-init) is not in" in text
+    assert "has no peer" not in text
+    assert "Syncthing has accepted the fleet folder" not in text
+    assert fake_syncthing.bodies == []
+    assert not config.CONFIG_PATH.exists()
+    assert not (storage / "mm-crypto-init").exists()
+    assert not (storage / ".stignore").exists()
+    assert _device_keys(LocalBackend(storage)) == []
+
+
+@pytest.mark.parametrize("post_wait_state", ["in_flight", "fleet", "unreadable"])
+def test_managed_join_reclassifies_folder_after_header_wait_timeout(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses, post_wait_state
+):
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+    storage.mkdir(parents=True, exist_ok=True)
+    config.save_syncthing_record(my_id)
+    fake_syncthing.set_folder(storage, peers=[(peer_id, "mac-b", True)], write_stignore=False)
+    fake_syncthing.bodies.clear()
+    real_classify = initflow._classify_folder
+    fail_classify = False
+
+    def classify_maybe_unreadable(path):
+        if fail_classify:
+            return initflow._Folder(
+                exists=True,
+                error=PermissionError(errno.EACCES, "Permission denied"),
+            )
+        return real_classify(path)
+
+    monkeypatch.setattr(initflow, "_classify_folder", classify_maybe_unreadable)
+
+    def pause_and_mutate_at_timeout(seconds: float) -> None:
+        nonlocal fail_classify
+        pauses.append(seconds)
+        if len(pauses) == 120:
+            if post_wait_state == "in_flight":
+                (storage / ".syncthing.mm-crypto-init.tmp").write_bytes(b"partial")
+            elif post_wait_state == "fleet":
+                (storage / "data").mkdir(parents=True, exist_ok=True)
+            else:
+                fail_classify = True
+
+    monkeypatch.setattr(initflow, "_pause", pause_and_mutate_at_timeout)
+
+    result, text = _run(f"{storage}\n")
+
+    assert result.exit_code == 1, result.output
+    assert pauses == [1] * 120
+    assert "--new-fleet" not in text
+    assert "Syncthing has accepted the fleet folder" not in text
+    assert fake_syncthing.bodies == []
+    assert not config.CONFIG_PATH.exists()
+    assert not (storage / "mm-crypto-init").exists()
+    assert not (storage / ".stignore").exists()
+    assert _device_keys(LocalBackend(storage)) == []
+    if post_wait_state == "in_flight":
+        assert "still receiving files from Syncthing ('.syncthing.mm-crypto-init.tmp')" in text
+    elif post_wait_state == "fleet":
+        assert "holds fleet files ('data') but no key header" in text
+    else:
+        assert "cannot read the storage folder" in text
+        assert "Permission denied" in text
+
+
+def test_init_skill_link_notice_and_forced_terminal_outcome(env, monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    storage, _backend = env
+    monkeypatch.setattr(
+        skill_link,
+        "_ensure_retro_skill_links",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("link failed")),
+    )
+    out_buf = io.StringIO()
+    monkeypatch.setattr(
+        initflow,
+        "console",
+        Console(file=out_buf, force_terminal=True, color_system="standard", width=240),
+    )
+
+    result, _text = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines() == [
+        "mm: notice: retro-fleet skill installation failed: RuntimeError: link failed"
+    ]
+    assert "\x1b" not in result.stderr
+    outcome_line = out_buf.getvalue().splitlines()[-1]
+    assert outcome_line == (
+        f"Init: Mind Meld initialized. Share {storage} "
+        "as the root of a Syncthing folder, run 'mm init' on the other machines, "
+        "and run 'mm push'."
+    )
+    assert "\x1b" not in outcome_line

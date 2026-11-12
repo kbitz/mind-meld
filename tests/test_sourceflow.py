@@ -32,21 +32,21 @@ DETAIL_LINES = {
         "plugins and hooks are not synced.",
         "Grok keeps memory off by default; turn it on on each machine with "
         "[memory] enabled = true in ~/.grok/config.toml (or GROK_MEMORY=1).",
-        "Run 'mm disable-source grok' to turn this off.",
+        "Run: mm disable-source grok",
     ],
     "muse": [
         "Syncs ~/.local/share/muse memory/ only. "
         "Session files are not synced. Prompts never leave the Mac.",
         "Reads completed model-step token totals from local Muse session logs. "
         "Session files are not synced. Prompts never leave the Mac.",
-        "Run 'mm disable-source muse' to turn this off.",
+        "Run: mm disable-source muse",
     ],
     "agy": [
         "Syncs ~/.gemini/config skills/, rules/, AGENTS.md, and GEMINI.md. "
         "Session databases and settings are not synced.",
         "Reads completed model-step token totals from local Antigravity "
         "session databases. Prompts never leave this device.",
-        "Run 'mm disable-source agy' to turn this off.",
+        "Run: mm disable-source agy",
     ],
 }
 
@@ -112,25 +112,25 @@ def test_default_source_disable_enable_round_trip(cfg):
     result = runner.invoke(app, ["disable-source", "gstack"])
     assert result.exit_code == 0, result.output
     assert _lines(result.stdout) == [
-        "Disabled source 'gstack' on this device.",
-        "Run 'mm enable-source gstack' to re-enable.",
+        "Disable: Disabled source 'gstack' on this device.",
+        "Run: mm enable-source gstack",
     ]
     assert _disabled(cfg) == ["gstack"]
 
     before = cfg.read_bytes()
     again = runner.invoke(app, ["disable-source", "gstack"])
     assert again.exit_code == 0, again.output
-    assert _lines(again.stdout) == ["Source 'gstack' is already disabled."]
+    assert _lines(again.stdout) == ["Disable: Source 'gstack' is already disabled."]
     assert cfg.read_bytes() == before
 
     result = runner.invoke(app, ["enable-source", "gstack"])
     assert result.exit_code == 0, result.output
-    assert _lines(result.stdout) == ["Enabled source 'gstack' on this device."]
+    assert _lines(result.stdout) == ["Enable: Enabled source 'gstack' on this device."]
     assert _disabled(cfg) == []
 
     again = runner.invoke(app, ["enable-source", "gstack"])
     assert again.exit_code == 0, again.output
-    assert _lines(again.stdout) == ["Source 'gstack' is already enabled."]
+    assert _lines(again.stdout) == ["Enable: Source 'gstack' is already enabled."]
 
 
 # ── opt-in sources (grok, muse, agy) ──────────────────────────────────
@@ -141,7 +141,7 @@ def test_opt_in_source_enable_then_disable(cfg, name):
     result = runner.invoke(app, ["enable-source", name])
     assert result.exit_code == 0, result.output
     assert _lines(result.stdout) == [
-        f"Enabled source '{name}' on this device.",
+        f"Enable: Enabled source '{name}' on this device.",
         *DETAIL_LINES[name],
     ]
     added = next(s for s in _on_disk(cfg)["sync"]["sources"] if s["name"] == name)
@@ -150,7 +150,7 @@ def test_opt_in_source_enable_then_disable(cfg, name):
 
     again = runner.invoke(app, ["enable-source", name])
     assert again.exit_code == 0, again.output
-    expected_again = [f"Source '{name}' is already enabled."]
+    expected_again = [f"Enable: Source '{name}' is already enabled."]
     if name == "grok":
         expected_again.extend(DETAIL_LINES["grok"][:2])
     assert _lines(again.stdout) == expected_again
@@ -158,8 +158,8 @@ def test_opt_in_source_enable_then_disable(cfg, name):
     off = runner.invoke(app, ["disable-source", name])
     assert off.exit_code == 0, off.output
     assert _lines(off.stdout) == [
-        f"Disabled source '{name}' on this device.",
-        f"Run 'mm enable-source {name}' to re-enable.",
+        f"Disable: Disabled source '{name}' on this device.",
+        f"Run: mm enable-source {name}",
     ]
     on_disk = _on_disk(cfg)
     assert name in _disabled(cfg)
@@ -238,7 +238,8 @@ def test_config_write_failure_stops_before_success_output(cfg, monkeypatch):
     result = runner.invoke(app, ["disable-source", "gstack"])
     assert result.exit_code == 1
     assert isinstance(result.exception, OSError)
-    assert "Disabled source" not in result.output
+    assert "Disable:" not in result.output
+    assert "disabled source" not in result.output.lower()
     assert cfg.read_bytes() == before
     assert not seen_sources.seen_path().exists()
 
@@ -314,7 +315,11 @@ def test_reconfigure_abort_exits_1_and_writes_nothing(cfg, monkeypatch):
     before = cfg.read_bytes()
     result = runner.invoke(app, ["reconfigure-sources"])
     assert result.exit_code == 1, result.output
-    assert "Reconfigure aborted; no changes written." in _lines(result.stdout)
+    assert _lines(result.stdout)[0] == "Reconfigure sources for this device."
+    assert _lines(result.stderr) == [
+        "mm: error: reconfigure aborted; no changes written.",
+        "Run: mm reconfigure-sources",
+    ]
     assert cfg.read_bytes() == before
 
 
@@ -323,8 +328,43 @@ def test_reconfigure_accepting_defaults_updates_the_configuration(cfg, monkeypat
     result = runner.invoke(app, ["reconfigure-sources"])
     assert result.exit_code == 0, result.output
     assert _lines(result.stdout)[0] == "Reconfigure sources for this device."
-    assert _lines(result.stdout)[-1] == "Source configuration updated."
+    assert _lines(result.stdout)[-1] == "Reconfigure: source configuration updated."
     assert seen_sources.seen_path().exists()
+
+
+def test_reconfigure_no_sources_configured_prints_shared_outcome(cfg, monkeypatch):
+    monkeypatch.setattr(sourceflow, "DEFAULT_SOURCES", [])
+    on_disk = _on_disk(cfg)
+    on_disk["sync"]["sources"] = []
+    config.save_config(on_disk, cfg)
+    result = runner.invoke(app, ["reconfigure-sources"])
+    assert result.exit_code == 0, result.output
+    assert _lines(result.stdout) == ["Reconfigure: no sources configured to reconfigure."]
+
+
+def test_sourceflow_outcomes_emit_no_ansi_and_preserve_brackets_under_forced_terminal(
+    cfg, monkeypatch
+):
+    import io
+
+    from rich.console import Console
+
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        sourceflow,
+        "console",
+        Console(file=buf, force_terminal=True, color_system="standard", width=240),
+    )
+    sourceflow.disable_source(name="custom[tag]", force=True)
+    sourceflow.enable_source(name="custom[tag]", force=True)
+
+    lines = buf.getvalue().splitlines()
+    assert lines == [
+        "Disable: Disabled source 'custom[tag]' on this device.",
+        "Run: mm enable-source custom[tag]",
+        "Enable: Enabled source 'custom[tag]' on this device.",
+    ]
+    assert "\x1b" not in buf.getvalue()
 
 
 def test_sourceflow_contract_import_does_not_register_cli():

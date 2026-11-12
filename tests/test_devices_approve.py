@@ -56,8 +56,8 @@ def test_approve_pending_device_adds_marks_introducer_and_shares_folder(
 
     assert res.exit_code == 0, res.output
     assert res.output == (
-        f"Approved {joining_id}: Syncthing here shares the fleet folder with it "
-        "and marks it as introducer. On the new machine, run: mm init\n"
+        f"Approve: approved {joining_id}: Syncthing here shares the fleet folder with it "
+        "and marks it as introducer. On the new machine, Run: mm init.\n"
     )
     assert fake_syncthing.bodies == [
         (
@@ -128,7 +128,7 @@ def test_approve_repeat_after_success_and_peer_introduced_device_report_already_
     second = runner.invoke(app, ["devices", "approve", joining_id])
     assert second.exit_code == 0, second.output
     assert second.output == (
-        f"{joining_id} is already approved: Syncthing on this machine already "
+        f"Approve: {joining_id} is already approved: Syncthing on this machine already "
         "shares the fleet folder with it.\n"
     )
     assert fake_syncthing.bodies == []
@@ -137,7 +137,7 @@ def test_approve_repeat_after_success_and_peer_introduced_device_report_already_
     # (as when another fleet machine introduced it).
     third = runner.invoke(app, ["devices", "approve", peer_id])
     assert third.exit_code == 0, third.output
-    assert f"{peer_id} is already approved" in third.output
+    assert f"Approve: {peer_id} is already approved" in third.output
     assert fake_syncthing.bodies == []
 
 
@@ -260,8 +260,8 @@ def test_approve_resumes_after_syncthing_stops_between_add_and_share(
 
     assert second.exit_code == 0, second.output
     assert second.output == (
-        f"Finished approving {joining_id}: marked it as introducer and shared the "
-        "fleet folder with it (it was already added). On the new machine, run: mm init\n"
+        f"Approve: finished approving {joining_id}: Syncthing here now marks it as "
+        "introducer and shares the fleet folder with it. On the new machine, Run: mm init.\n"
     )
     assert fake_syncthing.bodies == [
         ("PATCH", f"/rest/config/devices/{joining_id}", {"introducer": True}),
@@ -311,8 +311,9 @@ def test_approve_resumes_after_syncthing_stops_between_introducer_and_share(
 
     assert second.exit_code == 0, second.output
     assert second.output == (
-        f"Finished approving {joining_id}: shared the fleet folder with it "
-        "(it was already added and marked as introducer). On the new machine, run: mm init\n"
+        f"Approve: finished approving {joining_id}: Syncthing here now shares the "
+        "fleet folder with it (it was already marked as introducer). "
+        "On the new machine, Run: mm init.\n"
     )
     assert fake_syncthing.bodies == [
         (
@@ -359,8 +360,9 @@ def test_approve_share_http_500_reports_mm_diag_and_rerun_finishes_share_only(
 
     assert second.exit_code == 0, second.output
     assert second.output == (
-        f"Finished approving {joining_id}: shared the fleet folder with it "
-        "(it was already added and marked as introducer). On the new machine, run: mm init\n"
+        f"Approve: finished approving {joining_id}: Syncthing here now shares the "
+        "fleet folder with it (it was already marked as introducer). "
+        "On the new machine, Run: mm init.\n"
     )
     assert fake_syncthing.bodies == [
         (
@@ -411,7 +413,8 @@ def test_approve_add_response_lost_after_apply_reports_unconfirmed_and_rerun_fin
 
     assert second.exit_code == 0, second.output
     assert second.output.startswith(
-        f"Finished approving {joining_id}: marked it as introducer and shared the fleet folder"
+        f"Approve: finished approving {joining_id}: Syncthing here now marks it as introducer "
+        "and shares the fleet folder"
     )
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
         ("PATCH", f"/rest/config/devices/{joining_id}"),
@@ -446,7 +449,7 @@ def test_approve_add_rejected_by_syncthing_reports_unconfirmed_and_rerun_approve
     second = runner.invoke(app, ["devices", "approve", joining_id])
 
     assert second.exit_code == 0, second.output
-    assert second.output.startswith(f"Approved {joining_id}:")
+    assert second.output.startswith(f"Approve: approved {joining_id}:")
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
         ("POST", "/rest/config/devices"),
         ("PATCH", f"/rest/config/devices/{joining_id}"),
@@ -538,14 +541,14 @@ def test_approve_resume_write_failure_reports_unconfirmed_step_and_rerun_finishe
     )
     if preset_introducer or failing == "share_folder":
         assert second.output.startswith(
-            f"Finished approving {joining_id}: shared the fleet folder with it "
-            "(it was already added and marked as introducer)."
+            f"Approve: finished approving {joining_id}: Syncthing here now shares the "
+            "fleet folder with it (it was already marked as introducer)."
         )
         assert fake_syncthing.bodies == [folder_patch]
     else:
         assert second.output.startswith(
-            f"Finished approving {joining_id}: marked it as introducer and shared the "
-            "fleet folder with it (it was already added)."
+            f"Approve: finished approving {joining_id}: Syncthing here now marks it as "
+            "introducer and shares the fleet folder with it."
         )
         assert fake_syncthing.bodies == [
             ("PATCH", f"/rest/config/devices/{joining_id}", {"introducer": True}),
@@ -848,3 +851,36 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
         res = runner.invoke(app, [cmd])
         assert res.exit_code == 0, res.output
     assert fake_syncthing.bodies == []
+
+
+def test_approve_outcome_lines_emit_no_ansi_under_forced_terminal(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    import io
+
+    from rich.console import Console
+
+    from mind_meld import devicesflow
+
+    _my_id, _peer_id, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_id: {"name": "joining-box"}
+    }
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        devicesflow,
+        "console",
+        Console(file=buf, force_terminal=True, color_system="standard", width=240),
+    )
+
+    devicesflow.approve(joining_id)
+    devicesflow.approve(joining_id)
+
+    lines = buf.getvalue().splitlines()
+    assert lines == [
+        f"Approve: approved {joining_id}: Syncthing here shares the fleet folder with it "
+        "and marks it as introducer. On the new machine, Run: mm init.",
+        f"Approve: {joining_id} is already approved: Syncthing on this machine already "
+        "shares the fleet folder with it.",
+    ]
+    assert "\x1b" not in buf.getvalue()

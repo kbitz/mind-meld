@@ -2480,7 +2480,7 @@ class TestIncomingDigestCheck:
         assert canonical.read_text() == "local notes"
         assert sidecar.read_text() == "peer copy"
         apply_spy.assert_not_called()
-        assert "content check failed" in capsys.readouterr().out
+        assert "content check failed" in capsys.readouterr().err
 
     def test_mismatch_then_later_valid_file_applies(self, tmp_path, monkeypatch) -> None:
 

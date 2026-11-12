@@ -1739,11 +1739,11 @@ def _download_and_apply(
                 # isolation: fail this file, keep walking — matches the
                 # v0.8.1 empty-device_id handling in _apply_conflict.
                 if not quiet:
-                    with core._pause_sync_progress():
-                        console.print(
-                            f"  [red]bad blob key (local preserved):[/red] "
-                            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
-                        )
+                    core._print_error(
+                        f"bad blob key (local preserved): "
+                        f"{safety.safe_terminal_str(rel_path)} \u2014 "
+                        f"{safety.safe_terminal_str(e)}"
+                    )
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -1778,11 +1778,11 @@ def _download_and_apply(
                         preserved="local preserved",
                     )
                 elif not quiet:
-                    with core._pause_sync_progress():
-                        console.print(
-                            "  [red]decrypt failed:[/red] "
-                            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
-                        )
+                    core._print_error(
+                        f"decrypt failed: "
+                        f"{safety.safe_terminal_str(rel_path)} \u2014 "
+                        f"{safety.safe_terminal_str(e)}"
+                    )
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -1822,11 +1822,9 @@ def _download_and_apply(
                 _path_inside_base = False
             if not _path_inside_base:
                 if not quiet:
-                    with core._pause_sync_progress():
-                        console.print(
-                            "  [red]rejected (would escape source root):[/red] "
-                            f"{safe_str(rel_path)}"
-                        )
+                    core._print_error(
+                        f"rejected (would escape source root): {safety.safe_terminal_str(rel_path)}"
+                    )
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -1835,12 +1833,11 @@ def _download_and_apply(
             actual = hashlib.sha256(plain_data).hexdigest()
             if not isinstance(advertised, str) or actual != advertised:
                 if not quiet:
-                    with core._pause_sync_progress():
-                        console.print(
-                            f"  [red]content check failed:[/red] {safe_str(rel_path)} "
-                            "does not match the sending snapshot. Local file kept. "
-                            f"see {SNAPSHOT_FAILURES_URL}."
-                        )
+                    core._print_error(
+                        f"content check failed: {safety.safe_terminal_str(rel_path)} "
+                        "does not match the sending snapshot. Local file kept. "
+                        f"see {SNAPSHOT_FAILURES_URL}."
+                    )
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -2448,7 +2445,13 @@ def _run_deletions(
                 touched_parents.add(d.local_path.parent)
                 if verbose and not quiet:
                     console.print(
-                        f"  [red]deleted[/red] {safe_str(d.rel_path)} (a peer deleted it)"
+                        core._outcome_line(
+                            "pull",
+                            f"deleted {safety.safe_terminal_str(d.rel_path)} (a peer deleted it)",
+                        ),
+                        markup=False,
+                        highlight=False,
+                        soft_wrap=True,
                     )
             else:
                 if outcome == "restored":
@@ -3116,12 +3119,7 @@ def _record_source_bookkeeping(
                 skipped_files=per_source.outcomes["skipped"],
             )
         except (OSError, StorageError) as e:
-            msg = f"sync log write failed: {e}"
-            with core._pause_sync_progress():
-                if quiet:
-                    print(f"mm: warning: {msg}", file=sys.stderr)
-                else:
-                    console.print(f"  [yellow]warning:[/yellow] {msg}")
+            core._warning(f"sync log write failed: {e}")
         else:
             if verbose and not quiet and logs:
                 for log in logs:
@@ -3296,41 +3294,28 @@ def not_placed_line(result: PullResult) -> str:
 def _print_preflight_conflicts(predicted: list[pullplan.PullPrediction], quiet: bool) -> None:
     """Print predicted fail-mode refusals before --conflict-mode=fail raises.
 
-    Quiet (autopull): one-liner per conflict or local failure to stderr.
-    Non-quiet: rich console with resolution hint.
+    Always emits per-file `mm: warning: ...` lines to stderr; direct/non-quiet
+    callers outside `_sync_output` also receive the shared `mm: error: ...`
+    refusal and `Run:` remedy line.
     """
     # src_name, rel_path, device_name are all peer-controlled — sanitize.
     state = core._SYNC_OUTPUT.get()
     if state is not None:
         state["preflight"] = "; ".join(p.label for p in predicted[:3])
         state["preflight_failures"] = any(p.outcome == "may fail" for p in predicted)
-        # Which files would conflict is the "what broke" part of the refusal.
-        for p in predicted:
-            core._sync_warning(
-                f"mm: {safety.safe_terminal_str(p.label)} "
-                f"{safety.safe_terminal_str(p.src_name)}/"
-                f"{safety.safe_terminal_str(p.rel_path)} "
-                f"(from {safety.safe_terminal_str(p.device_name)})"
-            )
-        return
-    if quiet:
-        for p in predicted:
-            print(
-                f"mm: {safety.safe_terminal_str(p.label)} "
-                f"{safety.safe_terminal_str(p.src_name)}/"
-                f"{safety.safe_terminal_str(p.rel_path)} "
-                f"(from {safety.safe_terminal_str(p.device_name)})",
-                file=sys.stderr,
-            )
-        return
-    console.print(f"[red]Pull refused:[/red] {len(predicted)} file(s) would conflict or may fail.")
+    # Which files would conflict is the "what broke" part of the refusal.
     for p in predicted:
-        console.print(
-            f"  [yellow]! {safe_str(p.label)}[/yellow] {safe_str(p.src_name)}/"
-            f"{safe_str(p.rel_path)} (from {safe_str(p.device_name)})"
-        )
-    console.print(
-        "\nResolve conflicts locally, or re-run with --conflict-mode keep-both to auto-rename."
+        core._warning(f"{p.label} {p.src_name}/{p.rel_path} (from {p.device_name})")
+    if state is not None or quiet:
+        return
+    fix = (
+        "mm diag"
+        if any(p.outcome == "may fail" for p in predicted)
+        else "mm pull --conflict-mode keep-both"
+    )
+    core._print_error(
+        f"Pull refused: {len(predicted)} file(s) would conflict or may fail.",
+        fix=fix,
     )
 
 
@@ -3354,7 +3339,7 @@ def _format_inline_paths(paths: list[str], *, verbose: bool, sep: str) -> str:
     return f"{shown} (and {len(safe_paths) - _INLINE_PATH_CAP} more)"
 
 
-def _print_inline_paths(paths: list[str], *, verbose: bool, color: str) -> None:
+def _print_inline_paths(paths: list[str], *, verbose: bool, color: str | None = None) -> None:
     """Render an inline path list under a non-quiet per-source summary line.
 
     Uses 4-space indent so the device→source→file hierarchy stays visible
@@ -3363,7 +3348,10 @@ def _print_inline_paths(paths: list[str], *, verbose: bool, color: str) -> None:
     """
     cap = len(paths) if verbose else min(_INLINE_PATH_CAP, len(paths))
     for p in paths[:cap]:
-        console.print(f"    [{color}]- {safe_str(p)}[/{color}]")
+        if color is None:
+            console.print(f"    - {safe_str(p)}")
+        else:
+            console.print(f"    [{color}]- {safe_str(p)}[/{color}]")
     if not verbose and len(paths) > cap:
         console.print(f"    [dim]... and {len(paths) - cap} more[/dim]")
 
@@ -3406,70 +3394,32 @@ def _print_pull_summary(
     # sanitize before render (Group 7 preflight #1 sweep extension).
     for peer in corrupt_peers:
         if peer.own_vanished:
-            text = (
-                "this device's manifest ({}) vanished during the read - its deletion "
-                "records were not applied, so files deleted on this Mac may have come "
-                "back from peers. Check them before the next mm push."
+            core._warning(
+                f"this device's manifest ({peer.device_id}) vanished during the read - "
+                "its deletion records were not applied, so files deleted on this Mac "
+                "may have come back from peers. Check them before the next mm push."
             )
-            if quiet:
-                print(
-                    "mm: warning: " + text.format(safety.safe_terminal_str(peer.device_id)),
-                    file=sys.stderr,
-                )
-            else:
-                console.print("[yellow]Warning:[/yellow] " + text.format(safe_str(peer.device_id)))
             continue
         if peer.newer_version is not None:
             subject = f"manifest for {peer.device_name} ({peer.device_id})"
-            text = core._newer_format_message(peer.newer_version, subject)
-            if quiet:
-                print(f"mm: warning: {safety.safe_terminal_str(text)}", file=sys.stderr)
-            else:
-                console.print(f"[yellow]Warning:[/yellow] {safe_str(text)}")
+            core._warning(core._newer_format_message(peer.newer_version, subject))
             continue
-        msg = (
-            f"manifest for device {safe_str(peer.device_name)} "
-            f"({safe_str(peer.device_id)}) "
-            f"is corrupt - skipping pull from this device."
+        core._warning(
+            f"manifest for device {peer.device_name} ({peer.device_id}) "
+            "is corrupt - skipping pull from this device."
         )
-        if quiet:
-            print(
-                "mm: warning: manifest for device "
-                f"{safety.safe_terminal_str(peer.device_name)} "
-                f"({safety.safe_terminal_str(peer.device_id)}) "
-                "is corrupt - skipping pull from this device.",
-                file=sys.stderr,
-            )
-        else:
-            console.print(f"[yellow]Warning:[/yellow] {msg}")
 
     # Load-bearing: unknown sources (partition risk — rename drift or
     # missed config migration). src_name and device_name are peer-controlled.
     for unk in unknown_sources:
-        msg = (
-            f"skipping unknown source '{safe_str(unk.src_name)}' from "
-            f"{safe_str(unk.device_name)} - not configured locally"
+        core._warning(
+            f"skipping unknown source '{unk.src_name}' from "
+            f"{unk.device_name} - not configured locally"
         )
-        if quiet:
-            print(
-                f"mm: warning: skipping unknown source '{safety.safe_terminal_str(unk.src_name)}' "
-                f"from {safety.safe_terminal_str(unk.device_name)} - not configured locally",
-                file=sys.stderr,
-            )
-        else:
-            console.print(f"  [yellow]Warning:[/yellow] {msg}")
 
     # Load-bearing: fsync failures (pulls non-durable).
     for w in fsync_warnings:
-        msg = f"durability fsync failed on {safe_str(w.parent_dir)} — {safe_str(w.error)}"
-        if quiet:
-            print(
-                "mm: warning: durability fsync failed on "
-                f"{safety.safe_terminal_str(w.parent_dir)} — {safety.safe_terminal_str(w.error)}",
-                file=sys.stderr,
-            )
-        else:
-            console.print(f"  [yellow]warning:[/yellow] {msg}")
+        core._warning(f"durability fsync failed on {w.parent_dir} \u2014 {w.error}")
 
     if dry_run:
         return
@@ -3488,7 +3438,7 @@ def _print_pull_summary(
                 paths = _format_inline_paths(r.outcomes["conflicted"], verbose=verbose, sep=", ")
                 print(
                     f"mm: warning: {safety.safe_terminal_str(r.device_name)}/"
-                    f"{safety.safe_terminal_str(r.src_name)} — "
+                    f"{safety.safe_terminal_str(r.src_name)} \u2014 "
                     f"{src_conflicted} conflicts: {paths}",
                     file=sys.stderr,
                 )
@@ -3496,7 +3446,7 @@ def _print_pull_summary(
                 paths = _format_inline_paths(r.outcomes["failed"], verbose=verbose, sep=", ")
                 print(
                     f"mm: warning: {safety.safe_terminal_str(r.device_name)}/"
-                    f"{safety.safe_terminal_str(r.src_name)} — {src_failed} failed: {paths}",
+                    f"{safety.safe_terminal_str(r.src_name)} \u2014 {src_failed} failed: {paths}",
                     file=sys.stderr,
                 )
         if core._SYNC_OUTPUT.get() is not None:
@@ -3522,7 +3472,7 @@ def _print_pull_summary(
             if src_conflicted:
                 line += f" [yellow]{src_conflicted} conflicts[/yellow]"
             if src_failed:
-                line += f" [red]{src_failed} failed[/red]"
+                line += f" {src_failed} failed"
             if src_waiting:
                 line += f" [yellow]{src_waiting} waiting[/yellow]"
             console.print(line)
@@ -3533,7 +3483,7 @@ def _print_pull_summary(
             if src_conflicted:
                 _print_inline_paths(r.outcomes["conflicted"], verbose=verbose, color="yellow")
             if src_failed:
-                _print_inline_paths(r.outcomes["failed"], verbose=verbose, color="red")
+                _print_inline_paths(r.outcomes["failed"], verbose=verbose)
             if src_waiting and verbose:
                 _print_inline_paths(r.outcomes.get("waiting", []), verbose=verbose, color="yellow")
 
@@ -3567,9 +3517,9 @@ def _print_pull_summary(
     if result.total_conflicted:
         parts.append(f"[yellow]{result.total_conflicted} conflicts[/yellow]")
     if result.total_failed:
-        parts.append(f"[red]{result.total_failed} failed[/red]")
+        parts.append(f"{result.total_failed} failed")
     if result.total_deleted:
-        parts.append(f"[red]{result.total_deleted} deleted[/red]")
+        parts.append(f"{result.total_deleted} deleted")
     if result.total_waiting:
         parts.append(f"[yellow]{result.total_waiting} waiting[/yellow]")
     if result.total_skipped_unknown_source:
@@ -4298,12 +4248,7 @@ def _pull_core(
                         try:
                             core._cleanup_conflict_copies(backend, did, passphrase, memory_kb)
                         except (OSError, StorageError) as e:
-                            msg = f"manifest conflict-copy cleanup failed for {dname}: {e}"
-                            with core._pause_sync_progress():
-                                if quiet:
-                                    print(f"mm: warning: {msg}", file=sys.stderr)
-                                else:
-                                    console.print(f"  [yellow]warning:[/yellow] {msg}")
+                            core._warning(f"manifest conflict-copy cleanup failed for {dname}: {e}")
 
             if not dry_run:
                 # Hooks never run `mm gc`; copies only grow when a pull deletes.

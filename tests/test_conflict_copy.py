@@ -1413,6 +1413,9 @@ class TestResolveInteractiveLoop:
         assert conflict.read_bytes() == b"remote content"
 
         captured = capsys.readouterr()
+        assert captured.err.startswith(
+            "mm: error: input letters 'c' and 'f' are no longer accepted. "
+        )
         assert "no longer accepted" in captured.err
         assert "(l)ocal" in captured.err
         assert "(r)emote" in captured.err
@@ -3171,8 +3174,11 @@ class TestMigrationWarningIsSanitized:
 
         assert out == nasty, "migration failure leaves the file where it was"
         captured = capsys.readouterr()
-        assert "\x1b" not in (captured.out + captured.err), "raw ESC reached the terminal"
-        assert "failed to migrate" in (captured.out + captured.err)
+        assert captured.out == ""
+        assert "\x1b" not in captured.err, "raw ESC reached the terminal"
+        assert captured.err.startswith(
+            "mm: warning: failed to migrate pre-inversion conflict file "
+        )
 
 
 class TestGcFilenameClock:
@@ -3642,7 +3648,7 @@ class TestConflictOwnershipDiscovery:
         assert owned.read_bytes() == b"A remote"
         assert [h[1] for h in hits] == [other_sidecar]
         err = capsys.readouterr().err
-        assert "unreadable" in err
+        assert err.startswith("mm: warning: conflict sidecar unreadable (left in place): ")
         assert "\x1b" not in err
 
     @pytest.mark.parametrize("name", ["notes[1].md", "notes*.md", "notes?.md"])
@@ -3728,8 +3734,15 @@ class TestConflictOwnershipDiscovery:
         assert canonical.read_bytes() == b"recoverable remote"
         assert not recoverable.exists()
         captured = capsys.readouterr()
-        assert "promote failed:" in captured.out
-        assert "cannot reconstruct a canonical name" in captured.out
+        assert (
+            "Resolve: promoted notes.sync-conflict-20260421-120000-v1-devA1234.md -> notes.md."
+            in captured.out
+        )
+        assert (
+            "mm: error: promote failed: .sync-conflict-20260421-143055-v1-devA1234 "
+            "\u2014 cannot reconstruct a canonical name for this sidecar"
+        ) in captured.err
+        assert "mm: error: Resolved 1 of 2; 1 failed.\nRun: mm resolve" in captured.err
 
     def test_ownerless_sidecar_is_discovered_without_self_canonical(self, tmp_path: Path) -> None:
         src = tmp_path / "gstack"
@@ -4114,7 +4127,7 @@ class TestUnreadableCandidateNotCleaned:
         assert len(current) == 1
         assert current[0].read_bytes() == b"peer R2"
         err = capsys.readouterr().err
-        assert "unreadable" in err
+        assert err.startswith("mm: warning: conflict sidecar unreadable (left in place): ")
         assert "\x1b" not in err
 
     def test_failed_publish_retains_unreadable_old(
@@ -4666,3 +4679,297 @@ class TestKeptOutcome91A:
         )
         assert second == "kept"
         assert pending == {}
+
+
+# ── Track 130B: shared output style for conflicts & resolve ─────────────
+
+
+class TestSharedStyleResolveAndConflictsOutput:
+    def test_resolve_outcomes_and_forced_terminal_preserve_brackets_without_ansi(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import io
+
+        from rich.console import Console
+
+        buf = io.StringIO()
+        err_buf = io.StringIO()
+        monkeypatch.setattr(
+            resolveflow,
+            "console",
+            Console(file=buf, force_terminal=True, color_system="standard", width=200),
+        )
+        monkeypatch.setattr(
+            core,
+            "console",
+            Console(file=buf, force_terminal=True, color_system="standard", width=200),
+        )
+        monkeypatch.setattr(
+            core,
+            "stderr_console",
+            Console(file=err_buf, force_terminal=True, color_system="standard", width=200),
+        )
+
+        # 1. canonical is None -> (p)romote
+        orphan_p = tmp_path / "orphan[p].sync-conflict-20260421-143055-v1-devA1234.md"
+        orphan_p.write_bytes(b"orphan p\n")
+        # 2. canonical is None -> (d)elete
+        orphan_d = tmp_path / "orphan[d].sync-conflict-20260421-143055-v1-devA1234.md"
+        orphan_d.write_bytes(b"orphan d\n")
+        # 3. pre-inversion (l)ocal -> kept local; promoted
+        pre_l_canon = tmp_path / "pre[l].md"
+        pre_l_canon.write_bytes(b"remote\n")
+        pre_l_sidecar = tmp_path / "pre[l].sync-conflict-v0-20260101-100000-devA1234.md"
+        pre_l_sidecar.write_bytes(b"local\n")
+        # 4. post-inversion (l)ocal -> kept local; discarded remote
+        post_l_canon = tmp_path / "post[l].md"
+        post_l_canon.write_bytes(b"local\n")
+        post_l_sidecar = tmp_path / "post[l].sync-conflict-20260421-143055-v1-devA1234.md"
+        post_l_sidecar.write_bytes(b"remote\n")
+        # 5. pre-inversion (r)emote -> kept remote; discarded local
+        pre_r_canon = tmp_path / "pre[r].md"
+        pre_r_canon.write_bytes(b"remote\n")
+        pre_r_sidecar = tmp_path / "pre[r].sync-conflict-v0-20260101-100000-devA1234.md"
+        pre_r_sidecar.write_bytes(b"local\n")
+        # 6. post-inversion (r)emote -> kept remote; promoted
+        post_r_canon = tmp_path / "post[r].md"
+        post_r_canon.write_bytes(b"local\n")
+        post_r_sidecar = tmp_path / "post[r].sync-conflict-20260421-143055-v1-devA1234.md"
+        post_r_sidecar.write_bytes(b"remote\n")
+        # 7. clean (m)erge
+        clean_canon = tmp_path / "clean[m].md"
+        clean_canon.write_bytes(b"line1\nline2\n")
+        clean_sidecar = tmp_path / "clean[m].sync-conflict-20260421-143055-v1-devA1234.md"
+        clean_sidecar.write_bytes(b"line1\nline2\nline3\n")
+        # 8. marker (m)erge
+        marker_canon = tmp_path / "marker[m].md"
+        marker_canon.write_bytes(b"shared\nmine\n")
+        marker_sidecar = tmp_path / "marker[m].sync-conflict-20260421-143055-v1-devA1234.md"
+        marker_sidecar.write_bytes(b"shared\ntheirs\n")
+        # 9. (p)romote with canonical present
+        prom_canon = tmp_path / "prom[p].md"
+        prom_canon.write_bytes(b"local\n")
+        prom_sidecar = tmp_path / "prom[p].sync-conflict-20260421-143055-v1-devA1234.md"
+        prom_sidecar.write_bytes(b"remote\n")
+
+        hits = [
+            ("s1", orphan_p, None),
+            ("s1", orphan_d, None),
+            ("s1", pre_l_sidecar, pre_l_canon),
+            ("s1", post_l_sidecar, post_l_canon),
+            ("s1", pre_r_sidecar, pre_r_canon),
+            ("s1", post_r_sidecar, post_r_canon),
+            ("s1", clean_sidecar, clean_canon),
+            ("s1", marker_sidecar, marker_canon),
+            ("s1", prom_sidecar, prom_canon),
+        ]
+        answers = iter(["p", "d", "l", "l", "r", "r", "m", "m", "p"])
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(answers))
+
+        resolved, failed = resolveflow._resolve_interactive_loop(hits)
+        assert (resolved, failed) == (9, 0)
+
+        resolve_lines = [
+            line for line in buf.getvalue().splitlines() if line.startswith("Resolve:")
+        ]
+        assert len(resolve_lines) == 10
+        assert resolve_lines[0] == (
+            "Resolve: promoted orphan[p].sync-conflict-20260421-143055-v1-devA1234.md "
+            "-> orphan[p].md."
+        )
+        assert (
+            resolve_lines[1]
+            == "Resolve: deleted orphan[d].sync-conflict-20260421-143055-v1-devA1234.md."
+        )
+        assert resolve_lines[2] == (
+            "Resolve: kept local; promoted "
+            "pre[l].sync-conflict-v0-20260101-100000-devA1234.md -> pre[l].md."
+        )
+        assert resolve_lines[3] == (
+            "Resolve: kept local; discarded remote "
+            "post[l].sync-conflict-20260421-143055-v1-devA1234.md."
+        )
+        assert resolve_lines[4] == (
+            "Resolve: kept remote; discarded local "
+            "pre[r].sync-conflict-v0-20260101-100000-devA1234.md."
+        )
+        assert resolve_lines[5] == (
+            "Resolve: kept remote; promoted "
+            "post[r].sync-conflict-20260421-143055-v1-devA1234.md -> post[r].md."
+        )
+        assert resolve_lines[6] == "Resolve: merged clean[m].md (clean LCS merge)."
+        assert (
+            resolve_lines[7]
+            == "Resolve: merged marker[m].md (contains 1 <<<<<<< region; resolve in editor)."
+        )
+        assert resolve_lines[8].startswith(
+            "Resolve: promoted prom[p].sync-conflict-20260421-143055-v1-devA1234.md "
+            "-> prom[p].from-devA1234-"
+        )
+        assert resolve_lines[8].endswith(".md.")
+        assert resolve_lines[9] == "Resolve: resolved 9 of 9."
+        for line in resolve_lines:
+            assert "\x1b" not in line
+        assert err_buf.getvalue() == ""
+
+    def test_resolve_error_and_warning_lines_use_shared_stderr_helpers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # 1. canonical is None -> (p)romote OSError and (d)elete OSError
+        orphan_p = tmp_path / "op.sync-conflict-20260421-143055-v1-devA1234.md"
+        orphan_p.write_bytes(b"op\n")
+        orphan_d = tmp_path / "od.sync-conflict-20260421-143055-v1-devA1234.md"
+        orphan_d.write_bytes(b"od\n")
+        # 2. pre-inversion (l)ocal rename OSError and (r)emote unlink OSError
+        pre_l_canon = tmp_path / "prel.md"
+        pre_l_canon.write_bytes(b"r\n")
+        pre_l_sc = tmp_path / "prel.sync-conflict-v0-20260101-100000-devA1234.md"
+        pre_l_sc.write_bytes(b"l\n")
+        pre_r_canon = tmp_path / "prer.md"
+        pre_r_canon.write_bytes(b"r\n")
+        pre_r_sc = tmp_path / "prer.sync-conflict-v0-20260101-100000-devA1234.md"
+        pre_r_sc.write_bytes(b"l\n")
+        # 3. post-inversion (l)ocal unlink OSError and (r)emote rename OSError
+        post_l_canon = tmp_path / "postl.md"
+        post_l_canon.write_bytes(b"l\n")
+        post_l_sc = tmp_path / "postl.sync-conflict-20260421-143055-v1-devA1234.md"
+        post_l_sc.write_bytes(b"r\n")
+        post_r_canon = tmp_path / "postr.md"
+        post_r_canon.write_bytes(b"l\n")
+        post_r_sc = tmp_path / "postr.sync-conflict-20260421-143055-v1-devA1234.md"
+        post_r_sc.write_bytes(b"r\n")
+        # 4. merge write failure
+        m_canon = tmp_path / "mw.md"
+        m_canon.write_bytes(b"a\nb\n")
+        m_sc = tmp_path / "mw.sync-conflict-20260421-143055-v1-devA1234.md"
+        m_sc.write_bytes(b"a\nb\nc\n")
+        # 5. promote OSError when canonical exists
+        pr_canon = tmp_path / "pr.md"
+        pr_canon.write_bytes(b"a\n")
+        pr_sc = tmp_path / "pr.sync-conflict-20260421-143055-v1-devA1234.md"
+        pr_sc.write_bytes(b"b\n")
+
+        monkeypatch.setattr(
+            Path, "rename", lambda *a, **kw: (_ for _ in ()).throw(OSError("r-err"))
+        )
+        monkeypatch.setattr(
+            Path, "unlink", lambda *a, **kw: (_ for _ in ()).throw(OSError("u-err"))
+        )
+        monkeypatch.setattr(
+            resolveflow.fsutil,
+            "atomic_write_bytes",
+            lambda *a, **kw: (_ for _ in ()).throw(OSError("w-err")),
+        )
+        monkeypatch.setattr(
+            resolveflow,
+            "_promote_conflict_file",
+            lambda *a, **kw: (_ for _ in ()).throw(OSError("p-err")),
+        )
+        answers = iter(["p", "d", "l", "r", "l", "r", "m", "p"])
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(answers))
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [
+                ("s1", orphan_p, None),
+                ("s1", orphan_d, None),
+                ("s1", pre_l_sc, pre_l_canon),
+                ("s1", pre_r_sc, pre_r_canon),
+                ("s1", post_l_sc, post_l_canon),
+                ("s1", post_r_sc, post_r_canon),
+                ("s1", m_sc, m_canon),
+                ("s1", pr_sc, pr_canon),
+            ]
+        )
+        assert (resolved, failed) == (0, 8)
+        err = capsys.readouterr().err
+        expected_errors = [
+            f"mm: error: promote failed: {orphan_p.name} \u2014 r-err",
+            f"mm: error: delete failed: {orphan_d.name} \u2014 u-err",
+            f"mm: error: rename failed: {pre_l_sc.name} \u2014 r-err",
+            f"mm: error: delete failed: {pre_r_sc.name} \u2014 u-err",
+            f"mm: error: delete failed: {post_l_sc.name} \u2014 u-err",
+            f"mm: error: rename failed: {post_r_sc.name} \u2014 r-err",
+            f"mm: error: merge write failed: {m_canon.name} \u2014 w-err",
+            f"mm: error: promote failed: {pr_sc.name} \u2014 p-err",
+            "mm: error: Resolved 0 of 8; 8 failed.\nRun: mm resolve",
+        ]
+        for expected in expected_errors:
+            assert expected in err
+
+    def test_resolve_read_failure_merge_unlink_warning_and_ledger_notice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # 1. Read failure
+        r_canon = tmp_path / "readfail.md"
+        r_canon.write_bytes(b"local\n")
+        r_sc = tmp_path / "readfail.sync-conflict-20260421-143055-v1-devA1234.md"
+        r_sc.write_bytes(b"remote\n")
+        real_read = Path.read_bytes
+
+        def fail_read(self: Path) -> bytes:
+            if self == r_canon:
+                raise OSError("permission denied")
+            return real_read(self)
+
+        with monkeypatch.context() as mp:
+            mp.setattr(Path, "read_bytes", fail_read)
+            resolved, failed = resolveflow._resolve_interactive_loop([("s1", r_sc, r_canon)])
+        assert (resolved, failed) == (0, 1)
+        err1 = capsys.readouterr().err
+        assert f"mm: error: read failed: {r_sc.name} \u2014 permission denied" in err1
+        assert "mm: error: Resolved 0 of 1; 1 failed.\nRun: mm resolve" in err1
+
+        # 2. Merge sidecar unlink failure warning + ledger notice
+        m_canon = tmp_path / "mwarn.md"
+        m_canon.write_bytes(b"line1\nline2\n")
+        m_sc = tmp_path / "mwarn.sync-conflict-20260421-143055-v1-devA1234.md"
+        m_sc.write_bytes(b"line1\nline2\nline3\n")
+        real_unlink = Path.unlink
+
+        def fail_sidecar_unlink(self: Path, missing_ok: bool = False) -> None:
+            if self == m_sc:
+                raise OSError("busy sidecar")
+            return real_unlink(self, missing_ok=missing_ok)
+
+        with monkeypatch.context() as mp:
+            mp.setattr(Path, "unlink", fail_sidecar_unlink)
+            mp.setattr(typer, "prompt", lambda *a, **kw: "m")
+            mp.setattr(
+                core,
+                "commit_ledger",
+                lambda *_a, **_kw: OSError("corrupt pull-ledger.json"),
+            )
+            resolved, failed = resolveflow._resolve_interactive_loop(
+                [("s1", m_sc, m_canon)],
+                [{"device_id": "devA1234", "device_name": "Peer"}],
+                {"s1": {"name": "s1", "path": str(tmp_path), "type": "generic"}},
+            )
+        assert (resolved, failed) == (1, 0)
+        captured = capsys.readouterr()
+        assert "Resolve: merged mwarn.md (clean LCS merge)." in captured.out
+        assert "Resolve: resolved 1 of 1." in captured.out
+        assert (
+            f"mm: warning: merged result written; sidecar unlink failed: {m_sc.name} "
+            "\u2014 busy sidecar"
+        ) in captured.err
+        assert (
+            "mm: notice: resolution kept; settled base not recorded (unreadable); "
+            "a later pull may conflict again. See"
+        ) in captured.err
+
+    def test_touched_source_files_contain_no_legacy_yellow_or_red_message_prefixes(self) -> None:
+        src_dir = Path(__file__).resolve().parents[1] / "src" / "mind_meld"
+        touched = (
+            "pullflow.py",
+            "resolveflow.py",
+            "initflow.py",
+            "devicesflow.py",
+            "sourceflow.py",
+        )
+        for name in touched:
+            source = (src_dir / name).read_text(encoding="utf-8")
+            assert "[yellow]Warning:" not in source, name
+            assert "[yellow]warning:" not in source, name
+            for line in source.splitlines():
+                if "[red]" in line:
+                    assert name == "sourceflow.py" and '"[red]N[/red]"' in line, (name, line)

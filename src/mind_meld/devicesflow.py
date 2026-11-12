@@ -217,8 +217,12 @@ def approve(device_id: str) -> None:
 
     if state.configured and state.shared:
         console.print(
-            f"{safe_str(candidate)} is already approved: Syncthing on this machine "
-            "already shares the fleet folder with it.",
+            core._outcome_line(
+                "approve",
+                f"{safe_terminal_str(candidate)} is already approved: Syncthing on this "
+                "machine already shares the fleet folder with it",
+            ),
+            markup=False,
             highlight=False,
             soft_wrap=True,
         )
@@ -264,8 +268,13 @@ def approve(device_id: str) -> None:
                 cause=share_res.cause,
             )
         console.print(
-            f"Approved {safe_str(candidate)}: Syncthing here shares the fleet folder "
-            "with it and marks it as introducer. On the new machine, run: mm init",
+            core._outcome_line(
+                "approve",
+                f"approved {safe_terminal_str(candidate)}: Syncthing here shares the "
+                "fleet folder with it and marks it as introducer. On the new machine, "
+                "Run: mm init",
+            ),
+            markup=False,
             highlight=False,
             soft_wrap=True,
         )
@@ -290,17 +299,25 @@ def approve(device_id: str) -> None:
             )
         if intro_res.outcome == "unchanged":
             console.print(
-                f"Finished approving {safe_str(candidate)}: shared the fleet folder "
-                "with it (it was already added and marked as introducer). "
-                "On the new machine, run: mm init",
+                core._outcome_line(
+                    "approve",
+                    f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
+                    "now shares the fleet folder with it (it was already marked as "
+                    "introducer). On the new machine, Run: mm init",
+                ),
+                markup=False,
                 highlight=False,
                 soft_wrap=True,
             )
         else:
             console.print(
-                f"Finished approving {safe_str(candidate)}: marked it as introducer "
-                "and shared the fleet folder with it (it was already added). "
-                "On the new machine, run: mm init",
+                core._outcome_line(
+                    "approve",
+                    f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
+                    "now marks it as introducer and shares the fleet folder with it. "
+                    "On the new machine, Run: mm init",
+                ),
+                markup=False,
                 highlight=False,
                 soft_wrap=True,
             )

@@ -56,7 +56,8 @@ from mind_meld.config import (
     load_config,
     save_config,
 )
-from mind_meld.consoles import console, stderr_console
+from mind_meld.consoles import console
+from mind_meld.consoles import stderr_console as stderr_console
 from mind_meld.crypto import (
     CryptoInitFetch,
     bootstrap_crypto_init,
@@ -1108,9 +1109,7 @@ def init(new_fleet: bool = False) -> str | None:
     try:
         skill_link._ensure_retro_skill_links(dry_run=False, explicit=True, may_create=may_create)
     except Exception as e:
-        stderr_console.print(
-            f"mm: notice: retro-fleet skill installation failed: {type(e).__name__}: {safe_str(e)}"
-        )
+        core._notice(f"retro-fleet skill installation failed: {type(e).__name__}: {e}")
 
     # Init-time event backfill (v0.11.8). Captures the past 30 days of git
     # commits + a full sessions inventory so retro-fleet works immediately
@@ -1121,22 +1120,40 @@ def init(new_fleet: bool = False) -> str | None:
 
     if new_fleet:
         if setup.record is not None:
-            local_id = safe_str(setup.local_id or setup.record.device_id)
+            local_id = safe_terminal_str(setup.local_id or setup.record.device_id)
             console.print(
-                "\n[green]Mind Meld initialized.[/green] This machine's Syncthing "
-                f"device ID is {local_id}. Run 'mm push' here, then run 'mm init' "
-                "on each other machine and paste this ID when it asks."
+                core._outcome_line(
+                    "init",
+                    "Mind Meld initialized. This machine's Syncthing device ID is "
+                    f"{local_id}. Run 'mm push' here, then run 'mm init' on each "
+                    "other machine and paste this ID when it asks",
+                ),
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
             )
         else:
             console.print(
-                "\n[green]Mind Meld initialized.[/green] Share "
-                f"{safe_str(full_path)} as the root of a Syncthing folder, run 'mm init' on "
-                "the other machines, and run 'mm push'."
+                core._outcome_line(
+                    "init",
+                    f"Mind Meld initialized. Share {safe_terminal_str(full_path)} as the "
+                    "root of a Syncthing folder, run 'mm init' on the other machines, "
+                    "and run 'mm push'",
+                ),
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
             )
         return None
     console.print(
-        "\n[green]Mind Meld initialized.[/green] Pulling now; if the folder is still "
-        "syncing, run 'mm pull' again when delivery finishes."
+        core._outcome_line(
+            "init",
+            "Mind Meld initialized. Pulling now; if the folder is still syncing, "
+            "run 'mm pull' again when delivery finishes",
+        ),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
     )
     return passphrase
 
