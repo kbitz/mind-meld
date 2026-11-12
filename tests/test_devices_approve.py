@@ -57,7 +57,7 @@ def test_approve_pending_device_adds_marks_introducer_and_shares_folder(
     assert res.exit_code == 0, res.output
     assert res.output == (
         f"Approve: approved {joining_id}: Syncthing here shares the fleet folder with it "
-        "and marks it as introducer. On the new machine, Run: mm init.\n"
+        "and marks it as introducer. On the new machine, Run: mm init\n"
     )
     assert fake_syncthing.bodies == [
         (
@@ -261,7 +261,8 @@ def test_approve_resumes_after_syncthing_stops_between_add_and_share(
     assert second.exit_code == 0, second.output
     assert second.output == (
         f"Approve: finished approving {joining_id}: Syncthing here now marks it as "
-        "introducer and shares the fleet folder with it. On the new machine, Run: mm init.\n"
+        "introducer and shares the fleet folder with it (it was already added). "
+        "On the new machine, Run: mm init\n"
     )
     assert fake_syncthing.bodies == [
         ("PATCH", f"/rest/config/devices/{joining_id}", {"introducer": True}),
@@ -312,8 +313,8 @@ def test_approve_resumes_after_syncthing_stops_between_introducer_and_share(
     assert second.exit_code == 0, second.output
     assert second.output == (
         f"Approve: finished approving {joining_id}: Syncthing here now shares the "
-        "fleet folder with it (it was already marked as introducer). "
-        "On the new machine, Run: mm init.\n"
+        "fleet folder with it (it was already added and marked as introducer). "
+        "On the new machine, Run: mm init\n"
     )
     assert fake_syncthing.bodies == [
         (
@@ -361,8 +362,8 @@ def test_approve_share_http_500_reports_mm_diag_and_rerun_finishes_share_only(
     assert second.exit_code == 0, second.output
     assert second.output == (
         f"Approve: finished approving {joining_id}: Syncthing here now shares the "
-        "fleet folder with it (it was already marked as introducer). "
-        "On the new machine, Run: mm init.\n"
+        "fleet folder with it (it was already added and marked as introducer). "
+        "On the new machine, Run: mm init\n"
     )
     assert fake_syncthing.bodies == [
         (
@@ -542,13 +543,13 @@ def test_approve_resume_write_failure_reports_unconfirmed_step_and_rerun_finishe
     if preset_introducer or failing == "share_folder":
         assert second.output.startswith(
             f"Approve: finished approving {joining_id}: Syncthing here now shares the "
-            "fleet folder with it (it was already marked as introducer)."
+            "fleet folder with it (it was already added and marked as introducer)."
         )
         assert fake_syncthing.bodies == [folder_patch]
     else:
         assert second.output.startswith(
             f"Approve: finished approving {joining_id}: Syncthing here now marks it as "
-            "introducer and shares the fleet folder with it."
+            "introducer and shares the fleet folder with it (it was already added)."
         )
         assert fake_syncthing.bodies == [
             ("PATCH", f"/rest/config/devices/{joining_id}", {"introducer": True}),
@@ -879,7 +880,7 @@ def test_approve_outcome_lines_emit_no_ansi_under_forced_terminal(
     lines = buf.getvalue().splitlines()
     assert lines == [
         f"Approve: approved {joining_id}: Syncthing here shares the fleet folder with it "
-        "and marks it as introducer. On the new machine, Run: mm init.",
+        "and marks it as introducer. On the new machine, Run: mm init",
         f"Approve: {joining_id} is already approved: Syncthing on this machine already "
         "shares the fleet folder with it.",
     ]

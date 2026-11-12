@@ -271,9 +271,9 @@ def approve(device_id: str) -> None:
             core._outcome_line(
                 "approve",
                 f"approved {safe_terminal_str(candidate)}: Syncthing here shares the "
-                "fleet folder with it and marks it as introducer. On the new machine, "
-                "Run: mm init",
-            ),
+                "fleet folder with it and marks it as introducer",
+            )
+            + f" On the new machine, {core._fix_line('mm init')}",
             markup=False,
             highlight=False,
             soft_wrap=True,
@@ -302,9 +302,10 @@ def approve(device_id: str) -> None:
                 core._outcome_line(
                     "approve",
                     f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
-                    "now shares the fleet folder with it (it was already marked as "
-                    "introducer). On the new machine, Run: mm init",
-                ),
+                    "now shares the fleet folder with it (it was already added and "
+                    "marked as introducer)",
+                )
+                + f" On the new machine, {core._fix_line('mm init')}",
                 markup=False,
                 highlight=False,
                 soft_wrap=True,
@@ -314,9 +315,10 @@ def approve(device_id: str) -> None:
                 core._outcome_line(
                     "approve",
                     f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
-                    "now marks it as introducer and shares the fleet folder with it. "
-                    "On the new machine, Run: mm init",
-                ),
+                    "now marks it as introducer and shares the fleet folder with it "
+                    "(it was already added)",
+                )
+                + f" On the new machine, {core._fix_line('mm init')}",
                 markup=False,
                 highlight=False,
                 soft_wrap=True,
