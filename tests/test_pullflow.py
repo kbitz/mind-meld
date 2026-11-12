@@ -3660,7 +3660,7 @@ class TestDownloadAndApply:
             pending_inline_bumps={},
             line_indexes={},
         )
-        token = core._SYNC_OUTPUT.set({"verbose": False, "diagnostics": [], "progress": None})
+        scope_reset = core._SYNC_OUTPUT.set({"verbose": False, "diagnostics": [], "progress": None})
         try:
             pullflow._download_and_apply(
                 backend=fleet.backend,
@@ -3674,7 +3674,7 @@ class TestDownloadAndApply:
                 reporter=reporter,
             )
         finally:
-            core._SYNC_OUTPUT.reset(token)
+            core._SYNC_OUTPUT.reset(scope_reset)
 
         captured = capsys.readouterr()
         assert reporter.outcomes["failed"] == [rel]
@@ -3831,9 +3831,9 @@ def test_bookkeeping_and_manifest_cleanup_warnings_use_shared_stderr_helper(
 ):
     fleet.config["sync"]["sources"][0]["type"] = "claude"
     peer, _ = _seed(fleet, {"projects/demo/memory/note.md": b"peer content\n"})
-    mkey = manifest_key(PEER)
-    copy_key = mkey.replace("manifest.json.enc", f"manifest.json.{CONFLICT_STAMP}.enc")
-    fleet.backend.put(copy_key, fleet.backend.get(mkey))
+    manifest_path = manifest_key(PEER)
+    copy_path = manifest_path.replace("manifest.json.enc", f"manifest.json.{CONFLICT_STAMP}.enc")
+    fleet.backend.put(copy_path, fleet.backend.get(manifest_path))
 
     monkeypatch.setattr(
         pullflow,
