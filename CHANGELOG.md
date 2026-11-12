@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.40] - 2026-11-12
+
+`mm update` now shows the same clearing spinner as `mm push` and `mm pull` and ends with one result line, and an attended `mm push` or `mm pull` that updates mm shows the update in its spinner and ends with `Updated mm <old> → <new>.`
+
+### Changed
+
+- `mm update` now shows the same clearing spinner as `mm push` and `mm pull` and ends with one result line, and an attended `mm push` or `mm pull` that updates mm shows the update in its spinner and ends with `Updated mm <old> → <new>.`
+- `mm update` uses a clearing terminal spinner and prints one result line; piped output omits the start line.
+- Attended terminal `mm push` and `mm pull` show update progress and report its result alongside the sync result.
+
+### Upgrade notes
+
+- Scripts that read `mm update` output no longer get its `Updating mm …` start line, only the result line.
+
 ## [1.12.39] - 2026-11-12
 
 `mm retro-fleet` names affected machines in coverage causes, gives missing snapshots a push-or-delivery remedy, and recognizes version-prefixed conventional commits.
