@@ -3860,8 +3860,8 @@ def test_bookkeeping_and_manifest_cleanup_warnings_use_shared_stderr_helper(
 def test_cli_autopull_surfaces_data_at_risk_warnings_on_stderr(fleet, monkeypatch):
     from typer.testing import CliRunner
 
-    from mind_meld import config as config_mod
     from mind_meld import cli
+    from mind_meld import config as config_mod
 
     cfg_path = fleet.root / "config.toml"
     config_mod.save_config(fleet.config, cfg_path)
