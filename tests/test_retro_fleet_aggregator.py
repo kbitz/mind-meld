@@ -4686,6 +4686,9 @@ class TestCoverageAcceptor:
         accepted_absent = _accepted(absent_row)
         assert accepted_absent.pending_left == ()
         assert accepted_absent.pending_left_reason is None
+        empty = _accepted({**absent_row, "pending_left": {}})
+        assert empty.pending_left == ()
+        assert empty.pending_left_reason is None
 
         # tie_key excludes pending_left; _sibling_tie_key includes it.
         with_pending = _host_event(
@@ -4707,6 +4710,7 @@ class TestCoverageAcceptor:
             {"": 5},
             {"codex": 5},  # contributor in token_sources, not degraded
             {"muse": 5},  # absent reader, not in degraded_sources
+            {"grok": 5, "muse": 6},  # more entries than degraded readers
             {"grok": 0},
             {"grok": -1},
             {"grok": True},
@@ -6416,7 +6420,6 @@ class TestAgentCoverageNotes:
         notes_superseded = aggregator._agent_coverage_notes(data_superseded)
         assert any("failed on the latest push" in n for n in notes_superseded)
         assert not any("catching up" in n for n in notes_superseded)
-        assert not any("catching up" in n for n in notes_superseded)
 
     def test_every_health_code_is_documented_in_skill_md(self):
         """The 1.1 doc-sync contract.
@@ -7429,6 +7432,46 @@ def _capture_on(
 
 
 class TestGitCoverageAndRecapture:
+    @pytest.mark.parametrize(
+        "aborts,errors,left",
+        [
+            (1, 1, 5),
+            (0, 0, 5),
+            (True, 0, 5),
+            (1, False, 5),
+            (1, 0, 1.5),
+            (1, 0, aggregator.MAX_PENDING_LEFT + 1),
+        ],
+    )
+    def test_invalid_git_progress_keeps_failure_and_explains_drop(
+        self, tmp_path, monkeypatch, capsys, aborts, errors, left
+    ):
+        # Value: protects=malformed Git progress cannot claim catch-up; fails_when=
+        # invalid progress replaces failure guidance or loses its forensic reason;
+        # why_new=old malformed tests check only the legacy note; seam=none;
+        # no_claim=live peer capture (synthetic wire rows).
+        older = _capture_on(_git_event("dev-a", 1, [_commit("aaa", 1)]), since_days=7, aborts=1)
+        bad = _capture_on(
+            _git_event("dev-a", 0, [_commit("bbb", 0)]),
+            since_days=7,
+            aborts=aborts,
+            errors=errors,
+            pending_left=left,
+        )
+        _write_events(tmp_path, "dev-a", "2026-04-28", [older, bad])
+        data = _aggregate(tmp_path)
+        assert data.git.git_catching_up == {}
+        assert data.git.git_pending_left_rejections == {"dev-a": "invalid_coverage"}
+        assert "ran out of budget" in next(
+            e["detail"] for e in _health(aggregator.format_retro(data)) if e["code"] == "git_budget"
+        )
+        monkeypatch.setattr(aggregator, "aggregate", lambda **_kw: data)
+        assert aggregator.main(["7d", "--dump-host-usage", "--no-author-filter"]) == 0
+        dump = json.loads(capsys.readouterr().out)
+        assert dump["git_pending_left_rejections"] == [
+            {"device": "dev-a", "reason": "invalid_coverage"}
+        ]
+
     def test_g1_recapture_rows_excluded_from_push_tally(self, tmp_path):
         events_dir = tmp_path / "events"
         events_dir.mkdir()

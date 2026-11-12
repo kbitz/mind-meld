@@ -391,6 +391,9 @@ class GitAggregate:
     # device_id -> repositories left on its latest in-window capture when
     # that device is in ``git_budget_aborts`` (per machine, never summed).
     git_catching_up: dict[str, int] = field(default_factory=dict)
+    # Device -> drop reason for malformed progress observed in capture rows.
+    # Read only by the forensic dump; never changes coverage or commit totals.
+    git_pending_left_rejections: dict[str, str] = field(default_factory=dict)
 
     @property
     def pull_requests(self) -> int:
@@ -1273,17 +1276,30 @@ def _project_git_capture(raw: object) -> dict | None:
     errors = raw.get("walk_errors")
     discovery = raw.get("discovery") if isinstance(raw.get("discovery"), str) else None
     pending_left = raw.get("pending_left")
-    if since is None and aborts is None and errors is None and discovery is None:
+    valid_pending_left = (
+        type(pending_left) is int
+        and 1 <= pending_left <= MAX_PENDING_LEFT
+        and type(aborts) is int
+        and aborts > 0
+        and type(errors) is int
+        and errors == 0
+    )
+    if (
+        since is None
+        and aborts is None
+        and errors is None
+        and discovery is None
+        and "pending_left" not in raw
+    ):
         return None
     return {
         "since": since,
         "discovery": discovery,
         "walk_budget_aborts": aborts if type(aborts) is int else None,
         "walk_errors": errors if isinstance(errors, int) else None,
-        "pending_left": (
-            pending_left
-            if type(pending_left) is int and 1 <= pending_left <= MAX_PENDING_LEFT
-            else None
+        "pending_left": pending_left if valid_pending_left else None,
+        "pending_left_reason": (
+            "invalid_coverage" if "pending_left" in raw and not valid_pending_left else None
         ),
     }
 
@@ -1579,6 +1595,8 @@ def aggregate_git(
                     snap_zero[device] = snap_zero.get(device, 0) + 1
             capture = _project_git_capture(ev.get("git_capture"))
             if capture is not None:
+                if capture.get("pending_left_reason") is not None:
+                    out.git_pending_left_rejections[device] = capture["pending_left_reason"]
                 cap_since = _parse_aware_ts(capture.get("since"))
                 cap_ts = _parse_aware_ts(ev.get("ts")) or _parse_iso(ev.get("ts"))
                 if cap_since is not None and cap_ts is not None and cap_since <= cap_ts:
@@ -2766,7 +2784,7 @@ def _sanitize_tokens_by_day(raw: dict | None) -> dict | None:
     return out
 
 
-def _dump_host_inventory(inventory: HostUsageInventory) -> str:
+def _dump_host_inventory(inventory: HostUsageInventory, *, git: GitAggregate | None = None) -> str:
     payload = {
         "by_device": {
             device: {
@@ -2800,6 +2818,11 @@ def _dump_host_inventory(inventory: HostUsageInventory) -> str:
         "rejected": [{"device": row.device, "reason": row.reason} for row in inventory.rejected],
         "rejected_rows": inventory.rejected_rows,
     }
+    if git is not None:
+        payload["git_pending_left_rejections"] = [
+            {"device": _safe_short(device), "reason": reason}
+            for device, reason in sorted(git.git_pending_left_rejections.items())
+        ]
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
@@ -5507,7 +5530,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.dump_host_usage:
-        sys.stdout.write(_dump_host_inventory(data.host_inventory))
+        sys.stdout.write(_dump_host_inventory(data.host_inventory, git=data.git))
         return 0
 
     sys.stdout.write(

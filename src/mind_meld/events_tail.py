@@ -149,14 +149,15 @@ class Degradations(list[str]):
 
 HOST_USAGE_READ_BUDGET_INTERACTIVE_MS = DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS
 HOST_USAGE_READ_BUDGET_AUTOPUSH_MS = DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS
-
-CAPTURE_PROGRESS_PATH = mm_config.CONFIG_DIR / "capture-progress.json"
-CAPTURE_PROGRESS_MAX_AGE = timedelta(days=7)
 """Host reads get their OWN absolute deadline, deliberately separate from the
 git/session walk budgets. It starts after the ``walk_done`` snapshot so host
 time can never trigger or redefine the session-walk notice, and it is passed
 explicitly to every reader — no unattended caller may fall through to ``host_usage``'s
 5-second default, which is ~20x an autopush's entire walk budget."""
+
+CAPTURE_PROGRESS_PATH = mm_config.CONFIG_DIR / "capture-progress.json"
+CAPTURE_PROGRESS_MAX_AGE = timedelta(days=7)
+"""Maximum age of an attended figure carried onto an unattended capture."""
 
 
 _pending_capture_budget_ms: int | None = None

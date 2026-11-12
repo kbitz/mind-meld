@@ -3848,6 +3848,62 @@ def test_track_125a_codex_deadline_catching_up_matches_diag_pending_and_failures
 
 
 class TestTrack131AHostProgressCarry:
+    @pytest.mark.parametrize(
+        "reason,attended",
+        [
+            ("io_error", True),
+            ("unavailable", True),
+            ("unsupported", True),
+            ("unknown-count", True),
+            ("io_error", False),
+            ("unavailable", False),
+            ("unsupported", False),
+        ],
+    )
+    def test_non_deadline_or_unknown_progress_clears_attended_figure(
+        self, monkeypatch, reason, attended
+    ):
+        # Value: protects=only measured deadline progress is carried; fails_when=
+        # failures or unknown counts reuse stale progress; why_new=AC1/AC11
+        # require permanent failures and unknown evidence; seam=none;
+        # no_claim=host parser behavior (stub reader outcomes).
+        events_tail._record_host_progress(
+            events_tail.HostUsageCapture(
+                None,
+                "codex",
+                "deadline",
+                dropped=(("codex", "deadline"),),
+                deadline_evidence={
+                    "codex": events_tail.HostReadEvidence(files_on_disk=10, files_cached=4)
+                },
+            ),
+            device_id="dev-a",
+            attended=True,
+        )
+        monkeypatch.setattr(_mm_host_registry, "reader_usage_diag", lambda *_a, **_kw: {})
+        monkeypatch.setattr(
+            _mm_host_registry,
+            "warm_host_cache_inline",
+            lambda **_kw: _incomplete("deadline"),
+        )
+        readers = (
+            (
+                "codex",
+                lambda **_kw: _incomplete("deadline" if reason == "unknown-count" else reason),
+            ),
+            ("muse", lambda **_kw: _complete({})),
+        )
+        capture, rows = events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=250,
+            warm_host_cache=(lambda _n: None) if attended else None,
+        )
+        assert len(rows) == 1
+        assert "pending_left" not in rows[0]
+        events_tail._record_host_progress(capture, device_id="dev-a", attended=attended)
+        assert events_tail._read_capture_progress("dev-a").host == {}
+
     def test_attended_capture_populates_pending_left_for_deadline_only_and_calls_diag_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -3971,7 +4027,10 @@ class TestTrack131AHostProgressCarry:
 
         # 2. Following unattended capture (warm_host_cache=None) where Codex again hits deadline
         # publishes pending_left == {"codex": 6} without calling reader_usage_diag.
+        forbidden_diag_calls = []
+
         def forbid_diag(*_a, **_kw):
+            forbidden_diag_calls.append((_a, _kw))
             raise AssertionError("unattended capture must not call reader_usage_diag")
 
         monkeypatch.setattr(_mm_host_registry, "reader_usage_diag", forbid_diag)
@@ -3985,6 +4044,7 @@ class TestTrack131AHostProgressCarry:
         assert len(unattended_rows) == 1
         assert unattended_rows[0]["degraded_sources"] == ["codex"]
         assert unattended_rows[0]["pending_left"] == {"codex": 6}
+        assert forbidden_diag_calls == []
 
         # 3. Unattended capture where Codex hits io_error clears the entry and omits pending_left.
         _stub_hosts(monkeypatch, codex=_incomplete("io_error"), muse=muse_ok)
@@ -4147,3 +4207,27 @@ class TestTrack131AHostProgressCarry:
                 assert capsys.readouterr().err == ""
             finally:
                 fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        assert forbidden_diag_calls == []
+
+        # Unreadable progress omits only the optional figure, without stderr.
+        from contextlib import contextmanager
+
+        from mind_meld import lockedjson
+
+        real_snapshot = lockedjson.locked_json_snapshot
+
+        @contextmanager
+        def unreadable_progress(path, **kwargs):
+            if path == events_tail.CAPTURE_PROGRESS_PATH:
+                raise PermissionError("unreadable progress fixture")
+            with real_snapshot(path, **kwargs) as snap:
+                yield snap
+
+        monkeypatch.setattr(lockedjson, "locked_json_snapshot", unreadable_progress)
+        _cap_unreadable, rows_unreadable = events_tail._capture_host_snapshot(
+            "dev-a", readers, host_budget_ms=250, warm_host_cache=None
+        )
+        assert len(rows_unreadable) == 1
+        assert "pending_left" not in rows_unreadable[0]
+        assert capsys.readouterr().err == ""
+        assert forbidden_diag_calls == []

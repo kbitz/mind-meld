@@ -4560,7 +4560,10 @@ class TestGitPendingLeftAndProgressCarry131A:
         events_tail._record_git_progress(device_id="dev-a", published=5, clear=False)
         assert events_tail._read_capture_progress("dev-a").git == 5
 
+        forbidden_count_calls = []
+
         def _forbid(*_a, **_kw):
+            forbidden_count_calls.append((_a, _kw))
             raise AssertionError("quiet push must not call git pending repository counters")
 
         monkeypatch.setattr(events, "preview_pending_repositories", _forbid)
@@ -4685,3 +4688,4 @@ class TestGitPendingLeftAndProgressCarry131A:
             git_and_push_bad = [r for r in rows_bad if r["type"] in ("git-snapshot", "mm-push")]
             for r in git_and_push_bad[-2:]:
                 assert "pending_left" not in r["git_capture"]
+        assert forbidden_count_calls == []
