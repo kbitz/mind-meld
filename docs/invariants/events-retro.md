@@ -1239,10 +1239,14 @@ whose snapshot caused it.
   Each family groups reader causes by `(kind, _reader_display_labels)` across
   contributing machines and formats the affected machine list with
   `_format_coverage_peer_names` (`"<machines>: a host declared totals
-  incomplete (<readers>)"` / `"<machines>: a host reader failed (<readers>)"`),
-  so two machines with different failed reader sets stay distinct while
+  incomplete (<readers>)"` / `"<machines>: a host reader is still catching up
+  (<readers>)"` / `"<machines>: a host reader failed (<readers>)"`),
+  so two machines with different failed or catching-up reader sets stay distinct while
   machines sharing the same kind and reader set merge into one bounded sentence
-  per reader set without crowding `MAX_AGENT_FLOOR_CAUSES`.
+  per reader set without crowding `MAX_AGENT_FLOOR_CAUSES`. A reader in
+  `degraded_sources` that carries a positive `pending_left` count on that
+  snapshot uses the `"catching_up"` kind; degraded readers without a figure keep
+  `"degraded"`.
   Only snapshots eligible for the requested window propagate reader causes;
   stale inventory remains available for diagnostics without repricing current rows.
   Unusable coverage metadata is the same scope: a snapshot that carries
@@ -1360,6 +1364,28 @@ shape and opposite disjointness contracts. **Do not unify them.**
   snapshot's retained days. A subset of `token_sources`, disjoint from
   `partial_sources`; written even when empty when reader-day evidence is supplied.
   It is neither a lifetime claim nor a classification by model family.
+- **`pending_left`** (131A): optional `dict[str, int]` mapping a deadline-dropped
+  reader in `degraded_sources` to its remaining unit count (`1..MAX_PENDING_LEFT`,
+  where `MAX_PENDING_LEFT == 2**31 - 1` is mirrored between `events` and
+  `aggregator` and pinned by `test_writer_model_caps_mirror_the_acceptor`).
+  Ordered by `HOST_USAGE_TOKEN_SOURCES` and omitted when empty. The writer
+  filters keys to `degraded_sources` (never a contributor or non-degraded reader)
+  and requires `type(v) is int and 1 <= v <= MAX_PENDING_LEFT`. The acceptor
+  validates `pending_left` three-way after `degraded_sources`: absent → `()`,
+  present and valid (`dict` with non-empty string keys that are a subset of the
+  accepted `degraded` set and `type(v) is int and 1 <= v <= MAX_PENDING_LEFT`,
+  canonically ordered by `degraded`) → `tuple[tuple[str, int], ...]`, and present
+  but invalid → drops `pending_left` alone with `pending_left_reason =
+  "invalid_coverage"` while keeping the row and `degraded`. `tie_key` excludes
+  `pending_left` (coverage metadata does not change row totals); `_sibling_tie_key`
+  appends `[[reader, count], ...]` and `pending_left_reason or ""`. In
+  `_host_reader_coverage_notes`, degraded readers with a positive `pending_left`
+  entry emit `<Reader> usage reader is still catching up: <entries> — the next
+  attended \`mm push\` on the machine continues it.` (via `_reader_catching_up_note`
+  and `_attended_usage_remedy`, never summing counts across machines and bounding
+  entries at 5 with `(+K more)`), while only the remaining degraded readers emit
+  `"failed on the latest push"`. `--dump-host-usage` exposes `pending_left` and
+  `pending_left_reason` on each device entry.
 
 **Partial is day-scoped until the writer, then row-scoped.** The Grok reader
 carries `HostUsageResult.partial_days` (UTC days that had a `usageIsIncomplete
@@ -1444,7 +1470,22 @@ A device with no `git_capture` is unknown, never a gap. `origin: recapture` and
 `origin: init` rows COVER their interval and are EXCLUDED from the push tally
 (`snap_total` / `snap_zero`) — opposite treatment of one field; an absent or
 unknown origin still counts (see "Append boundaries and non-push origins"). `walk_budget_aborts` is a budget-exhaustion note, not a gap.
-The `git_budget` note names `mm recapture --dry-run` to check current repository
+When `walk_budget_aborts > 0` and `walk_errors == 0`, `git_capture` may also
+carry `pending_left` (`1..MAX_PENDING_LEFT`): on attended push,
+`events.preview_pending_repositories` computes the post-commit pending count in
+memory before `write_push_event` so the `git-snapshot` and `mm-push` rows carry
+the same figure that `count_pending_repositories` reports after
+`commit_repo_cursors`; on quiet push, `_attach_git_pending_left` attaches the
+carried figure from `capture-progress.json` without reading the Git capture
+cache. `_project_git_capture` accepts `pending_left` only when `type(v) is int
+and 1 <= v <= MAX_PENDING_LEFT`. `aggregate_git` inspects each device's latest
+in-window capture in `git_budget_aborts`: if that latest capture has a positive
+`pending_left`, the device enters `GitAggregate.git_catching_up[device] = left`
+and `format_retro` emits a separate `git_budget` note (`Git history walk is
+still catching up: <machine> (N left) — the next attended ...`, with summary
+clause `git catching up (N left)` for a single peer); devices whose latest
+in-window capture has `walk_budget_aborts > 0` without a positive `pending_left`
+keep the existing `git_budget` note naming `mm recapture --dry-run` to check current repository
 failures, then `mm recapture 30d` on the named machines to recover omitted commits.
 The diagnostic count remains `git_capture.recorded.walk_budget_aborts`, not a `last_push` key.
 
@@ -1710,6 +1751,44 @@ mm-events and reader consent, but no Git roots. The phrase and the joined breadc
 are prose, not a semicolon-delimited schema: the approved retry sentence
 contains `; ` too. Nothing parses the detail by that separator. One
 degradation is appended per dropped reader.
+
+**Capture progress carry (Track 131A).** Attended capture (`_capture_host_snapshot`
+when `warm_host_cache is not None`) counts remaining units once per
+deadline-dropped reader via `_deadline_read_evidence` (`reader_usage_diag(name,
+count_logs=True)`), stores the resulting map on `HostUsageCapture.deadline_evidence`,
+populates `pending_left` on `make_host_usage_snapshot`, and passes that same
+evidence to `_capture_skip_phrase` in both `_run_events_tail` and
+`cli._capture_attended_usage` so stderr and the wire row derive from a single
+filesystem walk per reader per capture. Unattended capture (`autopush`) never
+calls `reader_usage_diag(..., count_logs=True)` or `preview_pending_repositories`.
+Instead, `~/.config/mind-meld/capture-progress.json` (`CAPTURE_PROGRESS_PATH`,
+mode 0600 via `lockedjson` with `fail_open="warn"`, TTL
+`CAPTURE_PROGRESS_MAX_AGE = timedelta(days=7)`, schema `version = 1`, `device`,
+`host`, `git`) carries the last attended `left` count forward onto later quiet
+pushes on the same device:
+- `_record_host_progress` (called on persistent host capture in
+  `_capture_event_snapshots` and `cli._capture_attended_usage`, skipped on dry
+  runs and `mm init` backfill) writes `{left, saved_at}` on attended runs for
+  each deadline-dropped reader with `1 <= left <= MAX_PENDING_LEFT` and removes
+  consulted readers that completed, failed with a non-deadline reason (`io_error`,
+  `unavailable`, `unsupported`), or had `left == 0` / unknown counts. On
+  unattended runs it never writes new counts or updates `saved_at`, and opens the
+  file only when a consulted reader completed or failed with a non-deadline
+  reason and has an existing entry to clear (so a healthy machine never creates
+  `capture-progress.json`).
+- `_read_capture_progress` reads fresh (`0 <= now - saved_at <= 7d`),
+  device-matching entries under `locked_json_ro(..., fail_open="warn")` so an
+  unattended push whose reader hits `deadline` again can publish the carried
+  `pending_left` figure; missing, malformed, wrong-version, wrong-device,
+  expired, future-dated, out-of-range, or lock-contended files degrade to empty
+  progress with no exception and no extra stderr.
+- `_record_git_progress` runs in `_run_events_tail` only after `cursors_committed`
+  is true: on attended push it writes `git = {left, saved_at}` when
+  `walk_budget_aborts > 0 and walk_errors == 0 and 1 <= left <= MAX_PENDING_LEFT`
+  and clears `git` otherwise; on quiet push it clears `git` when
+  `walk_budget_aborts == 0 or walk_errors > 0` and leaves `git` untouched when
+  the walk again hit its budget without errors or when the event append was not
+  confirmed (`EventAppendSkipped`).
 
 ### Standing read blockers (v0.14.8)
 

@@ -781,6 +781,7 @@ def _capture_attended_usage(
             host_budget_ms=events_tail.resolve_host_read_budget(config, interactive=True)[0],
             warm_host_cache=events_tail._warm_host_cache_with_notice,
         )
+        events_tail._record_host_progress(capture, device_id=config["device"]["id"], attended=True)
         dropped = dict(capture.dropped)
         outcomes = events.host_reader_outcomes(
             rows[0] if rows else None,
@@ -791,7 +792,14 @@ def _capture_attended_usage(
         notices = []
         for name, _read in readers:
             if name in dropped:
-                notices.append(events_tail._capture_skip_phrase(name, dropped[name], attended=True))
+                notices.append(
+                    events_tail._capture_skip_phrase(
+                        name,
+                        dropped[name],
+                        attended=True,
+                        evidence=capture.deadline_evidence.get(name),
+                    )
+                )
             elif outcomes.get(name) == "partial":
                 notices.append(f"{name} coverage is partial; mm diag shows the reader's state.")
             elif outcomes.get(name) == "absent":

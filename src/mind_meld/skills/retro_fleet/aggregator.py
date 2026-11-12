@@ -159,6 +159,10 @@ count check always fired first and the byte check could not be reached. A
 guard that cannot fire is worse than no guard, because it reads as protection.
 Re-adding one is only meaningful BELOW the product."""
 
+MAX_PENDING_LEFT = 2**31 - 1
+"""Cap on ``pending_left`` counts on host-usage rows and ``git_capture``.
+Mirrors ``events.MAX_PENDING_LEFT``."""
+
 HOST_SNAPSHOT_MIN_VERSION = "v0.12.32"
 """First mm release whose event tail publishes ``host-usage-snapshot`` rows.
 Named in events-retro as the schema floor. Refresh remedies use
@@ -384,6 +388,9 @@ class GitAggregate:
     # device_id -> walk_budget_aborts summed across in-window captures
     # that carried the field. Different remedy from a genuine gap.
     git_budget_aborts: dict[str, int] = field(default_factory=dict)
+    # device_id -> repositories left on its latest in-window capture when
+    # that device is in ``git_budget_aborts`` (per machine, never summed).
+    git_catching_up: dict[str, int] = field(default_factory=dict)
 
     @property
     def pull_requests(self) -> int:
@@ -593,6 +600,8 @@ class HostDeviceSnapshot:
     partial: tuple[str, ...] = ()
     degraded_reason: str | None = None
     partial_reason: str | None = None
+    pending_left: tuple[tuple[str, int], ...] = ()
+    pending_left_reason: str | None = None
     counter_semantics: str | None = None
     """Exact ``disjoint-v1`` when the winning row published disjoint
     counters. ``None`` is legacy inclusive/unknown — token columns and
@@ -969,7 +978,16 @@ def aggregate_agent_usage(
                 fam_reader_causes.setdefault(fam, {}).setdefault(
                     ("partial", reader_labels), set()
                 ).add(device)
-        for fam, readers in _reader_scope(snap.degraded).items():
+        catching_up_readers = {reader for reader, _left in snap.pending_left}
+        degraded_catching_up = tuple(r for r in snap.degraded if r in catching_up_readers)
+        degraded_failed = tuple(r for r in snap.degraded if r not in catching_up_readers)
+        for fam, readers in _reader_scope(degraded_catching_up).items():
+            reader_labels = _reader_display_labels(tuple(readers))
+            if reader_labels:
+                fam_reader_causes.setdefault(fam, {}).setdefault(
+                    ("catching_up", reader_labels), set()
+                ).add(device)
+        for fam, readers in _reader_scope(degraded_failed).items():
             reader_labels = _reader_display_labels(tuple(readers))
             if reader_labels:
                 fam_reader_causes.setdefault(fam, {}).setdefault(
@@ -1019,6 +1037,10 @@ def aggregate_agent_usage(
             if kind == "partial":
                 fam_causes.setdefault(family, set()).add(
                     f"{machines_txt}: a host declared totals incomplete ({readers_txt})"
+                )
+            elif kind == "catching_up":
+                fam_causes.setdefault(family, set()).add(
+                    f"{machines_txt}: a host reader is still catching up ({readers_txt})"
                 )
             else:
                 fam_causes.setdefault(family, set()).add(
@@ -1104,6 +1126,8 @@ class _AcceptedHostRow:
     partial: tuple[str, ...] = ()
     degraded_reason: str | None = None
     partial_reason: str | None = None
+    pending_left: tuple[tuple[str, int], ...] = ()
+    pending_left_reason: str | None = None
     counter_semantics: str | None = None
     empty_sources: tuple[str, ...] | None = None
     empty_reason: str | None = None
@@ -1248,6 +1272,7 @@ def _project_git_capture(raw: object) -> dict | None:
     aborts = raw.get("walk_budget_aborts")
     errors = raw.get("walk_errors")
     discovery = raw.get("discovery") if isinstance(raw.get("discovery"), str) else None
+    pending_left = raw.get("pending_left")
     if since is None and aborts is None and errors is None and discovery is None:
         return None
     return {
@@ -1255,6 +1280,11 @@ def _project_git_capture(raw: object) -> dict | None:
         "discovery": discovery,
         "walk_budget_aborts": aborts if type(aborts) is int else None,
         "walk_errors": errors if isinstance(errors, int) else None,
+        "pending_left": (
+            pending_left
+            if type(pending_left) is int and 1 <= pending_left <= MAX_PENDING_LEFT
+            else None
+        ),
     }
 
 
@@ -1525,6 +1555,7 @@ def aggregate_git(
     covered: dict[str, list[tuple[datetime, datetime]]] = {}
     observed: dict[str, datetime] = {}
     budget_aborts: dict[str, int] = {}
+    latest_in_window_capture: dict[str, tuple[datetime, int | None]] = {}
     window_start, window_end = _git_coverage_window(since, until, coverage_floor)
     for ev in events:
         if ev.get("type") != "git-snapshot":
@@ -1582,6 +1613,15 @@ def aggregate_git(
                     aborts = capture.get("walk_budget_aborts")
                     if in_window and type(aborts) is int and aborts > 0:
                         budget_aborts[device] = budget_aborts.get(device, 0) + aborts
+                    if in_window:
+                        raw_left = capture.get("pending_left")
+                        left_val = raw_left if type(raw_left) is int else None
+                        prior_cap = latest_in_window_capture.get(device)
+                        if prior_cap is None or (cap_ts, left_val or 0) > (
+                            prior_cap[0],
+                            prior_cap[1] or 0,
+                        ):
+                            latest_in_window_capture[device] = (cap_ts, left_val)
         for proj in projects:
             if not isinstance(proj, dict):
                 continue
@@ -1682,6 +1722,11 @@ def aggregate_git(
         device: (snap_zero[device], snap_total[device]) for device in snap_zero if snap_zero[device]
     }
     out.git_budget_aborts = {device: n for device, n in budget_aborts.items() if n > 0}
+    out.git_catching_up = {
+        device: left
+        for device in out.git_budget_aborts
+        if (left := latest_in_window_capture.get(device, (None, None))[1]) is not None
+    }
     uncovered: dict[str, tuple[tuple[str, str], ...]] = {}
     for device, latest_end in observed.items():
         # Iterate OBSERVATIONS, not coverage: a device with only HOLD
@@ -2463,6 +2508,28 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
         counter_semantics = None
     else:
         counter_semantics = _accept_counter_semantics(ev.get("counter_semantics"))
+    pending_left: tuple[tuple[str, int], ...] = ()
+    pending_left_reason: str | None = None
+    if "pending_left" in ev:
+        raw_pending = ev.get("pending_left")
+        degraded_set = set(degraded)
+        if (
+            isinstance(raw_pending, dict)
+            and len(raw_pending) <= len(degraded)
+            and all(
+                isinstance(k, str)
+                and k in degraded_set
+                and type(v) is int
+                and 1 <= v <= MAX_PENDING_LEFT
+                for k, v in raw_pending.items()
+            )
+        ):
+            pending_left = tuple(
+                (reader, raw_pending[reader]) for reader in degraded if reader in raw_pending
+            )
+        else:
+            pending_left = ()
+            pending_left_reason = "invalid_coverage"
     return _AcceptedHostRow(
         device=device,
         as_of=as_of,
@@ -2486,6 +2553,8 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
         counter_semantics=counter_semantics,
         empty_sources=empty_sources,
         empty_reason=empty_reason,
+        pending_left=pending_left,
+        pending_left_reason=pending_left_reason,
     )
 
 
@@ -2549,6 +2618,8 @@ def _sibling_tie_key(row: _AcceptedHostRow) -> str:
             row.empty_sources is not None,
             list(row.empty_sources or ()),
             row.empty_reason or "",
+            [[reader, count] for reader, count in row.pending_left],
+            row.pending_left_reason or "",
         ],
         sort_keys=True,
         separators=(",", ":"),
@@ -2642,6 +2713,8 @@ def aggregate_host_usage(
             partial=row.partial,
             degraded_reason=row.degraded_reason,
             partial_reason=row.partial_reason,
+            pending_left=row.pending_left,
+            pending_left_reason=row.pending_left_reason,
             counter_semantics=row.counter_semantics,
         )
     return HostUsageInventory(
@@ -2715,6 +2788,8 @@ def _dump_host_inventory(inventory: HostUsageInventory) -> str:
                     "partial", snap.partial, snap.partial_reason
                 ),
                 "partial_reason": snap.partial_reason,
+                "pending_left": dict(snap.pending_left),
+                "pending_left_reason": snap.pending_left_reason,
                 "stale": snap.stale,
                 "counter_semantics": snap.counter_semantics,
                 "tokens_by_day": _sanitize_tokens_by_day(snap.tokens_by_day),
@@ -4131,9 +4206,23 @@ def _host_reader_coverage_notes(
     """One aggregated note per coverage class, never one per device."""
     labels = labels or (device_labels(fleet) if fleet else {})
     notes: list[str] = []
+    catching_up_note = _reader_catching_up_note(
+        [(s.device, s.pending_left) for s in snaps if s.pending_left],
+        labels,
+    )
+    if catching_up_note:
+        notes.append(catching_up_note)
+    degraded_rows: list[tuple[str, tuple[str, ...]]] = []
+    for s in snaps:
+        if not s.degraded:
+            continue
+        catching_up_set = {reader for reader, _left in s.pending_left}
+        failed = tuple(r for r in s.degraded if r not in catching_up_set)
+        if failed:
+            degraded_rows.append((s.device, failed))
     degraded_note = _reader_issue_note(
         "degraded",
-        [(s.device, s.degraded) for s in snaps if s.degraded],
+        degraded_rows,
         labels,
     )
     if degraded_note:
@@ -4161,6 +4250,44 @@ def _host_reader_coverage_notes(
             "then `mm status`; pull again on this machine."
         )
     return notes
+
+
+def _reader_catching_up_note(
+    rows: list[tuple[str, tuple[tuple[str, int], ...]]],
+    labels: dict[str, str] | None = None,
+) -> str | None:
+    if not rows:
+        return None
+    labels = labels or {}
+    reader_order = {name: i for i, name in enumerate(mm_events.HOST_USAGE_TOKEN_SOURCES)}
+    items: list[tuple[tuple[str, int, str], str, str]] = []
+    for device, pairs in rows:
+        machine = device_label(device, labels)
+        for reader, left in pairs:
+            display = _reader_display_labels((reader,))
+            reader_label = display[0] if display else _safe_short(reader)
+            sort_key = (machine, reader_order.get(reader, len(reader_order)), reader_label)
+            entry = f"{reader_label} on `{machine}` is catching up ({left} left)"
+            items.append((sort_key, entry, machine))
+    if not items:
+        return None
+    items.sort(key=lambda item: item[0])
+    entries = [entry for _key, entry, _machine in items]
+    shown = entries[:MAX_TOKEN_COVERAGE_PEER_NAMES]
+    extra = len(entries) - len(shown)
+    entries_txt = "; ".join(shown) + (f" (+{extra} more)" if extra > 0 else "")
+    machines = {machine for _key, _entry, machine in items}
+    if len(machines) == 1:
+        only_machine = next(iter(machines))
+        remedy = (
+            f"the next attended `mm push` on `{only_machine}` continues it; nothing else is needed."
+        )
+    else:
+        remedy = (
+            "the next attended `mm push` on each named machine continues it; "
+            "nothing else is needed."
+        )
+    return f"{entries_txt} — {remedy}"
 
 
 def _reader_issue_note(
@@ -5020,12 +5147,37 @@ def format_retro(
             f"{len(data.pushes.discovery_errors)} discovery error(s) recorded.",
             remedy="Run `mm diag`.",
         )
-    if data.git.git_budget_aborts:
+    if data.git.git_catching_up:
+        catching_entries = [
+            f"`{device_label(d, labels)}` ({left} left)"
+            for d, left in sorted(
+                data.git.git_catching_up.items(),
+                key=lambda kv: (device_label(kv[0], labels), kv[0]),
+            )
+        ]
+        shown_catching = catching_entries[:MAX_TOKEN_COVERAGE_PEER_NAMES]
+        extra_catching = len(catching_entries) - len(shown_catching)
+        catching_names = ", ".join(shown_catching) + (
+            f" (+{extra_catching} more)" if extra_catching > 0 else ""
+        )
+        note(
+            "git_budget",
+            f"Git capture is catching up on {catching_names} — the latest push stopped on its "
+            "walk budget (repositories left); the next attended `mm push` there continues it. "
+            "This is not a missing push.",
+            remedy=(
+                "Nothing more is needed than the next attended `mm push` on the named machine(s)."
+            ),
+        )
+    remaining_git_budget_aborts = {
+        d: n for d, n in data.git.git_budget_aborts.items() if d not in data.git.git_catching_up
+    }
+    if remaining_git_budget_aborts:
         note(
             "git_budget",
             "Git walk ran out of budget on "
             + _format_coverage_peer_names(
-                {device_label(d, labels) for d in data.git.git_budget_aborts}
+                {device_label(d, labels) for d in remaining_git_budget_aborts}
             )
             + " — some repositories were not captured. This is not a missing push.",
             remedy="On those machines run `mm recapture --dry-run` to check current "

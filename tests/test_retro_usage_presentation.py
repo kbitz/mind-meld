@@ -207,6 +207,31 @@ def test_degraded_reader_floors_its_agent_and_names_the_cause():
     assert "token coverage is incomplete on dev-a" in claude_floor["detail"]
 
 
+def test_catching_up_reader_floors_its_agent_and_names_catching_up_cause():
+    from dataclasses import replace
+
+    data = presentation_data("degraded")
+    snap = data.host_inventory.by_device["dev-b"]
+    data.host_inventory.by_device["dev-b"] = replace(
+        snap,
+        degraded=("codex",),
+        pending_left=(("codex", 3),),
+        tokens_by_day={"2026-09-10": day_bucket({"gpt-6-astra": usage(1_000_000)})},
+        lifetime_by_family={"codex": {"2026-09-10": usage(1_000_000)}},
+    )
+    codex = row(data, "codex")
+    assert agg._agent_row_cost(codex)[1] is True
+    assert "dev-b: a host reader is still catching up (codex)" in codex.floor_causes
+    assert not any("a host reader failed" in c for c in codex.floor_causes)
+    out = agg.format_retro(data)
+    assert "≥$" in out
+    codex_floor = next(
+        e for e in health(out) if e["code"] == "cost_floor" and e["agent"] == "Codex"
+    )
+    assert "dev-b: a host reader is still catching up (codex)" in codex_floor["detail"]
+    assert "a host reader failed" not in codex_floor["detail"]
+
+
 def test_unpriced_model_is_counted_in_tokens_and_excluded_from_cost():
     data = presentation_data()
     grok = row(data, "grok")
