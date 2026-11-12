@@ -41,6 +41,7 @@ from mind_meld.consoles import console
 from mind_meld.errors import ConfigError
 from mind_meld.manifest import _is_excluded as _manifest_is_excluded
 from mind_meld.manifest import walk_source
+from mind_meld.safety import safe_terminal_str
 
 
 def sources() -> None:
@@ -174,7 +175,14 @@ def disable_source(name: str, *, force: bool = False) -> None:
     sync = dict(config.get("sync", {}) or {})
     disabled = list(sync.get("disabled_sources", []) or [])
     if name in disabled:
-        console.print(f"[dim]Source '{name}' is already disabled.[/dim]")
+        console.print(
+            core._outcome_line(
+                "disable", f"Source '{safe_terminal_str(name)}' is already disabled"
+            ),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
         return
 
     disabled.append(name)
@@ -182,8 +190,20 @@ def disable_source(name: str, *, force: bool = False) -> None:
     patch_config_on_disk(updates)
     _record_seen([name])
 
-    console.print(f"[green]Disabled source '{name}' on this device.[/green]")
-    console.print(f"[dim]Run 'mm enable-source {name}' to re-enable.[/dim]")
+    console.print(
+        core._outcome_line(
+            "disable", f"Disabled source '{safe_terminal_str(name)}' on this device"
+        ),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    console.print(
+        core._fix_line(f"mm enable-source {safe_terminal_str(name)}"),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
 
 
 def _print_grok_enable_notes() -> None:
@@ -247,7 +267,14 @@ def enable_source(name: str, *, force: bool = False) -> None:
     if not updates:
         # Already enabled and configured — no-op message.
         if name in explicit_names or (not has_explicit_sources and name in default_names):
-            console.print(f"[dim]Source '{name}' is already enabled.[/dim]")
+            console.print(
+                core._outcome_line(
+                    "enable", f"Source '{safe_terminal_str(name)}' is already enabled"
+                ),
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
+            )
             if name == "grok":
                 _print_grok_enable_notes()
             return
@@ -257,10 +284,20 @@ def enable_source(name: str, *, force: bool = False) -> None:
         patch_config_on_disk(config_updates)
 
     _record_seen([name])
-    console.print(f"[green]Enabled source '{name}' on this device.[/green]")
+    console.print(
+        core._outcome_line("enable", f"Enabled source '{safe_terminal_str(name)}' on this device"),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
     if name == "grok":
         _print_grok_enable_notes()
-        console.print("[dim]Run 'mm disable-source grok' to turn this off.[/dim]")
+        console.print(
+            core._fix_line("mm disable-source grok"),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
     elif name == "muse":
         console.print(
             "[dim]Syncs ~/.local/share/muse memory/ only. "
@@ -270,7 +307,12 @@ def enable_source(name: str, *, force: bool = False) -> None:
             "[dim]Reads completed model-step token totals from local Muse session logs. "
             "Session files are not synced. Prompts never leave the Mac.[/dim]"
         )
-        console.print("[dim]Run 'mm disable-source muse' to turn this off.[/dim]")
+        console.print(
+            core._fix_line("mm disable-source muse"),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
     elif name == "agy":
         console.print(
             "[dim]Syncs ~/.gemini/config skills/, rules/, AGENTS.md, and GEMINI.md. "
@@ -280,7 +322,12 @@ def enable_source(name: str, *, force: bool = False) -> None:
             "[dim]Reads completed model-step token totals from local Antigravity "
             "session databases. Prompts never leave this device.[/dim]"
         )
-        console.print("[dim]Run 'mm disable-source agy' to turn this off.[/dim]")
+        console.print(
+            core._fix_line("mm disable-source agy"),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
 
 
 def reconfigure_sources() -> None:
@@ -311,7 +358,12 @@ def reconfigure_sources() -> None:
             ordered.append(s)
 
     if not ordered:
-        console.print("[dim]No sources configured to reconfigure.[/dim]")
+        console.print(
+            core._outcome_line("reconfigure", "no sources configured to reconfigure"),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
         return
 
     console.print("[bold]Reconfigure sources for this device.[/bold]")
@@ -364,7 +416,10 @@ def reconfigure_sources() -> None:
                     new_explicit_sources.append(existing)
                 new_disabled.append(iname)
     except (KeyboardInterrupt, typer.Abort):
-        console.print("\n[yellow]Reconfigure aborted; no changes written.[/yellow]")
+        core._print_error(
+            "reconfigure aborted; no changes written.",
+            fix="mm reconfigure-sources",
+        )
         raise typer.Exit(1) from None
 
     updates: dict[str, Any] = {
@@ -379,4 +434,9 @@ def reconfigure_sources() -> None:
     # "new" hints next run.
     _record_seen([item["name"] for item in ordered])
 
-    console.print("\n[green]Source configuration updated.[/green]")
+    console.print(
+        core._outcome_line("reconfigure", "source configuration updated"),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )

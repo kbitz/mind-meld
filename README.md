@@ -384,6 +384,13 @@ quiet flag. See [Sync outcomes](#sync-outcomes), [Exit codes](#exit-codes),
 A foreground automatic update can delay the final line; successful version
 details appear only with `--verbose`. Standalone `mm update` is unchanged.
 
+**Setup and resolution output (Track 130B):** `mm init`, `mm devices approve`,
+source enable/disable/reconfigure and per-conflict resolution now use the same
+`<Verb>: <what happened>.` outcomes. Pull and resolution errors, warnings and
+notices use the shared stderr forms, including fail-mode preflight warnings.
+Human-readable text and streams change; commands, flags, exit codes, consent
+and `mm devices --format=json` are unchanged. No migration is needed.
+
 
 **Status verdict and local run evidence (Track 77A):** `mm status` now opens
 its report after authentication with a verdict about this device's last push.
@@ -931,8 +938,9 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 
 ### Sync outcomes
 
-The shared output style has five plain-text forms (Track 129B). Push/pull and
-the shared error helpers use them; the remaining commands adopt them in later Tracks:
+The shared output style has five plain-text forms (Tracks 129B / 130B).
+Push/pull, setup, device approval, source toggles, resolution and the shared
+error helpers use them; the remaining commands adopt them in later Tracks:
 
 - **Outcome:** `<Verb>: <what happened>.` on stdout, one line per thing that happened (`Push: 3 content changes published.`, `Push: 1 file held.`, `Pull: 3 files applied (1 conflict copy).`).
 - **Error:** `mm: error: <what broke>` on stderr, followed by `Run: <command>` on its own last line when a fix command is supplied.

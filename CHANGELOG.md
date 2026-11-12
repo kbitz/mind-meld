@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.41] - 2026-11-12
+
+Setup, device approval, source changes, conflict resolution and pull warnings use the shared outcome and diagnostic forms.
+
+### Changed
+
+- Setup, device approval, source changes, conflict resolution and pull warnings use the shared outcome and diagnostic forms.
+- Setup, approval, source changes, conflict resolution and pull diagnostics use shared output forms.
+
+### Fixed
+
+- Approval guidance ends with `Run: mm init` without a period, and retries retain the “already added” context.
+
 ## [1.12.40] - 2026-11-12
 
 `mm update` now shows the same clearing spinner as `mm push` and `mm pull` and ends with one result line, and an attended `mm push` or `mm pull` that updates mm shows the update in its spinner and ends with `Updated mm <old> → <new>.`
