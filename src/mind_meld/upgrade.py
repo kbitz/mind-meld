@@ -67,8 +67,8 @@ import termios
 import threading
 import time
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
-from dataclasses import dataclass
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -1756,15 +1756,49 @@ def _record_install_failed(
         return
 
 
+def update_step_label(old: str | None, new: str | None) -> str:
+    """Initial transient spinner label for an installer step."""
+    return safe_terminal_str(
+        f"Updating mm {old} → {new}" if new is not None else f"Updating mm {old}"
+    )
+
+
+def updated_line(old: str | None, new: str | None) -> str:
+    """Stdout outcome line after a completed mm update."""
+    return safe_terminal_str(f"Updated mm {old} → {new}.")
+
+
+@dataclass
+class SyncUpdateDisplay:
+    """Terminal display seam for an attended push/pull update step.
+
+    The caller prints `outcomes` and `problems` after successful sync outcomes
+    or before sync failure lines. `installing` must not raise for a display failure.
+    """
+
+    installing: Callable[
+        [str], AbstractContextManager[Callable[[updateprogress.UpdateProgress], None] | None]
+    ]
+    outcomes: list[str] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)
+
+
 def update_or_nudge(
-    config: dict[str, Any] | None, *, attended: bool, diagnostics: bool = True
+    config: dict[str, Any] | None,
+    *,
+    attended: bool,
+    diagnostics: bool = True,
+    display: SyncUpdateDisplay | None = None,
 ) -> None:
     """Tail seam for pull / push / autopull / autopush.
 
     Installs the newer release when `[upgrade] auto_install` is on and this
     install tracks the release branch; otherwise, or when that attempt failed,
     prints the same nudge `emit_nudge_if_due` does. `attended=True` runs pipx
-    in the foreground and says so; the hooks spawn it detached and stay silent.
+    in the foreground and says so; `display` shows the foreground install in a
+    transient spinner and collects its outcome or problem line for the caller
+    to emit after the sync's outcome line; the hooks spawn it detached and
+    stay silent.
 
     The caller has finished its sync. Nothing here may change its outcome: an
     install failure is a `mm: notice:`, never an exception or an exit code.
@@ -1777,7 +1811,7 @@ def update_or_nudge(
         stage = "install"
         try:
             handled, failed = _auto_install(
-                config, result, attended=attended, diagnostics=diagnostics
+                config, result, attended=attended, diagnostics=diagnostics, display=display
             )
         except Exception as error:
             _record_install_problem(_unexpected_cause(error))
@@ -1803,6 +1837,7 @@ def _auto_install(
     *,
     attended: bool,
     diagnostics: bool = True,
+    display: SyncUpdateDisplay | None = None,
 ) -> tuple[bool, bool]:
     """Returns (handled, failed): handled suppresses the nudge for this run;
     failed makes the nudge say the automatic update did not complete."""
@@ -1860,27 +1895,41 @@ def _auto_install(
         claim = _claim_install_attempt(result.latest)
         if claim != "claimed":
             return claim == "in-flight", claim == "failed"
-        shown = " ".join(["pipx", *argv[1:]])
-        if diagnostics:
-            print(
-                f"mm: notice: updating mm {result.local} → {result.latest} ({shown})…",
-                file=sys.stderr,
-            )
-        outcome = run_update(install, pipx, latest=result.latest)
+        if display is None:
+            shown = " ".join(["pipx", *argv[1:]])
+            if diagnostics:
+                print(
+                    f"mm: notice: updating mm {result.local} → {result.latest} ({shown})…",
+                    file=sys.stderr,
+                )
+            outcome = run_update(install, pipx, latest=result.latest)
+        else:
+            with display.installing(update_step_label(result.local, result.latest)) as on_progress:
+                outcome = run_update(install, pipx, latest=result.latest, on_progress=on_progress)
     except KeyboardInterrupt:
         if claim == "claimed":
             _record_install_failed(result.latest, cause=None)
         _write_update_log(argv, "Automatic update cancelled.\n")
-        print(
+        cancel_line = (
             "mm: notice: automatic update cancelled; sync outcome is reported separately. "
-            f"If mm is now missing, reinstall with: {reinstall_cmd(install)}",
-            file=sys.stderr,
+            f"If mm is now missing, reinstall with: {reinstall_cmd(install)}"
         )
+        if display is not None:
+            display.problems.append(cancel_line)
+        else:
+            print(cancel_line, file=sys.stderr)
         return True, False
     except Exception as error:
         if claim == "claimed":
             _record_install_failed(result.latest, cause=None)
         _record_install_problem(_unexpected_cause(error))
+        if display is not None and claim == "claimed":
+            display.problems.append(
+                f"mm: notice: automatic update to {result.latest} did not complete "
+                f"({type(error).__name__}). Run: mm update"
+            )
+            record_nudge(result.latest)
+            return True, False
         return False, claim == "claimed"
     finally:
         lockfile.release_lock()
@@ -1889,7 +1938,9 @@ def _auto_install(
     _write_update_log(argv, outcome.output)
     if outcome.status == "updated":
         _record_install_problem(None)
-        if diagnostics:
+        if display is not None:
+            display.outcomes.append(updated_line(outcome.old, outcome.new))
+        elif diagnostics:
             print(
                 f"mm: notice: updated mm {outcome.old} → {outcome.new}; "
                 "the next mm command runs it",
@@ -1898,11 +1949,17 @@ def _auto_install(
         return True, False
     _record_install_failed(result.latest)
     reason = outcome.detail if outcome.status == "failed" else "pipx found no newer build"
-    print(
-        f"mm: notice: automatic update to {result.latest} did not complete ({reason}) — "
-        f"run `mm update`, or `{reinstall_cmd(install)}`",
-        file=sys.stderr,
-    )
+    if display is not None:
+        display.problems.append(
+            f"mm: notice: automatic update to {result.latest} did not complete "
+            f"({reason}). Run: mm update"
+        )
+    else:
+        print(
+            f"mm: notice: automatic update to {result.latest} did not complete ({reason}) — "
+            f"run `mm update`, or `{reinstall_cmd(install)}`",
+            file=sys.stderr,
+        )
     record_nudge(result.latest)
     return True, False
 
@@ -1949,6 +2006,7 @@ __all__ = [
     "INSTALL_SPEC",
     "InstallInfo",
     "REPO_URL",
+    "SyncUpdateDisplay",
     "UpdateOutcome",
     "UpgradeCheckResult",
     "auto_install_enabled",
@@ -1969,4 +2027,6 @@ __all__ = [
     "update_argv",
     "update_log_path",
     "update_or_nudge",
+    "update_step_label",
+    "updated_line",
 ]
