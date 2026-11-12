@@ -2277,10 +2277,9 @@ class TestUpdateCommand:
 
         terminal = ObservedTerminal()
         monkeypatch.setenv("TERM", "xterm-256color")
-        monkeypatch.setattr(
-            "mind_meld.cli.console",
-            Console(file=terminal, force_terminal=True, color_system=None, width=80),
-        )
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
 
         raw_output = (
             "Downloading PRIVATE_INSTALLER_DETAIL\n"
@@ -2323,30 +2322,23 @@ class TestUpdateCommand:
         assert result.stdout == ""
         assert "━" not in output  # Spinner + step text; there is no bar.
         assert "PRIVATE_INSTALLER_DETAIL" not in output
+        assert "Updating mm 1.2.0 → 1.3.0" in output
+        for settled in ("Done", "Failed", "Cancelled", "Not started"):
+            assert settled not in output
         if scenario != "busy":
             assert "17.0%" in output and "67.9%" in output
             assert "33.3%" in output and "66.7%" in output
             assert "1/3 packages" in output and "2/3 packages" in output
             assert "100.0% 1/1 packages" in output
             assert output.index("17.0%") < output.index("67.9%")
-        final = {
-            "updated": "Done",
-            "failed": "Failed",
-            "unchanged": "Failed",  # pipx saw nothing newer than the tagged release
-            "intermediate": "Failed",
-            "unverifiable": "Failed",
-            "cancelled": "Cancelled",
-            "busy": "Not started",
-        }[scenario]
-        assert final in output
-        if scenario != "busy":
-            assert output.rindex(final) > output.rindex("2/3 packages")
+            assert output.rindex("\x1b[2K") > output.rindex("2/3 packages")
         verified = scenario in ("updated", "unchanged", "intermediate", "unverifiable")
         assert ("Verifying" in output) == verified
         if verified:
-            assert output.rindex(final) > output.rindex("Verifying")
+            assert output.rindex("\x1b[2K") > output.rindex("Verifying")
             assert any(f"{frame} Verifying" in output for frame in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-        assert ("Done" in output) == (scenario == "updated")
+        if scenario == "updated":
+            assert output.rindex("Updated mm 1.2.0 → 1.3.0.") > output.rindex("\x1b[2K")
         assert "\x1b[?25h" in output
         lockfile.acquire_lock()
         lockfile.release_lock()
@@ -2365,10 +2357,9 @@ class TestUpdateCommand:
         venv = pipx_install()
         terminal = _TerminalBuffer()
         monkeypatch.setenv("TERM", "xterm-256color")
-        monkeypatch.setattr(
-            "mind_meld.cli.console",
-            Console(file=terminal, force_terminal=True, color_system=None, width=80),
-        )
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
         raw_output = (
             "Cloning https://github.com/kbitz/mind-meld.git to /tmp/build\n"
             "Building wheel for mind-meld (pyproject.toml) ... started\n"
@@ -2388,9 +2379,17 @@ class TestUpdateCommand:
         assert "━" not in output
         assert "%" not in output
         assert any(frame in output for frame in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-        for phase in ("Fetching source", "Building wheel", "Installing", "Verifying", "Done"):
+        assert "Done" not in output
+        for phase in (
+            "Updating mm 1.2.0 → 1.3.0",
+            "Fetching source",
+            "Building wheel",
+            "Installing",
+            "Verifying",
+        ):
             assert phase in output
         assert output.index("Fetching source") < output.index("Building wheel")
+        assert output.rindex("Updated mm 1.2.0 → 1.3.0.") > output.rindex("\x1b[2K")
 
     def test_spinner_animates_while_installer_is_silent(self, pipx_install, monkeypatch):
         # The spinner must advance on its own timer, not only when the
@@ -2399,10 +2398,9 @@ class TestUpdateCommand:
         venv = pipx_install()
         terminal = _TerminalBuffer()
         monkeypatch.setenv("TERM", "xterm-256color")
-        monkeypatch.setattr(
-            "mind_meld.cli.console",
-            Console(file=terminal, force_terminal=True, color_system=None, width=80),
-        )
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
         frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
         def building_frames() -> set[str]:
@@ -2448,10 +2446,9 @@ class TestUpdateCommand:
 
         terminal = DyingTerminal()
         monkeypatch.setenv("TERM", "xterm-256color")
-        monkeypatch.setattr(
-            "mind_meld.cli.console",
-            Console(file=terminal, force_terminal=True, color_system=None, width=80),
-        )
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
 
         def run(argv, *, on_output=None):
             assert on_output is not None
@@ -2482,21 +2479,23 @@ class TestUpdateCommand:
 
     def test_spinner_shutdown_leaves_a_blocked_ticker_as_a_daemon(self, pipx_install, monkeypatch):
         pipx_install()
-        monkeypatch.setattr(cli, "console", Console(file=_TerminalBuffer(), force_terminal=True))
+        term_console = Console(file=_TerminalBuffer(), force_terminal=True)
+        monkeypatch.setattr(cli, "console", term_console)
+        monkeypatch.setattr(core, "console", term_console)
         monkeypatch.setattr(core, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
         monkeypatch.setattr(core, "_UPDATE_SPINNER_JOIN_SECONDS", 0.02)
         drawing = threading.Event()
         release_draw = threading.Event()
         finished = threading.Event()
         tickers, displays, stopped, outcomes, errors = [], [], [], [], []
-        original_refresh = cli.Progress.refresh
-        original_stop = cli.Progress.stop
+        original_refresh = core.Progress.refresh
+        original_stop = core.Progress.stop
         expected = upgrade.UpdateOutcome("updated", "1.2.0", "1.3.0")
 
         def refresh(progress):
             if not displays:
                 displays.append(progress)
-            if threading.current_thread().name == "mm-update-spinner":
+            if threading.current_thread().name == "mm-sync-spinner":
                 tickers.append(threading.current_thread())
                 drawing.set()
                 # Block before taking Rich's lock: this isolates the join
@@ -2522,8 +2521,8 @@ class TestUpdateCommand:
             finally:
                 finished.set()
 
-        monkeypatch.setattr(cli.Progress, "refresh", refresh)
-        monkeypatch.setattr(cli.Progress, "stop", stop)
+        monkeypatch.setattr(core.Progress, "refresh", refresh)
+        monkeypatch.setattr(core.Progress, "stop", stop)
         monkeypatch.setattr(upgrade, "run_update", run_update)
         caller = threading.Thread(target=update, daemon=True)
         caller.start()
@@ -2550,7 +2549,9 @@ class TestUpdateCommand:
         pipx_install()
         terminal = _TerminalBuffer()
         monkeypatch.setenv("TERM", "xterm-256color")
-        monkeypatch.setattr(cli, "console", Console(file=terminal, force_terminal=True))
+        term_console = Console(file=terminal, force_terminal=True)
+        monkeypatch.setattr(cli, "console", term_console)
+        monkeypatch.setattr(core, "console", term_console)
         expected = upgrade.UpdateOutcome(scenario, "1.2.0", "1.3.0")
 
         def run_update(*args, **kwargs):
@@ -2587,7 +2588,9 @@ class TestUpdateCommand:
 
         terminal = Terminal()
         monkeypatch.setenv("TERM", "xterm-256color")
-        monkeypatch.setattr(cli, "console", Console(file=terminal, force_terminal=True))
+        term_console = Console(file=terminal, force_terminal=True)
+        monkeypatch.setattr(cli, "console", term_console)
+        monkeypatch.setattr(core, "console", term_console)
         original_start = threading.Thread.start
         tickers = []
 
@@ -2617,10 +2620,11 @@ class TestUpdateCommand:
     def test_failed_update_prints_what_the_terminal_finally_showed(self, pipx_install, monkeypatch):
         pipx_install()
         monkeypatch.setenv("TERM", "xterm-256color")
-        monkeypatch.setattr(
-            "mind_meld.cli.console",
-            Console(file=_TerminalBuffer(), force_terminal=True, color_system=None, width=80),
+        term_console = Console(
+            file=_TerminalBuffer(), force_terminal=True, color_system=None, width=80
         )
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
         raw = (
             "\x1b[?25l\r\x1b[2K   133.4/784.7 kB\r\x1b[2K   784.7/784.7 kB\x1b[?25h\r\n"
             "  Installing build dependencies ... |\b \b/\b \bdone\r\n"
@@ -2646,10 +2650,9 @@ class TestUpdateCommand:
     def test_forced_color_on_a_pipe_runs_without_the_display(self, pipx_install, monkeypatch):
         venv = pipx_install()
         piped = StringIO()  # FORCE_COLOR / TTY_COMPATIBLE make Rich call this a terminal.
-        monkeypatch.setattr(
-            "mind_meld.cli.console",
-            Console(file=piped, force_terminal=True, color_system=None, width=80),
-        )
+        piped_console = Console(file=piped, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", piped_console)
+        monkeypatch.setattr("mind_meld.core.console", piped_console)
 
         def run(argv, *, on_output=None):
             assert on_output is None
@@ -2659,7 +2662,7 @@ class TestUpdateCommand:
         monkeypatch.setattr(upgrade, "_run_pipx", run)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
-        assert "Starting installer" not in piped.getvalue()
+        assert "Updating mm" not in piped.getvalue()
         assert "Updated mm 1.2.0 → 1.3.0." in piped.getvalue()
 
     def test_display_that_cannot_start_falls_back_to_a_plain_update(
@@ -2679,10 +2682,9 @@ class TestUpdateCommand:
 
         terminal = FlakyTerminal()
         monkeypatch.setenv("TERM", "xterm-256color")
-        monkeypatch.setattr(
-            "mind_meld.cli.console",
-            Console(file=terminal, force_terminal=True, color_system=None, width=80),
-        )
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
         calls = []
 
         def run(argv, *, on_output=None):
@@ -2710,10 +2712,9 @@ class TestUpdateCommand:
         )
         terminal = _TerminalBuffer()
         monkeypatch.setenv("TERM", "xterm-256color")
-        monkeypatch.setattr(
-            "mind_meld.cli.console",
-            Console(file=terminal, force_terminal=True, color_system=None, width=80),
-        )
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
 
         def run(argv, *, on_output=None):
             on_output("Requirement already satisfied: mind-meld\r\n")
@@ -2723,8 +2724,112 @@ class TestUpdateCommand:
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
         output = terminal.getvalue()
-        assert output.rindex("Done") > output.rindex("Verifying")
+        assert "Updating mm 1.2.0" in output
+        assert "Done" not in output
+        assert output.rindex("\x1b[2K") > output.rindex("Verifying")
         assert "already the latest release pipx can see" in _flat(output)
+
+    def test_one_progress_class_serves_push_pull_and_update(
+        self, tmp_path, pipx_install, monkeypatch
+    ):
+        assert "Progress" not in vars(cli)
+        _setup_real_config(tmp_path, monkeypatch)
+        venv = pipx_install()
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            on_output("Installing collected packages: mind-meld\n")
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
+        started: list[tuple[type, str]] = []
+        original_start = core._SyncProgress.start
+
+        def record_start(self, phase: str) -> None:
+            started.append((type(self), phase))
+            return original_start(self, phase)
+
+        monkeypatch.setattr(core._SyncProgress, "start", record_start)
+        for command in (["push"], ["pull"], ["update"]):
+            started.clear()
+            terminal = _TerminalBuffer()
+            term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+            monkeypatch.setattr("mind_meld.cli.console", term_console)
+            monkeypatch.setattr("mind_meld.core.console", term_console)
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.2.0")
+            upgrade.CACHE_PATH.unlink(missing_ok=True)
+            result = runner.invoke(app, command)
+            assert result.exit_code == 0, result.output
+            assert started and all(cls is core._SyncProgress for cls, _phase in started)
+
+    @pytest.mark.parametrize("already_current", [False, True])
+    def test_update_on_a_terminal_clears_its_spinner_then_prints_one_line(
+        self, pipx_install, monkeypatch, already_current
+    ):
+        venv = pipx_install(latest="1.2.0" if already_current else "1.3.0")
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            on_output("Installing collected packages: mind-meld\n")
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        output = terminal.getvalue()
+        if already_current:
+            assert output == "mm 1.2.0 is up to date.\n"
+            assert "Updating mm" not in output
+        else:
+            assert "Updating mm 1.2.0 → 1.3.0" in output
+            clear_pos = output.rindex("\x1b[2K")
+            assert clear_pos > output.rindex("Verifying")
+            tail = output[clear_pos:].replace("\x1b[2K", "").replace("\x1b[?25h", "").lstrip("\r")
+            assert tail == "Updated mm 1.2.0 → 1.3.0.\n"
+
+    def test_update_piped_prints_only_the_outcome_line(self, pipx_install, monkeypatch):
+        venv = pipx_install()
+        _fake_run(monkeypatch, venv, lands="1.3.0")
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        assert result.stdout == "Updated mm 1.2.0 → 1.3.0.\n"
+        assert result.stderr == ""
+        assert "Updating" not in result.output
+
+    def test_failed_update_on_a_terminal_ends_with_the_fix_command(self, pipx_install, monkeypatch):
+        pipx_install()
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
+        raw = "cloning\nfatal: no route\n"
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            on_output(raw)
+            return subprocess.CompletedProcess(argv, 1, stdout=raw)
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 1
+        output = terminal.getvalue()
+        assert "Updating mm 1.2.0 → 1.3.0" in output
+        clear_pos = output.rindex("\x1b[2K")
+        tail = output[clear_pos:].replace("\x1b[2K", "").replace("\x1b[?25h", "").lstrip("\r")
+        assert tail == ""
+        err = _flat(result.stderr)
+        assert "Update did not complete: fatal: no route." in err
+        reinstall = upgrade.reinstall_cmd(upgrade.detect_install())
+        assert err.endswith(f"If mm is now missing, reinstall with: {reinstall}")
 
     def test_busy_installer_refuses_without_a_forced_reinstall_remedy(
         self, pipx_install, monkeypatch
@@ -2842,12 +2947,14 @@ class TestUpdateCommand:
 
     def test_updates_a_tracking_install(self, pipx_install, monkeypatch):
         venv = pipx_install()
-        monkeypatch.setattr("mind_meld.cli.console", Console(force_terminal=False))
+        piped_console = Console(force_terminal=False)
+        monkeypatch.setattr("mind_meld.cli.console", piped_console)
+        monkeypatch.setattr("mind_meld.core.console", piped_console)
         calls = _fake_run(monkeypatch, venv, lands="1.3.0")
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
         assert calls == [[PIPX, "upgrade", "mind-meld"]]
-        assert "Updating mm 1.2.0 → 1.3.0 (pipx upgrade mind-meld)" in _flat(result.stdout)
+        assert "Updating mm" not in _flat(result.stdout)
         assert "Updated mm 1.2.0 → 1.3.0." in result.stdout
         assert "Installing" not in result.stdout
         assert "\x1b" not in result.stdout
@@ -2906,7 +3013,7 @@ class TestUpdateCommand:
         assert result.exit_code == 0, result.output
         assert calls == [[PIPX, "install", "--force", upgrade.INSTALL_SPEC]]
         text = _flat(result.stdout)
-        assert "Updated mm 1.2.0 → 1.3.0." in text
+        assert "Updated mm 1.2.0 → 1.3.0; this install now tracks the release branch." in text
         assert "now tracks the release branch" in text
 
     @pytest.mark.parametrize(
@@ -3414,3 +3521,234 @@ class TestTrack124BInstallRecordsAndPinnedRefusal:
         upgrade.update_or_nudge({}, attended=True)
         result = runner.invoke(app, [command])
         assert result.exit_code == 0, result.output
+
+
+class TestSyncUpdateDisplay:
+    @pytest.mark.parametrize("command", ["push", "pull"])
+    @pytest.mark.parametrize("mode", ["piped", "--verbose"])
+    @pytest.mark.parametrize("outcome", ["updated", "failed"])
+    def test_piped_and_verbose_sync_update_output_is_unchanged(
+        self, tmp_path, monkeypatch, pipx_install, command, mode, outcome
+    ):
+        _setup_real_config(tmp_path, monkeypatch)
+        venv = pipx_install()
+
+        def run(argv, *, on_output=None):
+            assert on_output is None
+            if outcome == "updated":
+                _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+                return subprocess.CompletedProcess(argv, 0, stdout="upgraded\n")
+            return subprocess.CompletedProcess(argv, 1, stdout="fatal: no route\n")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        args = [command] if mode == "piped" else [command, "--verbose"]
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, result.output
+        # Normalize only the per-test pytest tmp_path embedded in PIPX_HOME=... by reinstall_cmd.
+        actual = result.output.replace(str(venv.parent.parent), "/tmp/pipx")
+        updated_notice = (
+            "mm: notice: updating mm 1.2.0 → 1.3.0 (pipx upgrade mind-meld)…\n"
+            "mm: notice: updated mm 1.2.0 → 1.3.0; the next mm command runs it\n"
+        )
+        failed_notice = (
+            "mm: notice: automatic update to 1.3.0 did not complete (fatal: no route) "
+            "— run `mm update`, or "
+            "`PIPX_HOME=/tmp/pipx pipx install --force git+https://github.com/kbitz/mind-meld.git@latest`\n"
+        )
+        push_verbose_prefix = (
+            "Building manifest...\n"
+            "  1 files scanned across 1 source(s)\n"
+            "\n"
+            "Uploading 1 files from 'claude'...\n"
+            "  ↑ projects/-Users-user-myapp/memory/role.md\n"
+            "\n"
+            "Uploading 1 files...\n"
+            "\n"
+            "GC complete. Deleted 0 orphaned blobs.\n"
+            "mm: warning: Usage capture (prerequisites: disabled): skipped — "
+            "Run mm enable-source mm-events to enable usage publication. Content sync continues.\n"
+        )
+        expected = {
+            ("push", "piped", "updated"): "Push: 1 content change published.\n",
+            ("push", "piped", "failed"): failed_notice + "Push: 1 content change published.\n",
+            ("push", "--verbose", "updated"): (
+                push_verbose_prefix + updated_notice + "Push: 1 content change published.\n"
+            ),
+            ("push", "--verbose", "failed"): (
+                push_verbose_prefix
+                + "mm: notice: updating mm 1.2.0 → 1.3.0 (pipx upgrade mind-meld)…\n"
+                + failed_notice
+                + "Push: 1 content change published.\n"
+            ),
+            ("pull", "piped", "updated"): "Pull: no peer devices.\n",
+            ("pull", "piped", "failed"): failed_notice + "Pull: no peer devices.\n",
+            ("pull", "--verbose", "updated"): (
+                "No other devices found to pull from.\n"
+                + updated_notice
+                + "Pull: no peer devices.\n"
+            ),
+            ("pull", "--verbose", "failed"): (
+                "No other devices found to pull from.\n"
+                "mm: notice: updating mm 1.2.0 → 1.3.0 (pipx upgrade mind-meld)…\n"
+                + failed_notice
+                + "Pull: no peer devices.\n"
+            ),
+        }[(command, mode, outcome)]
+        assert actual == expected
+
+    @pytest.mark.parametrize("command", ["push", "pull"])
+    def test_terminal_sync_shows_the_update_step_then_updated_line(
+        self, tmp_path, monkeypatch, pipx_install, command
+    ):
+        _setup_real_config(tmp_path, monkeypatch)
+        venv = pipx_install()
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            on_output(
+                "Downloading mind-meld\n133.4/784.7 kB\rInstalling collected packages: mind-meld\n"
+            )
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="upgraded\n")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        term_out = terminal.getvalue()
+        assert "Updating mm 1.2.0 → 1.3.0" in term_out
+        assert "17.0%" in term_out
+        assert "Verifying" in term_out
+        assert "mm: notice: updating" not in result.stderr
+        assert "mm: notice: updated" not in result.stderr
+        sync_line = (
+            "Push: 1 content change published." if command == "push" else "Pull: no peer devices."
+        )
+        assert result.stdout.splitlines() == [sync_line, "Updated mm 1.2.0 → 1.3.0."]
+
+    @pytest.mark.parametrize("command", ["push", "pull"])
+    def test_terminal_failed_update_ends_with_run_mm_update(
+        self, tmp_path, monkeypatch, pipx_install, command
+    ):
+        _setup_real_config(tmp_path, monkeypatch)
+        pipx_install()
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            on_output("Cloning mind-meld\nfatal: no route\n")
+            return subprocess.CompletedProcess(argv, 1, stdout="fatal: no route\n")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        sync_line = (
+            "Push: 1 content change published." if command == "push" else "Pull: no peer devices."
+        )
+        assert result.stdout.splitlines() == [sync_line]
+        assert result.stderr.strip() == (
+            "mm: notice: automatic update to 1.3.0 did not complete (fatal: no route). "
+            "Run: mm update"
+        )
+        assert result.output.splitlines()[-1].endswith("Run: mm update")
+        assert _cache()["install_attempt_outcome"] == "failed"
+
+    def test_terminal_cancelled_update_reports_after_the_outcome(
+        self, tmp_path, monkeypatch, pipx_install
+    ):
+        _setup_real_config(tmp_path, monkeypatch)
+        pipx_install()
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+        assert result.output.index("Push:") < result.output.index("automatic update cancelled")
+        assert _cache()["install_attempt_outcome"] == "failed"
+
+    @pytest.mark.parametrize("outcome", ["updated", "failed"])
+    def test_terminal_update_lines_precede_a_failed_sync(
+        self, tmp_path, monkeypatch, pipx_install, outcome
+    ):
+        from mind_meld.errors import SnapshotError
+
+        _setup_real_config(tmp_path, monkeypatch)
+        venv = pipx_install()
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
+
+        def fail_push(*args, **kwargs):
+            raise SnapshotError("source folder disappeared")
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            if outcome == "updated":
+                _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+                return subprocess.CompletedProcess(argv, 0, stdout="upgraded\n")
+            return subprocess.CompletedProcess(argv, 1, stdout="fatal: no route\n")
+
+        monkeypatch.setattr(cli, "_push_core", fail_push)
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 1
+        marker = (
+            "Updated mm 1.2.0 → 1.3.0."
+            if outcome == "updated"
+            else "mm: notice: automatic update to 1.3.0 did not complete (fatal: no route)."
+        )
+        assert result.output.index(marker) < result.output.index("Push refused")
+        assert result.output.splitlines()[-1] == "Run: mm push"
+
+    def test_terminal_update_failure_line_is_sanitized(self, tmp_path, monkeypatch, pipx_install):
+        _setup_real_config(tmp_path, monkeypatch)
+        pipx_install()
+        hostile_venv = tmp_path / "pipx\nRun: evil\x1b[2J" / "venvs" / "mind-meld"
+        _write_metadata(hostile_venv, spec=upgrade.INSTALL_SPEC, version="1.2.0")
+        monkeypatch.setattr(upgrade, "_install_prefix", lambda: hostile_venv)
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+        stderr_lines = result.stderr.splitlines()
+        assert len(stderr_lines) == 1
+        assert "\x1b" not in result.stderr
+        assert not any(line.startswith("Run: evil") for line in stderr_lines)
+
+    @pytest.mark.parametrize("command", ["autopush", "autopull"])
+    def test_auto_commands_print_nothing_for_an_update(
+        self, tmp_path, monkeypatch, pipx_install, command
+    ):
+        _setup_real_config(tmp_path, monkeypatch)
+        pipx_install()
+        _fake_spawn(monkeypatch)
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        assert result.output == ""

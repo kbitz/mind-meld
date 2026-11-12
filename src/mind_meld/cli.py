@@ -13,7 +13,6 @@ import os
 import re
 import secrets
 import sys
-import threading
 import time
 import traceback
 from collections import Counter, deque
@@ -26,11 +25,6 @@ from typing import Any, Literal
 
 import typer
 from packaging.version import Version
-from rich.progress import (
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-)
 from rich.table import Table
 from typer.core import TyperGroup
 
@@ -59,7 +53,6 @@ from mind_meld import (
     statedb,
     statusflow,
     syncdiag,
-    updateprogress,
     upgrade,
 )
 from mind_meld import config as _config_module
@@ -995,10 +988,21 @@ def _report_usage_publication(
 
 
 def _sync_update(config: dict, *, verbose: bool) -> None:
+    state = core._SYNC_OUTPUT.get()
+    display: upgrade.SyncUpdateDisplay | None = None
+    if isinstance(state, dict) and not verbose and core._console_is_terminal():
+        display = upgrade.SyncUpdateDisplay(installing=core._installer_progress)
+        state["update"] = display
     try:
-        upgrade.update_or_nudge(config, attended=True, diagnostics=verbose)
+        if display is not None:
+            upgrade.update_or_nudge(config, attended=True, diagnostics=False, display=display)
+        else:
+            upgrade.update_or_nudge(config, attended=True, diagnostics=verbose)
     except (Exception, KeyboardInterrupt):
-        core._notice("automatic update did not complete. Run: mm update")
+        if display is not None:
+            display.problems.append("mm: notice: automatic update did not complete. Run: mm update")
+        else:
+            core._notice("automatic update did not complete. Run: mm update")
 
 
 def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) -> list[str]:
@@ -1207,6 +1211,24 @@ def _emit_sync_outcome(lines: Iterable[str], *, failed: bool) -> None:
         stream.flush()
 
 
+def _emit_update_lines(display: upgrade.SyncUpdateDisplay | None) -> None:
+    if display is None or (not display.outcomes and not display.problems):
+        return
+    for stream in (sys.stdout, sys.stderr):
+        with suppress(Exception, SystemExit):
+            stream.flush()
+    if display.outcomes:
+        with suppress(Exception, SystemExit):
+            for line in display.outcomes:
+                sys.stdout.write(safety.safe_terminal_str(line) + "\n")
+            sys.stdout.flush()
+    if display.problems:
+        with suppress(Exception, SystemExit):
+            for line in display.problems:
+                sys.stderr.write(safety.safe_terminal_str(line) + "\n")
+            sys.stderr.flush()
+
+
 @contextmanager
 def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     if dry_run:
@@ -1240,9 +1262,13 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     if error is not None and verbose:
         with suppress(Exception, SystemExit):
             print(_compact_sync_trace(error), file=sys.stderr)
-    _emit_sync_outcome(
-        _sync_failure(verb, state, error) if failed else _sync_success(verb, result), failed=failed
-    )
+    update = state.get("update")
+    if failed:
+        _emit_update_lines(update)
+        _emit_sync_outcome(_sync_failure(verb, state, error), failed=True)
+    else:
+        _emit_sync_outcome(_sync_success(verb, result), failed=False)
+        _emit_update_lines(update)
     if isinstance(error, typer.Exit) and error.exit_code == 3:
         raise typer.Exit(3)
     if failed:
@@ -4206,101 +4232,14 @@ def _print_update_current(install: upgrade.InstallInfo) -> None:
 def _run_update_with_progress(
     install: upgrade.InstallInfo, pipx: str, *, latest: str | None
 ) -> upgrade.UpdateOutcome:
-    """Render a spinner from actual installer counters and phase changes.
+    """Run the foreground update under `_installer_progress`.
 
-    No bar: most phases report no fraction, so a bar could only sit at 0%
-    until completion jumped it to 100%. The spinner shows activity, the
-    description names the current step, and the detail shows a counter's
-    real percentage when the installer reports one. A timer thread redraws
-    the current state so the spinner keeps animating through silent steps;
-    measured text still moves only on installer output.
-
-    Display exceptions never replace the outcome or an interruption from
-    `update`. Rich reports a closed pipe as SystemExit, so that counts as a
-    display failure too. Blocked terminal writes can still delay rendering
-    and completion; the join timeout bounds only the ticker join.
+    Display failures fall back to the plain capture and never decide the outcome.
     """
-    # FORCE_COLOR can make a pipe look like a terminal; only a real one
-    # draws, so a reader that exits early never reaches the installer.
-    if not (console.is_terminal and console.file.isatty()):
-        return upgrade.run_update(install, pipx, latest=latest)
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("{task.description}", markup=False),
-        TextColumn("{task.fields[detail]}", markup=False),
-        console=console,
-        # Rich's own refresh thread dies with a traceback on a failed draw;
-        # the ticker below turns itself off instead, per the display contract.
-        auto_refresh=False,
-        redirect_stdout=False,
-        redirect_stderr=False,
-    )
-    task = progress.add_task("Starting installer", total=1, detail="")
-
-    def render(state: updateprogress.UpdateProgress, *, complete: bool = False) -> None:
-        measured = state.total is not None and state.completed is not None
-        detail = f"{100 * state.completed / state.total:.1f}% {state.detail}" if measured else ""
-        progress.update(
-            task,
-            # Phase counters are detail only. Completing Rich's task would
-            # hide the spinner during later phases, including verification.
-            completed=1 if complete else 0,
-            description=state.phase,
-            detail=detail.rstrip(),
-            refresh=True,
-        )
-
-    def settle(phase: str, *, complete: bool = False) -> None:
-        with suppress(Exception, SystemExit):
-            render(updateprogress.UpdateProgress(phase), complete=complete)
-
-    stop_ticking = threading.Event()
-
-    def tick() -> None:
-        while not stop_ticking.wait(core._UPDATE_SPINNER_TICK_SECONDS):
-            try:
-                progress.refresh()
-            except (Exception, SystemExit):  # First failed draw: timer off.
-                return
-
-    ticker = threading.Thread(target=tick, name="mm-update-spinner", daemon=True)
-    try:
-        progress.start()
-    except (Exception, SystemExit):
-        with suppress(Exception, SystemExit):
-            progress.stop()
-        with suppress(Exception, SystemExit):
-            console.show_cursor(True)  # A failed start can skip Rich's own restore.
-        return upgrade.run_update(install, pipx, latest=latest)
-    try:
-        with suppress(Exception):  # No ticker thread: state changes still redraw.
-            ticker.start()
-        try:
-            outcome = upgrade.run_update(install, pipx, latest=latest, on_progress=render)
-        except BaseException as error:
-            settle("Cancelled" if isinstance(error, KeyboardInterrupt) else "Failed")
-            raise
-        complete = outcome.status in ("updated", "unchanged") and (
-            latest is None or Version(outcome.new or "") >= Version(latest)
-        )
-        settle(
-            "Done" if complete else "Not started" if outcome.status == "busy" else "Failed",
-            complete=complete,
-        )
-        return outcome
-    finally:
-        stop_ticking.set()
-        with suppress(Exception, SystemExit):
-            # ident also covers an interruption after native startup but
-            # before Thread.start returned; an unstarted thread cannot join.
-            if ticker.ident is not None:
-                ticker.join(timeout=core._UPDATE_SPINNER_JOIN_SECONDS)
-        # Avoid another wait on Rich if the ticker is still writing. This
-        # timeout bounds only join: settlement above and later result output
-        # can still block on a paused terminal. The ticker remains a daemon.
-        if not ticker.is_alive():
-            with suppress(Exception, SystemExit):
-                progress.stop()
+    with core._installer_progress(
+        upgrade.update_step_label(install.version, latest)
+    ) as on_progress:
+        return upgrade.run_update(install, pipx, latest=latest, on_progress=on_progress)
 
 
 @app.command()
@@ -4364,10 +4303,6 @@ def update() -> None:
                 what, fix = upgrade.problem_text(check.check_failure)
                 core._error(f"The install is now pinned, and {what}. {fix}")
             core._error("The install is now pinned; retry mm update when GitHub is reachable.")
-        argv = upgrade.update_argv(pipx, install)
-        shown = " ".join(["pipx", *argv[1:]])
-        target = f" → {safe_str(latest)}" if latest is not None else ""
-        console.print(f"Updating mm {safe_str(install.version)}{target} ({shown})…")
         outcome = _run_update_with_progress(install, pipx, latest=latest)
     except KeyboardInterrupt:
         print(
@@ -4394,13 +4329,26 @@ def update() -> None:
                 f"pipx found no build newer than {outcome.old}, but {latest} is tagged. "
                 f"Retry in a minute, or run: {upgrade.INSTALL_CMD}"
             )
-        console.print(f"mm {safe_str(outcome.old)} is already the latest release pipx can see.")
+        console.print(
+            f"mm {outcome.old} is already the latest release pipx can see.",
+            markup=False,
+            highlight=False,
+        )
         return
     if outcome.new != outcome.old:
-        moved = f"{safe_str(outcome.old)} → {safe_str(outcome.new)}"
-        console.print(f"[bold green]Updated mm {moved}.[/bold green]")
-    if outcome.now_tracking:
-        console.print("  This install now tracks the release branch.")
+        base = upgrade.updated_line(outcome.old, outcome.new)
+        line = (
+            f"{base[:-1]}; this install now tracks the release branch."
+            if outcome.now_tracking
+            else base
+        )
+        console.print(line, markup=False, highlight=False)
+    elif outcome.now_tracking:
+        console.print(
+            f"mm {outcome.old} now tracks the release branch.",
+            markup=False,
+            highlight=False,
+        )
 
 
 # ── refresh-identity ──────────────────────────────────────────────────

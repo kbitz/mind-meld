@@ -2,11 +2,11 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/upgrade.py` — `run_transition_hook` / `update_or_nudge` / `emit_nudge_if_due` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_run_pipx` / `_signal_pipx_group` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `_pick_latest_tag` / `find_git` / `_run_git` / `_no_prompt_environment` / `_fetch_tags` / `_classify_git_failure` / `_record_install_problem` / `problem_text` / `INSTALL_SPEC` / `INSTALL_CMD` / upgrade-state cache layout
+- `src/mind_meld/upgrade.py` — `run_transition_hook` / `update_or_nudge` / `SyncUpdateDisplay` / `update_step_label` / `updated_line` / `emit_nudge_if_due` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_run_pipx` / `_signal_pipx_group` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `_pick_latest_tag` / `find_git` / `_run_git` / `_no_prompt_environment` / `_fetch_tags` / `_classify_git_failure` / `_record_install_problem` / `problem_text` / `INSTALL_SPEC` / `INSTALL_CMD` / upgrade-state cache layout
 - `src/mind_meld/updateprogress.py` — `PipxProgressParser` / `UpdateProgress`
-- `src/mind_meld/core.py` — `_get_config` / (read-only transition gate)
+- `src/mind_meld/core.py` — `_get_config` / `_console_is_terminal` / `_SyncProgress` / `_installer_progress` / (read-only transition gate and shared terminal spinner)
 - `src/mind_meld/initflow.py` — `init` / (transition seam)
-- `src/mind_meld/cli.py` — `_auto_command_setup` / `push` / `pull` / `autopull` / `autopush` / `recapture` / `update` / `_run_update_with_progress` / (transition and update/nudge seams)
+- `src/mind_meld/cli.py` — `_auto_command_setup` / `push` / `pull` / `autopull` / `autopush` / `recapture` / `update` / `_run_update_with_progress` / `_sync_update` / `_emit_update_lines` / (transition and update/nudge seams)
 - `src/mind_meld/statusflow.py` — `status` / `diag` / (cached upgrade surfacing)
 - `src/mind_meld/config.py` — the `[upgrade]` defaults in `_apply_defaults` (`auto_check`, `auto_install`)
 - `src/mind_meld/pullhistory.py` — `append_self_upgrade` and `verb: "self-upgrade"` row class
@@ -18,16 +18,30 @@ Read BEFORE editing any of these:
 Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updateprogress.py`, `tests/test_pullhistory.py` (self-upgrade row class), `tests/test_lockfile.py`, `tests/test_diag.py` (cached reader remedies).
 
 
-## Sync tail output and eligibility (Track 78A)
+## Sync tail output and eligibility (Tracks 78A / 130A)
 
 Attended non-preview push/pull defer their terminal outcome lines until capture
 receipt, unlock, eligible update, history command_scope notice and attended run
-record/notice have finished. Successful `updating`/`updated` chatter is verbose-only
-for these callers (`diagnostics=` defaults preserve direct callers). Standalone
-`mm update` is unchanged. A foreground update can delay the final outcome; no
-latency improvement is claimed. Actionable failure/nudge/cancellation notices
-still precede the final outcome lines. Cancellation never asserts that sync succeeded:
-its outcome belongs to the outer sync command.
+record/notice have finished. On a real terminal without `--verbose`
+(`core._console_is_terminal()`), `_sync_update` passes
+`SyncUpdateDisplay(installing=core._installer_progress)` to `update_or_nudge`:
+a foreground install shows `Updating mm <old> → <new>` and installer phases in
+the shared transient `_SyncProgress`, then `_emit_update_lines` prints
+`Updated mm <old> → <new>.` on stdout or
+`mm: notice: automatic update to <new> did not complete (<reason>). Run: mm update`
+on stderr (`reason` sanitized with `safety.safe_terminal_str`, or `cancelled` on
+Ctrl-C) after a successful sync's outcome lines, and before a failed sync's
+failure lines so the sync's `Run:` line stays last (`docs/SPEC.md` O8.1). With
+output piped or `--verbose`, `display` is `None`: `--verbose` prints
+`mm: notice: updating …` then `mm: notice: updated …`, piped successful updates
+stay silent, and piped/`--verbose` failure, nudge and cancellation notices still
+precede the final outcome lines (`diagnostics=` defaults preserve direct
+callers). Standalone `mm update` shares `core._installer_progress`, clearing its
+transient spinner before printing `Updated mm <old> → <new>.` or the
+already-current line (with output piped, no spinner and the same outcome line).
+A foreground update can delay the final outcome; no latency improvement is
+claimed. Cancellation never asserts that sync succeeded: its outcome belongs to
+the outer sync command.
 
 Eligibility is independent of presentation: a failed attended push that acquired
 the sync lock still runs the tail, except interruptions; pull runs it only after
@@ -128,11 +142,15 @@ record failure; neither reports that intermediate version as completion.
 Comparisons use installed metadata rather than the process's imported version;
 an install another updater has already advanced is current, not a failure.
 
-**Explicit-update progress represents installer output and is terminal-only.**
-`mm update` renders one Rich spinner from `updateprogress.PipxProgressParser`,
-and only when stdout is a real terminal: `FORCE_COLOR` can make Rich treat a
-pipe as one, so the display also requires `isatty()`. Redirected output and
-automatic updates keep their existing pipe capture and messages. For the
+**Explicit-update and terminal sync-update progress represent installer output and are terminal-only.**
+`mm update` and an attended terminal `mm push` / `mm pull` update render one
+transient Rich spinner (`core._SyncProgress` via `core._installer_progress`,
+`delay=0.0` so the initial `Updating mm <old> → <new>` step draws immediately)
+from `updateprogress.PipxProgressParser`, and only when stdout is a real
+terminal (`core._console_is_terminal()`): `FORCE_COLOR` can make Rich treat a
+pipe as one, so the display also requires `isatty()`. Redirected output,
+`--verbose` syncs, and detached automatic updates (`autopush` / `autopull`)
+keep their existing pipe capture and messages. For the
 in-place `pipx upgrade` (and no other command shape), `_run_pipx(on_output=...)`
 captures a private PTY so pipx reports native counters without writing raw
 output to the user's terminal. Percentages belong to the current download,
@@ -148,7 +166,8 @@ never changes the phase or counters, which move only on installer output.
 Rich's `auto_refresh` stays off because its refresh thread dies with a
 traceback on a failed draw; mm's ticker turns itself off instead (see the
 display contract below). Measured counters do not finish the spinner; only
-verified update completion does. The parser handles split ANSI frames, bounds
+verified update completion does, when the transient spinner clears before the
+caller prints its outcome or failure line. The parser handles split ANSI frames, bounds
 its partial-line buffer and emits only fixed labels and validated numeric
 counters. pip's interactive spinner ends a step's line only when the step
 finishes, so phase labels are also read from the unterminated line; counters
@@ -171,16 +190,16 @@ traceback, leaving the last drawn frame. Only `KeyboardInterrupt` (Ctrl-C
 while drawing) reaches pipx cleanup. A display that cannot start falls back
 to a plain update. If only the ticker cannot start, installer output still
 redraws the display; cleanup never joins an unstarted thread. Interruption
-during ticker startup still stops the display. Exceptions from its final
-label or shutdown cannot replace an interruption or the outcome.
+during ticker startup still stops the display. Exceptions from transient
+shutdown cannot replace an interruption or the outcome.
 
-After settlement, shutdown signals the ticker to stop and joins a started
-ticker for at most one second. If it is still alive, it remains a daemon and
-shutdown skips Rich's stop to avoid another wait on its lock. This bounds
+On shutdown, `_SyncProgress.stop()` signals the ticker to stop and joins a
+started ticker for at most one second. If it is still alive, it remains a daemon
+and shutdown skips Rich's stop to avoid another wait on its lock. This bounds
 only the join, not command completion: a blocked terminal write can stall
-the output callback, settlement (including cancellation), or later result
-printing before or after that join. The existing Ctrl-S/Ctrl-Z limitation
-below remains. Only verified metadata completes the display.
+the output callback or later result printing before or after that join. The
+existing Ctrl-S/Ctrl-Z limitation below remains. Only verified metadata
+completes the update.
 
 **Only the in-place upgrade is tied to mm's terminal (load-bearing).** On a
 TTY, pipx 1.17 streams pip's output and re-raises a failed write after pip
@@ -275,8 +294,13 @@ version is still behind; a foreign or already-updated install never inherits
 another installation's failed-attempt message.
 
 **Attended vs unattended.** `push` / `pull` run pipx in the foreground after
-`release_lock()`, re-take the mm lock for the swap, and show
-`mm: notice: updating …` then `updated …` only with --verbose during sync. `autopull` / `autopush` spawn pipx
+`release_lock()`, re-take the mm lock for the swap, and on a terminal without
+`--verbose` show the update in the shared transient spinner and print
+`Updated mm <old> → <new>.` after the sync outcome (or
+`mm: notice: automatic update to <new> did not complete (<reason>). Run: mm update`
+on failure); with `--verbose` they print `mm: notice: updating …` then
+`updated …`, and with output piped a successful update stays silent while a
+failure prints its `mm: notice:` before the outcome. `autopull` / `autopush` spawn pipx
 in its own session with output to `~/.config/mind-meld/auto-update.log`, print
 nothing, and do not wait. The detached pipx cannot hold the mm lock (its
 parent exits), so an mm process starting during the few seconds pip swaps

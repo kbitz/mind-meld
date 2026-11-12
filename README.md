@@ -493,7 +493,7 @@ mm update
 
 That's it, and from v1.3.0 you rarely need it: `mm pull` and `mm push` (and the `autopull` / `autopush` hooks) install a newer release on their own once they notice one. See [Automatic updates](#automatic-updates). `mm update` needs no config and no passphrase, so it also works on a Mac whose sync is refusing.
 
-In a terminal, `mm update` shows a spinner that keeps animating during silent steps. Phase names and measured progress change only when installer output reports them. It shows download bytes or package installation counts when pip reports them. pip reports those only for larger uncached downloads and multi-package installs, so an update that changes only mm usually shows phase labels alone. A pipx venv created with the uv backend shows fewer labels. Percentages describe that phase; build phases show their label without an estimated percentage. Raw output stays hidden during the update, and mm verifies the installed release before reporting success. A pinned install's reinstall shows only a `Reinstalling` label: pipx removes the install if a forced reinstall cannot finish, so that command is never tied to the terminal. Display exceptions do not stop the installer, and closing the terminal mid-update lets pipx finish. A paused terminal can still stall the update until resumed. Redirected output, including output that `FORCE_COLOR` marks as a terminal, keeps the plain-text start and result messages.
+In a terminal, `mm update` shows a transient spinner (`Updating mm <old> → <new>`, then phase labels and counters) that keeps animating during silent steps and clears before the one-line outcome (`Updated mm <old> → <new>.`, or `mm <version> is already the latest release.`). Phase names and measured progress change only when installer output reports them. It shows download bytes or package installation counts when pip reports them. pip reports those only for larger uncached downloads and multi-package installs, so an update that changes only mm usually shows phase labels alone. A pipx venv created with the uv backend shows fewer labels. Percentages describe that phase; build phases show their label without an estimated percentage. Raw output stays hidden during the update, and mm verifies the installed release before reporting success. A pinned install's reinstall shows only a `Reinstalling` label: pipx removes the install if a forced reinstall cannot finish, so that command is never tied to the terminal. Display exceptions do not stop the installer, and closing the terminal mid-update lets pipx finish. A paused terminal can still stall the update until resumed. Redirected or piped output, including output that `FORCE_COLOR` marks as a terminal, prints no spinner and the same outcome line.
 
 `mm update` and the automatic path both ship in v1.3.0, so an mm older than that (1.2.0 and below) has neither: update it once by hand with `pipx upgrade mind-meld`, or the `@latest` reinstall below if that leaves you on the same version. The first release an installed mm can fetch for you is the one after v1.3.0.
 
@@ -511,7 +511,7 @@ pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
 
 Once per 24h, `mm pull`, `mm push`, `mm autopull` and `mm autopush` check GitHub for a newer release tag after the sync has finished. If there is one, mm updates itself:
 
-- **`mm pull` / `mm push`** run `pipx upgrade mind-meld` in the foreground before their final outcome line. With `--verbose` they print `mm: notice: updating mm <old> → <new> (pipx upgrade mind-meld)…`, then `mm: notice: updated mm <old> → <new>; the next mm command runs it`; without it a successful update prints nothing. Expect a short one-off wait per release while pipx clones and builds.
+- **`mm pull` / `mm push`** run `pipx upgrade mind-meld` in the foreground before their final outcome line. On a terminal without `--verbose`, they show the update step in the spinner and print `Updated mm <old> → <new>.` after the sync's outcome line (or `mm: notice: automatic update to <new> did not complete (<reason>). Run: mm update` last on `stderr` when the update fails, without changing the sync's exit code); with output piped, a successful update stays silent and a failure prints the `mm: notice:`; with `--verbose`, they print `mm: notice: updating mm <old> → <new> (pipx upgrade mind-meld)…`, then `mm: notice: updated mm <old> → <new>; the next mm command runs it` as before. Expect a short one-off wait per release while pipx clones and builds.
 - **`mm autopull` / `mm autopush`** start the same command in the background and return immediately, printing nothing. The output goes to `~/.config/mind-meld/auto-update.log`.
 
 The new version takes effect on the next `mm` command. A failed update never fails the sync or changes its exit code: it prints a `mm: notice:`, `mm status` shows `Automatic update did not complete`, and mm retries once a day. Run `mm update` to see the error.
@@ -945,9 +945,11 @@ In an interactive terminal without `--verbose` or `--dry-run`, `mm push` and
 progress counters (`Uploading files 50.0% 1/2 files`, `Reading peer manifests
 50.0% 1/2 manifests`, `Applying files 50.0% 1/2 files` per source batch),
 pausing cleanly for mid-run warnings or conflict prompts on the push/pull
-paths and clearing before the final outcome lines. Redirected output (even
-with `FORCE_COLOR`), `--verbose`, `--dry-run`, `autopush`, and `autopull`
-omit the spinner.
+paths and clearing before the final outcome lines; `mm update` and an
+automatic update during an attended terminal `mm push` or `mm pull` share the
+same transient spinner (`Updating mm <old> → <new>`, then installer phases and
+counters). Redirected output (even with `FORCE_COLOR`), `--verbose`,
+`--dry-run`, `autopush`, and `autopull` omit the spinner.
 
 Default and verbose commands end with the same final outcome lines; a narrow
 terminal may wrap a line visually. Success is on stdout, failure on stderr.
