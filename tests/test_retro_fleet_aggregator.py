@@ -3093,6 +3093,52 @@ class TestCommitTypeMix:
         out = _agg_git_only([_commit("a" * 7, 1, subject="feat!: breaking")])
         assert out.commit_types.counts.get("feat") == 1
 
+    @pytest.mark.parametrize(
+        "subject,expected",
+        [
+            ("v1.2.3 fix(core): y", "fix"),
+            ("v0.0.7.0 feat: add command palette", "feat"),
+            ("fix(core): y", "fix"),
+            ("v1.2.3", "other"),
+            ("  V1.2.3   FEAT(UI): X  ", "feat"),
+            ("v1.0.0 feat!: breaking release", "feat"),
+            ("v1.0.0 feat(api)!: scoped breaking release", "feat"),
+            ("v1.2.3-rc1 feat: prerelease tag stays other", "other"),
+            ("v1..2 feat: malformed version stays other", "other"),
+            ("v1.2.3 v1.2.4 feat: double prefix stays other", "other"),
+        ],
+    )
+    def test_version_prefixed_subjects_classify_and_malformed_stay_other(self, subject, expected):
+        assert aggregator._classify_commit_subject(subject) == expected
+
+    def test_version_prefix_preserves_git_totals_prs_loc_dates_and_dedup(self):
+        commits = [
+            _commit("a" * 7, 1, subject="v1.2.3 fix(core): y (#42)", add=10, dlt=2),
+            _commit("a" * 7, 1, subject="v1.2.3 fix(core): y (#42)", add=10, dlt=2),
+            _commit(
+                "b" * 7,
+                2,
+                subject="v0.0.7.0 feat: add command palette (#43)",
+                add=20,
+                dlt=5,
+            ),
+            _commit("c" * 7, 2, subject="fix(core): y", add=3, dlt=1),
+            _commit("d" * 7, 3, subject="v1.2.3", add=1, dlt=1),
+        ]
+        out = _agg_git_only(commits)
+        assert out.commits == 4
+        assert out.additions == 34
+        assert out.deletions == 9
+        assert out.pull_requests == 2
+        assert out.commit_types.total == 4
+        assert out.commit_types.counts == {"fix": 2, "feat": 1, "other": 1}
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.git = out
+        markdown = aggregator.format_retro(data)
+        raw = markdown.split("<!-- MM_THEMES_PROMPT -->", 1)[1]
+        payload = json.loads(raw.split("```json", 1)[1].split("```", 1)[0])
+        assert payload["commit_types"] == {"feat": 1, "fix": 2, "other": 1}
+
     def test_mix_feeds_synthesis_rather_than_the_body(self):
         out = _agg_git_only(
             [
@@ -3973,6 +4019,11 @@ class TestSafeProseHardening:
         # classifier only inspects the prefix anyway.
         long = "feat: " + "x" * 1_000_000
         assert aggregator._classify_commit_subject(long) == "feat"
+        long_versioned = "v1.2.3 fix(core): " + "y" * 1_000_000
+        assert aggregator._classify_commit_subject(long_versioned) == "fix"
+        overlong_version = "v" + ("1." * 200) + "0 feat: after cap"
+        assert len(overlong_version) > aggregator._CLASSIFY_LEN_CAP
+        assert aggregator._classify_commit_subject(overlong_version) == "other"
 
 
 class TestRenderHardening:
@@ -5525,19 +5576,47 @@ class TestHostTokensByDayAcceptance:
         ],
     )
     def test_every_dropped_detail_phrase_carries_the_attended_floor(self, reason):
-        """The bare "mm push" check above passes for a phrase with no floor at all."""
+        """Default remedy asks to push; proven-old peer cites the attended floor."""
         phrase = aggregator._host_detail_phrase("absent", reason)
         assert aggregator._attended_usage_remedy() in phrase
+        assert "run `mm push` on the machine" in phrase
+        assert "upgrade mind-meld" not in phrase
+        assert "Mac" not in phrase
         assert "mm diag" in phrase and "capture-usage" not in phrase
+
+        old_fleet = aggregator.FleetState(
+            devices_known=1,
+            devices_known_list=[{"device_id": "dev-a", "last_seen_version": "0.14.16"}],
+        )
+        old_phrase = aggregator._host_detail_phrase(
+            "absent", reason, device="dev-a", fleet=old_fleet
+        )
+        assert aggregator.ATTENDED_USAGE_MIN_VERSION in old_phrase
+        assert "verify with `mm --version`, then run `mm push`" in old_phrase
+        assert "Mac" not in old_phrase
 
     @pytest.mark.parametrize("device", [None, "dev-a"])
     def test_legacy_counters_phrase_names_the_floor_with_or_without_a_device(self, device):
         phrase = aggregator._host_detail_phrase("absent", "legacy_counters", device=device)
-        assert "older format" in phrase
+        assert "a machine reported token counters in an older format" in phrase
+        assert "Mac" not in phrase
         assert aggregator._attended_usage_remedy() in phrase
+        assert "upgrade mind-meld" not in phrase
         assert "then re-run `mm retro-fleet`" in phrase
         assert ("`dev-a`" in phrase) == (device is not None)
         assert "capture-usage" not in phrase
+
+        if device is not None:
+            old_fleet = aggregator.FleetState(
+                devices_known=1,
+                devices_known_list=[{"device_id": device, "last_seen_version": "0.14.16"}],
+            )
+            old_phrase = aggregator._host_detail_phrase(
+                "absent", "legacy_counters", device=device, fleet=old_fleet
+            )
+            assert aggregator.ATTENDED_USAGE_MIN_VERSION in old_phrase
+            assert "verify with `mm --version`, then run `mm push`" in old_phrase
+            assert "Mac" not in old_phrase
 
     def test_wire_row_fixture_measurement(self):
         """Deterministic size of a 90-day 4-family 2-model-per-day row."""
@@ -6105,36 +6184,70 @@ class TestAgentCoverageNotes:
             assert f"`{entry['code']}`" in text, entry["code"]
 
     @pytest.mark.parametrize(
-        "case,marker",
+        "case,marker,target_device",
         [
-            ("registry-unavailable", "No agent-log snapshots were accepted from any machine"),
-            ("no-reader", "No agent-log reader contributed on any machine"),
-            ("all-stale", "Agent-log snapshots all predate this window"),
-            ("some-missing", "have no agent-log snapshot (unknown, not zero)"),
+            ("registry-unavailable", "No agent-log snapshots were accepted from any machine", None),
+            ("empty-missing", "No agent-log snapshots yet from 1 machine(s)", "dev-z"),
+            ("no-reader", "No agent-log reader contributed on any machine", "dev-a"),
+            ("all-stale", "Agent-log snapshots all predate this window", "dev-a"),
+            ("some-missing", "have no agent-log snapshot (unknown, not zero)", "dev-z"),
         ],
     )
-    def test_every_refresh_remedy_names_the_attended_floor(self, case, marker):
-        """Each quiet-block cause repairs with an upgrade to the attended floor.
-
-        Below v0.14.17 a converged ``mm push`` succeeds without refreshing usage,
-        so a remedy that says only "run mm push" sends a stale Mac in a circle.
-        """
+    def test_every_refresh_remedy_names_the_attended_floor(self, case, marker, target_device):
+        """Quiet-block remedies default to `mm push` (or Syncthing delivery on
+        missing rows) and add the attended-floor upgrade only when registry
+        evidence shows the peer runs an older mm."""
         active = {"codex": {"2026-04-22": _usage(1)}}
-        if case == "registry-unavailable":
-            data = self._data([])
-        elif case == "no-reader":
-            data = self._data([_snap("dev-a", self.UNTIL, consulted=())])
-        elif case == "all-stale":
-            data = self._data([_snap("dev-a", datetime(2026, 3, 1, tzinfo=timezone.utc))])
-        else:
-            data = self._data(
+
+        def build_case():
+            if case == "registry-unavailable":
+                return self._data([])
+            if case == "empty-missing":
+                return self._data([], missing=frozenset({"dev-z"}))
+            if case == "no-reader":
+                return self._data([_snap("dev-a", self.UNTIL, consulted=())])
+            if case == "all-stale":
+                return self._data([_snap("dev-a", datetime(2026, 3, 1, tzinfo=timezone.utc))])
+            return self._data(
                 [_snap("dev-a", self.UNTIL, families=active)], missing=frozenset({"dev-z"})
             )
+
+        data = build_case()
+        if target_device:
+            data.fleet.devices_known_list = [
+                {"device_id": target_device, "device_name": f"host-{target_device}"}
+            ]
         notes = [n for n in aggregator._agent_coverage_notes(data) if marker in n]
         assert len(notes) == 1, notes
-        assert aggregator._attended_usage_remedy() in notes[0]
-        assert aggregator.ATTENDED_USAGE_MIN_VERSION in notes[0]
+        assert "run `mm push` on the machine" in notes[0]
+        assert "upgrade mind-meld" not in notes[0]
+        assert "Mac" not in notes[0]
         assert "capture-usage" not in notes[0]
+        if case in {"empty-missing", "some-missing"}:
+            assert f"host-{target_device}" in notes[0]
+            assert "run `mm push` on the machine, or wait for Syncthing to deliver" in notes[0]
+        if case == "registry-unavailable":
+            assert "run `mm push` on the machine, or wait for Syncthing to deliver" in notes[0]
+
+        if target_device is not None:
+            old_data = build_case()
+            old_data.fleet.devices_known_list = [
+                {
+                    "device_id": target_device,
+                    "device_name": f"host-{target_device}",
+                    "last_seen_version": "0.14.16",
+                }
+            ]
+            old_notes = [n for n in aggregator._agent_coverage_notes(old_data) if marker in n]
+            assert len(old_notes) == 1, old_notes
+            assert aggregator.ATTENDED_USAGE_MIN_VERSION in old_notes[0]
+            assert "verify with `mm --version`, then run `mm push`" in old_notes[0]
+            assert "Mac" not in old_notes[0]
+            if case in {"empty-missing", "some-missing"}:
+                assert f"host-{target_device}" in old_notes[0]
+                assert (
+                    "run `mm push` on the machine, or wait for Syncthing to deliver" in old_notes[0]
+                )
 
 
 class TestUnifiedAgents:
@@ -6392,10 +6505,14 @@ class TestUnifiedAgents:
         snap.tokens_by_day = {
             "2026-04-22": {**_usage(1_000_000), "by_model": {"gpt-6-astra": _usage(500_000)}}
         }
-        row = self._row(self._usage_for(self._data([snap])), "codex")
+        data = self._data([snap], known_ids=("dev-a",), names={"dev-a": "mac-a"})
+        row = self._row(self._usage_for(data), "codex")
         assert row.tokens == 1_000_000
         assert aggregator._agent_row_cost(row) == (5.0, True)
-        assert any("not attributed to a named model" in cause for cause in row.floor_causes)
+        assert (
+            "mac-a: some tokens were not attributed to a named model (the per-day model cap)"
+            in row.floor_causes
+        )
 
     def test_unusable_coverage_metadata_floors_without_naming_a_reader(self):
         """A reason with an empty reader list is broken metadata, not a failed reader."""
@@ -6692,7 +6809,138 @@ class TestUnifiedAgents:
             known_ids=("dev-a",),
         )
         causes = self._row(self._usage_for(data), "codex").floor_causes
-        assert any("failed" in c for c in causes)
+        assert "dev-a: a host reader failed (codex)" in causes
+
+    def test_two_machines_with_different_and_matching_failed_readers_name_machines_and_merge(self):
+        """AC1: Two machines whose snapshots have different failed readers yield
+        `cost_floor` causes that name each machine, a third machine with a
+        matching reader set merges same-kind causes into one sentence per reader
+        set, and a failed reader still floors every family."""
+        day = "2026-04-22"
+        all_families = {
+            "codex": {day: _usage(1_000_000)},
+            "grok": {day: _usage(1_000_000)},
+            "muse": {day: _usage(1_000_000)},
+            "agy": {day: _usage(1_000_000)},
+            "other": {day: _usage(1_000_000)},
+        }
+        all_models = {
+            "gpt-6-astra": _usage(1_000_000),
+            "grok-4.7": _usage(1_000_000),
+            "muse-wonder-full-1.0": _usage(1_000_000),
+            "gemini-3.8-flash": _usage(1_000_000),
+            "claude-sonnet-5": _usage(1_000_000),
+        }
+        snap_a = _snap(
+            "dev-a",
+            self.UNTIL,
+            families=all_families,
+            degraded=("codex",),
+            counter_semantics="disjoint-v1",
+        )
+        snap_a.tokens_by_day = {
+            day: {
+                **_usage(4_000_000),
+                "by_model": {
+                    "gpt-6-astra": _usage(1_000_000),
+                    "grok-4.7": _usage(1_000_000),
+                    "muse-wonder-full-1.0": _usage(1_000_000),
+                    "gemini-3.8-flash": _usage(1_000_000),
+                },
+            }
+        }
+        snap_b = _snap(
+            "dev-b",
+            self.UNTIL,
+            families={"codex": {day: _usage(1_000_000)}},
+            degraded=("muse",),
+            counter_semantics="disjoint-v1",
+        )
+        snap_b.tokens_by_day = {
+            day: {**_usage(1_000_000), "by_model": {"gpt-6-astra": _usage(1_000_000)}}
+        }
+        snap_c = _snap(
+            "dev-c",
+            self.UNTIL,
+            families={"codex": {day: _usage(1_000_000)}},
+            degraded=("codex",),
+            partial=("codex",),
+            counter_semantics="disjoint-v1",
+        )
+        snap_c.tokens_by_day = {
+            day: {**_usage(1_000_000), "by_model": {"gpt-6-astra": _usage(1_000_000)}}
+        }
+
+        names = {"dev-a": "mac-a", "dev-b": "arch-b", "dev-c": "mac-c"}
+        data_fwd = self._data(
+            [snap_a, snap_b, snap_c],
+            known_ids=("dev-a", "dev-b", "dev-c"),
+            names=names,
+        )
+        data_fwd.sessions.tokens_by_model = {"claude-sonnet-5": all_models["claude-sonnet-5"]}
+        data_fwd.sessions.active_days = {day}
+        data_fwd.sessions.token_devices = {"dev-a": self.UNTIL}
+
+        data_rev = self._data(
+            [snap_c, snap_b, snap_a],
+            known_ids=("dev-a", "dev-b", "dev-c"),
+            names=names,
+        )
+        data_rev.sessions.tokens_by_model = {"claude-sonnet-5": all_models["claude-sonnet-5"]}
+        data_rev.sessions.active_days = {day}
+        data_rev.sessions.token_devices = {"dev-a": self.UNTIL}
+
+        usage_fwd = self._usage_for(data_fwd)
+        usage_rev = self._usage_for(data_rev)
+        expected_reader_causes = (
+            "arch-b: a host reader failed (muse)",
+            "mac-a, mac-c: a host reader failed (codex)",
+            "mac-c: a host declared totals incomplete (codex)",
+        )
+        # Every host family (plus Claude via merged host causes) is floored and
+        # carries the exact merged per-reader-set causes in deterministic order.
+        for family in ("claude", "codex", "grok", "muse", "agy", "other"):
+            row_fwd = self._row(usage_fwd, family)
+            row_rev = self._row(usage_rev, family)
+            assert row_fwd is not None, family
+            assert row_fwd.floor_causes == row_rev.floor_causes
+            for expected in expected_reader_causes:
+                assert expected in row_fwd.floor_causes, (family, row_fwd.floor_causes)
+            if row_fwd.by_model:
+                assert aggregator._agent_row_cost(row_fwd)[1] is True, family
+
+        out = aggregator.format_retro(data_fwd)
+        codex_floor = next(
+            e for e in _health(out) if e["code"] == "cost_floor" and e["agent"] == "Codex"
+        )
+        assert codex_floor["causes"] == list(expected_reader_causes)
+        assert (
+            codex_floor["detail"]
+            == "Codex's cost is a floor (≥), not an estimate: "
+            + "; ".join(expected_reader_causes)
+            + "."
+        )
+
+    def test_many_machines_sharing_a_failed_reader_bound_peer_names(self):
+        day = "2026-04-22"
+        snaps = []
+        for i in range(7):
+            s = _snap(
+                f"dev-{i}",
+                self.UNTIL,
+                families={"codex": {day: _usage(1_000_000)}},
+                degraded=("codex",),
+                counter_semantics="disjoint-v1",
+            )
+            s.tokens_by_day = {
+                day: {**_usage(1_000_000), "by_model": {"gpt-6-astra": _usage(1_000_000)}}
+            }
+            snaps.append(s)
+        data = self._data(snaps, known_ids=tuple(f"dev-{i}" for i in range(7)))
+        codex = self._row(self._usage_for(data), "codex")
+        assert codex.floor_causes == (
+            "dev-0, dev-1, dev-2, dev-3, dev-4 (+2 more): a host reader failed (codex)",
+        )
 
     def test_unknown_reader_widens_rather_than_misattributing(self):
         """A reader id that names no family cannot be narrowed to one; the wire
@@ -7417,9 +7665,19 @@ class TestAgentEconomics:
         cause = next(c for c in issue["causes"] if "per-model host tokens" in c)
         assert "mac-a" in cause
         assert ("unsupported_schema" if dropped else "absent") in cause
-        assert aggregator.ATTENDED_USAGE_MIN_VERSION in cause
-        assert "mm --version" in cause
-        assert "mm push" in cause
+        assert "run `mm push` on the machine" in cause
+        assert "upgrade mind-meld" not in cause
+        assert "Mac" not in cause
+
+        data.fleet.devices_known_list = [
+            {"device_id": "dev-a", "device_name": "mac-a", "last_seen_version": "0.14.16"}
+        ]
+        old_issue = _health_entry(aggregator.format_retro(data), "cost_unavailable")
+        old_cause = next(c for c in old_issue["causes"] if "per-model host tokens" in c)
+        assert aggregator.ATTENDED_USAGE_MIN_VERSION in old_cause
+        assert "mm --version" in old_cause
+        assert "mm push" in old_cause
+        assert "Mac" not in old_cause
 
     def test_many_machine_detail_failures_preserve_provenance_but_bound_health_output(self):
         events = [
@@ -7540,9 +7798,24 @@ class TestAgentEconomics:
         ]
         assert entry["machines_omitted"] == 2
         assert "healthy-desktop" not in entry["detail"]
-        assert aggregator.ATTENDED_USAGE_MIN_VERSION in entry["remedy"]
-        assert "mm --version" in entry["remedy"]
-        assert "mm push" in entry["remedy"]
+        assert entry["remedy"] == "On the named machines, run `mm push` on the machine."
+        assert "Mac" not in entry["remedy"]
+
+        data.fleet.devices_known_list = [
+            {
+                "device_id": d,
+                "device_name": f"laptop-{i}",
+                "last_seen_version": "0.14.16",
+            }
+            for i, d in enumerate(legacy_devices)
+        ] + [
+            {"device_id": "healthy", "device_name": "healthy-desktop", "last_seen_version": "1.2.0"}
+        ]
+        old_entry = _health_entry(aggregator.format_retro(data), "legacy_counters")
+        assert aggregator.ATTENDED_USAGE_MIN_VERSION in old_entry["remedy"]
+        assert "mm --version" in old_entry["remedy"]
+        assert "mm push" in old_entry["remedy"]
+        assert "Mac" not in old_entry["remedy"]
 
     def test_stale_snapshot_is_absent_rather_than_zero(self):
         hosts = _priced_hosts(day="2026-03-02")

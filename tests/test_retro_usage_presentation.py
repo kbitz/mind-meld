@@ -32,7 +32,11 @@ def presentation_data(state="populated"):
     data.fleet = agg.FleetState(
         devices_known=2,
         devices_in_events=ids,
-        devices_known_list=[{"device_id": d} for d in sorted(ids)],
+        devices_known_list=(
+            [{"device_id": "dev-a", "last_seen_version": "0.14.16"}, {"device_id": "dev-b"}]
+            if state == "absent"
+            else [{"device_id": d} for d in sorted(ids)]
+        ),
     )
     events = []
     if state != "absent":
@@ -192,11 +196,15 @@ def test_degraded_reader_floors_its_agent_and_names_the_cause():
     data = presentation_data("degraded")
     grok = row(data, "grok")
     assert agg._agent_row_cost(grok)[1] is True
-    assert any("failed" in c for c in grok.floor_causes)
+    assert "dev-b: a host reader failed (Grok Build)" in grok.floor_causes
     out = agg.format_retro(data)
     assert "≥$" in out
     grok_floor = next(e for e in health(out) if e["code"] == "cost_floor" and e["agent"] == "Grok")
-    assert "a host reader failed" in grok_floor["detail"]
+    assert "dev-b: a host reader failed (Grok Build)" in grok_floor["detail"]
+    claude_floor = next(
+        e for e in health(out) if e["code"] == "cost_floor" and e["agent"] == "Claude"
+    )
+    assert "token coverage is incomplete on dev-a" in claude_floor["detail"]
 
 
 def test_unpriced_model_is_counted_in_tokens_and_excluded_from_cost():
@@ -249,6 +257,7 @@ def test_model_names_are_bounded_and_defanged():
 
 def stale_data(*, exactly_at_since=False, empty=False):
     data = presentation_data("absent")
+    data.fleet.devices_known_list = [{"device_id": "dev-a"}, {"device_id": "dev-b"}]
     day = data.since.date().isoformat()
     ts = data.since if exactly_at_since else data.since.replace(hour=1)
     models = {} if empty else {"gpt-6-astra": usage(1_000_000)}
@@ -344,17 +353,100 @@ def test_empty_device_label_falls_back_rather_than_rendering_blank():
 
 
 def test_fleet_refresh_remedies_require_the_attended_producer_version():
+    # Without proven-old registry evidence, remedies ask to push (or wait for
+    # Syncthing delivery on missing snapshots) and never nag to upgrade.
     data = stale_data()
     snap = data.host_inventory.by_device["dev-a"]
-    remedies = [
-        agg._host_detail_phrase("absent", None),
-        *agg._agent_coverage_notes(presentation_data("absent")),
-        *agg._host_reader_coverage_notes([snap]),
+    unknown_absent = presentation_data("absent")
+    unknown_absent.fleet.devices_known_list = [{"device_id": "dev-a"}, {"device_id": "dev-b"}]
+    unknown_remedies = [
+        agg._host_detail_phrase("absent", None, device="dev-a", fleet=data.fleet),
+        *agg._agent_coverage_notes(unknown_absent),
+        *agg._host_reader_coverage_notes([snap], fleet=data.fleet),
     ]
-    assert len(remedies) >= 3
-    for remedy in remedies:
-        assert f"upgrade mind-meld to {agg.ATTENDED_USAGE_MIN_VERSION}+" in remedy
+    assert len(unknown_remedies) >= 3
+    for remedy in unknown_remedies:
+        assert "run `mm push` on the machine" in remedy
+        assert "upgrade mind-meld" not in remedy
+        assert "Mac" not in remedy
+    assert any(
+        "dev-a, dev-b" in r
+        and "run `mm push` on the machine, or wait for Syncthing to deliver" in r
+        for r in agg._agent_coverage_notes(unknown_absent)
+    )
+
+    # Proven-old registry evidence (< v0.14.17) triggers the upgrade remedy.
+    old_fleet = agg.FleetState(
+        devices_known=2,
+        devices_in_events={"dev-a", "dev-b"},
+        devices_known_list=[
+            {"device_id": "dev-a", "device_name": "mac-a", "last_seen_version": "0.14.16"},
+            {"device_id": "dev-b", "device_name": "arch-b", "last_seen_version": "v0.14.16"},
+        ],
+    )
+    old_absent = presentation_data("absent")
+    old_absent.fleet = old_fleet
+    old_remedies = [
+        agg._host_detail_phrase("absent", None, device="dev-a", fleet=old_fleet),
+        *agg._agent_coverage_notes(old_absent),
+        *agg._host_reader_coverage_notes([snap], fleet=old_fleet),
+    ]
+    for remedy in old_remedies:
+        assert f"upgrade mind-meld to {agg.ATTENDED_USAGE_MIN_VERSION}+ on that machine" in remedy
         assert "verify with `mm --version`, then run `mm push`" in remedy
+        assert "Mac" not in remedy
+
+    # Version parsing matrix: below/at/above floor, v-prefix, missing/null/malformed/
+    # non-string/overlong, and conflicting duplicate registry records.
+    matrix_fleet = agg.FleetState(
+        devices_known=9,
+        devices_known_list=[
+            {"device_id": "old-bare", "last_seen_version": "0.14.16"},
+            {"device_id": "old-v", "last_seen_version": "v0.14.16"},
+            {"device_id": "at-floor", "last_seen_version": "0.14.17"},
+            {"device_id": "at-floor-v", "last_seen_version": "v0.14.17"},
+            {"device_id": "above", "last_seen_version": "1.2.0"},
+            {"device_id": "missing"},
+            {"device_id": "null", "last_seen_version": None},
+            {"device_id": "malformed", "last_seen_version": "not-a-version"},
+            {"device_id": "non-str", "last_seen_version": 1416},
+            {"device_id": "overlong", "last_seen_version": "0." + ("1" * 300)},
+            {"device_id": "conflict", "last_seen_version": "0.14.16"},
+            {"device_id": "conflict", "last_seen_version": "0.14.17"},
+        ],
+    )
+    versions = agg._device_versions(matrix_fleet)
+    assert agg._is_peer_below_attended_floor("old-bare", versions) is True
+    assert agg._is_peer_below_attended_floor("old-v", versions) is True
+    for current_or_unknown in (
+        "at-floor",
+        "at-floor-v",
+        "above",
+        "missing",
+        "null",
+        "malformed",
+        "non-str",
+        "overlong",
+        "conflict",
+        "unregistered",
+    ):
+        assert agg._is_peer_below_attended_floor(current_or_unknown, versions) is False, (
+            current_or_unknown
+        )
+
+    # Mixed group: only the proven-old subset receives upgrade advice.
+    mixed_notes = agg._agent_coverage_notes(presentation_data("absent"))
+    assert len(mixed_notes) == 1
+    assert "dev-a, dev-b" in mixed_notes[0]
+    assert (
+        "for dev-b, run `mm push` on the machine, or wait for Syncthing to deliver"
+        in mixed_notes[0]
+    )
+    assert (
+        f"for dev-a (last reported push below {agg.ATTENDED_USAGE_MIN_VERSION}), "
+        f"upgrade mind-meld to {agg.ATTENDED_USAGE_MIN_VERSION}+ on that machine" in mixed_notes[0]
+    )
+    assert "Mac" not in mixed_notes[0]
 
 
 def test_populated_absent_degraded_goldens_at_terminal_widths(monkeypatch):
