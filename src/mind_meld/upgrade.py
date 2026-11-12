@@ -1765,15 +1765,15 @@ def update_step_label(old: str | None, new: str | None) -> str:
 
 def updated_line(old: str | None, new: str | None) -> str:
     """Stdout outcome line after a completed mm update."""
-    return f"Updated mm {old} → {new}."
+    return safe_terminal_str(f"Updated mm {old} → {new}.")
 
 
 @dataclass
 class SyncUpdateDisplay:
     """Terminal display seam for an attended push/pull update step.
 
-    The caller prints `outcomes` and `problems` after the sync's outcome lines,
-    and `installing` must not raise for a display failure.
+    The caller prints `outcomes` and `problems` after successful sync outcomes
+    or before sync failure lines. `installing` must not raise for a display failure.
     """
 
     installing: Callable[

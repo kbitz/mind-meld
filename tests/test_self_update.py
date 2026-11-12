@@ -2763,6 +2763,7 @@ class TestUpdateCommand:
             result = runner.invoke(app, command)
             assert result.exit_code == 0, result.output
             assert started and all(cls is core._SyncProgress for cls, _phase in started)
+            assert any(phase == "Updating mm 1.2.0 → 1.3.0" for _cls, phase in started)
 
     @pytest.mark.parametrize("already_current", [False, True])
     def test_update_on_a_terminal_clears_its_spinner_then_prints_one_line(
@@ -2804,8 +2805,18 @@ class TestUpdateCommand:
         assert result.stderr == ""
         assert "Updating" not in result.output
 
-    def test_failed_update_on_a_terminal_ends_with_the_fix_command(self, pipx_install, monkeypatch):
-        pipx_install()
+    @pytest.mark.parametrize("failure", ["pipx", "unchanged", "forced-reinstall"])
+    def test_failed_update_on_a_terminal_ends_with_the_fix_command(
+        self, pipx_install, monkeypatch, failure
+    ):
+        # Value: protects=explicit update failures end with their recovery command;
+        # fails_when=an unchanged or failed reinstall reports success;
+        # why_new=plan T1 failure matrix;
+        # seam=none; no_claim=real pipx installation (installer mocked).
+        spec = (
+            f"{upgrade.REPO_SPEC}@v1.2.0" if failure == "forced-reinstall" else upgrade.INSTALL_SPEC
+        )
+        pipx_install(spec=spec)
         terminal = _TerminalBuffer()
         monkeypatch.setenv("TERM", "xterm-256color")
         term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
@@ -2814,9 +2825,10 @@ class TestUpdateCommand:
         raw = "cloning\nfatal: no route\n"
 
         def run(argv, *, on_output=None):
-            assert on_output is not None
-            on_output(raw)
-            return subprocess.CompletedProcess(argv, 1, stdout=raw)
+            assert (on_output is None) == (failure == "forced-reinstall")
+            if on_output is not None:
+                on_output(raw)
+            return subprocess.CompletedProcess(argv, 0 if failure == "unchanged" else 1, stdout=raw)
 
         monkeypatch.setattr(upgrade, "_run_pipx", run)
         result = runner.invoke(app, ["update"])
@@ -2827,9 +2839,32 @@ class TestUpdateCommand:
         tail = output[clear_pos:].replace("\x1b[2K", "").replace("\x1b[?25h", "").lstrip("\r")
         assert tail == ""
         err = _flat(result.stderr)
-        assert "Update did not complete: fatal: no route." in err
-        reinstall = upgrade.reinstall_cmd(upgrade.detect_install())
-        assert err.endswith(f"If mm is now missing, reinstall with: {reinstall}")
+        if failure == "unchanged":
+            assert "pipx found no build newer than 1.2.0, but 1.3.0 is tagged." in err
+            assert err.endswith(f"run: {upgrade.INSTALL_CMD}")
+        else:
+            assert "Update did not complete: fatal: no route." in err
+            reinstall = upgrade.reinstall_cmd(upgrade.detect_install())
+            assert err.endswith(f"If mm is now missing, reinstall with: {reinstall}")
+
+    @pytest.mark.parametrize("unchanged", [False, True])
+    def test_update_metadata_controls_stay_on_one_line(self, pipx_install, monkeypatch, unchanged):
+        # Value: protects=one physical update outcome despite metadata whitespace;
+        # fails_when=raw version controls reach stdout; why_new=metadata accepts C1 whitespace;
+        # seam=none; no_claim=real pipx installation (installer mocked).
+        version = "1.2.0\x85" if unchanged else "1.2.0"
+        venv = pipx_install(version=version)
+        if unchanged:
+
+            def offline(*args):
+                raise OSError("offline")
+
+            monkeypatch.setattr(upgrade, "_fetch_tags", offline)
+        _fake_run(monkeypatch, venv, lands=None if unchanged else "1.3.0\x85")
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        assert len(result.stdout.splitlines()) == 1
+        assert "\x85" not in result.stdout
 
     def test_busy_installer_refuses_without_a_forced_reinstall_remedy(
         self, pipx_install, monkeypatch
@@ -3630,10 +3665,15 @@ class TestSyncUpdateDisplay:
         )
         assert result.stdout.splitlines() == [sync_line, "Updated mm 1.2.0 → 1.3.0."]
 
+    @pytest.mark.parametrize("failure", ["pipx", "unchanged", "after-claim"])
     @pytest.mark.parametrize("command", ["push", "pull"])
     def test_terminal_failed_update_ends_with_run_mm_update(
-        self, tmp_path, monkeypatch, pipx_install, command
+        self, tmp_path, monkeypatch, pipx_install, command, failure
     ):
+        # Value: protects=optional update failure never changes sync success or output order;
+        # fails_when=unchanged or exceptional installs bypass deferred notices;
+        # why_new=plan T2 requires all three failures; seam=none;
+        # no_claim=real pipx installation (installer mocked).
         _setup_real_config(tmp_path, monkeypatch)
         pipx_install()
         terminal = _TerminalBuffer()
@@ -3644,8 +3684,12 @@ class TestSyncUpdateDisplay:
 
         def run(argv, *, on_output=None):
             assert on_output is not None
+            if failure == "after-claim":
+                raise RuntimeError("installer boundary failed")
             on_output("Cloning mind-meld\nfatal: no route\n")
-            return subprocess.CompletedProcess(argv, 1, stdout="fatal: no route\n")
+            return subprocess.CompletedProcess(
+                argv, 0 if failure == "unchanged" else 1, stdout="fatal: no route\n"
+            )
 
         monkeypatch.setattr(upgrade, "_run_pipx", run)
         result = runner.invoke(app, [command])
@@ -3654,9 +3698,13 @@ class TestSyncUpdateDisplay:
             "Push: 1 content change published." if command == "push" else "Pull: no peer devices."
         )
         assert result.stdout.splitlines() == [sync_line]
+        reason = {
+            "pipx": "fatal: no route",
+            "unchanged": "pipx found no newer build",
+            "after-claim": "RuntimeError",
+        }[failure]
         assert result.stderr.strip() == (
-            "mm: notice: automatic update to 1.3.0 did not complete (fatal: no route). "
-            "Run: mm update"
+            f"mm: notice: automatic update to 1.3.0 did not complete ({reason}). Run: mm update"
         )
         assert result.output.splitlines()[-1].endswith("Run: mm update")
         assert _cache()["install_attempt_outcome"] == "failed"
@@ -3680,6 +3728,11 @@ class TestSyncUpdateDisplay:
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, result.output
         assert result.output.index("Push:") < result.output.index("automatic update cancelled")
+        reinstall = upgrade.reinstall_cmd(upgrade.detect_install())
+        assert result.stderr.strip() == (
+            "mm: notice: automatic update cancelled; sync outcome is reported separately. "
+            f"If mm is now missing, reinstall with: {reinstall}"
+        )
         assert _cache()["install_attempt_outcome"] == "failed"
 
     @pytest.mark.parametrize("outcome", ["updated", "failed"])
@@ -3718,7 +3771,13 @@ class TestSyncUpdateDisplay:
         assert result.output.index(marker) < result.output.index("Push refused")
         assert result.output.splitlines()[-1] == "Run: mm push"
 
-    def test_terminal_update_failure_line_is_sanitized(self, tmp_path, monkeypatch, pipx_install):
+    @pytest.mark.parametrize("failure", ["cancelled", "installer-output"])
+    def test_terminal_update_failure_line_is_sanitized(
+        self, tmp_path, monkeypatch, pipx_install, failure
+    ):
+        # Value: protects=installer failure and cancellation diagnostics stay inert and single-line;
+        # fails_when=raw controls reach stderr; why_new=AC8 names installer output;
+        # seam=none; no_claim=real pipx installation (installer mocked).
         _setup_real_config(tmp_path, monkeypatch)
         pipx_install()
         hostile_venv = tmp_path / "pipx\nRun: evil\x1b[2J" / "venvs" / "mind-meld"
@@ -3732,7 +3791,11 @@ class TestSyncUpdateDisplay:
 
         def run(argv, *, on_output=None):
             assert on_output is not None
-            raise KeyboardInterrupt
+            if failure == "cancelled":
+                raise KeyboardInterrupt
+            raw = "cloning\nfatal: \x1b]52;c;ZXZpbA==\x07no route\x1b[2J to host\n"
+            on_output(raw)
+            return subprocess.CompletedProcess(argv, 1, stdout=raw)
 
         monkeypatch.setattr(upgrade, "_run_pipx", run)
         result = runner.invoke(app, ["push"])
@@ -3740,7 +3803,10 @@ class TestSyncUpdateDisplay:
         stderr_lines = result.stderr.splitlines()
         assert len(stderr_lines) == 1
         assert "\x1b" not in result.stderr
+        assert "\x07" not in result.stderr
         assert not any(line.startswith("Run: evil") for line in stderr_lines)
+        if failure == "installer-output":
+            assert result.stderr.strip().endswith("(fatal: no route to host). Run: mm update")
 
     @pytest.mark.parametrize("command", ["autopush", "autopull"])
     def test_auto_commands_print_nothing_for_an_update(
@@ -3748,7 +3814,14 @@ class TestSyncUpdateDisplay:
     ):
         _setup_real_config(tmp_path, monkeypatch)
         pipx_install()
-        _fake_spawn(monkeypatch)
+        spawned = _fake_spawn(monkeypatch)
         result = runner.invoke(app, [command])
         assert result.exit_code == 0, result.output
         assert result.output == ""
+        assert len(spawned) == 1
+        upgrade.CACHE_PATH.unlink(missing_ok=True)
+        pipx_install(latest="1.2.0")
+        current = runner.invoke(app, [command])
+        assert current.exit_code == 0, current.output
+        assert current.output == result.output
+        assert len(spawned) == 1

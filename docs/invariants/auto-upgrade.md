@@ -29,8 +29,8 @@ a foreground install shows `Updating mm <old> → <new>` and installer phases in
 the shared transient `_SyncProgress`, then `_emit_update_lines` prints
 `Updated mm <old> → <new>.` on stdout or
 `mm: notice: automatic update to <new> did not complete (<reason>). Run: mm update`
-on stderr (`reason` sanitized with `safety.safe_terminal_str`, or `cancelled` on
-Ctrl-C) after a successful sync's outcome lines, and before a failed sync's
+on stderr (`reason` sanitized with `safety.safe_terminal_str`) after a successful
+sync's outcome lines, and before a failed sync's
 failure lines so the sync's `Run:` line stays last (`docs/SPEC.md` O8.1). With
 output piped or `--verbose`, `display` is `None`: `--verbose` prints
 `mm: notice: updating …` then `mm: notice: updated …`, piped successful updates
@@ -40,8 +40,11 @@ callers). Standalone `mm update` shares `core._installer_progress`, clearing its
 transient spinner before printing `Updated mm <old> → <new>.` or the
 already-current line (with output piped, no spinner and the same outcome line).
 A foreground update can delay the final outcome; no latency improvement is
-claimed. Cancellation never asserts that sync succeeded: its outcome belongs to
-the outer sync command.
+claimed. Ctrl-C keeps the existing `mm: notice: automatic update cancelled; sync
+outcome is reported separately. If mm is now missing, reinstall with: …` notice,
+with the same deferred ordering. Cancellation never asserts that sync succeeded:
+its outcome belongs to the outer sync command. Nudges for installs mm cannot
+update, including a previously failed daily claim, still precede the outcome.
 
 Eligibility is independent of presentation: a failed attended push that acquired
 the sync lock still runs the tail, except interruptions; pull runs it only after

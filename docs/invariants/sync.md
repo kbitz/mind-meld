@@ -128,7 +128,7 @@ actual degradations reach existing status/diag evidence, including failures
 without a returned result. Actionable/data-at-risk warnings remain visible in
 all modes before the outcome: growth, migration, missing custom events root,
 unsafe/corrupt peer skips, kept conflict copies, files deleted because a peer deleted them (autopull prints one `mm:` line), apply/fsync/recovery failures,
-unavailable history/run evidence, and piped/`--verbose` actionable update faults (on a terminal without `--verbose`, `_emit_update_lines` prints the update's `Updated mm <old> → <new>.` or `mm: notice: … Run: mm update` line after a successful sync's outcome line, and before a failed sync's failure lines so the sync's `Run:` line stays last). Automatic successful changes and no-ops
+unavailable history/run evidence, and piped/`--verbose` actionable update faults (on a terminal without `--verbose`, `_emit_update_lines` prints the update's `Updated mm <old> → <new>.` or `mm: notice: … Run: mm update` line after a successful sync's outcome line, and before a failed sync's failure lines so the sync's `Run:` line stays last; cancellation keeps its existing notice and reinstall remedy, while nudges for installs mm cannot update keep their prior ordering). Automatic successful changes and no-ops
 are silent; existing automatic error/exit policies remain. The emitter census
 and isolated transcript are implementation artifacts, not live fleet acceptance.
 

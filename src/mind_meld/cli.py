@@ -4330,7 +4330,8 @@ def update() -> None:
                 f"Retry in a minute, or run: {upgrade.INSTALL_CMD}"
             )
         console.print(
-            f"mm {outcome.old} is already the latest release pipx can see.",
+            f"mm {safety.safe_terminal_str(outcome.old)} "
+            "is already the latest release pipx can see.",
             markup=False,
             highlight=False,
         )
@@ -4345,7 +4346,7 @@ def update() -> None:
         console.print(line, markup=False, highlight=False)
     elif outcome.now_tracking:
         console.print(
-            f"mm {outcome.old} now tracks the release branch.",
+            f"mm {safety.safe_terminal_str(outcome.old)} now tracks the release branch.",
             markup=False,
             highlight=False,
         )
