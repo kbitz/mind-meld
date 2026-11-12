@@ -3093,6 +3093,10 @@ class TestCommitTypeMix:
         out = _agg_git_only([_commit("a" * 7, 1, subject="feat!: breaking")])
         assert out.commit_types.counts.get("feat") == 1
 
+    # Value: protects=one bounded ASCII numeric whitespace-delimited release prefix;
+    # fails_when=adjacency or punctuation is stripped or classification scans past the cap;
+    # why_new=existing examples omit lexical and cap-edge boundaries; seam=none;
+    # no_claim=classifier grammar only, not real corpus classification quality.
     @pytest.mark.parametrize(
         "subject,expected",
         [
@@ -3106,12 +3110,25 @@ class TestCommitTypeMix:
             ("v1.2.3-rc1 feat: prerelease tag stays other", "other"),
             ("v1..2 feat: malformed version stays other", "other"),
             ("v1.2.3 v1.2.4 feat: double prefix stays other", "other"),
+            ("v1.2.3fix: adjacent", "other"),
+            ("v1.2.3: fix: punctuation", "other"),
+            ("v١.٢ fix: non-ASCII digits", "other"),
+            ("v1\tfix: tab delimiter", "fix"),
+            ("v1.2\nfeat: newline delimiter", "feat"),
+            ("v1 " + " " * (aggregator._CLASSIFY_LEN_CAP - 7) + "fix:", "fix"),
+            ("v1 " + " " * (aggregator._CLASSIFY_LEN_CAP - 6) + "fix:", "other"),
         ],
     )
     def test_version_prefixed_subjects_classify_and_malformed_stay_other(self, subject, expected):
         assert aggregator._classify_commit_subject(subject) == expected
 
-    def test_version_prefix_preserves_git_totals_prs_loc_dates_and_dedup(self):
+    # Value: protects=version classification preserves deduplicated calendar and hourly metrics;
+    # fails_when=prefix handling changes accepted commit dates or double-counts their activity;
+    # why_new=existing assertions covered totals and type mix but not dates or hours; seam=none;
+    # no_claim=synthetic git events in UTC, not real corpus eligibility or other time zones.
+    def test_version_prefix_preserves_git_totals_prs_loc_dates_and_dedup(self, monkeypatch):
+        import time
+
         commits = [
             _commit("a" * 7, 1, subject="v1.2.3 fix(core): y (#42)", add=10, dlt=2),
             _commit("a" * 7, 1, subject="v1.2.3 fix(core): y (#42)", add=10, dlt=2),
@@ -3125,13 +3142,33 @@ class TestCommitTypeMix:
             _commit("c" * 7, 2, subject="fix(core): y", add=3, dlt=1),
             _commit("d" * 7, 3, subject="v1.2.3", add=1, dlt=1),
         ]
-        out = _agg_git_only(commits)
+        # Explicit UTC makes the expected calendar buckets independent of the
+        # machine running pytest. The fixture dates are Apr 25, 26, and 27 at noon.
+        try:
+            with monkeypatch.context() as env:
+                env.setenv("TZ", "UTC")
+                time.tzset()
+                out = _agg_git_only(commits)
+                fortnight = _agg_git_only(commits, window_days=14)
+        finally:
+            time.tzset()
         assert out.commits == 4
         assert out.additions == 34
         assert out.deletions == 9
         assert out.pull_requests == 2
         assert out.commit_types.total == 4
         assert out.commit_types.counts == {"fix": 2, "feat": 1, "other": 1}
+        assert out.hourly == {12: 4}
+        assert out.streak_days == 3
+        assert fortnight.hourly == {12: 4}
+        assert fortnight.streak_days == 3
+        assert [
+            (week.week_start, week.active_days, week.commits, week.additions, week.deletions)
+            for week in fortnight.weekly
+        ] == [
+            ("2026-04-20", 2, 3, 24, 7),
+            ("2026-04-27", 1, 1, 10, 2),
+        ]
         data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
         data.git = out
         markdown = aggregator.format_retro(data)
@@ -4971,6 +5008,10 @@ class TestHostSnapshotCoverage:
 
 
 class TestDumpHostUsage:
+    # Value: protects=dump diagnostics give platform-neutral evidence-free refresh advice;
+    # fails_when=dump reintroduces Mac wording or assumes an obsolete peer;
+    # why_new=the existing test only checked detail_phrase presence; seam=none;
+    # no_claim=fixture CLI output, not a real installation or Syncthing delivery.
     def test_dump_flag_skips_markdown(self, tmp_path, monkeypatch, capsys):
         events_dir = tmp_path / "events"
         events_dir.mkdir()
@@ -4986,6 +5027,13 @@ class TestDumpHostUsage:
         assert "dev-a" in payload["by_device"]
         assert payload["by_device"]["dev-a"]["detail"] == "absent"
         assert "detail_phrase" in payload["by_device"]["dev-a"]
+        assert payload["by_device"]["dev-a"]["detail_phrase"] == (
+            "per-model host tokens absent — pre-v0.12.49 peer or an empty host scan; "
+            "run `mm push` on the machine; "
+            "run `mm diag` if it persists."
+        )
+        assert "Mac" not in out
+        assert "upgrade mind-meld" not in out
         assert "degraded" in payload["by_device"]["dev-a"]
         assert "partial" in payload["by_device"]["dev-a"]
         assert "degraded_phrase" in payload["by_device"]["dev-a"]
@@ -6029,7 +6077,12 @@ class TestAgentCoverageNotes:
         )
         assert any("unknown, not zero" in n for n in notes)
 
-    def test_rejected_counts_devices_not_rows(self):
+    # Value: protects=rejected snapshots do not imply a currently obsolete peer binary;
+    # fails_when=the rejected-row caller loses registry evidence or upgrades every peer;
+    # why_new=existing rejection assertions only pinned counts; seam=none;
+    # no_claim=synthetic rejected inventory, not real transport or running peer versions.
+    @pytest.mark.parametrize("case", ["unknown", "current", "old", "mixed", "conflicting"])
+    def test_rejected_counts_devices_not_rows(self, case):
         """`aggregate_host_usage` applies no window filter to rejects, so a
         row-count breadcrumb from one broken writer would stay lit for the whole
         90-day retention."""
@@ -6041,6 +6094,43 @@ class TestAgentCoverageNotes:
         assert data.host_inventory.rejected_devices == 1
         notes = aggregator._agent_coverage_notes(data)
         assert any("from 1 machine(s) were rejected" in n for n in notes)
+        records = [{"device_id": "dev-bad", "device_name": "failed-host"}]
+        if case in {"old", "mixed", "conflicting"}:
+            records[0]["last_seen_version"] = "0.14.16"
+        elif case == "current":
+            records[0]["last_seen_version"] = "1.2.0"
+        if case == "mixed":
+            records.append(
+                {
+                    "device_id": "dev-current",
+                    "device_name": "current-host",
+                    "last_seen_version": "1.2.0",
+                }
+            )
+            data.host_inventory.rejected += (
+                aggregator.HostReject(device="dev-current", reason="unsupported_schema"),
+            )
+        if case == "conflicting":
+            records.extend(
+                {"device_id": "dev-bad", "last_seen_version": version}
+                for version in ("1.2.0", "0.14.16")
+            )
+        for ordered_records in (records, list(reversed(records))):
+            data.fleet.devices_known_list = ordered_records
+            note = next(n for n in aggregator._agent_coverage_notes(data) if "were rejected" in n)
+            assert "unsupported_schema" in note
+            assert "run `mm diag` if it persists" in note
+            assert "Mac" not in note
+            if case in {"old", "mixed"}:
+                assert "last reported push" in note
+                assert "upgrade mind-meld to v0.14.17+" in note
+                assert "verify with `mm --version`, then run `mm push`" in note
+            else:
+                assert "upgrade" not in note
+                assert "run `mm push` on the machine" in note
+            if case == "mixed":
+                assert "for current-host, run `mm push` on the machine;" in note
+                assert "for failed-host (last reported push below v0.14.17), upgrade" in note
 
     def test_rejected_breadcrumb_fires_even_with_no_card_block(self):
         data = self._data(
@@ -6920,6 +7010,50 @@ class TestUnifiedAgents:
             + "; ".join(expected_reader_causes)
             + "."
         )
+
+    # Value: protects=normalized reader groups preserve distinct safe machine identities;
+    # fails_when=reader order or unknown raw IDs split groups or colliding labels lose peers;
+    # why_new=existing merged fixture uses singleton known-reader sets; seam=none;
+    # no_claim=synthetic snapshots, not reader capture or delivery.
+    def test_reader_groups_normalize_sets_and_preserve_colliding_machine_identities(self):
+        day = "2026-04-22"
+        snaps = [
+            _snap(
+                device,
+                self.UNTIL,
+                families={"codex": {day: _usage(1_000_000)}},
+                degraded=readers,
+                counter_semantics="disjoint-v1",
+            )
+            for device, readers in (
+                ("dev-a", ("codex", "muse", "unknown-one")),
+                ("dev-b", ("unknown-two", "muse", "codex")),
+            )
+        ]
+        for snap in snaps:
+            snap.tokens_by_day = {
+                day: {**_usage(1_000_000), "by_model": {"gpt-6-astra": _usage(1_000_000)}}
+            }
+        for ordered in (snaps, list(reversed(snaps))):
+            data = self._data(
+                ordered,
+                known_ids=("dev-a", "dev-b"),
+                names={"dev-a": "shared|host", "dev-b": "shared`host"},
+            )
+            codex = self._row(self._usage_for(data), "codex")
+            expected = (
+                "shared_host (dev-a), shared_host (dev-b): "
+                "a host reader failed (codex, muse, unknown/retired reader)"
+            )
+            assert codex.floor_causes == (expected,)
+            entry = next(
+                e
+                for e in _health(aggregator.format_retro(data))
+                if e["code"] == "cost_floor" and e["agent"] == "Codex"
+            )
+            assert entry["causes"] == [expected]
+            assert "unknown-one" not in entry["detail"]
+            assert "unknown-two" not in entry["detail"]
 
     def test_many_machines_sharing_a_failed_reader_bound_peer_names(self):
         day = "2026-04-22"

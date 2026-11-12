@@ -449,6 +449,43 @@ def test_fleet_refresh_remedies_require_the_attended_producer_version():
     assert "Mac" not in mixed_notes[0]
 
 
+# Value: protects=historical session formats do not prove a peer currently needs upgrading;
+# fails_when=session or token health bypasses evidence or upgrades a current/unknown peer;
+# why_new=existing first-pass tests assert coverage details but not these remedies; seam=none;
+# no_claim=synthetic session and registry evidence, not live peer binary state.
+@pytest.mark.parametrize("case", ["unknown", "current", "old", "mixed"])
+def test_session_and_token_health_remedies_require_peer_version_evidence(case):
+    data = presentation_data()
+    data.sessions.pre_v2_peers = {"dev-a", "dev-b"}
+    data.sessions.pre_token_peers = {"dev-a", "dev-b"}
+    records = [
+        {"device_id": "dev-a", "device_name": "machine-a"},
+        {"device_id": "dev-b", "device_name": "machine-b"},
+    ]
+    if case != "unknown":
+        records[0]["last_seen_version"] = "1.2.0" if case == "current" else "0.14.16"
+        records[1]["last_seen_version"] = "0.14.16" if case == "old" else "1.2.0"
+    data.fleet.devices_known_list = records
+    entries = {e["code"]: e for e in health(agg.format_retro(data))}
+    assert "published pre-v0.11.0" in entries["sessions_incomplete"]["detail"]
+    assert "omitted rather than double-counted" in entries["sessions_incomplete"]["detail"]
+    assert "machine-a, machine-b" in entries["tokens_incomplete"]["detail"]
+    for code in ("sessions_incomplete", "tokens_incomplete"):
+        remedy = entries[code]["remedy"]
+        assert "Mac" not in remedy
+        if case in {"old", "mixed"}:
+            assert "last reported push" in remedy
+            assert "upgrade mind-meld to v0.14.17+" in remedy
+            assert "verify with `mm --version`, then run `mm push`" in remedy
+        else:
+            assert "upgrade" not in remedy
+            assert "run `mm push` on the machine" in remedy
+        if case == "mixed":
+            assert "for machine-b, run `mm push` on the machine;" in remedy
+            assert "for machine-a (last reported push below v0.14.17), upgrade" in remedy
+    assert "run `mm diag` if it persists" in entries["tokens_incomplete"]["remedy"]
+
+
 def test_populated_absent_degraded_goldens_at_terminal_widths(monkeypatch):
     import os
     import time
