@@ -2018,7 +2018,7 @@ class TestAttendedAutoUpdate:
         upgrade.update_or_nudge({}, attended=True)
         err = capsys.readouterr().err
         assert "automatic update to 1.3.0 did not complete (fatal: no route to host)" in err
-        assert "`mm update`" in err and upgrade.INSTALL_CMD in err
+        assert "Run: mm update" in err and upgrade.INSTALL_CMD in err and "`mm update`" not in err
         assert _cache()["install_attempt_outcome"] == "failed"
         # The same run does not also print the plain nudge, and the next run
         # neither retries pipx nor repeats itself inside the gates.
@@ -2157,6 +2157,7 @@ class TestUnattendedAutoUpdate:
         assert err.startswith("mm: notice: 1.2.0 → 1.3.0 available")
         assert "automatic update did not complete" in err
         assert str(upgrade.update_log_path()) in err
+        assert err.strip().endswith(f"Run: {upgrade.INSTALL_CMD}")
         # Nudge gate: once per 24h, not on every hook.
         upgrade.update_or_nudge({}, attended=False)
         assert capsys.readouterr().err == ""
@@ -3562,7 +3563,7 @@ class TestSyncUpdateDisplay:
     @pytest.mark.parametrize("command", ["push", "pull"])
     @pytest.mark.parametrize("mode", ["piped", "--verbose"])
     @pytest.mark.parametrize("outcome", ["updated", "failed"])
-    def test_piped_and_verbose_sync_update_output_is_unchanged(
+    def test_piped_and_verbose_sync_update_output_uses_shared_style(
         self, tmp_path, monkeypatch, pipx_install, command, mode, outcome
     ):
         _setup_real_config(tmp_path, monkeypatch)
@@ -3586,9 +3587,10 @@ class TestSyncUpdateDisplay:
             "mm: notice: updated mm 1.2.0 → 1.3.0; the next mm command runs it\n"
         )
         failed_notice = (
-            "mm: notice: automatic update to 1.3.0 did not complete (fatal: no route) "
-            "— run `mm update`, or "
-            "`PIPX_HOME=/tmp/pipx pipx install --force git+https://github.com/kbitz/mind-meld.git@latest`\n"
+            "mm: notice: automatic update to 1.3.0 did not complete (fatal: no route); "
+            "if mm is now missing, reinstall with: PIPX_HOME=/tmp/pipx pipx install --force "
+            "git+https://github.com/kbitz/mind-meld.git@latest "
+            "Run: mm update\n"
         )
         push_verbose_prefix = (
             "Building manifest...\n"
@@ -3598,8 +3600,6 @@ class TestSyncUpdateDisplay:
             "  ↑ projects/-Users-user-myapp/memory/role.md\n"
             "\n"
             "Uploading 1 files...\n"
-            "\n"
-            "GC complete. Deleted 0 orphaned blobs.\n"
             "mm: warning: Usage capture (prerequisites: disabled): skipped — "
             "Run mm enable-source mm-events to enable usage publication. Content sync continues.\n"
         )
@@ -3825,3 +3825,112 @@ class TestSyncUpdateDisplay:
         assert current.exit_code == 0, current.output
         assert current.output == result.output
         assert len(spawned) == 1
+
+    @pytest.mark.parametrize("sync_mode", ["succeeded", "failed"])
+    @pytest.mark.parametrize("op", ["write", "flush"])
+    @pytest.mark.parametrize("exc_cls", [BrokenPipeError, OSError])
+    def test_deferred_update_stream_failures_preserve_sync_result_without_retry(
+        self, tmp_path, monkeypatch, pipx_install, sync_mode, op, exc_cls
+    ):
+        from mind_meld.errors import SnapshotError
+        from mind_meld.storage.keys import manifest_key
+
+        _setup_real_config(tmp_path, monkeypatch)
+        venv = pipx_install()
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
+
+        pipx_calls = []
+        push_calls = []
+        stream_failures = []
+        real_push_core = cli._push_core
+        real_emit_update_lines = cli._emit_update_lines
+
+        def tracked_push_core(*args, **kwargs):
+            push_calls.append(1)
+            if sync_mode == "failed":
+                raise SnapshotError("source folder disappeared")
+            return real_push_core(*args, **kwargs)
+
+        def run_pipx(argv, *, on_output=None):
+            assert on_output is not None
+            pipx_calls.append(list(argv))
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="upgraded\n")
+
+        def broken_emit_update_lines(display):
+            assert display is not None
+            display.outcomes = ["Updated mm 1.2.0 → 1.3.0."]
+            display.problems = [
+                "mm: notice: automatic update to 1.3.0 did not complete "
+                "(fatal: no route). Run: mm update"
+            ]
+            orig_out_write = sys.stdout.write
+            orig_err_write = sys.stderr.write
+            orig_out_flush = sys.stdout.flush
+            orig_err_flush = sys.stderr.flush
+            out_writes = 0
+            err_writes = 0
+
+            def out_write(text):
+                nonlocal out_writes
+                out_writes += 1
+                if op == "write":
+                    stream_failures.append("stdout.write")
+                    raise exc_cls("broken stdout write")
+                return orig_out_write(text)
+
+            def err_write(text):
+                nonlocal err_writes
+                err_writes += 1
+                if op == "write":
+                    stream_failures.append("stderr.write")
+                    raise exc_cls("broken stderr write")
+                return orig_err_write(text)
+
+            def out_flush():
+                if op == "flush" and out_writes > 0:
+                    stream_failures.append("stdout.flush")
+                    raise exc_cls("broken stdout flush")
+                return orig_out_flush()
+
+            def err_flush():
+                if op == "flush" and err_writes > 0:
+                    stream_failures.append("stderr.flush")
+                    raise exc_cls("broken stderr flush")
+                return orig_err_flush()
+
+            monkeypatch.setattr(sys.stdout, "write", out_write)
+            monkeypatch.setattr(sys.stderr, "write", err_write)
+            monkeypatch.setattr(sys.stdout, "flush", out_flush)
+            monkeypatch.setattr(sys.stderr, "flush", err_flush)
+            try:
+                return real_emit_update_lines(display)
+            finally:
+                monkeypatch.setattr(sys.stdout, "write", orig_out_write)
+                monkeypatch.setattr(sys.stderr, "write", orig_err_write)
+                monkeypatch.setattr(sys.stdout, "flush", orig_out_flush)
+                monkeypatch.setattr(sys.stderr, "flush", orig_err_flush)
+
+        monkeypatch.setattr(cli, "_push_core", tracked_push_core)
+        monkeypatch.setattr(upgrade, "_run_pipx", run_pipx)
+        monkeypatch.setattr(
+            upgrade, "_spawn_pipx", lambda *a, **kw: pytest.fail("unexpected fallback spawn")
+        )
+        monkeypatch.setattr(cli, "_emit_update_lines", broken_emit_update_lines)
+
+        result = runner.invoke(app, ["push"])
+        assert len(push_calls) == 1
+        assert len(pipx_calls) == 1
+        assert stream_failures == [f"stdout.{op}", f"stderr.{op}"]
+        cfg = config_module.load_config()
+        manifest_file = Path(cfg["storage"]["path"]) / manifest_key(cfg["device"]["id"])
+        if sync_mode == "succeeded":
+            assert result.exit_code == 0, result.output
+            assert manifest_file.is_file()
+        else:
+            assert result.exit_code == 1
+            assert not manifest_file.exists()

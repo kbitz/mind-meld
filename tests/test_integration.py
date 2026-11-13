@@ -3907,7 +3907,8 @@ class TestGCSafety:
 
         monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
         monkeypatch.setattr(LocalBackend, "delete", delete)
-        assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, False) == 0
+        gc_res = cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, False)
+        assert (gc_res.deleted, gc_res.collected) == (0, False)
         before = _preview_tree(env["claude"].parent, pin=dry_run)
         result = runner.invoke(app, ["gc"] + (["--dry-run"] if dry_run else []))
         assert result.exit_code == 0, result.output
@@ -3917,6 +3918,10 @@ class TestGCSafety:
         assert "Wait for sync" in warning and "mm diag" in warning and "mm gc" in warning
         assert not listings and not deletes
         assert "GC complete" not in result.output and "orphaned blobs" not in result.output
+        if not dry_run:
+            assert result.stdout.splitlines()[-1] == (
+                "Gc: blob collection skipped (own manifest missing); local retention complete."
+            )
         assert backend.get(blob) == b"keep without metadata"
         assert peer_tmp.read_bytes() == b"peer"
         assert old_event.exists() == dry_run
@@ -3944,7 +3949,10 @@ class TestGCSafety:
             return original(storage, prefix)
 
         monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
-        assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, False) == 1
+        assert (
+            cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, False).deleted
+            == 1
+        )
         assert storage_keys.data_prefix("dev-a") == "data/dev-a/"
         assert listings == ["data/dev-a/"]
         assert backend.exists(own) == dry_run
@@ -3961,9 +3969,9 @@ class TestGCSafety:
 
         monkeypatch.setattr(LocalBackend, "list_keys", forbidden)
         monkeypatch.setattr(LocalBackend, "delete", forbidden)
-        monkeypatch.setattr(cli_module.retention, "_sweep_local_tmp_files", forbidden)
+        monkeypatch.setattr(cli_module.gcflow.retention, "_sweep_local_tmp_files", forbidden)
         with pytest.raises(ValueError, match="storage key: device_id"):
-            cli_module._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
+            cli_module.gcflow._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
         assert calls == []
 
     @pytest.mark.parametrize("dry_run", [False, True])
@@ -3987,7 +3995,10 @@ class TestGCSafety:
             return list(keys)
 
         monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
-        assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, True) == 1
+        assert (
+            cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, True).deleted
+            == 1
+        )
         output = capsys.readouterr().out
         assert "malformed (skipped)" in output and "inject" in output
         assert "\x1b" not in output and "\x07" not in output
@@ -4022,7 +4033,10 @@ class TestGCSafety:
 
         monkeypatch.setattr(LocalBackend, "get", get)
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", forbidden)
-        assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False) == 1
+        assert (
+            cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False).deleted
+            == 1
+        )
         assert not backend.exists(own)
         assert backend.get(peer) == b"peer"
 
@@ -4255,10 +4269,11 @@ class TestGCSafety:
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fetch)
         if late in ("corrupt", "unreadable"):
             with pytest.raises(typer.Exit):
-                cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False)
+                cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False)
         else:
             expected = 1 if late == "more-refs" else 0
-            assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False) == expected
+            gc_res = cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False)
+            assert gc_res.deleted == expected
         assert calls == ["dev-a", "dev-a"]
         orphan_key = storage_keys.blob_key("dev-a", orphan)
         survivors = dict(blobs)
@@ -4279,15 +4294,16 @@ class TestGCSafety:
         config = {**env["config"], "device": {**env["config"]["device"], "name": "Mac [work]"}}
         buf = StringIO()
         monkeypatch.setattr(
-            cli_module.core if state == "corrupt" else cli_module,
+            cli_module.core if state == "corrupt" else cli_module.gcflow,
             "stderr_console",
             Console(file=buf, width=300, color_system=None),
         )
         if state == "corrupt":
             with pytest.raises(typer.Exit):
-                cli_module._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
+                cli_module.gcflow._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
         else:
-            assert cli_module._do_gc(config, PASSPHRASE, MEMORY_KB, False, False) == 0
+            gc_res = cli_module.gcflow._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
+            assert (gc_res.deleted, gc_res.collected) == (0, False)
         assert "Mac [work] (dev-a)" in buf.getvalue()
         assert "\\[work]" not in buf.getvalue()
 
@@ -6260,9 +6276,12 @@ def test_recapture_with_a_held_day_file_takes_the_not_synced_exit_75a(capture61,
     result = _recapture_with_unstable(capture61, monkeypatch, held_name="*.jsonl")
     flat = " ".join((result.output + (result.stderr or "")).split())
     assert result.exit_code == 1, result.output
-    assert "Recapture was written locally but not synced." in flat
-    assert "still changing; run 'mm push' to publish it." in flat
-    assert "Recapture complete" not in flat and "Recapture found no commits" not in flat
+    assert (
+        "mm: error: Recapture was written locally but not synced. "
+        "A recapture file was still changing." in flat
+    )
+    assert result.stderr.splitlines()[-1] == "Run: mm push"
+    assert "Recapture:" not in flat and "Recapture complete" not in flat
 
 
 def test_attended_capture_exit_with_a_held_day_file_carries_held_and_not_published_75a(
@@ -6710,7 +6729,7 @@ def test_capture_exit_uses_acceptance_boundary(capture61, monkeypatch, after):
         def fail_gc(*a, **kw):
             raise typer.Exit(1)
 
-        monkeypatch.setattr(cli_module, "_do_gc", fail_gc)
+        monkeypatch.setattr(cli_module.gcflow, "_do_gc", fail_gc)
     else:
         real = LocalBackend.put
 
@@ -7539,9 +7558,9 @@ class TestPushMtimeOnlyPropagation:
         assert "In sync with this device's last push." not in result.output, (
             f"status reported 'in sync' on a mtime-only divergence:\n{result.output}"
         )
-        assert "Metadata-only changes pending" in result.output, (
-            f"status did not surface the mtime-only pending hint:\n{result.output}"
-        )
+        assert "Metadata-only changes pending (updated mtimes). Run: mm push" in (
+            " ".join(result.output.split())
+        ), f"status did not surface the mtime-only pending hint:\n{result.output}"
 
     def test_dry_run_push_flags_pending_mtime_only_changes(
         self, tmp_path: Path, monkeypatch
@@ -10626,12 +10645,16 @@ def test_recapture_source_advice62(preview62, disabled, configured, dry_run):
         f"but it is {'disabled' if disabled else 'not configured'} on this Mac."
         in _preview_text(result)
     )
+    assert "Run: mm enable-source mm-events" in result.stderr.splitlines()
     if dry_run:
         _assert_preview_refused(result)
-        assert "Fix (changes config): mm enable-source mm-events" in _preview_text(result)
-        assert "Then preview again: mm recapture --dry-run 1d" in _preview_text(result)
+        assert (
+            "Enabling it changes config; then preview again: mm recapture --dry-run 1d."
+            in _preview_text(result)
+        )
     else:
-        assert "Then retry: mm recapture 1d" in result.output
+        assert "Enabling it changes config; then retry: mm recapture 1d." in _preview_text(result)
+        assert result.stderr.splitlines()[-1] == "Run: mm enable-source mm-events"
     if not disabled and dry_run:
         enabled = runner.invoke(app, ["enable-source", "mm-events"])
         assert enabled.exit_code == 0, enabled.output
@@ -10673,7 +10696,7 @@ def test_recapture_incomplete_preview62(preview62, monkeypatch, discovery, reaso
     else:
         assert "Preview incomplete" not in text
     assert "\x1b" not in result.output
-    assert text.endswith(cli_module.RECAPTURE_NOT_PREVIEWED)
+    assert text.endswith(cli_module.recaptureflow.RECAPTURE_NOT_PREVIEWED)
 
 
 def test_pending_events_root62(preview62):
@@ -10701,6 +10724,202 @@ def test_diff_excludes62(preview62, target):
     assert result.exit_code == 0, result.output
     assert "secret.md" not in result.output
     assert "visible.md" in result.output
+
+
+@pytest.mark.parametrize("from_device", [None, "dev-b"])
+def test_diff_corrupt_remote_warns_in_shared_style(preview62, from_device):
+    env = preview62
+    target_id = from_device or "dev-a"
+    env["backend"].put(storage_keys.manifest_key(target_id), b"corrupt-bytes")
+    argv = ["diff"] + (["--from", from_device] if from_device else [])
+    result = env["audit"](argv)
+    assert result.exit_code == 0, result.output
+    who = f"device {from_device}" if from_device else "this device"
+    assert result.stderr.strip() == (
+        f"mm: warning: remote manifest for {who} is corrupt — "
+        "showing diff against empty remote. Run: mm diag"
+    )
+
+
+@pytest.mark.parametrize("remote", ["corrupt", "missing"])
+def test_diff_from_a_hostile_device_id_stays_inert(preview62, remote):
+    # Value: protects=mm diff --from display text neutralizes markup and terminal escapes;
+    # fails_when=a raw device id reaches the corrupt warning or the Rich lines; seam=none
+    env = preview62
+    hostile = "dev-[bold]evil\x1b]52;c;Zm9v\x07"
+    if remote == "corrupt":
+        env["backend"].put(storage_keys.manifest_key(hostile), b"corrupt-bytes")
+    result = env["audit"](["diff", "--from", hostile])
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    for stream in (result.stdout, result.stderr):
+        assert "\x1b" not in stream and "\x07" not in stream, ascii(stream)
+    shown = " ".join(result.stdout.split())
+    assert "Diff against device dev-[bold]evil" in shown, ascii(result.stdout)
+    if remote == "corrupt":
+        (warning,) = result.stderr.strip().splitlines()
+        assert warning.startswith("mm: warning: remote manifest for device dev-[bold]evil")
+        assert warning.endswith("is corrupt — showing diff against empty remote. Run: mm diag")
+    else:
+        assert "No remote manifest for device dev-[bold]evil" in shown, ascii(result.stdout)
+        assert result.stderr == ""
+
+
+@pytest.mark.parametrize("case", ["empty", "already_present", "new_old_commits"])
+@pytest.mark.parametrize("verbose", [False, True])
+def test_recapture_outcomes_and_verbose_details(preview62, monkeypatch, case, verbose):
+    env = preview62
+    now = datetime.now(timezone.utc)
+    events_dir = env["events"] / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    repo = env["claude"]
+    old_date = (now - timedelta(days=10)).isoformat()
+    commit = {
+        "sha": "abc1234",
+        "date": old_date,
+        "author_email": "user@example.com",
+        "subject": "feat: historical commit",
+        "files": 1,
+        "add": 2,
+        "del": 0,
+    }
+    if case == "already_present":
+        existing_row = {
+            "v": _mm_events.EVENTS_SCHEMA_VERSION,
+            "type": "git-snapshot",
+            "ts": now.isoformat(),
+            "device": "dev-a",
+            "origin": _mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+            "projects": [
+                {
+                    "remote": "https://github.com/user/mm.git",
+                    "local_path": str(repo),
+                    "commits": [commit],
+                }
+            ],
+            "skipped": [],
+        }
+        _mm_events.write_push_event(events_dir, "dev-a", [existing_row])
+
+    git_rows = (
+        []
+        if case == "empty"
+        else [
+            {
+                "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                "type": "git-snapshot",
+                "ts": now.isoformat(),
+                "device": "dev-a",
+                "origin": _mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+                "projects": [
+                    {
+                        "remote": "https://github.com/user/mm.git",
+                        "local_path": str(repo),
+                        "commits": [commit],
+                    }
+                ],
+                "skipped": [],
+            }
+        ]
+    )
+    prepared = events_tail.RecaptureCapture(
+        git_rows=git_rows,
+        root_discovery=_mm_events.GitRootDiscovery((repo,), (), False),
+        walk_budget_aborts=0,
+        walk_errors=0,
+        events_dir=events_dir,
+        since=now - timedelta(days=14),
+        until=now,
+    )
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: prepared)
+    argv = ["recapture", "14d"] + (["-v"] if verbose else [])
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    last_line = result.stdout.splitlines()[-1]
+    assert ("Window scanned:" in result.stdout) == verbose
+    since_day = prepared.since.strftime("%Y-%m-%d")
+    until_day = prepared.until.strftime("%Y-%m-%d")
+    if case == "empty":
+        assert (
+            last_line
+            == f"Recapture: 0 commit records found across 1 repository ({since_day} → {until_day})."
+        )
+    elif case == "already_present":
+        assert last_line == (
+            f"Recapture: 0 new commit records "
+            f"(1 commit record already recorded for {since_day} → {until_day})."
+        )
+    else:
+        assert last_line == (
+            f"Recapture: 1 commit record captured and published across "
+            f"1 repository ({since_day} → {until_day})."
+        )
+        assert (
+            "mm: notice: Retros window by commit date, not capture time. "
+            "Run: mm retro-fleet 14d" in result.stderr
+        )
+
+
+def test_partial_recapture_prints_one_error_with_its_cause_and_one_final_fix(
+    preview62, monkeypatch
+):
+    env = preview62
+    now = datetime.now(timezone.utc)
+    events_dir = env["events"] / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    repo = env["claude"]
+    prepared = events_tail.RecaptureCapture(
+        git_rows=[],
+        root_discovery=_mm_events.GitRootDiscovery((repo, repo.parent), (), False),
+        walk_budget_aborts=0,
+        walk_errors=1,
+        events_dir=events_dir,
+        since=now - timedelta(days=14),
+        until=now,
+    )
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: prepared)
+    result = runner.invoke(app, ["recapture", "14d"])
+    report = (result.stdout, result.stderr)
+    assert result.exit_code == cli_module.recaptureflow.RECAPTURE_EXIT_PARTIAL == 4, report
+    both = result.stdout + result.stderr
+    assert both.count("Recapture incomplete:") == 1, report
+    assert both.count("Run: mm recapture --dry-run") == 1, report
+    assert result.stderr.splitlines()[-1] == "Run: mm recapture --dry-run", report
+    assert (
+        "mm: error: Recapture incomplete: captured 0 commit records from 1 of 2 repositories"
+        in result.stderr
+    ), report
+    assert "skipped because the Git walk failed" in result.stdout, report
+    assert "Recapture:" not in result.stdout, report
+
+
+def test_recapture_outcome_stays_plain_on_a_terminal(preview62, monkeypatch):
+    from io import StringIO
+
+    env = preview62
+    now = datetime.now(timezone.utc)
+    events_dir = env["events"] / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    prepared = events_tail.RecaptureCapture(
+        git_rows=[],
+        root_discovery=_mm_events.GitRootDiscovery((env["claude"],), (), False),
+        walk_budget_aborts=0,
+        walk_errors=0,
+        events_dir=events_dir,
+        since=now - timedelta(days=14),
+        until=now,
+    )
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: prepared)
+    buf = StringIO()
+    monkeypatch.setattr(
+        cli_module.recaptureflow,
+        "console",
+        Console(file=buf, force_terminal=True, color_system="standard", width=200),
+    )
+    result = runner.invoke(app, ["recapture", "14d"])
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    outcome = [line for line in buf.getvalue().splitlines() if line.startswith("Recapture:")]
+    assert len(outcome) == 1, buf.getvalue()
+    assert "\x1b[" not in outcome[0], ascii(outcome[0])
 
 
 @pytest.mark.parametrize("state", ["empty", "current", "migration"])
@@ -11440,7 +11659,9 @@ def test_bootstrap_calls_stay_in_explicit_writers59a():
             ):
                 owner = parents.get(owner)
             found.add((path.name, owner.name if owner else None))
-    assert found == {("cli.py", n) for n in ("_push_core", "recapture")} | {
+    assert found == {
+        ("cli.py", "_push_core"),
+        ("recaptureflow.py", "recapture"),
         ("initflow.py", "init"),
         ("pullflow.py", "_pull_one_source"),
     }
@@ -12157,7 +12378,11 @@ def test_usage_only_skips_auto_gc_content_runs_it(capture61, monkeypatch, conten
     if content:
         (capture61["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
     calls = []
-    monkeypatch.setattr(cli_module, "_do_gc", lambda *a, **kw: calls.append(True) or 0)
+    monkeypatch.setattr(
+        cli_module.gcflow,
+        "_do_gc",
+        lambda *a, **kw: calls.append(True) or cli_module.gcflow.GcBlobResult(deleted=0),
+    )
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert calls == ([True] if content else [])
@@ -12425,9 +12650,9 @@ def test_post_push_gc_outcomes_never_undo_accepted_content(capture61, monkeypatc
             raise OSError("gc scan failed")
         if outcome == "mindmeld":
             raise MindMeldError("gc refused")
-        return 3
+        return cli_module.gcflow.GcBlobResult(deleted=3)
 
-    monkeypatch.setattr(cli_module, "_do_gc", gc)
+    monkeypatch.setattr(cli_module.gcflow, "_do_gc", gc)
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     if outcome == "deleted":
@@ -13058,7 +13283,10 @@ def test_recapture_and_plain_push_stay_silent_on_nested_checkouts(capture61, mon
     assert recaptured.exit_code == 0, recaptured.output
     assert "skipped: nested git repository" not in recaptured.stdout
     assert "skipped: nested git repository" not in recaptured.stderr
-    assert "Recapture complete" in recaptured.stdout
+    assert (
+        "Recapture: 0 commit records found across 1 repository"
+        in recaptured.stdout.splitlines()[-1]
+    )
 
     key = storage_keys.manifest_key("dev-a")
     accepted = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))

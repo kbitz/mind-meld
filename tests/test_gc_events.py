@@ -345,6 +345,55 @@ class TestGcDryRunRetentionReport:
         assert "retention cleanup" in result.output
         assert "deleting" in result.output
 
+    def test_gc_default_and_verbose_final_outcome_and_skipped_collection(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        storage_dir = tmp_path / "storage"
+        events_root = tmp_path / "events_root"
+        events_dir = events_root / "events"
+        events_dir.mkdir(parents=True)
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+
+        config_path = tmp_path / "config.toml"
+        cfg = _config_with_events(tmp_path, events_root)
+        cfg["storage"] = {"path": str(storage_dir)}
+        save_config(cfg, config_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        # Own manifest missing -> skipped outcome, never "0 orphaned blobs deleted".
+        skipped = runner.invoke(app, ["gc"])
+        assert skipped.exit_code == 0, skipped.output
+        assert skipped.stdout.strip() == (
+            "Gc: blob collection skipped (own manifest missing); local retention complete."
+        )
+        assert "0 orphaned blobs deleted" not in skipped.output
+
+        # Push so own manifest exists, then plant 1 orphaned blob.
+        _make_events_file(events_dir, "dev-a", datetime.now(timezone.utc))
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        orphan_blob = storage_dir / "data" / "dev-a" / ("a" * 64 + ".enc")
+        orphan_blob.parent.mkdir(parents=True, exist_ok=True)
+        orphan_blob.write_bytes(b"orphan")
+
+        normal = runner.invoke(app, ["gc"])
+        assert normal.exit_code == 0, normal.output
+        assert normal.stdout.strip() == "Gc: 1 orphaned blob deleted."
+        assert "candidates=" not in normal.stdout
+        assert "GC complete" not in normal.stdout
+        assert not orphan_blob.exists()
+
+        verbose = runner.invoke(app, ["gc", "-v"])
+        assert verbose.exit_code == 0, verbose.output
+        assert "Temporary files: candidates=" in verbose.stdout
+        assert "Events: candidates=" in verbose.stdout
+        assert "Token cache: candidates=" in verbose.stdout
+        assert "Orphan retros: candidates=" in verbose.stdout
+        assert "Deleted-file copies: candidates=" in verbose.stdout
+        assert verbose.stdout.strip().splitlines()[-1] == "Gc: 0 orphaned blobs deleted."
+
 
 class TestGcEventsOfflinePeerSuppression:
     """An offline peer that comes back online sees the tombstone

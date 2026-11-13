@@ -301,7 +301,7 @@ REVIEWED = {
             "breadcrumb.unlink()",
         ],
     ),
-    "cli.py:_oldest_commit_date": (
+    "recaptureflow.py:_oldest_commit_date": (
         *_READ_ONLY,
         [
             "ts.replace(tzinfo=timezone.utc)",

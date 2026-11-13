@@ -440,9 +440,8 @@ class TestFormatMessage:
             "0.9.3", "0.9.4", "pipx install --force git+https://github.com/x/y.git@v0.9.4"
         )
         assert isinstance(msg, str)
-        # Backticks and version arrows must appear literally — Rich brackets
-        # would have been stripped if routed through Console.print
-        assert "`pipx install" in msg
+        assert "Run: pipx install --force git+https://github.com/x/y.git@v0.9.4" in msg
+        assert "`pipx install" not in msg
         assert "0.9.3 → 0.9.4" in msg
         assert msg.startswith("mm: notice:")
 
@@ -458,7 +457,20 @@ class TestEmitNudge:
         captured = capsys.readouterr()
         assert "mm: notice:" in captured.err
         assert "0.9.3 → 0.9.4" in captured.err
+        assert f"Run: {upgrade.INSTALL_CMD}" in captured.err
         # Stdout untouched
+        assert captured.out == ""
+
+    def test_emits_failed_install_detail_before_run_fix(self, monkeypatch, capsys):
+        _set_version(monkeypatch, "0.9.3")
+        _stub_tags(monkeypatch, ["v0.9.4"])
+        upgrade._nudge_if_due(upgrade.check_for_upgrade({}), failed_install=True)
+        captured = capsys.readouterr()
+        assert captured.err.strip() == (
+            f"mm: notice: 0.9.3 → 0.9.4 available "
+            f"(the automatic update did not complete; see {upgrade.update_log_path()}). "
+            f"Run: {upgrade.INSTALL_CMD}"
+        )
         assert captured.out == ""
 
     def test_silent_when_current(self, monkeypatch, capsys):

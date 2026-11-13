@@ -512,9 +512,9 @@ attended push's conditional activity tail and exit contract, read
 10. With `--conflicts`, also reap post-inversion `.sync-conflict-*` files whose filename birth is older than `CONFLICT_AGE_DAYS` (30), only when canonical exists with identical bytes. Live, ownerless, missing-canonical, pre-inversion, and unhashable copies remain at any age.
 11. Supports `--dry-run`: each executed retention reaper selects the same candidates as apply mode, prints a stable summary (including zero counts), and makes no deletion or cache write; the recovery-copy reaper lists the folders it would remove. Token-cache preview holds a shared read-only lock, so inspecting a missing or malformed cache never creates, rewrites, re-permissions, or normalizes it. Apply mode counts a deletion only after it succeeds and reports failed or skipped work separately; use `mm gc -v` for safe per-path detail. Bare `--dry-run` also previews conflict cleanup; deleting those copies requires `--conflicts`.
 12. Release lockfile.
-13. Print summary (blobs deleted, bytes freed).
+13. End with one `Gc: <N> orphaned blob(s) deleted.` outcome line, or `Gc: blob collection skipped (own manifest missing); local retention complete.` when step 3 or 5 skipped collection. When any retention reaper reports a failed or skipped item, end instead with one `mm: warning: Retention cleanup was incomplete ... Run: mm gc -v` line on stderr. In apply mode, per-reaper summaries print only with `-v`; `--dry-run` keeps step 11's summaries and ends with its completion line, not an outcome.
 
-The reapers and the tmp sweep live in `retention.py`; the `@app.command()` shell stays in `cli.py`.
+The command body and own-device blob collection (`gc`, `_do_gc`) live in `gcflow.py`, and the reapers and the tmp sweep in `retention.py`; the `@app.command()` shell stays in `cli.py`.
 
 ### `mm status [--source NAME]`
 
@@ -914,8 +914,9 @@ Snapshot refusals use a four-part message: location (source/path), problem, pres
 
 Shared CLI error helpers print `mm: error: <what broke>` on stderr, with
 `Run: <command>` on its own last line when the caller supplies a fix command.
-Attended push/pull failures use this form; remaining command output conversion
-is tracked separately (see [Sync outcomes](README.md#sync-outcomes)).
+Attended push/pull failures use this form; [Sync outcomes](README.md#sync-outcomes)
+lists the other commands that use the shared forms, and conversion of the
+remaining commands is tracked separately.
 
 Illustrative problem messages, rather than exact CLI transcripts:
 - `push: failed to write blob abc123.enc — disk full. Free space on iCloud Drive.`

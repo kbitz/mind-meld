@@ -7,6 +7,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/core.py` — `_get_config` / `_console_is_terminal` / `_SyncProgress` / `_installer_progress` / (read-only transition gate and shared terminal spinner)
 - `src/mind_meld/initflow.py` — `init` / (transition seam)
 - `src/mind_meld/cli.py` — `_auto_command_setup` / `push` / `pull` / `autopull` / `autopush` / `recapture` / `update` / `_run_update_with_progress` / `_sync_update` / `_emit_update_lines` / (transition and update/nudge seams)
+- `src/mind_meld/recaptureflow.py` — `recapture` / (nudge seam)
 - `src/mind_meld/statusflow.py` — `status` / `diag` / (cached upgrade surfacing)
 - `src/mind_meld/events_tail.py` — `_capture_skip_phrase` / (cached upgrade surfacing on attended push capture)
 - `src/mind_meld/config.py` — the `[upgrade]` defaults in `_apply_defaults` (`auto_check`, `auto_install`)
@@ -439,8 +440,9 @@ found) or when its attempt failed. `recapture` stays nudge-only.
 **Upgrade command tracks the `latest` BRANCH, never a `@vX.Y.Z` TAG (load-bearing).**
 `INSTALL_CMD = "pipx install --force git+https://github.com/kbitz/mind-meld.git@latest"`
 — a single version-independent constant (NOT a per-version template). The target
-version appears only in the nudge *message* text (`format_upgrade_message`), not
-in the command.
+version appears only in the nudge *message* text (`format_upgrade_message`, which
+formats `mm: notice: <old> → <new> available. Run: <install_cmd>` and
+inserts optional `detail=` before `Run:`), not in the command.
 
 Why this matters — the historical lock this fixes: pipx's
 `parse_specifier_for_upgrade` strips PEP508 version specifiers but a git `@<ref>`

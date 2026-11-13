@@ -2,7 +2,8 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/cli.py` — `_ensure_device_registered` / `init` / `devices` / `devices_approve` / `_attended_pull` / `_do_gc`
+- `src/mind_meld/cli.py` — `_ensure_device_registered` / `init` / `devices` / `devices_approve` / `_attended_pull`
+- `src/mind_meld/gcflow.py` — `gc` / `_do_gc`
 - `src/mind_meld/core.py` — `SYNCTHING_GUIDE_HEADING` / `_syncthing_start_command` / `_has_valid_device_id_check_digits` / `_normalize_device_id` / `_device_id_problem`
 - `src/mind_meld/initflow.py` — `init` / `HEADER_WAIT_SECONDS` / `HEADER_POLL_SECONDS` / `_pause` / `_fetch_header_or_stop` / `_wait_for_header` / `_SyncthingSetup` / `_check_syncthing` / `_save_syncthing_record_or_stop` / `_require_syncthing` / `_read_syncthing_state_or_stop` / `_is_inside_stock_default_folder` / `_managed_new_fleet_folder` / `_read_fleet_device_id` / `_managed_join` / `_register_and_save` / `_init_storage_guard` / `_probe_storage_occupancy` / `_classify_folder` / `_bootstrap_new_fleet` / `_verify_join` / `_write_stignore` / `_stop_for_missing_header` / `_refuse_new_fleet`
 - `src/mind_meld/devicesflow.py` — `devices` / `approve` / `_stop_bad_device_id` / `_stop_not_managed` / `_stop_unchanged` / `_stop_partial`

@@ -784,8 +784,8 @@ class TestAdditivePull:
 class TestAutoGC:
     def test_gc_returns_count(self, tmp_path):
         """_do_gc should return the number of orphaned blobs deleted."""
-        from mind_meld.cli import _do_gc
         from mind_meld.devices import register_device
+        from mind_meld.gcflow import _do_gc
 
         storage = LocalBackend(tmp_path / "storage")
         config = {
@@ -821,8 +821,8 @@ class TestAutoGC:
         storage.put(f"data/dev1/{sha_ref}.enc", b"referenced")
         storage.put(f"data/dev1/{sha_orphan}.enc", b"orphaned")
 
-        count = _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
-        assert count == 1
+        result = _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
+        assert result.deleted == 1
         assert storage.exists(f"data/dev1/{sha_ref}.enc")
         assert not storage.exists(f"data/dev1/{sha_orphan}.enc")
 
@@ -831,8 +831,8 @@ class TestAutoGC:
         NEVER auto-reaped. Before this change, _do_gc silently skipped them
         (`if len(parts) != 3: continue`), making them invisible accumulators.
         """
-        from mind_meld.cli import _do_gc
         from mind_meld.devices import register_device
+        from mind_meld.gcflow import _do_gc
 
         storage = LocalBackend(tmp_path / "storage")
         config = {
@@ -871,8 +871,8 @@ class TestAutoGC:
         warning that N malformed blobs were skipped — silent accumulation
         is exactly the bug this test pins.
         """
-        from mind_meld.cli import _do_gc
         from mind_meld.devices import register_device
+        from mind_meld.gcflow import _do_gc
 
         storage = LocalBackend(tmp_path / "storage")
         config = {

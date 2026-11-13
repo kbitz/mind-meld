@@ -13,10 +13,11 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from mind_meld import statedb
-from mind_meld.cli import _do_gc, app
+from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
+from mind_meld.gcflow import _do_gc
 from mind_meld.retention import (
     _SNAPSHOT_FILENAME_RE,
     _gc_deleted_copies,
@@ -124,9 +125,12 @@ class TestTmpRetention:
         assert outcome.failed == 1
         assert failed_path.exists()
         assert not deleted_path.exists()
-        output = capsys.readouterr().out
-        assert "Temporary files: candidates=2 deleted=1 failed=1" in output
-        assert "Fix permissions or locks" in output
+        captured = capsys.readouterr()
+        assert "Temporary files: candidates=2 deleted=1 failed=1" in captured.out
+        assert (
+            "mm: warning: Retention cleanup was incomplete. Fix permissions or locks; "
+            "use -v for paths and details. Run: mm gc -v"
+        ) in captured.err
 
 
 class TestEventsRetention:
@@ -158,9 +162,12 @@ class TestEventsRetention:
         assert outcome.deleted == 0
         assert outcome.failed == 1
         assert event.exists()
-        output = capsys.readouterr().out
-        assert "Events: candidates=1 deleted=0 failed=1" in output
-        assert "use `-v` for paths and details" in output
+        captured = capsys.readouterr()
+        assert "Events: candidates=1 deleted=0 failed=1" in captured.out
+        assert (
+            "mm: warning: Retention cleanup was incomplete. Fix permissions or locks; "
+            "use -v for paths and details. Run: mm gc -v"
+        ) in captured.err
 
 
 class TestOrphanRetrosDir:
@@ -244,12 +251,22 @@ class TestTokenCacheGcFailureNotice:
 
         assert outcome.skipped == 1
         err = err_buf.getvalue()
-        if not err.startswith("mm: notice: token cache gc failed: OSError: "):
+        err_lines = err.splitlines()
+        if not err_lines or not err_lines[0].startswith(
+            "mm: notice: token cache gc failed: OSError: "
+        ):
             raise AssertionError(f"bad GC prefix in {ascii(err)}")
-        if err.count("\n") != 1:
-            raise AssertionError(f"expected one notice line, got {ascii(err)}")
+        if dry_run:
+            assert len(err_lines) == 1, ascii(err)
+        else:
+            assert len(err_lines) == 2, ascii(err)
+            assert (
+                err_lines[1]
+                == "mm: warning: Retention cleanup was incomplete. Fix permissions or locks; "
+                "use -v for paths and details. Run: mm gc -v"
+            )
         _assert_no_esc_or_c1(err)
-        field = err.split("OSError: ", 1)[1].rstrip("\n")
+        field = err_lines[0].split("OSError: ", 1)[1]
         _assert_plain_notice_field(field, starts_with="denied[red]")
         summary = buf.getvalue()
         assert "Token cache" in summary
@@ -359,9 +376,12 @@ class TestDeletedCopiesReaper:
 
         assert (outcome.candidates, outcome.deleted, outcome.failed) == (2, 0, 2)
         assert (old / "notes" / "gone.md").exists() and (other / "notes" / "gone.md").exists()
-        out = capsys.readouterr().out
-        assert out.count("could not delete") == 2  # one notice per folder, nothing raised
-        assert "Retention cleanup was incomplete" in out
+        captured = capsys.readouterr()
+        assert captured.out.count("could not delete") == 2  # one notice per folder, nothing raised
+        assert (
+            "mm: warning: Retention cleanup was incomplete. Fix permissions or locks; "
+            "use -v for paths and details. Run: mm gc -v"
+        ) in captured.err
 
     def test_a_listing_failure_prints_one_notice_and_changes_nothing(self, monkeypatch, capsys):
         old = _folder(timedelta(days=40))
@@ -456,13 +476,14 @@ class TestMmGcAndRecoveryCopies:
         (notes / "doc.md").write_bytes(b"second version\n")
         assert runner.invoke(app, ["push"]).exit_code == 0
 
-        result = runner.invoke(app, ["gc"])
+        result = runner.invoke(app, ["gc", "-v"])
 
         assert result.exit_code == 0, result.output
         assert not blob.exists(), "setup: gc must have collected the store blob"
         # The copy depends on no store blob.
         assert (copy_dir / "notes" / "doc.md").read_bytes() == b"first version\n"
         assert "Deleted-file copies: candidates=0" in result.output
+        assert result.output.strip().splitlines()[-1] == "Gc: 0 orphaned blobs deleted."
 
     def test_gc_reaps_an_old_folder_and_its_dry_run_only_previews_it(self, tmp_path, monkeypatch):
         self._store(tmp_path, monkeypatch)
@@ -480,7 +501,10 @@ class TestMmGcAndRecoveryCopies:
         applied = runner.invoke(app, ["gc"])
         assert applied.exit_code == 0, applied.output
         assert not old.exists() and (recent / "notes" / "doc.md").exists()
-        assert "Deleted-file copies: candidates=1 deleted=1" in applied.output
+        assert "Deleted-file copies:" not in applied.output
+        assert applied.stdout.strip() == (
+            "Gc: blob collection skipped (own manifest missing); local retention complete."
+        )
 
     def test_a_reaper_failure_does_not_fail_gc_or_remove_anything(self, tmp_path, monkeypatch):
         self._store(tmp_path, monkeypatch)
@@ -496,6 +520,11 @@ class TestMmGcAndRecoveryCopies:
         assert result.exit_code == 0, result.output
         assert (old / "notes" / "doc.md").exists()
         assert "could not delete" in result.output
+        assert (
+            "mm: warning: Retention cleanup was incomplete. Fix permissions or locks; "
+            "use -v for paths and details. Run: mm gc -v"
+        ) in result.output
+        assert "Gc:" not in result.output
 
 
 def _folder_now(suffix: str) -> Path:

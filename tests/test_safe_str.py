@@ -740,10 +740,10 @@ class TestGcMalformedKeyWarning:
     """G1: malformed blob-key warning is a Rich sink; compose both helpers."""
 
     def test_dry_run_warning_inert_and_key_preserved(self, tmp_path, monkeypatch):
-        from mind_meld import cli
-        from mind_meld.cli import _do_gc
+        from mind_meld import gcflow
         from mind_meld.crypto import encrypt
         from mind_meld.devices import register_device
+        from mind_meld.gcflow import _do_gc
         from mind_meld.manifest import serialize_manifest
         from mind_meld.storage.local import LocalBackend
 
@@ -773,14 +773,14 @@ class TestGcMalformedKeyWarning:
 
         buf = io.StringIO()
         monkeypatch.setattr(
-            cli,
+            gcflow,
             "console",
             Console(file=buf, force_terminal=True, width=200, color_system=None),
         )
-        count = _do_gc(config, "test-passphrase", 1024, dry_run=True, verbose=False)
+        result = _do_gc(config, "test-passphrase", 1024, dry_run=True, verbose=False)
         out = buf.getvalue()
 
-        assert count == 0
+        assert result.deleted == 0
         assert "\x1b]52" not in out
         assert "\x1b\\" not in out
         assert "\x07" not in out
@@ -791,10 +791,10 @@ class TestGcMalformedKeyWarning:
         assert storage.get(bkey) == payload
 
     def test_verbose_orphan_key_warning_is_inert(self, tmp_path, monkeypatch):
-        from mind_meld import cli
-        from mind_meld.cli import _do_gc
+        from mind_meld import gcflow
         from mind_meld.crypto import encrypt
         from mind_meld.devices import register_device
+        from mind_meld.gcflow import _do_gc
         from mind_meld.manifest import serialize_manifest
         from mind_meld.storage.local import LocalBackend
 
@@ -829,14 +829,14 @@ class TestGcMalformedKeyWarning:
 
         buf = io.StringIO()
         monkeypatch.setattr(
-            cli,
+            gcflow,
             "console",
             Console(file=buf, force_terminal=True, width=200, color_system=None),
         )
-        count = _do_gc(config, "test-passphrase", 1024, dry_run=True, verbose=True)
+        result = _do_gc(config, "test-passphrase", 1024, dry_run=True, verbose=True)
         out = buf.getvalue()
 
-        assert count == 1
+        assert result.deleted == 1
         assert "\x1b]52" not in out
         assert "\x1b\\" not in out
         assert "\x07" not in out

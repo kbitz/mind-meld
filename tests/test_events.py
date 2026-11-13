@@ -4396,7 +4396,7 @@ def test_repo_over_recapture_budget_is_skipped_with_reason_and_exit_code(
 
     real = runner.invoke(app, ["recapture", "7d"])
     real_text = " ".join(((real.stdout or "") + (real.stderr or "")).split())
-    assert real.exit_code == cli.RECAPTURE_EXIT_PARTIAL == 4, real_text
+    assert real.exit_code == cli.recaptureflow.RECAPTURE_EXIT_PARTIAL == 4, real_text
     assert "Recapture incomplete" in real_text
     assert advice in real_text
 
