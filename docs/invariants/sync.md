@@ -775,7 +775,9 @@ repair missing metadata. Explicit `mm gc` ends with
 `Gc: blob collection skipped (own manifest missing); local retention complete.`
 instead of a deleted-blob count, while normal `mm gc` ends with
 `Gc: <N> orphaned blob(s) deleted.` (per-reaper retention summaries print under
-`-v` / `--dry-run`).
+`-v` / `--dry-run`). When any retention reaper reports a failure or a skip, the
+run ends instead with the shared `mm: warning: Retention cleanup was incomplete ...`
+line and `Run: mm gc -v`, and prints no `Gc:` line.
 A valid empty manifest is distinct and can collect own orphans. Own corrupt or
 newer-format metadata refuses in apply and preview. So does an own manifest held
 only by conflict copies (iCloud, Dropbox or Syncthing) because the canonical is absent or unreadable

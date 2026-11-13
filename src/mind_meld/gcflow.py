@@ -22,17 +22,6 @@ class GcBlobResult:
     collected: bool = True
     tmp_outcome: retention.ReapOutcome = retention.ReapOutcome()
 
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, int) and not isinstance(other, bool):
-            return self.deleted == other
-        if isinstance(other, GcBlobResult):
-            return (self.deleted, self.collected, self.tmp_outcome) == (
-                other.deleted,
-                other.collected,
-                other.tmp_outcome,
-            )
-        return NotImplemented
-
 
 def gc(
     dry_run: bool = False,
@@ -124,6 +113,8 @@ def gc(
                     "gc", "blob collection skipped (own manifest missing); local retention complete"
                 ),
                 soft_wrap=True,
+                markup=False,
+                highlight=False,
             )
         else:
             console.print(
@@ -132,6 +123,8 @@ def gc(
                     f"{core._count(blob_res.deleted, 'orphaned blob', 'orphaned blobs')} deleted",
                 ),
                 soft_wrap=True,
+                markup=False,
+                highlight=False,
             )
     except MindMeldError as e:
         if dry_run:

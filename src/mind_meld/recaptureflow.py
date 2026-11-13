@@ -305,11 +305,8 @@ def recapture(
             n_scanned_ok = n_roots - skipped
             if partial:
                 narrower = "7d" if days > 7 else "1d"
-                console.print(
-                    f"Recapture incomplete: captured {len(records)} commit records "
-                    f"from {n_scanned_ok} of {n_roots} repositories for "
-                    f"{since_day} → {until_day}."
-                )
+                # Cause lines (each with its own remedy) stay on stdout; the
+                # headline and the single final fix are one stderr error.
                 if prepared.walk_errors:
                     n = prepared.walk_errors
                     noun = "repository was" if n == 1 else "repositories were"
@@ -342,12 +339,12 @@ def recapture(
                 else:
                     fix_cmd = "mm diag"
                 core._print_error(
-                    f"Recapture incomplete: captured {len(records)} commit records "
+                    "Recapture incomplete: captured "
+                    f"{core._count(len(records), 'commit record', 'commit records')} "
                     f"from {n_scanned_ok} of {n_roots} repositories for "
                     f"{since_day} → {until_day}.",
                     fix=fix_cmd,
                 )
-                console.print(core._fix_line(fix_cmd))
                 raise typer.Exit(RECAPTURE_EXIT_PARTIAL)
 
             if not records:
@@ -430,4 +427,4 @@ def recapture(
     if should_nudge:
         upgrade.emit_nudge_if_due(config)
     if final_outcome is not None:
-        console.print(final_outcome, soft_wrap=True)
+        console.print(final_outcome, soft_wrap=True, markup=False, highlight=False)

@@ -1981,7 +1981,7 @@ def _auto_install(
         print(
             outputstyle._notice_line(
                 f"automatic update to {result.latest} did not complete ({reason}); "
-                f"if mm is now missing, reinstall with: {reinstall_cmd(install)}.",
+                f"if mm is now missing, reinstall with: {reinstall_cmd(install)}",
                 fix="mm update",
             ),
             file=sys.stderr,

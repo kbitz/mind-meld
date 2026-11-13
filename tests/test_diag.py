@@ -2085,6 +2085,13 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
         result = runner.invoke(app, [command])
         assert result.exit_code == 0, result.output
         assert "mm update" in " ".join(result.output.split())
+    # The recapture bridge reports through the shared notice helper; capture that sink.
+    notices = []
+    monkeypatch.setattr(cli.recaptureflow.core, "_notice", lambda *args, **kw: notices.append(args))
+    # Positive control: this reader's cached unsupported read makes the bridge notify.
+    cli.recaptureflow._notice_recapture_host_usage(cfg, cfg["sync"]["sources"])
+    assert len(notices) == 1, notices
+    notices.clear()
     with monkeypatch.context() as ready:
         ready.setattr(
             reader_spec.owner,
@@ -2096,10 +2103,8 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
             },
         )
         # The recapture bridge must use the same reader's own readiness test.
-        lines = []
-        ready.setattr(cli.recaptureflow.console, "print", lambda *args, **kw: lines.append(args))
         cli.recaptureflow._notice_recapture_host_usage(cfg, cfg["sync"]["sources"])
-        assert lines == []
+        assert notices == []
 
 
 def test_legacy_cursor_consent_omits_cursor_from_status_diag_and_recapture(tmp_path, monkeypatch):
@@ -2119,10 +2124,20 @@ def test_legacy_cursor_consent_omits_cursor_from_status_diag_and_recapture(tmp_p
     assert json_res.exit_code == 0, json_res.output
     payload = json.loads(json_res.stdout)
     assert "cursor" not in payload["host_usage"]
-    lines = []
-    monkeypatch.setattr(cli.recaptureflow.console, "print", lambda *args, **kw: lines.append(args))
+    notices = []
+    monkeypatch.setattr(cli.recaptureflow.core, "_notice", lambda *args, **kw: notices.append(args))
     cli.recaptureflow._notice_recapture_host_usage(cfg, cfg["sync"]["sources"])
-    assert lines == []
+    assert notices == []
+    # Positive control: an enabled reader with a cold cache does make the bridge notify,
+    # so the empty result above comes from the omitted legacy Cursor consent.
+    _enable_capture_sources(tmp_path, readers=("codex",))
+    cfg = load_config()
+    codex_spec = host_registry.HOST_READER_DIAGS["codex"]
+    monkeypatch.setattr(
+        codex_spec.owner, codex_spec.function, lambda **_kw: {"state": "cold", "last_reason": None}
+    )
+    cli.recaptureflow._notice_recapture_host_usage(cfg, cfg["sync"]["sources"])
+    assert len(notices) == 1, notices
 
 
 def test_diag_never_walks_an_unconsented_muse_tree(tmp_path, monkeypatch):

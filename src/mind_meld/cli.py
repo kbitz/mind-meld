@@ -45,10 +45,8 @@ from mind_meld import (
     projectid,
     pullflow,
     pullhistory,
-    pullplan,  # noqa: F401
     recaptureflow,
     resolveflow,
-    retention,  # noqa: F401
     safety,
     sidecar,
     skill_link,
@@ -123,7 +121,6 @@ from mind_meld.devices import (
 )
 from mind_meld.errors import (
     DELETED_FILES_URL,
-    GIT_WALK_FAILURES_URL,  # noqa: F401
     HOST_USAGE_CAPTURE_URL,
     LEDGER_URL,
     ConfigError,
@@ -1583,7 +1580,7 @@ def push(
                             verbose=False,
                             emit_retention_summary=False,
                         )
-                        gc_pruned = gc_res.deleted if hasattr(gc_res, "deleted") else gc_res
+                        gc_pruned = gc_res.deleted
                         if gc_pruned and verbose:
                             console.print(f"  GC: deleted {gc_pruned} orphaned blobs.")
                     except typer.Exit:

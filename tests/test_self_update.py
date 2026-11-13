@@ -3589,7 +3589,7 @@ class TestSyncUpdateDisplay:
         failed_notice = (
             "mm: notice: automatic update to 1.3.0 did not complete (fatal: no route); "
             "if mm is now missing, reinstall with: PIPX_HOME=/tmp/pipx pipx install --force "
-            "git+https://github.com/kbitz/mind-meld.git@latest. "
+            "git+https://github.com/kbitz/mind-meld.git@latest "
             "Run: mm update\n"
         )
         push_verbose_prefix = (

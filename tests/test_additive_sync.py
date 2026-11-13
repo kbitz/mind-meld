@@ -821,8 +821,8 @@ class TestAutoGC:
         storage.put(f"data/dev1/{sha_ref}.enc", b"referenced")
         storage.put(f"data/dev1/{sha_orphan}.enc", b"orphaned")
 
-        count = _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
-        assert count == 1
+        result = _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
+        assert result.deleted == 1
         assert storage.exists(f"data/dev1/{sha_ref}.enc")
         assert not storage.exists(f"data/dev1/{sha_orphan}.enc")
 

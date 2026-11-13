@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from mind_meld import cli, events, events_tail, identity, retention
+from mind_meld import cli, errors, events, events_tail, identity, retention
 from mind_meld.cli import app
 from mind_meld.skills.retro_fleet import aggregator
 
@@ -730,7 +730,7 @@ def test_recapture_dry_run_names_failures_and_benign_skips(tmp_path, monkeypatch
     assert "skipped: /repo/[red]literal — git_error" in text
     assert "no commits yet (benign)" in text
     assert f"skipped: {prepared.root_discovery.roots[2]} — raised" in text
-    assert cli.GIT_WALK_FAILURES_URL in text
+    assert errors.GIT_WALK_FAILURES_URL in text
     assert "\x1b" not in result.stdout
 
 
@@ -752,7 +752,7 @@ def test_recapture_dry_run_reports_an_unexpected_walk_exception(tmp_path, monkey
     assert result.exit_code == 0, result.output
     text = " ".join(result.stdout.split())
     assert f"skipped: {repo} — raised" in text
-    assert cli.GIT_WALK_FAILURES_URL in text
+    assert errors.GIT_WALK_FAILURES_URL in text
 
 
 @pytest.mark.parametrize("rows,reasons", [(False, ()), (True, ("no_commits",))])
@@ -761,7 +761,7 @@ def test_recapture_dry_run_without_failures_has_no_remedy_url(tmp_path, monkeypa
     result = runner.invoke(app, ["recapture", "--dry-run"])
     assert result.exit_code == 0, result.output
     text = " ".join(result.stdout.split())
-    assert cli.GIT_WALK_FAILURES_URL not in text
+    assert errors.GIT_WALK_FAILURES_URL not in text
     if not rows:
         assert "skipped:" not in text
 
@@ -788,7 +788,7 @@ def test_recapture_partial_advice_matches_failure(
     assert ("Retry a narrower window: mm recapture 7d" in text) == narrower
     if check_failures:
         assert "then retry mm recapture 30d" in text
-        assert cli.GIT_WALK_FAILURES_URL in text
+        assert errors.GIT_WALK_FAILURES_URL in text
         assert "1 repository was skipped because the Git walk failed" in text
     if "budget_abort" in reasons:
         assert "1 repository was skipped because the Git walk exceeded its budget" in text

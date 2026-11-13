@@ -777,10 +777,10 @@ class TestGcMalformedKeyWarning:
             "console",
             Console(file=buf, force_terminal=True, width=200, color_system=None),
         )
-        count = _do_gc(config, "test-passphrase", 1024, dry_run=True, verbose=False)
+        result = _do_gc(config, "test-passphrase", 1024, dry_run=True, verbose=False)
         out = buf.getvalue()
 
-        assert count == 0
+        assert result.deleted == 0
         assert "\x1b]52" not in out
         assert "\x1b\\" not in out
         assert "\x07" not in out
@@ -833,10 +833,10 @@ class TestGcMalformedKeyWarning:
             "console",
             Console(file=buf, force_terminal=True, width=200, color_system=None),
         )
-        count = _do_gc(config, "test-passphrase", 1024, dry_run=True, verbose=True)
+        result = _do_gc(config, "test-passphrase", 1024, dry_run=True, verbose=True)
         out = buf.getvalue()
 
-        assert count == 1
+        assert result.deleted == 1
         assert "\x1b]52" not in out
         assert "\x1b\\" not in out
         assert "\x07" not in out

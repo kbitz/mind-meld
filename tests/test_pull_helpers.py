@@ -3064,8 +3064,6 @@ class TestApplyExceptionBoundary53A:
 
     @pytest.mark.parametrize("error", [TypeError, ValueError, OverflowError, OSError])
     def test_gate_and_prediction_degrade(self, ordered_apply, monkeypatch, capsys, error):
-        from mind_meld import cli
-
         base, prepare = ordered_apply
         (base / "notes.md").write_bytes(b"local")
 
@@ -3073,9 +3071,9 @@ class TestApplyExceptionBoundary53A:
             raise error("bad clock")
 
         monkeypatch.setattr(pullflow, "mtime_from_path", boom)
-        monkeypatch.setattr(cli.pullplan, "mtime_from_path", boom)
+        monkeypatch.setattr(pullplan, "mtime_from_path", boom)
         assert (
-            cli.pullplan._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer")}, base)
+            pullplan._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer")}, base)
             == "conflict"
         )
         run, _, _, _ = prepare([("notes.md", b"peer", 1234), ("later.txt", b"later", None)])
@@ -3087,12 +3085,11 @@ class TestApplyExceptionBoundary53A:
         )
 
     def test_int_mtime_reaches_direct_gate(self, ordered_apply, capsys):
-        from mind_meld import cli
 
         base, prepare = ordered_apply
         (base / "notes.md").write_bytes(b"local")
         assert (
-            cli.pullplan._predict_pull_outcome(
+            pullplan._predict_pull_outcome(
                 "notes.md", {"sha256": _sha(b"peer"), "mtime": 1234}, base
             )
             == "conflict"
@@ -3102,13 +3099,12 @@ class TestApplyExceptionBoundary53A:
         assert "timestamp could not be interpreted" in capsys.readouterr().out
 
     def test_naive_mtime_conflicts_and_later_file_arrives(self, ordered_apply, capsys):
-        from mind_meld import cli
 
         base, prepare = ordered_apply
         (base / "notes.md").write_bytes(b"local")
         naive = "2026-09-08T12:00:00"
         assert (
-            cli.pullplan._predict_pull_outcome(
+            pullplan._predict_pull_outcome(
                 "notes.md", {"sha256": _sha(b"peer"), "mtime": naive}, base
             )
             == "conflict"

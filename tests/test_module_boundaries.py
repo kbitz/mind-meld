@@ -1848,7 +1848,7 @@ def test_diff_gc_recapture_bindings_have_one_owner():
     moved = (
         (GCFLOW_DEFINITIONS - {"gc"})
         | (RECAPTUREFLOW_DEFINITIONS - {"recapture"})
-        | {"parse_blob_key", "storage_keys"}
+        | {"parse_blob_key", "storage_keys", "pullplan", "retention", "GIT_WALK_FAILURES_URL"}
     )
     for name in moved:
         assert not hasattr(cli, name), f"{name}: use its expected owner; no cli re-export"

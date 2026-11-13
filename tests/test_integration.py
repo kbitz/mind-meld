@@ -3907,7 +3907,8 @@ class TestGCSafety:
 
         monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
         monkeypatch.setattr(LocalBackend, "delete", delete)
-        assert cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, False) == 0
+        gc_res = cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, False)
+        assert (gc_res.deleted, gc_res.collected) == (0, False)
         before = _preview_tree(env["claude"].parent, pin=dry_run)
         result = runner.invoke(app, ["gc"] + (["--dry-run"] if dry_run else []))
         assert result.exit_code == 0, result.output
@@ -3948,7 +3949,10 @@ class TestGCSafety:
             return original(storage, prefix)
 
         monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
-        assert cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, False) == 1
+        assert (
+            cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, False).deleted
+            == 1
+        )
         assert storage_keys.data_prefix("dev-a") == "data/dev-a/"
         assert listings == ["data/dev-a/"]
         assert backend.exists(own) == dry_run
@@ -3991,7 +3995,10 @@ class TestGCSafety:
             return list(keys)
 
         monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
-        assert cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, True) == 1
+        assert (
+            cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, True).deleted
+            == 1
+        )
         output = capsys.readouterr().out
         assert "malformed (skipped)" in output and "inject" in output
         assert "\x1b" not in output and "\x07" not in output
@@ -4026,7 +4033,10 @@ class TestGCSafety:
 
         monkeypatch.setattr(LocalBackend, "get", get)
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", forbidden)
-        assert cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False) == 1
+        assert (
+            cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False).deleted
+            == 1
+        )
         assert not backend.exists(own)
         assert backend.get(peer) == b"peer"
 
@@ -4262,10 +4272,8 @@ class TestGCSafety:
                 cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False)
         else:
             expected = 1 if late == "more-refs" else 0
-            assert (
-                cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False)
-                == expected
-            )
+            gc_res = cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False)
+            assert gc_res.deleted == expected
         assert calls == ["dev-a", "dev-a"]
         orphan_key = storage_keys.blob_key("dev-a", orphan)
         survivors = dict(blobs)
@@ -4294,7 +4302,8 @@ class TestGCSafety:
             with pytest.raises(typer.Exit):
                 cli_module.gcflow._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
         else:
-            assert cli_module.gcflow._do_gc(config, PASSPHRASE, MEMORY_KB, False, False) == 0
+            gc_res = cli_module.gcflow._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
+            assert (gc_res.deleted, gc_res.collected) == (0, False)
         assert "Mac [work] (dev-a)" in buf.getvalue()
         assert "\\[work]" not in buf.getvalue()
 
@@ -10759,7 +10768,7 @@ def test_recapture_outcomes_and_verbose_details(preview62, monkeypatch, case, ve
             "origin": _mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
             "projects": [
                 {
-                    "remote": "https://github.com/kbitz/mind-meld.git",
+                    "remote": "https://github.com/user/mm.git",
                     "local_path": str(repo),
                     "commits": [commit],
                 }
@@ -10780,7 +10789,7 @@ def test_recapture_outcomes_and_verbose_details(preview62, monkeypatch, case, ve
                 "origin": _mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
                 "projects": [
                     {
-                        "remote": "https://github.com/kbitz/mind-meld.git",
+                        "remote": "https://github.com/user/mm.git",
                         "local_path": str(repo),
                         "commits": [commit],
                     }
@@ -10825,6 +10834,69 @@ def test_recapture_outcomes_and_verbose_details(preview62, monkeypatch, case, ve
             "mm: notice: Retros window by commit date, not capture time. "
             "Run: mm retro-fleet 14d" in result.stderr
         )
+
+
+def test_partial_recapture_prints_one_error_with_its_cause_and_one_final_fix(
+    preview62, monkeypatch
+):
+    env = preview62
+    now = datetime.now(timezone.utc)
+    events_dir = env["events"] / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    repo = env["claude"]
+    prepared = events_tail.RecaptureCapture(
+        git_rows=[],
+        root_discovery=_mm_events.GitRootDiscovery((repo, repo.parent), (), False),
+        walk_budget_aborts=0,
+        walk_errors=1,
+        events_dir=events_dir,
+        since=now - timedelta(days=14),
+        until=now,
+    )
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: prepared)
+    result = runner.invoke(app, ["recapture", "14d"])
+    report = (result.stdout, result.stderr)
+    assert result.exit_code == cli_module.recaptureflow.RECAPTURE_EXIT_PARTIAL == 4, report
+    both = result.stdout + result.stderr
+    assert both.count("Recapture incomplete:") == 1, report
+    assert both.count("Run: mm recapture --dry-run") == 1, report
+    assert result.stderr.splitlines()[-1] == "Run: mm recapture --dry-run", report
+    assert (
+        "mm: error: Recapture incomplete: captured 0 commit records from 1 of 2 repositories"
+        in result.stderr
+    ), report
+    assert "skipped because the Git walk failed" in result.stdout, report
+    assert "Recapture:" not in result.stdout, report
+
+
+def test_recapture_outcome_stays_plain_on_a_terminal(preview62, monkeypatch):
+    from io import StringIO
+
+    env = preview62
+    now = datetime.now(timezone.utc)
+    events_dir = env["events"] / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    prepared = events_tail.RecaptureCapture(
+        git_rows=[],
+        root_discovery=_mm_events.GitRootDiscovery((env["claude"],), (), False),
+        walk_budget_aborts=0,
+        walk_errors=0,
+        events_dir=events_dir,
+        since=now - timedelta(days=14),
+        until=now,
+    )
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: prepared)
+    buf = StringIO()
+    monkeypatch.setattr(
+        cli_module.recaptureflow,
+        "console",
+        Console(file=buf, force_terminal=True, color_system="standard", width=200),
+    )
+    result = runner.invoke(app, ["recapture", "14d"])
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    outcome = [line for line in buf.getvalue().splitlines() if line.startswith("Recapture:")]
+    assert len(outcome) == 1, buf.getvalue()
+    assert "\x1b[" not in outcome[0], ascii(outcome[0])
 
 
 @pytest.mark.parametrize("state", ["empty", "current", "migration"])
