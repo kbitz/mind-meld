@@ -44,176 +44,36 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/events_tail.py|tests/test_host_usage_snapshot.py|tests/test_events.py] Test gap: Capture progress write failure isolation
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Progress-cache read failures are covered, but save and clear failures are not injected while checking that event append, push outcome and stderr remain unchanged.
-- **Hypothesis (untested):** Extend a lifecycle fixture with a failing progress-cache update and assert the capture still publishes normally. Re-verify the reachable boundary first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py:1002
-- **Evidence:** Read-only coverage audit at `5596cb5` found 28 of 30 changed paths protected; no write-failure defect was reproduced.
-- **Context:** /review-and-prep for Track 131A, branch `mmm/800c8955`, 2026-11-12; PR link belongs to the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_host_usage_snapshot.py|tests/test_events.py] Test gap: Capture progress sibling section retention
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Host and Git lifecycle fixtures seed their sections separately, leaving interleaved saves and clears without a direct assertion that the other section and its timestamp survive.
-- **Hypothesis (untested):** Seed both sections and alternate host and Git updates, checking that each preserves the untouched section. Re-verify the behavior first; this would not prove live process concurrency.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py:1102
-- **Evidence:** Read-only coverage audit at `5596cb5` found no dedicated sibling-retention case and reproduced no failure.
-- **Context:** /review-and-prep for Track 131A, branch `mmm/800c8955`, 2026-11-12; PR link belongs to the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_fleet_aggregator.py] Base issue: Historical Git budget warning survives a completed capture
-- **Base issue:** present at merge base `94b3e25`; filed under `blocking=shown`.
-- **Description:** An aborted walk followed by a clean in-window capture still leaves the earlier abort in the window's `git_budget` warning. This Track preserves historical abort accounting and no-field wording.
-- **Evidence:** The same isolated two-row probe at `94b3e25` and `8cb9d19` returned `budget_aborts={"dev-a": 2}`, no catching-up devices and no uncovered interval. Review evidence capture 002 holds both results.
-- **Upstream severity:** CRITICAL
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:1725
-- **Context:** /review-and-prep for Track 131A, branch `mmm/800c8955`, 2026-11-12; the PR link belongs to its receipt. Revisit when this historical warning confuses an owner retro or the next Track changes Git coverage remedies.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py|tests/test_self_update.py] Test gap: Deferred update output stream failures
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The deferred update emitter suppresses stream flush/write failures, but no test populates its update display while the output stream fails.
-- **Hypothesis (untested):** Extend terminal sync coverage with an output stream that fails during the deferred update line, then assert no retry or sync exit-code change. Re-verify the reachable seam first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/cli.py:1214
-- **Evidence:** Read-only coverage audit of Track 130A found 29 of 30 changed paths protected, with no failure reproduced for this path.
-- **Context:** /review-and-prep for Track 130A, branch `mmm/29c37ce6`, at `459828f`, 2026-11-12; PR link belongs to its review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_usage_presentation.py] Test gap: Malformed registry container guards
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Peer-version tests vary version values and conflicting records, but do not directly exercise malformed registry containers, records or device IDs.
-- **Hypothesis (untested):** Extend the registry evidence matrix to confirm invalid shapes remain unknown; re-verify the reachable inputs first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:204
-- **Evidence:** Read-only coverage audit of Track 129A found untested early guards, with no product failure reproduced.
-- **Context:** /review-and-prep for Track 129A, branch `mmm/bbafbd93`, 2026-11-12; PR link belongs to its review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_fleet_cli.py] Test gap: Pricing confirmation model summary cap
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Successful pricing confirmations have exact-output coverage with at most two model IDs, but no case reaches the eight-name display cap and omitted-count suffix.
-- **Hypothesis (untested):** Extend the existing confirmation test with nine distinct IDs and assert eight sorted names, `(+1 more)`, all nine persisted cards, one stderr outcome and unchanged stdout; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:5085
-- **Evidence:** Testing specialist and coverage audit of `e2093c2` found the gap statically; the focused 1,002-test run passed and no incorrect cap behavior was reproduced.
-- **Context:** /review-and-prep for Track 128A, branch `mmm/b55d92a7`, 2026-11-11; the PR link belongs to the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/token_usage.py|tests/test_token_usage.py] Recheck Fable and Mythos 5.2 cards when observed
-- **Description:** The vendor pricing page lists Fable/Mythos 5.2 at rates different from the bundled family fallback. Track 128A is limited to three Claude 5.5 cards; no fleet use of the 5.2 IDs was established during its review.
-- **Hypothesis (untested):** If either ID appears in the owner's fleet, verify its exact spelling and current vendor rates before adding a distinct card and verification entry.
-- **Evidence:** Read-only adversarial review of `e2093c2` and the Anthropic pricing page on 2026-11-11. Current fallback and extrapolation notices behave as designed; this is not a demonstrated regression.
-- **Context:** /review-and-prep for Track 128A. This can wait for observed fleet use; that observation is the revisit trigger, not the model's availability alone.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/core.py|tests/test_output_style.py] Test gap: Shared diagnostic stream failures
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Shared warnings and notices have exact-output coverage, but no direct check of a stream failing during their write or flush.
-- **Hypothesis (untested):** Extend existing output tests with a failing stream and verify command results and completed effects survive; re-verify the current sink first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/core.py:168
-- **Evidence:** Read-only coverage audit at `e1c64b0`; existing broken-stream coverage targets the final outcome emitter. No diagnostic-stream failure was reproduced.
-- **Context:** /review-and-prep for Track 129B, branch `mmm/c2c48f3f`, 2026-11-11; PR link belongs to the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py|tests/test_output_style.py] Test gap: No-argument help keeps framework behavior
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Parser tests cover explicit help and invalid options or commands, but not the root invocation with no arguments and its NoArgsIsHelpError exception path.
-- **Hypothesis (untested):** Extend the parser table with a no-argument invocation and verify ordinary help and its exit semantics without a shared error; re-verify the installed framework behavior first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/cli.py:274
-- **Evidence:** Read-only coverage audit at `e1c64b0`; repository search found no no-argument invocation test. No incorrect help output or exit was demonstrated.
-- **Context:** /review-and-prep for Track 129B, branch `mmm/c2c48f3f`, 2026-11-11; PR link belongs to the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/attemptlog.py|tests/test_attemptlog.py] Test gap: Catch-up detail vocabulary boundaries
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The saved-run roundtrip covers Codex and Git positive counts plus a path-bearing suffix, but not every registered reader, unknown readers or malformed counts.
-- **Hypothesis (untested):** Extend the existing roundtrip table with all supported readers and zero, negative, nondecimal and near-match inputs; verify the current exact pattern first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/attemptlog.py:421
-- **Evidence:** Static repair-delta coverage audit at `e1be42a`; exact regex and identical four-reader producer/allowlist sets inspected, no incorrect acceptance or rejection demonstrated.
-- **Context:** /review-and-prep for PR #310, 2026-11-11. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-
-### [review:files=src/mind_meld/attemptlog.py|tests/test_attemptlog.py] Test gap: Pure formatter lock-access guard
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The run-detail purity regression spies on diagnostic inventories but not the separate Codex cache-lock probe.
-- **Hypothesis (untested):** Extend that test with a lock-access spy so reintroducing a lock probe without an inventory is independently detected; re-verify the current pure formatter first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** tests/test_attemptlog.py:697
-- **Evidence:** Outside challenge of `e1be42a`; current formatter has no filesystem or lock calls and no defect was reproduced. Existing test failed before the consent repair and passed afterward.
-- **Context:** /review-and-prep for PR #310, 2026-11-11. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-
-### [review:files=src/mind_meld/core.py|tests/test_integration.py] Test gap: Delayed measured progress retains counters
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Delayed startup renders the phase and counters retained before the display becomes visible.
-- **Hypothesis (untested):** Extend a terminal test with counter advances before forcing the delay to expire.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/core.py
-- **Evidence:** Static coverage audit at `97ae07a`: no specific regression-catching test found, no failure reproduced for this behavior.
-- **Context:** /review-and-prep for Track 125A, branch `mmm/f1aea97f`, 2026-11-11; PR link will be in the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_host_usage_snapshot.py] Test gap: Reader completion counts on failed and absent reads
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Raised, absent and incomplete readers each advance the transient completed-reader count.
-- **Hypothesis (untested):** Extend the existing reader progress fixture with each continue path.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py
-- **Evidence:** Static coverage audit at `97ae07a`: no specific regression-catching test found, no failure reproduced for this behavior.
-- **Context:** /review-and-prep for Track 125A, branch `mmm/f1aea97f`, 2026-11-11; PR link will be in the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_host_usage_snapshot.py] Test gap: Nested progress scope restores its prior sink
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Nested or exception-exiting progress scopes restore the previous ContextVar sink.
-- **Hypothesis (untested):** Extend the scope test with nested and exception exits.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py
-- **Evidence:** Static coverage audit at `97ae07a`: no specific regression-catching test found, no failure reproduced for this behavior.
-- **Context:** /review-and-prep for Track 125A, branch `mmm/f1aea97f`, 2026-11-11; PR link will be in the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_host_usage_snapshot.py] Test gap: Deadline diagnostic fallback preserves a truthful remedy
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Lookup errors, a busy Codex cache and malformed diagnostic counts keep the existing unknown-count remedy.
-- **Hypothesis (untested):** Exercise failing and malformed lookup results and the nonblocking cache-lock branch.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py
-- **Evidence:** Static coverage audit at `97ae07a`: no specific regression-catching test found, no failure reproduced for this behavior.
-- **Context:** /review-and-prep for Track 125A, branch `mmm/f1aea97f`, 2026-11-11; PR link will be in the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_silent_failure_contract.py] Test gap: Git pending count cutoff fallbacks
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** A zero post-commit count retries the old cutoff and a skipped append counts against the original cutoff.
-- **Hypothesis (untested):** Extend the degradation fixture with zero-count and append-not-committed outcomes.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py
-- **Evidence:** Static coverage audit at `97ae07a`: no specific regression-catching test found, no failure reproduced for this behavior.
-- **Context:** /review-and-prep for Track 125A, branch `mmm/f1aea97f`, 2026-11-11; PR link will be in the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/statusflow.py|tests/test_statusflow.py] Test gap: Zero pending capture omits catching-up prefix
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The status line does not invent a positive catching-up count when pending repositories is zero.
-- **Hypothesis (untested):** Extend the status fixture with zero pending and an incomplete discovery state.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/statusflow.py
-- **Evidence:** Static coverage audit at `97ae07a`: no specific regression-catching test found, no failure reproduced for this behavior.
-- **Context:** /review-and-prep for Track 125A, branch `mmm/f1aea97f`, 2026-11-11; PR link will be in the review receipt. Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
+None.
 
 ## Drain records
+
+### Roadmap regeneration — 2026-11-13
+
+Verified against `bbbe943` (v1.12.42), from the approved manager brief. Seven merged Tracks recorded independently; Group 132 is pinned by active Track 132A. Former Track 125B becomes 132B under the packer; its real-machine observation remains open. Four brief bugs placed as 132C, 132D, 132E and 134A; 133A remains blocked by 132A and satisfied 130A.
+
+| Inbox item | Disposition |
+|---|---|
+| Test gap: Capture progress write failure isolation | defer |
+| Test gap: Capture progress sibling section retention | defer |
+| Base issue: Historical Git budget warning survives a completed capture | kill — unobserved; reversible; reopen if it manifests (only a crafted two-row probe) |
+| Test gap: Deferred update output stream failures | place |
+| Test gap: Malformed registry container guards | place |
+| Test gap: Pricing confirmation model summary cap | defer |
+| Recheck Fable and Mythos 5.2 cards when observed | defer |
+| Test gap: Shared diagnostic stream failures | defer |
+| Test gap: No-argument help keeps framework behavior | defer |
+| Test gap: Catch-up detail vocabulary boundaries | defer |
+| Test gap: Pure formatter lock-access guard | defer |
+| Test gap: Delayed measured progress retains counters | defer |
+| Test gap: Reader completion counts on failed and absent reads | defer |
+| Test gap: Nested progress scope restores its prior sink | defer |
+| Test gap: Deadline diagnostic fallback preserves a truthful remedy | defer |
+| Test gap: Git pending count cutoff fallbacks | defer |
+| Test gap: Zero pending capture omits catching-up prefix | place |
+
+17 drained: 3 placed, 13 deferred, 1 killed, 0 discharged. Future: one gap promoted into 132D; one unobserved reversible Cursor-era remedy defect killed (reopen if manifested); 13 inbox deferrals added. Staying-deferred text preserved. No bump under SPEC documentation-only policy.
+
 
 ### Roadmap regeneration — 2026-11-10 (SPEC O8 amended: output consistency; Tracks 123A, 123B, 124A and 127A recorded)
 
