@@ -8,6 +8,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/initflow.py` — `init` / (transition seam)
 - `src/mind_meld/cli.py` — `_auto_command_setup` / `push` / `pull` / `autopull` / `autopush` / `recapture` / `update` / `_run_update_with_progress` / `_sync_update` / `_emit_update_lines` / (transition and update/nudge seams)
 - `src/mind_meld/statusflow.py` — `status` / `diag` / (cached upgrade surfacing)
+- `src/mind_meld/events_tail.py` — `_capture_skip_phrase` / (cached upgrade surfacing on attended push capture)
 - `src/mind_meld/config.py` — the `[upgrade]` defaults in `_apply_defaults` (`auto_check`, `auto_install`)
 - `src/mind_meld/pullhistory.py` — `append_self_upgrade` and `verb: "self-upgrade"` row class
 - `pyproject.toml` — version source of truth; bumping triggers the next-tag release
@@ -478,7 +479,7 @@ which filters with `packaging.Version` (skipping `is_prerelease` and
 and takes the maximum version. Why tags rather than `pyproject.toml` on `main`:
 `main` HEAD may be mid-bump or contain WIP that has not been tagged for release.
 
-**3 hook seams across core.py, cli.py, initflow.py and statusflow.py:**
+**3 hook seams across core.py, cli.py, initflow.py, statusflow.py and events_tail.py:**
 1. **Transition detection** (`upgrade.run_transition_hook`) called AFTER each of
    3 load_config sites: `core._get_config`, `cli._auto_command_setup`, `initflow.init`.
    `_get_config(*, read_only: bool)` has no default: every caller states its
@@ -514,8 +515,13 @@ and takes the maximum version. Why tags rather than `pyproject.toml` on `main`:
    install attempt, and a `fix:` line when a failure cause is recorded. Both
    commands use the view for unsupported-reader remedies. Diag guards the read
    and keeps the update remedy if it fails; `diag --json` does not read the view.
-   Push, pull, autopull, and autopush keep the refreshing `check_for_upgrade`
-   path.
+   Attended push capture reads the same view for that remedy:
+   `cli._capture_attended_usage` passes `config` to
+   `events_tail._capture_skip_phrase`, which calls `cached_upgrade_view` once
+   per permanent (`unsupported`) reader skip under the push lock, guarded like
+   diag, and changes only that reader's phrase in the `mm push --verbose`
+   capture warning. Push, pull, autopull, and autopush keep the refreshing
+   `check_for_upgrade` path in their update tails; push's runs after capture.
 
 **Lock-order invariants (load-bearing):** NEVER acquire mm lockfile while holding
 upgrade-state's flock; RELEASE upgrade-state's flock BEFORE appending to

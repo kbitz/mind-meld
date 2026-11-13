@@ -1194,7 +1194,7 @@ behavior. Ordinary directories still sync; there is no opt-out setting.
 
 Attended `mm push --verbose` and the `--dry-run` preview report each skipped root once:
 `skipped: nested git repository <source>:<relative-root>`. `mm status` shows
-the exact selected-source count plus `mm diag` for details; diag lists paths. `mm autopush` stays silent about them.
+the exact selected-source count plus `mm diag` for details; diag lists paths. `mm autopush` and `mm recapture` stay silent about them.
 `mm diag --json` adds `sync_scope`, whose `skipped_nested_repositories` maps
 source names to relative roots (empty lists mean none found; null means config
 unavailable). Inspection is best-effort and never reads checkout contents.
@@ -2538,7 +2538,7 @@ Run: mm push
 | State | You see | Do |
 |---|---|---|
 | Held (still changing, vanished or grew) | `Push: N file(s) held.` in the outcome; *not yet synced* paths with `--verbose` | Nothing; the prior version stays published. Exclude it if it is always being written. |
-| Frozen (inside a nested git checkout) | `skipped: nested git repository`; published entries kept | See [Nested git repositories](#nested-git-repositories) for resuming sync or excluding the subtree |
+| Frozen (inside a nested git checkout) | `skipped: nested git repository` with `--verbose` or `--dry-run`; published entries kept | See [Nested git repositories](#nested-git-repositories) for resuming sync or excluding the subtree |
 | Skipped or excluded | `skipped:` lines with `--verbose` | Raise `sync.max_file_size` or adjust the glob |
 | Tombstoned | the deletion is published with the deleted version's hash | Nothing. Other Macs holding exactly those bytes move their copy to a 30-day recovery folder ([Recovering a deleted file](#recovering-a-deleted-file)) |
 | Refused | `mm: error: Push refused [snapshot-refused]: Cannot publish: …` followed by `Run: <command>`, previous snapshot kept | The fix in the message. Blobs uploaded before the stop remain as orphans until GC. |
