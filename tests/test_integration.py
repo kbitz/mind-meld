@@ -3393,6 +3393,151 @@ class TestInversion5E:
         assert migrated.exists()
         assert migrated.read_bytes() == b"local content"
 
+    def _setup_empty_conflicts_env(self, tmp_path, monkeypatch):
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        memory = claude_dir / "projects" / "-Users-user-app" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "role.md").write_bytes(b"canonical content")
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-self", "Self")
+        config_path = self._make_claude_config(
+            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
+        )
+        self._activate(monkeypatch, config_path)
+        lock_path = tmp_path / "lock"
+        monkeypatch.setattr("mind_meld.config.LOCK_PATH", lock_path)
+        monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", lock_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr(
+            cli_module,
+            "list_devices",
+            lambda *a, **kw: pytest.fail("empty resolve must not call list_devices"),
+        )
+        monkeypatch.setattr(
+            cli_module.resolveflow,
+            "_resolve_interactive_loop",
+            lambda *a, **kw: pytest.fail("empty resolve must not call _resolve_interactive_loop"),
+        )
+        return memory, sidecar_dir, lock_path
+
+    @pytest.mark.parametrize(
+        ("command", "expected_stdout"),
+        [
+            ("conflicts", "Conflicts: no conflict files.\n"),
+            ("resolve", "Resolve: no conflict files.\n"),
+        ],
+    )
+    def test_empty_conflicts_and_resolve_outcomes(
+        self, tmp_path, monkeypatch, command, expected_stdout
+    ):
+        from mind_meld import lockfile
+
+        _, _, lock_path = self._setup_empty_conflicts_env(tmp_path, monkeypatch)
+        real_get_config = cli_module.core._get_config
+        real_find = cli_module.resolveflow._find_conflict_files
+        real_release = cli_module.release_lock
+        config_calls = []
+        find_calls = []
+        release_calls = []
+
+        def spy_get_config(*, read_only: bool):
+            config_calls.append(read_only)
+            return real_get_config(read_only=read_only)
+
+        def spy_find(config, *, migrate_pre_inversion: bool = False):
+            find_calls.append(migrate_pre_inversion)
+            return real_find(config, migrate_pre_inversion=migrate_pre_inversion)
+
+        def spy_release():
+            release_calls.append(True)
+            real_release()
+
+        monkeypatch.setattr(cli_module.core, "_get_config", spy_get_config)
+        monkeypatch.setattr(cli_module.resolveflow, "_find_conflict_files", spy_find)
+        monkeypatch.setattr(cli_module, "release_lock", spy_release)
+
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        assert result.stdout == expected_stdout
+        assert result.stderr == ""
+
+        marker = cli_module.resolveflow._inversion_marker_path()
+        assert not marker.exists()
+        if command == "conflicts":
+            assert config_calls == [True]
+            assert find_calls == [False]
+            assert release_calls == []
+            assert not lock_path.exists()
+        else:
+            assert config_calls == [False]
+            assert find_calls == [True]
+            assert len(release_calls) == 1
+            lockfile.acquire_lock()
+            lockfile.release_lock()
+
+    @pytest.mark.parametrize(
+        ("command", "expected_stdout"),
+        [
+            ("conflicts", "Conflicts: no conflict files.\n"),
+            ("resolve", "Resolve: no conflict files.\n"),
+        ],
+    )
+    def test_empty_conflicts_and_resolve_forced_terminal_plain_output(
+        self, tmp_path, monkeypatch, command, expected_stdout
+    ):
+        self._setup_empty_conflicts_env(tmp_path, monkeypatch)
+        buf = io.StringIO()
+        err_buf = io.StringIO()
+        forced_out = Console(file=buf, force_terminal=True, color_system="standard", width=200)
+        forced_err = Console(file=err_buf, force_terminal=True, color_system="standard", width=200)
+        for mod in (cli_module, core, cli_module.resolveflow):
+            monkeypatch.setattr(mod, "console", forced_out, raising=False)
+            monkeypatch.setattr(mod, "stderr_console", forced_err, raising=False)
+
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        rendered = buf.getvalue()
+        assert rendered == expected_stdout
+        assert "\x1b" not in rendered
+        assert "[green]" not in rendered
+        assert err_buf.getvalue() == ""
+
+    @pytest.mark.parametrize("has_other_conflict", [False, True])
+    def test_resolve_unmatched_path_errors_without_empty_outcome_and_releases_lock(
+        self, tmp_path, monkeypatch, has_other_conflict
+    ):
+        from mind_meld import lockfile
+
+        memory, _, _ = self._setup_empty_conflicts_env(tmp_path, monkeypatch)
+        if has_other_conflict:
+            legacy = memory / "role.sync-conflict-20260420-120000-devA1234.md"
+            legacy.write_bytes(b"local content")
+        real_release = cli_module.release_lock
+        release_calls = []
+
+        def spy_release():
+            release_calls.append(True)
+            real_release()
+
+        monkeypatch.setattr(cli_module, "release_lock", spy_release)
+        missing_path = memory / "missing.sync-conflict-20260420-120000-v1-devA1234.md"
+
+        result = runner.invoke(app, ["resolve", str(missing_path)])
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "no conflict files" not in result.output.lower()
+        assert result.stderr == f"mm: error: No conflict file matching: {missing_path}\n"
+        assert len(release_calls) == 1
+        if has_other_conflict:
+            assert (memory / "role.sync-conflict-v0-20260420-120000-devA1234.md").exists()
+        lockfile.acquire_lock()
+        lockfile.release_lock()
+
 
 class TestShipFixes5E:
     """Pre-landing review fixes (5E ship-fix). Pinned per IRON RULE.
@@ -10206,6 +10351,15 @@ def test_write_free_contract62(preview62, argv, tmp_path, monkeypatch):
     exemptions = (preview62["identity"],) if argv[0] == "retro-fleet" else ()
     result = preview62["audit"](list(argv), exemptions=exemptions)
     assert result.exit_code == 0, (result.output, result.exception)
+
+
+def test_empty_conflicts_write_free_audit62(preview62):
+    for conflict in preview62["claude"].rglob("*.sync-conflict-*"):
+        conflict.unlink()
+    result = preview62["audit"](["conflicts"])
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert result.stdout == "Conflicts: no conflict files.\n"
+    assert result.stderr == ""
 
 
 @pytest.mark.parametrize("argv", INSPECTION_CASES62 + PREVIEW_CASES62)
