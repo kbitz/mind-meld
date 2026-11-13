@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.43 | 2026-11-13 | `mm recapture` omits nested-repository notices, and verbose push diagnostics use the same cached release information as `mm status` when suggesting a remedy for unreadable Antigravity usage. |
 | 1.12.42 | 2026-11-12 | `mm retro-fleet` now says a peer's host-usage reader or Git walk is catching up when that peer's latest push stopped on its scan deadline with work left, and points to that machine's next attended `mm push`. |
 | 1.12.41 | 2026-11-12 | Setup, device approval, source changes, conflict resolution and pull warnings use the shared outcome and diagnostic forms. |
 | 1.12.40 | 2026-11-12 | `mm update` now shows the same clearing spinner as `mm push` and `mm pull` and ends with one result line, and an attended `mm push` or `mm pull` that updates mm shows the update in its spinner and ends with `Updated mm <old> → <new>.` |

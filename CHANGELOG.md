@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.43] - 2026-11-13
+
+`mm recapture` omits nested-repository notices, and verbose push diagnostics use the same cached release information as `mm status` when suggesting a remedy for unreadable Antigravity usage.
+
+### Changed
+
+- `mm recapture` omits nested-repository notices, and verbose push diagnostics use the same cached release information as `mm status` when suggesting a remedy for unreadable Antigravity usage.
+- `mm recapture` no longer prints a "skipped: nested git repository" line for each nested checkout.
+- When the cached release check says this mm is the newest release, `mm push --verbose` says no newer mm can read an unsupported host record format yet, matching `mm status`, instead of suggesting `mm update`.
+
 ## [1.12.42] - 2026-11-12
 
 `mm retro-fleet` now says a peer's host-usage reader or Git walk is catching up when that peer's latest push stopped on its scan deadline with work left, and points to that machine's next attended `mm push`.
