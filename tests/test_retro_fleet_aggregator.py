@@ -4732,6 +4732,23 @@ class TestCoverageAcceptor:
         assert accepted.pending_left == ()
         assert accepted.pending_left_reason == "invalid_coverage"
 
+    def test_pending_left_is_dropped_after_rejecting_degraded_sources(self):
+        # Value: protects=progress cannot outlive rejected reader coverage;
+        # fails_when=progress validates against raw rather than accepted coverage;
+        # why_new=T4 requires this ordering case; seam=none;
+        # no_claim=host capture (synthetic wire row).
+        row = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            extra={"degraded_sources": ["codex"], "pending_left": {"codex": 5}},
+        )
+        accepted = _accepted(row)
+        assert accepted.degraded == ()
+        assert accepted.degraded_reason == "invalid_coverage"
+        assert accepted.pending_left == ()
+        assert accepted.pending_left_reason == "invalid_coverage"
+
 
 class TestHostSnapshotSelection:
     SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
