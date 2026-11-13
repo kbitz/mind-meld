@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.42] - 2026-11-12
+
+`mm retro-fleet` now says a peer's host-usage reader or Git walk is catching up when that peer's latest push stopped on its scan deadline with work left, and points to that machine's next attended `mm push`.
+
+### Changed
+
+- `mm retro-fleet` now says a peer's host-usage reader or Git walk is "catching up (N left)" when that peer's latest push stopped on its scan deadline with work left, and says only that machine's next attended `mm push` is needed, instead of calling the reader failed or sending you to `mm recapture`.
+- Fleet health shows `catching up (N left)` for readers and Git walks with saved progress and points to that machine's next attended `mm push`.
+
+### Upgrade notes
+
+- The new wording appears only once a machine has run an attended `mm push` with this release (later automatic pushes repeat that push's figure for up to seven days), and only on machines that render the retro with this release; until then the earlier "failed" and "ran out of budget" wording stays.
+
 ## [1.12.41] - 2026-11-12
 
 Setup, device approval, source changes, conflict resolution and pull warnings use the shared outcome and diagnostic forms.

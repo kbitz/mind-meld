@@ -1161,8 +1161,13 @@ Track 78A since made attended partial pulls exit 1 and moved the push/pull
 outcome after these finalizers (see [Sync outcomes](#sync-outcomes)); this
 verdict alone does not complete O8's quiet-output checkpoint. Deadline-stopped
 host reads and budget-stopped Git walks with items left report `catching up (N left)`
-on attended push and in `mm status`; capture errors and quiet breadcrumbs keep their
-existing remedies.
+on attended push, in `mm status`, and in `mm retro-fleet`'s `MM_HEALTH`. Automatic
+pushes repeat the last attended count for up to seven days without recounting;
+completion, a non-deadline failure, or no longer selecting a reader clears its
+figure. Nothing more is needed than the next attended `mm push` on that machine.
+Other reader failures and peers without the new field keep the old wording;
+older renderers ignore the field. Capture errors and quiet breadcrumbs keep
+their existing remedies.
 
 ### Garbage collection
 
@@ -1433,7 +1438,7 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 Cost is not subscription spend: historical tokens are repriced at the bundled rates plus any active local pricing overrides, verified on the dates below. Grok always contributes a base-tier floor because its usage records cannot recover each request's context tier. All four token fields (input, cache write, cache read, output) contribute to the Tokens column.
 
-Partial or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Unusable coverage metadata (a reason with an empty source list) does the same, even when that machine recorded no in-window usage. Grok's context-tier caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
+Partial, catching-up, or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Unusable coverage metadata (a reason with an empty source list) does the same, even when that machine recorded no in-window usage. A peer's latest row with valid progress produces a note such as ``codex on `mac-a` is catching up (3 left)`` or ``Git capture is catching up on `mac-a` (2 left)``, with the next attended `mm push` on that machine as its remedy. Counts are per reader and per machine, never summed or added to token totals. Other failures retain their existing remedies. Grok's context-tier caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
 
 Legend:
 
@@ -1442,7 +1447,7 @@ Legend:
   never a guaranteed billing minimum. A floor never uses a family-extrapolated
   rate; such a model is left out of the floor and named in `MM_HEALTH`. Causes
   include unpriced models,
-  incomplete coverage, dropped readers, unattributed tokens and an unknown
+  incomplete coverage, readers still catching up, dropped readers, unattributed tokens and an unknown
   long-context tier, and are named per agent in `MM_HEALTH`.
 - `—` is unavailable, not zero.
 

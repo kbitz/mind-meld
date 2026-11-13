@@ -2729,7 +2729,7 @@ class TestCaptureBudget85A:
             {"retro": {"capture_budget_ms": 4000, "attended_capture_cap_ms": 4000}}
         ) == (4000, "config")
 
-    def test_capture_budget_takes_precedence_over_legacy_interactive(self):
+    def test_capture_budget_takes_precedence_over_legacy_interactive(self, monkeypatch, tmp_path):
         # Sweep keeps the legacy value, capped inside the capture phase
         # (three fifths of total attended cap, or capture_budget_ms when equal / scan_cap=False).
         config = {"retro": {"capture_budget_ms": 4000, "host_usage_interactive_budget_ms": 300}}
@@ -2752,6 +2752,44 @@ class TestCaptureBudget85A:
         assert events_tail.resolve_host_read_budget(
             {"retro": {"capture_budget_ms": 4000}}, interactive=True, scan_cap=False
         ) == (2400, "config")
+        # T6: attended_capture_cap_ms + host_usage_interactive_budget_ms (without capture_budget_ms)
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", None)
+        cap_legacy_cfg = {
+            "retro": {
+                "attended_capture_cap_ms": 15000,
+                "host_usage_interactive_budget_ms": 900,
+            }
+        }
+        assert events_tail.resolve_host_read_budget(cap_legacy_cfg, interactive=True) == (
+            900,
+            "config",
+        )
+        assert events_tail._pending_capture_budget_ms == 15000
+
+        seen: dict = {}
+        real_capture = events_tail._capture_event_snapshots
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            return real_capture(*args, **kwargs)
+
+        monkeypatch.setattr(events_tail, "_capture_event_snapshots", spy)
+        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", 1.0)
+        sources = [{"name": "mm-events", "path": str(tmp_path / "mm-events")}]
+        events_tail._run_events_tail(
+            cap_legacy_cfg,
+            sources,
+            "dev-a",
+            dry_run=False,
+            quiet=False,
+            suppress_host_capture=True,
+        )
+        assert seen["session_deadline"] is not None
+        assert seen["budget_ms"] == 14000
+        assert seen["git_budget_ms"] == min(
+            _mm_events.git_walk_budget_ms(quiet=False, since=seen["since"]) + (15000 - 5000),
+            14000,
+        )
 
     def test_legacy_budgets_preserved_without_capture_budget(self):
         assert events_tail.resolve_host_read_budget({"retro": {}}, interactive=True) == (
@@ -3807,3 +3845,389 @@ def test_track_125a_codex_deadline_catching_up_matches_diag_pending_and_failures
         )
         assert failure_phrase.startswith(f"host-usage snapshot skipped (codex {reason})")
         assert "catching up" not in failure_phrase
+
+
+class TestTrack131AHostProgressCarry:
+    @pytest.mark.parametrize(
+        "reason,attended",
+        [
+            ("io_error", True),
+            ("unavailable", True),
+            ("unsupported", True),
+            ("unknown-count", True),
+            ("io_error", False),
+            ("unavailable", False),
+            ("unsupported", False),
+        ],
+    )
+    def test_non_deadline_or_unknown_progress_clears_attended_figure(
+        self, monkeypatch, reason, attended
+    ):
+        # Value: protects=only measured deadline progress is carried; fails_when=
+        # failures or unknown counts reuse stale progress; why_new=AC1/AC11
+        # require permanent failures and unknown evidence; seam=none;
+        # no_claim=host parser behavior (stub reader outcomes).
+        events_tail._record_host_progress(
+            events_tail.HostUsageCapture(
+                None,
+                "codex",
+                "deadline",
+                dropped=(("codex", "deadline"),),
+                deadline_evidence={
+                    "codex": events_tail.HostReadEvidence(files_on_disk=10, files_cached=4)
+                },
+            ),
+            device_id="dev-a",
+            attended=True,
+        )
+        monkeypatch.setattr(_mm_host_registry, "reader_usage_diag", lambda *_a, **_kw: {})
+        monkeypatch.setattr(
+            _mm_host_registry,
+            "warm_host_cache_inline",
+            lambda **_kw: _incomplete("deadline"),
+        )
+        readers = (
+            (
+                "codex",
+                lambda **_kw: _incomplete("deadline" if reason == "unknown-count" else reason),
+            ),
+            ("muse", lambda **_kw: _complete({})),
+        )
+        capture, rows = events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=250,
+            warm_host_cache=(lambda _n: None) if attended else None,
+        )
+        assert len(rows) == 1
+        assert "pending_left" not in rows[0]
+        events_tail._record_host_progress(capture, device_id="dev-a", attended=attended)
+        assert events_tail._read_capture_progress("dev-a").host == {}
+
+    def test_attended_capture_populates_pending_left_for_deadline_only_and_calls_diag_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from mind_meld import cli
+
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root, hosts=("codex", "muse"))
+        cfg = {
+            **_tail_config(sources, muse=True),
+            "device": {"id": "dev-a", "name": "mac-a"},
+        }
+        cfg["sync"]["max_file_size"] = 52_428_800
+        _stub_fast_walks(monkeypatch)
+
+        diag_calls: list[str] = []
+
+        def fake_diag(name: str, **_kw):
+            diag_calls.append(name)
+            return {"files_cached": 10, "files_on_disk": 14, "pending": 4}
+
+        monkeypatch.setattr(_mm_host_registry, "reader_usage_diag", fake_diag)
+        monkeypatch.setattr(
+            _mm_host_registry,
+            "warm_host_cache_inline",
+            lambda *, reader, **_kw: _incomplete("deadline"),
+        )
+
+        muse_ok = _complete(
+            {"muse": {"2026-08-15": _usage(10)}},
+            {"2026-08-15": {**_usage(10), "by_model": {"muse-1": _usage(10)}}},
+        )
+        readers = (
+            ("codex", lambda *, deadline: _incomplete("deadline")),
+            ("grok", lambda *, deadline: _incomplete("io_error")),
+            ("muse", lambda *, deadline: muse_ok),
+        )
+
+        _cap, rows = events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=250,
+            warm_host_cache=lambda _name: None,
+        )
+        assert len(rows) == 1
+        assert rows[0]["degraded_sources"] == ["codex", "grok"]
+        assert rows[0]["pending_left"] == {"codex": 4}
+        assert diag_calls == ["codex"]
+
+        # Permanent / finished / left==0 or unknown carry no pending_left:
+        monkeypatch.setattr(
+            _mm_host_registry,
+            "reader_usage_diag",
+            lambda _n, **_kw: {"files_cached": 14, "files_on_disk": 14, "pending": 0},
+        )
+        _cap_zero, rows_zero = events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=250,
+            warm_host_cache=lambda _name: None,
+        )
+        assert len(rows_zero) == 1
+        assert "pending_left" not in rows_zero[0]
+
+        # Attended cli._capture_attended_usage and _run_events_tail(quiet=False) print the same
+        # "4 left" and each call reader_usage_diag once per deadline-dropped reader per capture.
+        _stub_hosts(monkeypatch, codex=_incomplete("deadline"), muse=muse_ok)
+        diag_calls.clear()
+        monkeypatch.setattr(_mm_host_registry, "reader_usage_diag", fake_diag)
+        cli._capture_attended_usage(cfg, sources, sources, verbose=False)
+        err_cli = capsys.readouterr().err
+        assert "codex usage catching up (4 left)" in err_cli
+        assert diag_calls == ["codex"]
+
+        diag_calls.clear()
+        deg = events_tail._run_events_tail(cfg, sources, "dev-a", dry_run=False, quiet=False)
+        assert any("codex usage catching up (4 left)" in d for d in deg), deg
+        assert diag_calls == ["codex"]
+
+    def test_unattended_host_carry_lifecycle_and_fail_open_cache_matrix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import fcntl
+        from datetime import timedelta
+
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root, hosts=("codex", "muse"))
+        cfg = {
+            **_tail_config(sources, muse=True),
+            "device": {"id": "dev-a", "name": "mac-a"},
+        }
+        _stub_fast_walks(monkeypatch)
+        muse_ok = _complete(
+            {"muse": {"2026-08-15": _usage(5)}},
+            {"2026-08-15": {**_usage(5), "by_model": {"muse-1": _usage(5)}}},
+        )
+        codex_ok = _complete(
+            {"codex": {"2026-08-15": _usage(5)}},
+            {"2026-08-15": {**_usage(5), "by_model": {"gpt-5": _usage(5)}}},
+        )
+
+        # 0. Unattended capture with nothing to clear does NOT create CAPTURE_PROGRESS_PATH.
+        assert not events_tail.CAPTURE_PROGRESS_PATH.exists()
+        _stub_hosts(monkeypatch, codex=_incomplete("deadline"), muse=muse_ok)
+        events_tail._run_events_tail(cfg, sources, "dev-a", dry_run=False, quiet=True)
+        assert not events_tail.CAPTURE_PROGRESS_PATH.exists()
+
+        # 1. Attended capture with deadline-dropped Codex saves N=6 to CAPTURE_PROGRESS_PATH.
+        monkeypatch.setattr(
+            _mm_host_registry,
+            "reader_usage_diag",
+            lambda _n, **_kw: {"files_cached": 10, "files_on_disk": 16, "pending": 6},
+        )
+        monkeypatch.setattr(
+            _mm_host_registry,
+            "warm_host_cache_inline",
+            lambda *, reader, **_kw: _incomplete("deadline"),
+        )
+        events_tail._run_events_tail(cfg, sources, "dev-a", dry_run=False, quiet=False)
+        capsys.readouterr()
+        assert events_tail._read_capture_progress("dev-a").host == {"codex": 6}
+
+        # 2. Following unattended capture (warm_host_cache=None) where Codex again hits deadline
+        # publishes pending_left == {"codex": 6} without calling reader_usage_diag.
+        forbidden_diag_calls = []
+
+        def forbid_diag(*_a, **_kw):
+            forbidden_diag_calls.append((_a, _kw))
+            raise AssertionError("unattended capture must not call reader_usage_diag")
+
+        monkeypatch.setattr(_mm_host_registry, "reader_usage_diag", forbid_diag)
+        readers = (
+            ("codex", lambda *, deadline: _incomplete("deadline")),
+            ("muse", lambda *, deadline: muse_ok),
+        )
+        _unattended_cap, unattended_rows = events_tail._capture_host_snapshot(
+            "dev-a", readers, host_budget_ms=250, warm_host_cache=None
+        )
+        assert len(unattended_rows) == 1
+        assert unattended_rows[0]["degraded_sources"] == ["codex"]
+        assert unattended_rows[0]["pending_left"] == {"codex": 6}
+        assert forbidden_diag_calls == []
+
+        # 3. Unattended capture where Codex hits io_error clears the entry and omits pending_left.
+        _stub_hosts(monkeypatch, codex=_incomplete("io_error"), muse=muse_ok)
+        events_tail._run_events_tail(cfg, sources, "dev-a", dry_run=False, quiet=True)
+        assert events_tail._read_capture_progress("dev-a").host == {}
+
+        # Re-seed codex=6, then unattended capture where Codex completes clears the entry.
+        events_tail.CAPTURE_PROGRESS_PATH.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "device": "dev-a",
+                    "host": {
+                        "codex": {
+                            "left": 6,
+                            "saved_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        _stub_hosts(monkeypatch, codex=codex_ok, muse=muse_ok)
+        events_tail._run_events_tail(cfg, sources, "dev-a", dry_run=False, quiet=True)
+        assert events_tail._read_capture_progress("dev-a").host == {}
+
+        # Unconsulted reader (disabled) clears its entry on capture.
+        events_tail.CAPTURE_PROGRESS_PATH.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "device": "dev-a",
+                    "host": {
+                        "grok": {
+                            "left": 4,
+                            "saved_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        events_tail._run_events_tail(cfg, sources, "dev-a", dry_run=False, quiet=True)
+        assert events_tail._read_capture_progress("dev-a").host == {}
+
+        # Attended capture with left == 0 or unknown clears the entry.
+        events_tail.CAPTURE_PROGRESS_PATH.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "device": "dev-a",
+                    "host": {
+                        "codex": {
+                            "left": 6,
+                            "saved_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            _mm_host_registry,
+            "reader_usage_diag",
+            lambda _n, **_kw: {"files_cached": 10, "files_on_disk": 10, "pending": 0},
+        )
+        _stub_hosts(monkeypatch, codex=_incomplete("deadline"), muse=muse_ok)
+        events_tail._run_events_tail(cfg, sources, "dev-a", dry_run=False, quiet=False)
+        capsys.readouterr()
+        assert events_tail._read_capture_progress("dev-a").host == {}
+
+        # 4. Malformed / stale / future / out-of-bound / locked CAPTURE_PROGRESS_PATH matrix:
+        monkeypatch.setattr(_mm_host_registry, "reader_usage_diag", forbid_diag)
+        now = datetime.now(timezone.utc)
+        bad_payloads = [
+            "{not-json",
+            "[]",
+            json.dumps({"version": 2, "device": "dev-a", "host": {}}),
+            json.dumps(
+                {
+                    "version": 1,
+                    "device": "other-dev",
+                    "host": {"codex": {"left": 3, "saved_at": now.isoformat()}},
+                }
+            ),
+            json.dumps(
+                {
+                    "version": 1,
+                    "device": "dev-a",
+                    "host": {
+                        "codex": {
+                            "left": 3,
+                            "saved_at": (
+                                now - events_tail.CAPTURE_PROGRESS_MAX_AGE - timedelta(seconds=1)
+                            ).isoformat(),
+                        }
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "version": 1,
+                    "device": "dev-a",
+                    "host": {
+                        "codex": {
+                            "left": 3,
+                            "saved_at": (now + timedelta(minutes=10)).isoformat(),
+                        }
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "version": 1,
+                    "device": "dev-a",
+                    "host": {"codex": {"left": 0, "saved_at": now.isoformat()}},
+                }
+            ),
+            json.dumps(
+                {
+                    "version": 1,
+                    "device": "dev-a",
+                    "host": {
+                        "codex": {
+                            "left": _mm_events.MAX_PENDING_LEFT + 1,
+                            "saved_at": now.isoformat(),
+                        }
+                    },
+                }
+            ),
+        ]
+        for raw in bad_payloads:
+            events_tail.CAPTURE_PROGRESS_PATH.write_text(raw, encoding="utf-8")
+            _cap_bad, rows_bad = events_tail._capture_host_snapshot(
+                "dev-a", readers, host_budget_ms=250, warm_host_cache=None
+            )
+            assert len(rows_bad) == 1
+            assert "pending_left" not in rows_bad[0]
+            assert capsys.readouterr().err == ""
+
+        # Exclusively-locked file omits pending_left and still writes the row with no extra stderr:
+        events_tail.CAPTURE_PROGRESS_PATH.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "device": "dev-a",
+                    "host": {"codex": {"left": 5, "saved_at": now.isoformat()}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        with events_tail.CAPTURE_PROGRESS_PATH.open("r+", encoding="utf-8") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                _cap_locked, rows_locked = events_tail._capture_host_snapshot(
+                    "dev-a", readers, host_budget_ms=250, warm_host_cache=None
+                )
+                assert len(rows_locked) == 1
+                assert "pending_left" not in rows_locked[0]
+                assert capsys.readouterr().err == ""
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        assert forbidden_diag_calls == []
+
+        # Unreadable progress omits only the optional figure, without stderr.
+        from contextlib import contextmanager
+
+        from mind_meld import lockedjson
+
+        real_snapshot = lockedjson.locked_json_snapshot
+
+        @contextmanager
+        def unreadable_progress(path, **kwargs):
+            if path == events_tail.CAPTURE_PROGRESS_PATH:
+                raise PermissionError("unreadable progress fixture")
+            with real_snapshot(path, **kwargs) as snap:
+                yield snap
+
+        monkeypatch.setattr(lockedjson, "locked_json_snapshot", unreadable_progress)
+        _cap_unreadable, rows_unreadable = events_tail._capture_host_snapshot(
+            "dev-a", readers, host_budget_ms=250, warm_host_cache=None
+        )
+        assert len(rows_unreadable) == 1
+        assert "pending_left" not in rows_unreadable[0]
+        assert capsys.readouterr().err == ""
+        assert forbidden_diag_calls == []

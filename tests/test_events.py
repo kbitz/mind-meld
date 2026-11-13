@@ -2548,6 +2548,7 @@ class TestMakeHostUsageSnapshot:
 
         assert events.MAX_HOST_MODELS_PER_DAY == aggregator.MAX_HOST_MODELS_PER_DAY
         assert events.MAX_HOST_MODELS_PER_ROW == aggregator.MAX_HOST_MODELS_PER_ROW
+        assert events.MAX_PENDING_LEFT == aggregator.MAX_PENDING_LEFT == 2**31 - 1
 
     def test_writer_caps_by_model_per_day_and_keeps_the_day_total_whole(self):
         n = events.MAX_HOST_MODELS_PER_DAY + 5
@@ -2803,6 +2804,44 @@ class TestMakeHostUsageSnapshot:
         assert oldest not in ev["tokens_by_day"]
         assert ev["degraded_sources"] == ["muse"]
         assert ev["partial_sources"] == ["codex"]
+
+    def test_pending_left_filtered_to_degraded_sources_and_canonical_order(self):
+        hosts = {"codex": {"2026-08-15": _u(5)}}
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex",),
+            hosts=hosts,
+            tokens_by_day=self._sibling_for(hosts),
+            degraded_sources=("agy", "grok", "muse"),
+            pending_left={
+                "agy": 9,
+                "grok": 1,
+                "muse": events.MAX_PENDING_LEFT,
+                "codex": 4,  # contributor in token_sources -> dropped
+                "cursor": 5,  # absent -> dropped
+            },
+        )
+        assert list(ev["pending_left"].items()) == [
+            ("grok", 1),
+            ("muse", events.MAX_PENDING_LEFT),
+            ("agy", 9),
+        ]
+
+    @pytest.mark.parametrize(
+        "bad_val",
+        [0, -1, True, False, 1.5, "4", events.MAX_PENDING_LEFT + 1, None],
+    )
+    def test_pending_left_drops_invalid_values_and_omits_when_empty(self, bad_val):
+        hosts = {"codex": {"2026-08-15": _u(5)}}
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex",),
+            hosts=hosts,
+            tokens_by_day=self._sibling_for(hosts),
+            degraded_sources=("muse",),
+            pending_left={"muse": bad_val},
+        )
+        assert "pending_left" not in ev
 
 
 class TestWriteOrderTransactionalPin:
@@ -4243,6 +4282,16 @@ def test_recapture_advice_loop_reproduced_under_equality_and_closed_by_default_c
         eq_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
     )
     assert any("git capture catching up (2 left)" in d for d in deg1), deg1
+    rows_step1 = [
+        json.loads(line)
+        for p in sorted(events_dir.glob("dev-a-*.jsonl"))
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    for row in rows_step1[-2:]:
+        assert row["type"] in ("git-snapshot", "mm-push")
+        assert row["git_capture"]["pending_left"] == 2
+    assert events_tail._read_capture_progress("dev-a").git == 2
 
     # 2. Recapture succeeds with its 120 s budget and advances both per-repo cursors.
     recap_since = datetime.now(timezone.utc) - timedelta(days=7)
@@ -4288,6 +4337,16 @@ def test_recapture_advice_loop_reproduced_under_equality_and_closed_by_default_c
         default_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
     )
     assert deg3 == []
+    rows_step4 = [
+        json.loads(line)
+        for p in sorted(events_dir.glob("dev-a-*.jsonl"))
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    for row in rows_step4[-2:]:
+        assert row["type"] in ("git-snapshot", "mm-push")
+        assert "pending_left" not in row["git_capture"]
+    assert events_tail._read_capture_progress("dev-a").git is None
     diag_clear = statusflow._collect_git_capture_diag(default_cfg, "dev-a", disc_dict)
     assert diag_clear["recorded"]["walk_budget_aborts"] == 0
     assert diag_clear["recorded"]["walk_errors"] == 0
@@ -4367,3 +4426,266 @@ def test_recapture_budget_docs_match_the_constants():
         for limit in (per_repo, whole_walk):
             assert re.search(rf"\b{limit}\b", text), f"{name} omits {limit}"
         assert "interactive budgets" not in text, name
+
+
+class TestGitPendingLeftAndProgressCarry131A:
+    @pytest.mark.parametrize("good_val", [1, 7, events.MAX_PENDING_LEFT])
+    def test_make_git_capture_emits_valid_pending_left(self, good_val):
+        since = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        cap = events.make_git_capture(
+            since=since,
+            discovery="complete",
+            walk_budget_aborts=2,
+            walk_errors=0,
+            pending_left=good_val,
+        )
+        assert cap["pending_left"] == good_val
+
+    @pytest.mark.parametrize(
+        "bad_val", [None, 0, -1, True, False, 1.5, "2", events.MAX_PENDING_LEFT + 1]
+    )
+    def test_make_git_capture_omits_invalid_pending_left(self, bad_val):
+        since = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        cap = events.make_git_capture(
+            since=since,
+            discovery="complete",
+            walk_budget_aborts=2,
+            walk_errors=0,
+            pending_left=bad_val,
+        )
+        assert "pending_left" not in cap
+
+    def test_preview_pending_repositories_matches_post_commit_count_and_preserves_cache_bytes(
+        self, tmp_path
+    ):
+        repo_a = tmp_path / "repo-a"
+        repo_b = tmp_path / "repo-b"
+        repo_c = tmp_path / "repo-c"
+        for r in (repo_a, repo_b, repo_c):
+            _init_git_repo(r)
+            _seed_commit(r)
+
+        old_since = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        cursor_ts = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        # Seed cache: repo_a has an older cursor; repo_b and repo_c are unwalked.
+        seed_rows = [{"projects": [{"local_path": str(repo_a)}], "skipped": []}]
+        events.commit_repo_cursors(
+            seed_rows,
+            since=old_since,
+            cursor_ts=old_since,
+            recorded_ts=old_since,
+            complete=False,
+        )
+        before_bytes = events.mm_config.GIT_CAPTURE_CACHE_PATH.read_bytes()
+
+        git_rows = [
+            {
+                "projects": [
+                    {"local_path": str(repo_a)},
+                    {"local_path": str(repo_b)},
+                ],
+                "skipped": [
+                    {"path": str(repo_c), "reason": events.WALK_SKIP_BUDGET_ABORT},
+                ],
+            }
+        ]
+        preview = events.preview_pending_repositories(
+            [repo_a, repo_b, repo_c],
+            git_rows,
+            since=old_since,
+            cursor_ts=cursor_ts,
+        )
+        assert preview == 1
+        assert events.mm_config.GIT_CAPTURE_CACHE_PATH.read_bytes() == before_bytes
+
+        events.commit_repo_cursors(
+            git_rows,
+            since=old_since,
+            cursor_ts=cursor_ts,
+            recorded_ts=cursor_ts,
+            complete=False,
+        )
+        assert events.count_pending_repositories([repo_a, repo_b, repo_c], cursor_ts) == preview
+
+    def test_preview_failure_still_writes_git_and_push_rows_without_pending_left(
+        self, tmp_path, monkeypatch
+    ):
+        from mind_meld import events_tail
+
+        sources = _recapture_test_sources(tmp_path)
+        events_dir = tmp_path / "mm-events" / "events"
+        repo_a = tmp_path / "repo-a"
+        _init_git_repo(repo_a)
+        _seed_commit(repo_a)
+        monkeypatch.setattr(
+            events,
+            "discover_git_roots",
+            lambda *_a, **_kw: events.GitRootDiscovery([repo_a], []),
+        )
+        _put_slow_git_first_on_path(tmp_path, monkeypatch, 0.7)
+        monkeypatch.setattr(
+            events,
+            "preview_pending_repositories",
+            lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        eq_cfg = {
+            "sync": {"sources": sources},
+            "retro": {"capture_budget_ms": 5000, "attended_capture_cap_ms": 5000},
+        }
+        deg = events_tail._run_events_tail(
+            eq_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+        )
+        assert deg  # still reports git degradation
+        rows = [
+            json.loads(line)
+            for p in sorted(events_dir.glob("dev-a-*.jsonl"))
+            for line in p.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        git_and_push = [r for r in rows if r["type"] in ("git-snapshot", "mm-push")]
+        assert [r["type"] for r in git_and_push[-2:]] == ["git-snapshot", "mm-push"]
+        for r in git_and_push[-2:]:
+            assert "pending_left" not in r["git_capture"]
+
+    def test_quiet_push_carries_and_clears_git_progress_without_touching_git_cache(
+        self, tmp_path, monkeypatch
+    ):
+        from mind_meld import events_tail
+
+        sources = _recapture_test_sources(tmp_path)
+        events_dir = tmp_path / "mm-events" / "events"
+        cfg = {"sync": {"sources": sources}}
+
+        # Seed local capture-progress.json with git=5 for dev-a.
+        events_tail._record_git_progress(device_id="dev-a", published=5, clear=False)
+        assert events_tail._read_capture_progress("dev-a").git == 5
+
+        forbidden_count_calls = []
+
+        def _forbid(*_a, **_kw):
+            forbidden_count_calls.append((_a, _kw))
+            raise AssertionError("quiet push must not call git pending repository counters")
+
+        monkeypatch.setattr(events, "preview_pending_repositories", _forbid)
+        monkeypatch.setattr(events, "count_pending_repositories", _forbid)
+
+        def _fake_capture_git_rows(*, aborts: int, errs: int):
+            since = datetime.now(timezone.utc) - timedelta(days=1)
+            cap = events.make_git_capture(
+                since=since,
+                discovery="complete",
+                walk_budget_aborts=aborts,
+                walk_errors=errs,
+            )
+            row = {
+                "v": events.EVENTS_SCHEMA_VERSION,
+                "type": "git-snapshot",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "device": "dev-a",
+                "projects": [],
+                "skipped": [],
+                "git_capture": cap,
+            }
+            disc = events.GitRootDiscovery((tmp_path / "repo-a",), ())
+            return [row], disc, aborts, errs
+
+        # 1. Quiet push with walk_budget_aborts > 0 and walk_errors == 0 carries git=5.
+        monkeypatch.setattr(
+            events_tail,
+            "_capture_git_rows",
+            lambda *_a, **_kw: _fake_capture_git_rows(aborts=1, errs=0),
+        )
+        events_tail._run_events_tail(
+            cfg, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
+        )
+        rows = [
+            json.loads(line)
+            for p in sorted(events_dir.glob("dev-a-*.jsonl"))
+            for line in p.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        git_and_push = [r for r in rows if r["type"] in ("git-snapshot", "mm-push")]
+        for r in git_and_push[-2:]:
+            assert r["git_capture"]["pending_left"] == 5
+        assert events_tail._read_capture_progress("dev-a").git == 5
+
+        # 2. Unconfirmed append (EventAppendSkipped) leaves git=5 intact even when complete.
+        real_write_push_event = events.write_push_event
+        monkeypatch.setattr(
+            events_tail,
+            "_capture_git_rows",
+            lambda *_a, **_kw: _fake_capture_git_rows(aborts=0, errs=0),
+        )
+        monkeypatch.setattr(
+            events,
+            "write_push_event",
+            lambda *_a, **_kw: events.EventAppendSkipped(events_dir / "dev-a.jsonl"),
+        )
+        events_tail._run_events_tail(
+            cfg, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
+        )
+        assert events_tail._read_capture_progress("dev-a").git == 5
+
+        # 3. Confirmed append with walk_budget_aborts == 0 clears the git entry.
+        monkeypatch.setattr(events, "write_push_event", real_write_push_event)
+        events_tail._run_events_tail(
+            cfg, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
+        )
+        assert events_tail._read_capture_progress("dev-a").git is None
+
+        # 4. Confirmed append with walk_errors > 0 also clears a seeded git entry.
+        events_tail._record_git_progress(device_id="dev-a", published=4, clear=False)
+        monkeypatch.setattr(
+            events_tail,
+            "_capture_git_rows",
+            lambda *_a, **_kw: _fake_capture_git_rows(aborts=1, errs=1),
+        )
+        events_tail._run_events_tail(
+            cfg, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
+        )
+        assert events_tail._read_capture_progress("dev-a").git is None
+
+        # 5. Stale (>7d or future) or other-device git entry is omitted.
+        monkeypatch.setattr(
+            events_tail,
+            "_capture_git_rows",
+            lambda *_a, **_kw: _fake_capture_git_rows(aborts=1, errs=0),
+        )
+        for bad_doc in (
+            {
+                "version": 1,
+                "device": "other-dev",
+                "git": {"left": 3, "saved_at": datetime.now(timezone.utc).isoformat()},
+            },
+            {
+                "version": 1,
+                "device": "dev-a",
+                "git": {
+                    "left": 3,
+                    "saved_at": (datetime.now(timezone.utc) - timedelta(days=8)).isoformat(),
+                },
+            },
+            {
+                "version": 1,
+                "device": "dev-a",
+                "git": {
+                    "left": 3,
+                    "saved_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+                },
+            },
+        ):
+            events_tail.CAPTURE_PROGRESS_PATH.write_text(json.dumps(bad_doc), encoding="utf-8")
+            assert events_tail._read_capture_progress("dev-a").git is None
+            events_tail._run_events_tail(
+                cfg, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
+            )
+            rows_bad = [
+                json.loads(line)
+                for p in sorted(events_dir.glob("dev-a-*.jsonl"))
+                for line in p.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            git_and_push_bad = [r for r in rows_bad if r["type"] in ("git-snapshot", "mm-push")]
+            for r in git_and_push_bad[-2:]:
+                assert "pending_left" not in r["git_capture"]
+        assert forbidden_count_calls == []

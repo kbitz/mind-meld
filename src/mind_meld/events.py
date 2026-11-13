@@ -242,6 +242,11 @@ MAX_HOST_MODELS_PER_ROW = 64
 Mirrors ``aggregator.MAX_HOST_MODELS_PER_ROW``; see
 ``MAX_HOST_MODELS_PER_DAY`` for why this is a mirror and not an import."""
 
+MAX_PENDING_LEFT = 2**31 - 1
+"""Writer-side ceiling on ``pending_left`` counts (host readers and ``git_capture``).
+Mirrors ``aggregator.MAX_PENDING_LEFT``; see ``MAX_HOST_MODELS_PER_DAY`` for why
+this is a mirror and not an import."""
+
 
 _GIT_LOG_FORMAT = "%x1e%H%x09%cI%x09%ae%x09%s"
 """Record-separator (\\x1e) prefix + tab-delimited fields:
@@ -345,6 +350,7 @@ class GitCaptureState(TypedDict, total=False):
     discovery: str
     walk_budget_aborts: int
     walk_errors: int
+    pending_left: int
 
 
 class SessionMetadata(TypedDict, total=False):
@@ -468,6 +474,10 @@ class HostUsageSnapshot(TypedDict, total=False):
     ``token_sources``, never unified with ``degraded_sources``.
     ``empty_sources`` (65A) identifies consulted readers with no usage day in
     this row's retained window, independently of the merged model families.
+    ``pending_left`` (Track 131A) maps a deadline-stopped reader in
+    ``degraded_sources`` to the positive item count still left as measured by
+    the latest attended capture (per reader and per machine, never summed across
+    readers or machines and never added to a token total); omitted when empty.
     Additive ``counter_semantics`` (Track 35A) is ``"disjoint-v1"`` when
     this writer published the row: host counters are mutually exclusive
     billable buckets. Key absent means a pre-35A peer whose ``input`` may
@@ -530,6 +540,7 @@ class HostUsageSnapshot(TypedDict, total=False):
     tokens_by_day: dict[str, dict]
     partial_sources: list[str]
     empty_sources: list[str]
+    pending_left: dict[str, int]
     counter_semantics: str
 
 
@@ -3088,13 +3099,17 @@ def make_git_capture(
     discovery: str,
     walk_budget_aborts: int,
     walk_errors: int,
+    pending_left: int | None = None,
 ) -> GitCaptureState:
-    return {
+    git_capture: GitCaptureState = {
         "since": since.isoformat(),
         "discovery": discovery,
         "walk_budget_aborts": walk_budget_aborts,
         "walk_errors": walk_errors,
     }
+    if type(pending_left) is int and 1 <= pending_left <= MAX_PENDING_LEFT:
+        git_capture["pending_left"] = pending_left
+    return git_capture
 
 
 def parse_nd_window(s: str) -> int | None:
@@ -3136,9 +3151,11 @@ def effective_capture_since(roots: Sequence[Path | str], since: datetime) -> dat
     return min([since, *parsed])
 
 
-def count_pending_repositories(roots: Sequence[Path | str], since: datetime) -> int:
-    """Count live roots behind the requested capture, without repairing state."""
-    cache = read_git_capture_cache()
+def _count_pending_in(
+    cache: dict,
+    roots: Sequence[Path | str],
+    since: datetime,
+) -> int:
     cursors = cache["repo_cursors"]
     stores = cache.get("repo_cursor_stores", {})
     if not isinstance(stores, Mapping):
@@ -3173,6 +3190,31 @@ def count_pending_repositories(roots: Sequence[Path | str], since: datetime) -> 
         if not present or min(present) < since:
             pending += 1
     return pending
+
+
+def count_pending_repositories(roots: Sequence[Path | str], since: datetime) -> int:
+    """Count live roots behind the requested capture, without repairing state."""
+    return _count_pending_in(read_git_capture_cache(), roots, since)
+
+
+def preview_pending_repositories(
+    roots: Sequence[Path | str],
+    git_rows: Sequence[dict],
+    *,
+    since: datetime,
+    cursor_ts: datetime,
+) -> int:
+    """Count live roots that would remain behind ``cursor_ts`` after committing ``git_rows``."""
+    cache_copy = copy.deepcopy(read_git_capture_cache())
+    _apply_repo_cursors_to_cache(
+        cache_copy,
+        git_rows,
+        since=since,
+        cursor_ts=cursor_ts,
+        recorded=cursor_ts,
+        complete=False,
+    )
+    return _count_pending_in(cache_copy, roots, cursor_ts)
 
 
 def _prune_invalid_repo_cursors(cursors: dict, stores: Mapping[str, object] | None = None) -> None:
@@ -4121,6 +4163,7 @@ def make_host_usage_snapshot(
     tokens_by_day: dict[str, token_usage.DayBucket] | None = None,
     partial_days: Mapping[str, Sequence[str]] | None = None,
     usage_days: Mapping[str, Sequence[str]] | None = None,
+    pending_left: Mapping[str, int] | None = None,
 ) -> HostUsageSnapshot:
     """Construct a ``host-usage-snapshot`` row from completed reader output.
 
@@ -4183,6 +4226,15 @@ def make_host_usage_snapshot(
     ``usage_days`` carries each reader's own day keys, including zero buckets.
     A mapping writes ``empty_sources`` (possibly []), intersected with ``keep``;
     None omits the claim. Production capture always supplies the mapping.
+
+    ``pending_left`` (Track 131A) records the items a deadline-stopped reader
+    still had when it stopped on its deadline, as measured by the latest
+    attended capture (units differ per reader: Codex rollouts, Grok Build
+    sessions, Muse session logs, Antigravity conversation DBs, per the unit map
+    in ``events_tail._host_skip_phrase``); a subset of ``degraded_sources`` in
+    ``HOST_USAGE_TOKEN_SOURCES`` order, omitted when empty; per reader and per
+    machine, never summed across readers or machines, never added to a token
+    total; no ``EVENTS_SCHEMA_VERSION`` bump.
     """
     payload: dict[str, dict[str, token_usage.Usage]] = {
         family: {day: dict(usage) for day, usage in days.items()}  # type: ignore[misc]
@@ -4228,6 +4280,16 @@ def make_host_usage_snapshot(
     ]
     if degraded:
         row["degraded_sources"] = degraded
+    if degraded and pending_left:
+        pending = {
+            name: value
+            for name in degraded
+            if (value := pending_left.get(name)) is not None
+            and type(value) is int
+            and 1 <= value <= MAX_PENDING_LEFT
+        }
+        if pending:
+            row["pending_left"] = pending
     # Intersect partial days with the SAME keep set hosts/tokens_by_day use,
     # then reduce to source names. A lifetime boolean would let one incomplete
     # turn older than the cap mark every future snapshot partial forever.

@@ -4666,6 +4666,89 @@ class TestCoverageAcceptor:
         assert ra.tie_key == rb.tie_key
         assert aggregator._sibling_tie_key(ra) != aggregator._sibling_tie_key(rb)
 
+    def test_pending_left_round_trips_and_validates_three_ways(self):
+        from mind_meld import events
+
+        row = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("grok",),
+            hosts={"grok": {"2026-04-20": _usage(4)}},
+            degraded_sources=("codex",),
+            pending_left={"codex": 184},
+            ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+        )
+        accepted = aggregator._accept_host_usage_snapshot(row)
+        assert isinstance(accepted, aggregator._AcceptedHostRow)
+        assert accepted.pending_left == (("codex", 184),)
+        assert accepted.pending_left_reason is None
+
+        absent_row = _host_event("dev-a", self.TS, extra={"degraded_sources": ["codex"]})
+        accepted_absent = _accepted(absent_row)
+        assert accepted_absent.pending_left == ()
+        assert accepted_absent.pending_left_reason is None
+        empty = _accepted({**absent_row, "pending_left": {}})
+        assert empty.pending_left == ()
+        assert empty.pending_left_reason is None
+
+        # tie_key excludes pending_left; _sibling_tie_key includes it.
+        with_pending = _host_event(
+            "dev-a",
+            self.TS,
+            extra={"degraded_sources": ["codex"], "pending_left": {"codex": 184}},
+        )
+        accepted_with = _accepted(with_pending)
+        assert accepted_absent.tie_key == accepted_with.tie_key
+        assert aggregator._sibling_tie_key(accepted_absent) != aggregator._sibling_tie_key(
+            accepted_with
+        )
+
+    @pytest.mark.parametrize(
+        "bad_pending",
+        [
+            "not-a-dict",
+            [],
+            {"": 5},
+            {"codex": 5},  # contributor in token_sources, not degraded
+            {"muse": 5},  # absent reader, not in degraded_sources
+            {"grok": 5, "muse": 6},  # more entries than degraded readers
+            {"grok": 0},
+            {"grok": -1},
+            {"grok": True},
+            {"grok": 1.5},
+            {"grok": "5"},
+            {"grok": aggregator.MAX_PENDING_LEFT + 1},
+        ],
+    )
+    def test_invalid_pending_left_drops_field_and_keeps_row_and_degraded(self, bad_pending):
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            extra={"degraded_sources": ["grok"], "pending_left": bad_pending},
+        )
+        accepted = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(accepted, aggregator._AcceptedHostRow)
+        assert accepted.degraded == ("grok",)
+        assert accepted.pending_left == ()
+        assert accepted.pending_left_reason == "invalid_coverage"
+
+    def test_pending_left_is_dropped_after_rejecting_degraded_sources(self):
+        # Value: protects=progress cannot outlive rejected reader coverage;
+        # fails_when=progress validates against raw rather than accepted coverage;
+        # why_new=T4 requires this ordering case; seam=none;
+        # no_claim=host capture (synthetic wire row).
+        row = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            extra={"degraded_sources": ["codex"], "pending_left": {"codex": 5}},
+        )
+        accepted = _accepted(row)
+        assert accepted.degraded == ()
+        assert accepted.degraded_reason == "invalid_coverage"
+        assert accepted.pending_left == ()
+        assert accepted.pending_left_reason == "invalid_coverage"
+
 
 class TestHostSnapshotSelection:
     SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
@@ -5056,6 +5139,31 @@ class TestDumpHostUsage:
         assert snap["degraded"] == []
         assert snap["degraded_reason"] == "invalid_token_sources"
         assert "invalid coverage metadata" in snap["degraded_phrase"]
+
+    def test_dump_carries_pending_left_and_pending_left_reason(self):
+        good = _host_event(
+            "dev-a",
+            "2026-04-27T12:00:00+00:00",
+            extra={"degraded_sources": ["grok"], "pending_left": {"grok": 12}},
+        )
+        bad = _host_event(
+            "dev-b",
+            "2026-04-27T12:00:00+00:00",
+            extra={"degraded_sources": ["grok"], "pending_left": {"grok": 0}},
+        )
+        inv = aggregator.aggregate_host_usage(
+            [good, bad],
+            since=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            until=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+            registered_ids=None,
+        )
+        payload = json.loads(aggregator._dump_host_inventory(inv))
+        snap_a = payload["by_device"]["dev-a"]
+        assert snap_a["pending_left"] == {"grok": 12}
+        assert snap_a["pending_left_reason"] is None
+        snap_b = payload["by_device"]["dev-b"]
+        assert snap_b["pending_left"] == {}
+        assert snap_b["pending_left_reason"] == "invalid_coverage"
 
 
 class TestHostTokensByDayAcceptance:
@@ -5719,6 +5827,7 @@ def _snap(
     until: datetime | None = None,
     degraded: tuple[str, ...] = (),
     partial: tuple[str, ...] = (),
+    pending_left: tuple[tuple[str, int], ...] = (),
     tokens_by_day: dict | None = None,
     counter_semantics: str | None = "disjoint-v1",
 ) -> aggregator.HostDeviceSnapshot:
@@ -5734,6 +5843,7 @@ def _snap(
         future_dated=as_of > ref_until,
         degraded=degraded,
         partial=partial,
+        pending_left=pending_left,
         tokens_by_day=tokens_by_day,
         counter_semantics=counter_semantics,
         detail="present" if tokens_by_day is not None else "absent",
@@ -6221,6 +6331,112 @@ class TestAgentCoverageNotes:
         joined = " ".join(notes)
         assert "too old" not in joined
         assert "partial_sources" not in joined
+
+    def test_f6_catching_up_reader_renders_catching_up_note_and_splits_from_failed(self):
+        # 1. Single peer with Codex catching up (184 left):
+        notes_single = aggregator._agent_coverage_notes(
+            self._data(
+                [
+                    _snap(
+                        "mac-a",
+                        self.UNTIL,
+                        degraded=("codex",),
+                        pending_left=(("codex", 184),),
+                    )
+                ]
+            )
+        )
+        catching = [n for n in notes_single if "catching up" in n]
+        assert len(catching) == 1
+        assert "catching up (184 left)" in catching[0]
+        assert "mac-a" in catching[0]
+        assert "codex" in catching[0]
+        assert (
+            "the next attended `mm push` on `mac-a` continues it; nothing else is needed."
+            in catching[0]
+        )
+        assert not any("failed on the latest push" in n for n in notes_single)
+
+        # 2. Peer with Codex catching up and Muse degraded without pending_left emits both notes:
+        notes_both = aggregator._agent_coverage_notes(
+            self._data(
+                [
+                    _snap(
+                        "mac-a",
+                        self.UNTIL,
+                        degraded=("codex", "muse"),
+                        pending_left=(("codex", 184),),
+                    )
+                ]
+            )
+        )
+        assert any("catching up (184 left)" in n and "codex" in n for n in notes_both)
+        assert any("failed on the latest push" in n and "muse" in n for n in notes_both)
+
+        # 3. Two machines with Codex catching up emit one note with two entries
+        # and figures not summed:
+        notes_two = aggregator._agent_coverage_notes(
+            self._data(
+                [
+                    _snap(
+                        "mac-a",
+                        self.UNTIL,
+                        degraded=("codex",),
+                        pending_left=(("codex", 184),),
+                    ),
+                    _snap(
+                        "arch-b",
+                        self.UNTIL,
+                        degraded=("codex",),
+                        pending_left=(("codex", 12),),
+                    ),
+                ]
+            )
+        )
+        catching_two = [n for n in notes_two if "catching up" in n]
+        assert len(catching_two) == 1
+        assert "codex on `arch-b` is catching up (12 left)" in catching_two[0]
+        assert "codex on `mac-a` is catching up (184 left)" in catching_two[0]
+        assert (
+            "the next attended `mm push` on each named machine continues it; "
+            "nothing else is needed." in catching_two[0]
+        )
+        assert "196" not in catching_two[0]
+
+        # 4. >5 entries bounded with (+K more):
+        many_snaps = [
+            _snap(
+                f"dev-{i:02d}",
+                self.UNTIL,
+                degraded=("codex",),
+                pending_left=(("codex", i + 1),),
+            )
+            for i in range(7)
+        ]
+        notes_many = aggregator._agent_coverage_notes(self._data(many_snaps))
+        catching_many = [n for n in notes_many if "catching up" in n]
+        assert len(catching_many) == 1
+        assert "(+2 more)" in catching_many[0]
+
+        # 5. Older row with pending_left + newer row with degraded_sources: ["muse"] and no
+        # pending_left renders "failed on the latest push":
+        older = _host_event(
+            "dev-a",
+            "2026-04-26T12:00:00+00:00",
+            extra={"degraded_sources": ["muse"], "pending_left": {"muse": 184}},
+        )
+        newer = _host_event(
+            "dev-a",
+            "2026-04-27T12:00:00+00:00",
+            extra={"degraded_sources": ["muse"]},
+        )
+        inv = aggregator.aggregate_host_usage(
+            [older, newer], since=self.SINCE, until=self.UNTIL, registered_ids=None
+        )
+        data_superseded = self._data(list(inv.by_device.values()))
+        notes_superseded = aggregator._agent_coverage_notes(data_superseded)
+        assert any("failed on the latest push" in n for n in notes_superseded)
+        assert not any("catching up" in n for n in notes_superseded)
 
     def test_every_health_code_is_documented_in_skill_md(self):
         """The 1.1 doc-sync contract.
@@ -7218,6 +7434,7 @@ def _capture_on(
     aborts: int = 0,
     errors: int = 0,
     discovery: str = "complete",
+    pending_left: object = None,
 ) -> dict:
     ev = dict(ev)
     ev["git_capture"] = {
@@ -7226,10 +7443,52 @@ def _capture_on(
         "walk_budget_aborts": aborts,
         "walk_errors": errors,
     }
+    if pending_left is not None:
+        ev["git_capture"]["pending_left"] = pending_left
     return ev
 
 
 class TestGitCoverageAndRecapture:
+    @pytest.mark.parametrize(
+        "aborts,errors,left",
+        [
+            (1, 1, 5),
+            (0, 0, 5),
+            (True, 0, 5),
+            (1, False, 5),
+            (1, 0, 1.5),
+            (1, 0, aggregator.MAX_PENDING_LEFT + 1),
+        ],
+    )
+    def test_invalid_git_progress_keeps_failure_and_explains_drop(
+        self, tmp_path, monkeypatch, capsys, aborts, errors, left
+    ):
+        # Value: protects=malformed Git progress cannot claim catch-up; fails_when=
+        # invalid progress replaces failure guidance or loses its forensic reason;
+        # why_new=old malformed tests check only the legacy note; seam=none;
+        # no_claim=live peer capture (synthetic wire rows).
+        older = _capture_on(_git_event("dev-a", 1, [_commit("aaa", 1)]), since_days=7, aborts=1)
+        bad = _capture_on(
+            _git_event("dev-a", 0, [_commit("bbb", 0)]),
+            since_days=7,
+            aborts=aborts,
+            errors=errors,
+            pending_left=left,
+        )
+        _write_events(tmp_path, "dev-a", "2026-04-28", [older, bad])
+        data = _aggregate(tmp_path)
+        assert data.git.git_catching_up == {}
+        assert data.git.git_pending_left_rejections == {"dev-a": "invalid_coverage"}
+        assert "ran out of budget" in next(
+            e["detail"] for e in _health(aggregator.format_retro(data)) if e["code"] == "git_budget"
+        )
+        monkeypatch.setattr(aggregator, "aggregate", lambda **_kw: data)
+        assert aggregator.main(["7d", "--dump-host-usage", "--no-author-filter"]) == 0
+        dump = json.loads(capsys.readouterr().out)
+        assert dump["git_pending_left_rejections"] == [
+            {"device": "dev-a", "reason": "invalid_coverage"}
+        ]
+
     def test_g1_recapture_rows_excluded_from_push_tally(self, tmp_path):
         events_dir = tmp_path / "events"
         events_dir.mkdir()
@@ -7497,6 +7756,106 @@ class TestGitCoverageAndRecapture:
         _write_events(events_dir, "dev-a", "2026-04-21", [good, gone])
         data = _aggregate(events_dir)
         assert "dev-a" not in data.git.uncovered_git
+
+    def test_h13_git_catching_up_renders_progress_and_splits_from_budget_fallback(self, tmp_path):
+        # 1. Latest in-window row with walk_budget_aborts=2, pending_left=5 emits git_budget
+        # with "catching up" and "(5 left)" and not "ran out of budget":
+        dir1 = tmp_path / "events-1"
+        dir1.mkdir()
+        row1 = _capture_on(
+            _git_event("dev-a", 0, [_commit("aaa", 1)]),
+            since_days=7,
+            aborts=2,
+            pending_left=5,
+        )
+        _write_events(dir1, "dev-a", "2026-04-28", [row1])
+        data1 = _aggregate(dir1)
+        assert data1.git.git_budget_aborts == {"dev-a": 2}
+        assert data1.git.git_catching_up == {"dev-a": 5}
+        out1 = aggregator.format_retro(data1)
+        gb1 = [e for e in _health(out1) if e["code"] == "git_budget"]
+        assert len(gb1) == 1
+        assert "catching up" in gb1[0]["detail"]
+        assert "(5 left)" in gb1[0]["detail"]
+        assert "ran out of budget" not in gb1[0]["detail"]
+        assert "the next attended `mm push` there continues it" in gb1[0]["detail"]
+        assert (
+            gb1[0]["remedy"]
+            == "Nothing more is needed than the next attended `mm push` on the named machine(s)."
+        )
+
+        # 2. Older row with pending_left=5 + newer row with walk_budget_aborts=1 and no
+        # pending_left renders today's text:
+        dir2 = tmp_path / "events-2"
+        dir2.mkdir()
+        older = _capture_on(
+            _git_event("dev-a", 1, [_commit("aaa", 1)]),
+            since_days=7,
+            aborts=2,
+            pending_left=5,
+        )
+        newer = _capture_on(
+            _git_event("dev-a", 0, [_commit("bbb", 0)]),
+            since_days=7,
+            aborts=1,
+        )
+        _write_events(dir2, "dev-a", "2026-04-28", [older, newer])
+        data2 = _aggregate(dir2)
+        assert data2.git.git_budget_aborts == {"dev-a": 3}
+        assert data2.git.git_catching_up == {}
+        out2 = aggregator.format_retro(data2)
+        gb2 = [e for e in _health(out2) if e["code"] == "git_budget"]
+        assert len(gb2) == 1
+        assert "ran out of budget" in gb2[0]["detail"]
+        assert "catching up" not in gb2[0]["detail"]
+
+        # 3. Malformed pending_left (0, -1, "5", True) renders today's text:
+        for idx, bad in enumerate((0, -1, "5", True)):
+            dir_bad = tmp_path / f"events-bad-{idx}"
+            dir_bad.mkdir()
+            bad_row = _capture_on(
+                _git_event("dev-a", 0, [_commit("aaa", 1)]),
+                since_days=7,
+                aborts=2,
+                pending_left=bad,
+            )
+            _write_events(dir_bad, "dev-a", "2026-04-28", [bad_row])
+            data_bad = _aggregate(dir_bad)
+            assert data_bad.git.git_catching_up == {}
+            out_bad = aggregator.format_retro(data_bad)
+            gb_bad = [e for e in _health(out_bad) if e["code"] == "git_budget"]
+            assert len(gb_bad) == 1
+            assert "ran out of budget" in gb_bad[0]["detail"]
+            assert "catching up" not in gb_bad[0]["detail"]
+
+        # 4. Two machines, one catching up and one without pending_left, emit two git_budget
+        # notes, each naming only its machines:
+        dir4 = tmp_path / "events-4"
+        dir4.mkdir()
+        catching_row = _capture_on(
+            _git_event("mac-a", 0, [_commit("aaa", 1)]),
+            since_days=7,
+            aborts=2,
+            pending_left=5,
+        )
+        fallback_row = _capture_on(
+            _git_event("arch-b", 0, [_commit("bbb", 1)]),
+            since_days=7,
+            aborts=1,
+        )
+        _write_events(dir4, "mac-a", "2026-04-28", [catching_row])
+        _write_events(dir4, "arch-b", "2026-04-28", [fallback_row])
+        data4 = _aggregate(dir4)
+        out4 = aggregator.format_retro(data4)
+        gb4 = [e for e in _health(out4) if e["code"] == "git_budget"]
+        assert len(gb4) == 2
+        catching_entry = next(e for e in gb4 if "catching up" in e["detail"])
+        fallback_entry = next(e for e in gb4 if "ran out of budget" in e["detail"])
+        assert "mac-a" in catching_entry["detail"]
+        assert "arch-b" not in catching_entry["detail"]
+        assert "(5 left)" in catching_entry["detail"]
+        assert "arch-b" in fallback_entry["detail"]
+        assert "mac-a" not in fallback_entry["detail"]
 
 
 # ---------------------------------------------------------------------------

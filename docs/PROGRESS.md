@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.42 | 2026-11-12 | `mm retro-fleet` now says a peer's host-usage reader or Git walk is catching up when that peer's latest push stopped on its scan deadline with work left, and points to that machine's next attended `mm push`. |
 | 1.12.41 | 2026-11-12 | Setup, device approval, source changes, conflict resolution and pull warnings use the shared outcome and diagnostic forms. |
 | 1.12.40 | 2026-11-12 | `mm update` now shows the same clearing spinner as `mm push` and `mm pull` and ends with one result line, and an attended `mm push` or `mm pull` that updates mm shows the update in its spinner and ends with `Updated mm <old> → <new>.` |
 | 1.12.39 | 2026-11-12 | `mm retro-fleet` names affected machines in coverage causes, gives missing snapshots a push-or-delivery remedy, and recognizes version-prefixed conventional commits. |

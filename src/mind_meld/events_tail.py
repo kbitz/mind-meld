@@ -45,6 +45,7 @@ from mind_meld import (
     host_registry,
     host_usage,
     identity,
+    lockedjson,
     token_usage,
     upgrade,
 )
@@ -153,6 +154,10 @@ git/session walk budgets. It starts after the ``walk_done`` snapshot so host
 time can never trigger or redefine the session-walk notice, and it is passed
 explicitly to every reader — no unattended caller may fall through to ``host_usage``'s
 5-second default, which is ~20x an autopush's entire walk budget."""
+
+CAPTURE_PROGRESS_PATH = mm_config.CONFIG_DIR / "capture-progress.json"
+CAPTURE_PROGRESS_MAX_AGE = timedelta(days=7)
+"""Maximum age of an attended figure carried onto an unattended capture."""
 
 
 _pending_capture_budget_ms: int | None = None
@@ -456,6 +461,7 @@ class HostUsageCapture:
     The writer intersects these with its retained days to prove emptiness.
     Model-family membership cannot identify a reader's contribution.
     """
+    deadline_evidence: Mapping[str, HostReadEvidence] = field(default_factory=dict)
 
     @property
     def complete(self) -> bool:
@@ -903,27 +909,289 @@ def _no_release_reads_clause(readers: Sequence[str]) -> str:
     )
 
 
-def _capture_skip_phrase(reader: str, reason: str, *, attended: bool) -> str:
+def _deadline_read_evidence(reader: str) -> HostReadEvidence:
+    """Count on-disk and cached items for a deadline-stopped reader."""
+    try:
+        locked = False
+        if reader == "codex":
+            with codex_host.locked_json_snapshot(codex_host.CACHE_PATH, blocking=False) as snap:
+                locked = snap.state == "lock_failed"
+        diag = {} if locked else host_registry.reader_usage_diag(reader, count_logs=True)
+    except Exception:
+        diag = {}
+    if isinstance(diag, Mapping):
+        return HostReadEvidence(
+            files_on_disk=diag.get("files_on_disk"),
+            files_cached=diag.get("files_cached"),
+        )
+    return HostReadEvidence()
+
+
+def _evidence_left(evidence: HostReadEvidence | None) -> int | None:
+    """Return ``max(0, files_on_disk - files_cached)`` when both counts are ints."""
+    if (
+        evidence is not None
+        and type(evidence.files_on_disk) is int
+        and type(evidence.files_cached) is int
+    ):
+        return max(0, evidence.files_on_disk - evidence.files_cached)
+    return None
+
+
+@dataclass(frozen=True)
+class CaptureProgress:
+    """Validated machine-local progress figures carried to unattended captures."""
+
+    host: Mapping[str, int] = field(default_factory=dict)
+    git: int | None = None
+
+
+def _valid_progress_entry(entry: object, *, now: datetime) -> int | None:
+    if not isinstance(entry, Mapping):
+        return None
+    left = entry.get("left")
+    raw_ts = entry.get("saved_at")
+    if type(left) is not int or not (1 <= left <= events.MAX_PENDING_LEFT):
+        return None
+    if not isinstance(raw_ts, str):
+        return None
+    try:
+        saved_at = datetime.fromisoformat(raw_ts)
+    except ValueError:
+        return None
+    if saved_at.tzinfo is None or saved_at.utcoffset() is None:
+        return None
+    if not (now - CAPTURE_PROGRESS_MAX_AGE <= saved_at <= now):
+        return None
+    return left
+
+
+def _read_capture_progress(
+    device_id: str,
+    *,
+    now: datetime | None = None,
+) -> CaptureProgress:
+    """Read carried progress figures without walking or counting anything."""
+    current = now or datetime.now(timezone.utc)
+    try:
+        with lockedjson.locked_json_snapshot(CAPTURE_PROGRESS_PATH, blocking=False) as snap:
+            if snap.state != "valid" or not isinstance(snap.data, Mapping):
+                return CaptureProgress()
+            data = snap.data
+            if (
+                type(data.get("version")) is not int
+                or data.get("version") != 1
+                or not isinstance(device_id, str)
+                or not device_id
+                or data.get("device") != device_id
+            ):
+                return CaptureProgress()
+            raw_host = data.get("host")
+            host: dict[str, int] = {}
+            if isinstance(raw_host, Mapping):
+                for name in events.HOST_USAGE_TOKEN_SOURCES:
+                    left = _valid_progress_entry(raw_host.get(name), now=current)
+                    if left is not None:
+                        host[name] = left
+            git = _valid_progress_entry(data.get("git"), now=current)
+            return CaptureProgress(host=host, git=git)
+    except Exception:
+        return CaptureProgress()
+
+
+def _record_host_progress(
+    capture: HostUsageCapture,
+    *,
+    device_id: str,
+    attended: bool,
+    now: datetime | None = None,
+) -> None:
+    """Persist or prune host-reader progress figures after a host capture."""
+    if not isinstance(device_id, str) or not device_id:
+        return
+    current = now or datetime.now(timezone.utc)
+    current_iso = current.isoformat()
+    deadline_readers = {
+        name
+        for name, reason in capture.dropped
+        if reason == "deadline" and name in events.HOST_USAGE_TOKEN_SOURCES
+    }
+    desired_attended: dict[str, dict[str, object]] = {}
+    if attended:
+        for name in events.HOST_USAGE_TOKEN_SOURCES:
+            if name not in deadline_readers:
+                continue
+            left = _evidence_left(capture.deadline_evidence.get(name))
+            if type(left) is int and 1 <= left <= events.MAX_PENDING_LEFT:
+                desired_attended[name] = {"left": left, "saved_at": current_iso}
+    try:
+        with lockedjson.locked_json_snapshot(CAPTURE_PROGRESS_PATH, blocking=False) as snap:
+            if not attended:
+                if (
+                    snap.state != "valid"
+                    or not isinstance(snap.data, Mapping)
+                    or type(snap.data.get("version")) is not int
+                    or snap.data.get("version") != 1
+                    or snap.data.get("device") != device_id
+                ):
+                    return
+                raw_host = snap.data.get("host")
+                if raw_host is None or (
+                    isinstance(raw_host, Mapping)
+                    and all(
+                        isinstance(k, str) and k in deadline_readers and isinstance(v, Mapping)
+                        for k, v in raw_host.items()
+                    )
+                ):
+                    return
+            elif not desired_attended:
+                if snap.state == "missing":
+                    return
+                if (
+                    snap.state == "valid"
+                    and isinstance(snap.data, Mapping)
+                    and type(snap.data.get("version")) is int
+                    and snap.data.get("version") == 1
+                    and snap.data.get("device") == device_id
+                    and "host" not in snap.data
+                ):
+                    return
+        with lockedjson.locked_json_rmw(
+            CAPTURE_PROGRESS_PATH,
+            on_contention="raise",
+            retry_intervals=(),
+        ) as ljson:
+            same_envelope = (
+                ljson.read_state == "valid"
+                and type(ljson.data.get("version")) is int
+                and ljson.data.get("version") == 1
+                and ljson.data.get("device") == device_id
+            )
+            other_git = (
+                ljson.data.get("git")
+                if same_envelope and isinstance(ljson.data.get("git"), Mapping)
+                else None
+            )
+            if attended:
+                new_host = desired_attended
+            else:
+                existing_host = (
+                    ljson.data.get("host")
+                    if same_envelope and isinstance(ljson.data.get("host"), Mapping)
+                    else {}
+                )
+                new_host = {
+                    k: v
+                    for k, v in existing_host.items()
+                    if isinstance(k, str) and k in deadline_readers and isinstance(v, Mapping)
+                }
+            target: dict[str, object] = {"version": 1, "device": device_id}
+            if new_host:
+                target["host"] = new_host
+            if other_git is not None:
+                target["git"] = other_git
+            if ljson.read_state == "valid" and ljson.data == target:
+                ljson.write_on_exit = False
+            else:
+                ljson.data.clear()
+                ljson.data.update(target)
+    except Exception:
+        pass
+
+
+def _record_git_progress(
+    *,
+    device_id: str,
+    published: int | None,
+    clear: bool,
+    now: datetime | None = None,
+) -> None:
+    """Persist or clear the Git repositories-left figure after a confirmed append."""
+    if not isinstance(device_id, str) or not device_id:
+        return
+    valid_published = (
+        published if type(published) is int and 1 <= published <= events.MAX_PENDING_LEFT else None
+    )
+    if valid_published is None and not clear:
+        return
+    current = now or datetime.now(timezone.utc)
+    current_iso = current.isoformat()
+    try:
+        if valid_published is None:
+            with lockedjson.locked_json_snapshot(CAPTURE_PROGRESS_PATH, blocking=False) as snap:
+                if (
+                    snap.state != "valid"
+                    or not isinstance(snap.data, Mapping)
+                    or type(snap.data.get("version")) is not int
+                    or snap.data.get("version") != 1
+                    or snap.data.get("device") != device_id
+                    or "git" not in snap.data
+                ):
+                    return
+        with lockedjson.locked_json_rmw(
+            CAPTURE_PROGRESS_PATH,
+            on_contention="raise",
+            retry_intervals=(),
+        ) as ljson:
+            same_envelope = (
+                ljson.read_state == "valid"
+                and type(ljson.data.get("version")) is int
+                and ljson.data.get("version") == 1
+                and ljson.data.get("device") == device_id
+            )
+            other_host = (
+                ljson.data.get("host")
+                if same_envelope
+                and isinstance(ljson.data.get("host"), Mapping)
+                and ljson.data.get("host")
+                else None
+            )
+            target: dict[str, object] = {"version": 1, "device": device_id}
+            if other_host is not None:
+                target["host"] = other_host
+            if valid_published is not None:
+                target["git"] = {"left": valid_published, "saved_at": current_iso}
+            if ljson.read_state == "valid" and ljson.data == target:
+                ljson.write_on_exit = False
+            else:
+                ljson.data.clear()
+                ljson.data.update(target)
+    except Exception:
+        pass
+
+
+def _attach_git_pending_left(
+    capture: CaptureResult,
+    mm_event: dict,
+    left: int | None,
+) -> int | None:
+    """Attach a positive ``pending_left`` count to ``mm_event`` and ``capture.git_rows``."""
+    if type(left) is not int or not (1 <= left <= events.MAX_PENDING_LEFT):
+        return None
+    git_capture = mm_event.get("git_capture")
+    if isinstance(git_capture, dict):
+        git_capture["pending_left"] = left
+    for row in capture.git_rows:
+        row_capture = row.get("git_capture")
+        if isinstance(row_capture, dict):
+            row_capture["pending_left"] = left
+    return left
+
+
+def _capture_skip_phrase(
+    reader: str,
+    reason: str,
+    *,
+    attended: bool,
+    evidence: HostReadEvidence | None = None,
+) -> str:
     """Build a notice for a reader the capture caller already consented to.
 
     Keep inventory reads here, outside the pure formatter also used by run
     evidence to enumerate its closed vocabulary without any host consent.
     """
-    evidence = None
-    if attended and reason == "deadline" and reader in HOST_READER_SOURCE_GATE:
-        try:
-            locked = False
-            if reader == "codex":
-                with codex_host.locked_json_snapshot(codex_host.CACHE_PATH, blocking=False) as snap:
-                    locked = snap.state == "lock_failed"
-            diag = {} if locked else host_registry.reader_usage_diag(reader, count_logs=True)
-        except Exception:
-            diag = {}
-        if isinstance(diag, Mapping):
-            evidence = HostReadEvidence(
-                files_on_disk=diag.get("files_on_disk"),
-                files_cached=diag.get("files_cached"),
-            )
+    if evidence is None and attended and reason == "deadline" and reader in HOST_READER_SOURCE_GATE:
+        evidence = _deadline_read_evidence(reader)
     return _host_skip_phrase(
         reader, reason, readiness="ready", evidence=evidence, attended=attended
     )
@@ -969,13 +1237,7 @@ def _host_skip_phrase(
             "to stop retrying."
         )
     if reason == "deadline":
-        left: int | None = None
-        if (
-            evidence is not None
-            and type(evidence.files_on_disk) is int
-            and type(evidence.files_cached) is int
-        ):
-            left = max(0, evidence.files_on_disk - evidence.files_cached)
+        left = _evidence_left(evidence)
         if type(left) is int and left > 0:
             return (
                 f"{reader} usage catching up ({left} left) — "
@@ -1110,6 +1372,37 @@ def _capture_host_snapshot(
                 readers=host_readers,
                 retried_names={name},
             )
+    pending_left: dict[str, int] = {}
+    if warm_host_cache is not None:
+        deadline_evidence: dict[str, HostReadEvidence] = {}
+        for name, reason in host_capture.dropped:
+            if reason == "deadline" and name in HOST_READER_SOURCE_GATE:
+                evidence = _deadline_read_evidence(name)
+                deadline_evidence[name] = evidence
+                left = _evidence_left(evidence)
+                if type(left) is int and 1 <= left <= events.MAX_PENDING_LEFT:
+                    pending_left[name] = left
+        if deadline_evidence:
+            host_capture = HostUsageCapture(
+                host_capture.hosts,
+                host_capture.reader,
+                host_capture.reason,
+                token_sources=host_capture.token_sources,
+                dropped=host_capture.dropped,
+                invoked=host_capture.invoked,
+                tokens_by_day=host_capture.tokens_by_day,
+                partial_days=host_capture.partial_days,
+                partial=host_capture.partial,
+                usage_days=host_capture.usage_days,
+                deadline_evidence=deadline_evidence,
+            )
+    elif host_capture.hosts is not None and any(
+        reason == "deadline" for _name, reason in host_capture.dropped
+    ):
+        progress = _read_capture_progress(device_id)
+        for name, reason in host_capture.dropped:
+            if reason == "deadline" and name in progress.host:
+                pending_left[name] = progress.host[name]
     host_rows: list[dict] = []
     if host_capture.hosts is not None:
         host_rows.append(
@@ -1121,6 +1414,7 @@ def _capture_host_snapshot(
                 tokens_by_day=host_capture.tokens_by_day or {},
                 partial_days=host_capture.partial_days,
                 usage_days=host_capture.usage_days,
+                pending_left=pending_left or None,
             )
         )
 
@@ -1282,16 +1576,21 @@ def _capture_event_snapshots(
     # notice, and reusing `deadline` would silently spend whatever the walk
     # left over (usually nothing on a busy machine, so the row would vanish
     # exactly when it is most interesting).
-    host_capture, host_rows = (
-        (HostUsageCapture({}), [])
-        if suppress_host_capture
-        else _capture_host_snapshot(
+    if suppress_host_capture:
+        host_capture, host_rows = HostUsageCapture({}), []
+    else:
+        host_capture, host_rows = _capture_host_snapshot(
             device_id,
             host_readers,
             host_budget_ms=host_budget_ms,
             warm_host_cache=warm_host_cache,
         )
-    )
+        if persist:
+            _record_host_progress(
+                host_capture,
+                device_id=device_id,
+                attended=warm_host_cache is not None,
+            )
 
     return CaptureResult(
         git_rows=git_rows,
@@ -1607,6 +1906,23 @@ def _run_events_tail(
                 walk_errors=capture.walk_errors,
             ),
         )
+        mm_event_ts = datetime.fromisoformat(mm_event["ts"])
+        published_git_left: int | None = None
+        if capture.walk_budget_aborts > 0 and capture.walk_errors == 0:
+            if not quiet:
+                try:
+                    preview_left = events.preview_pending_repositories(
+                        capture.root_discovery.roots,
+                        capture.git_rows,
+                        since=since,
+                        cursor_ts=mm_event_ts,
+                    )
+                except Exception:
+                    preview_left = None
+                published_git_left = _attach_git_pending_left(capture, mm_event, preview_left)
+            else:
+                carried_git_left = _read_capture_progress(device_id, now=mm_event_ts).git
+                published_git_left = _attach_git_pending_left(capture, mm_event, carried_git_left)
         # CT-4 invariant: mm-push event LAST so a partial write doesn't
         # advance the next-push cursor. The optional host row sits between the
         # session rows and it — it is capture data like the others, and must
@@ -1632,7 +1948,7 @@ def _run_events_tail(
             events.commit_repo_cursors(
                 capture.git_rows,
                 since=since,
-                cursor_ts=datetime.fromisoformat(mm_event["ts"]),
+                cursor_ts=mm_event_ts,
                 recorded_ts=mm_event["ts"],
                 complete=(
                     events.classify_discovery(capture.root_discovery) not in {"partial", "empty"}
@@ -1640,6 +1956,20 @@ def _run_events_tail(
                     and not capture.walk_errors
                 ),
             )
+            if not quiet:
+                _record_git_progress(
+                    device_id=device_id,
+                    published=published_git_left,
+                    clear=published_git_left is None,
+                    now=mm_event_ts,
+                )
+            elif capture.walk_budget_aborts == 0 or capture.walk_errors > 0:
+                _record_git_progress(
+                    device_id=device_id,
+                    published=None,
+                    clear=True,
+                    now=mm_event_ts,
+                )
 
         if cursor.held:
             degradations.append(_CURSOR_HOLD_DEGRADATION)
@@ -1701,7 +2031,12 @@ def _run_events_tail(
         # reader/reason when `dropped` is empty.
         if capture.host_capture.dropped:
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
-                phrase = _capture_skip_phrase(dropped_reader, dropped_reason, attended=not quiet)
+                phrase = _capture_skip_phrase(
+                    dropped_reader,
+                    dropped_reason,
+                    attended=not quiet,
+                    evidence=capture.host_capture.deadline_evidence.get(dropped_reader),
+                )
                 degradations.append(phrase)
                 _diagnostic(f"mm: notice: {phrase}\n")
         elif not capture.host_capture.complete:
@@ -1709,6 +2044,7 @@ def _run_events_tail(
                 capture.host_capture.reader,
                 capture.host_capture.reason,
                 attended=not quiet,
+                evidence=capture.host_capture.deadline_evidence.get(capture.host_capture.reader),
             )
             degradations.append(phrase)
             _diagnostic(f"mm: notice: {phrase}\n")
