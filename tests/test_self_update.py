@@ -263,6 +263,41 @@ class TestUpdateArgv:
 # ── the pipx seams ────────────────────────────────────────────────────────
 
 
+def _wait_for_detached_json(
+    out_file: Path,
+    log_path: Path,
+    *,
+    monotonic=time.monotonic,
+    sleep=time.sleep,
+):
+    """Poll a detached synthetic child's JSON output until a full snapshot decodes."""
+    deadline = monotonic() + 5
+    last_error: Exception | None = None
+    last_text: str | None = None
+    while True:
+        try:
+            text = out_file.read_text(encoding="utf-8")
+            last_text = text
+            return json.loads(text)
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            last_error = exc
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            break
+        # gstack-timing-ok: poll a detached synthetic child's result, bounded to 5s.
+        sleep(min(0.05, remaining))
+    try:
+        spawn_log = repr(log_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as log_exc:
+        spawn_log = f"<unavailable {log_path}: {type(log_exc).__name__}: {log_exc}>"
+    pytest.fail(
+        f"Timed out waiting for complete JSON in {out_file}: "
+        f"{type(last_error).__name__}: {last_error}; "
+        f"last_text={last_text!r}; "
+        f"spawn.log={spawn_log}"
+    )
+
+
 class TestPipxSeams:
     def test_progress_callback_arrives_before_exit_without_forwarding_raw_output(self, tmp_path):
         release = tmp_path / "release-installer"
@@ -1603,14 +1638,11 @@ class TestPipxSeams:
         argv = [sys.executable, "-c", code]
         if not detached:
             upgrade._run_pipx(argv)
+            recorded = json.loads(out_file.read_text(encoding="utf-8"))
         else:
             log = tmp_path / "spawn.log"
             upgrade._spawn_pipx(argv, log)
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline and not out_file.exists():
-                # gstack-timing-ok: poll a detached synthetic child's result, bounded to 5s.
-                time.sleep(0.05)
-        recorded = json.loads(out_file.read_text(encoding="utf-8"))
+            recorded = _wait_for_detached_json(out_file, log)
         assert recorded["stdin_eof"] is True
         assert recorded["new_session"] is True
         assert recorded["GIT_TERMINAL_PROMPT"] == "0"
@@ -1621,6 +1653,120 @@ class TestPipxSeams:
         assert recorded["GIT_HTTP_LOW_SPEED_LIMIT"] == "1000"
         assert recorded["GIT_HTTP_LOW_SPEED_TIME"] == "60"
         assert "BatchMode=yes" in (recorded["GIT_SSH_COMMAND"] or "")
+
+    def test_detached_json_wait_retries_partial_snapshots_and_leaves_other_failures_unretried(
+        self, tmp_path
+    ):
+        out_file = tmp_path / "pipx-child-True.json"
+        log = tmp_path / "spawn.log"
+        now = 100.0
+        sleeps: list[float] = []
+        snapshots = [
+            "",
+            '{"stdin_eof": true',
+            '{"stdin_eof": true, "new_session": true}',
+        ]
+
+        def fake_sleep(seconds: float) -> None:
+            nonlocal now
+            sleeps.append(seconds)
+            now += seconds
+            out_file.write_text(snapshots[len(sleeps) - 1], encoding="utf-8")
+
+        recorded = _wait_for_detached_json(
+            out_file,
+            log,
+            monotonic=lambda: now,
+            sleep=fake_sleep,
+        )
+        assert recorded == {"stdin_eof": True, "new_session": True}
+        assert sleeps == [0.05, 0.05, 0.05]
+
+        # Valid JSON with a wrong value or shape returns immediately to the caller's assertions.
+        wrong_sleeps: list[float] = []
+        out_file.write_text('{"stdin_eof": false}', encoding="utf-8")
+        wrong_recorded = _wait_for_detached_json(
+            out_file,
+            log,
+            monotonic=lambda: now,
+            sleep=wrong_sleeps.append,
+        )
+        assert wrong_sleeps == []
+        with pytest.raises(AssertionError):
+            assert wrong_recorded["stdin_eof"] is True
+
+        # Unrelated read errors propagate immediately without polling.
+        unreadable_dir = tmp_path / "out-as-dir"
+        unreadable_dir.mkdir()
+        with pytest.raises(IsADirectoryError):
+            _wait_for_detached_json(
+                unreadable_dir,
+                log,
+                monotonic=lambda: now,
+                sleep=wrong_sleeps.append,
+            )
+        assert wrong_sleeps == []
+
+    @pytest.mark.parametrize(
+        "partial_text, log_text, expected_error, expected_last_text, expected_log",
+        [
+            (
+                None,
+                None,
+                "FileNotFoundError",
+                "last_text=None",
+                "<unavailable ",
+            ),
+            (
+                '{"stdin_eof":\n',
+                "child stderr line\n",
+                "JSONDecodeError",
+                r"""last_text='{"stdin_eof":\n'""",
+                r"spawn.log='child stderr line\n'",
+            ),
+        ],
+    )
+    def test_detached_json_wait_fails_at_single_deadline_with_snapshot_and_log_diagnostics(
+        self,
+        tmp_path,
+        partial_text,
+        log_text,
+        expected_error,
+        expected_last_text,
+        expected_log,
+    ):
+        out_file = tmp_path / "pipx-child-True.json"
+        log = tmp_path / "spawn.log"
+        if log_text is not None:
+            log.write_text(log_text, encoding="utf-8")
+
+        now = 200.0
+        sleeps: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            nonlocal now
+            sleeps.append(seconds)
+            if len(sleeps) == 1 and partial_text is not None:
+                out_file.write_text(partial_text, encoding="utf-8")
+            # Advance close to the 5s deadline on the first two sleeps, then finish the budget.
+            now += 2.49 if len(sleeps) < 3 else seconds
+
+        with pytest.raises(pytest.fail.Exception) as caught:
+            _wait_for_detached_json(
+                out_file,
+                log,
+                monotonic=lambda: now,
+                sleep=fake_sleep,
+            )
+        message = str(caught.value)
+        assert str(out_file) in message
+        assert expected_error in message
+        assert expected_last_text in message
+        assert expected_log in message
+        assert len(sleeps) == 3
+        assert sleeps[:2] == [0.05, 0.05]
+        assert sleeps[2] == pytest.approx(0.02)
+        assert now == pytest.approx(205.0)
 
     def test_timeout_stops_installer_descendants(self, pipx_install, monkeypatch):
         pipx_install()
