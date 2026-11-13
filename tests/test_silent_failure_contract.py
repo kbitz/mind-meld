@@ -3356,3 +3356,220 @@ def test_track_125a_autopush_and_autopull_keep_quiet_output_and_invariant_breadc
     assert pull_crumb["outcome"] == "degraded"
     assert pull_crumb["detail"] == "pull ledger unavailable (busy)"
     assert "catching up" not in pull_crumb["detail"]
+
+
+def _setup_agy_unsupported_fixture(tmp_path, monkeypatch):
+    from mind_meld import upgrade
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    _mm_token_usage.warm_token_cache_inline([claude_root])
+    monkeypatch.setattr(cli_module.statusflow.console, "_width", 240)
+    _enable_test_host_source(tmp_path, "agy")
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_agy_usage",
+        lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
+    )
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "agy_usage_diag",
+        lambda **_kw: {
+            "last_reason": "unsupported",
+            "complete_once": False,
+            "usage_less_skipped": 0,
+            "cache_state": "ok",
+        },
+    )
+    monkeypatch.setattr(upgrade, "__version__", "9.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    monkeypatch.setattr(upgrade, "_TRANSITION_DETECTED_THIS_INVOCATION", True)
+    monkeypatch.setattr(upgrade, "update_or_nudge", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        upgrade,
+        "_fetch_tags",
+        lambda *_a, **_kw: pytest.fail("_fetch_tags must not run during push or status"),
+    )
+    monkeypatch.setattr(
+        upgrade,
+        "check_for_upgrade",
+        lambda *_a, **_kw: pytest.fail("check_for_upgrade must not run during push or status"),
+    )
+    return iso, upgrade
+
+
+def _write_upgrade_cache(cache_path: Path, latest_version: str) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "latest_version": latest_version,
+                "running_version": "9.0.0",
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expect_no_release"),
+    [
+        ("current", True),
+        ("upgrade_available", False),
+        ("missing_cache", False),
+        ("malformed_cache", False),
+        ("opt_out", False),
+        ("invocation_skip", False),
+        ("contended_lock", False),
+    ],
+)
+def test_agy_unsupported_push_and_status_match_across_cached_upgrade_states(
+    tmp_path, monkeypatch, mode, expect_no_release
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from mind_meld import attemptlog
+    from mind_meld import config as _mm_cfg
+
+    _iso, upgrade = _setup_agy_unsupported_fixture(tmp_path, monkeypatch)
+    cache_path = upgrade.CACHE_PATH
+
+    if mode == "current":
+        _write_upgrade_cache(cache_path, "9.0.0")
+    elif mode == "upgrade_available":
+        _write_upgrade_cache(cache_path, "9.1.0")
+    elif mode == "missing_cache":
+        cache_path.unlink(missing_ok=True)
+    elif mode == "malformed_cache":
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text("{broken")
+    elif mode == "opt_out":
+        _write_upgrade_cache(cache_path, "9.0.0")
+        cfg = _mm_cfg.load_config(_mm_cfg.CONFIG_PATH)
+        cfg["upgrade"] = {"auto_check": False}
+        save_config(cfg, _mm_cfg.CONFIG_PATH)
+    elif mode == "invocation_skip":
+        _write_upgrade_cache(cache_path, "9.0.0")
+        monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", True)
+    elif mode == "contended_lock":
+        _write_upgrade_cache(cache_path, "9.0.0")
+
+        @contextmanager
+        def _contended(_path, **_kw):
+            yield SimpleNamespace(data=None, state="lock_failed")
+
+        monkeypatch.setattr(upgrade, "locked_json_snapshot", _contended)
+
+    before_cache = (
+        (cache_path.read_bytes(), cache_path.stat().st_mtime_ns) if cache_path.exists() else None
+    )
+
+    pushed = runner.invoke(app, ["push", "--verbose"])
+    assert pushed.exit_code == 0, (pushed.stdout, pushed.stderr)
+
+    after_push_cache = (
+        (cache_path.read_bytes(), cache_path.stat().st_mtime_ns) if cache_path.exists() else None
+    )
+    assert after_push_cache == before_cache
+
+    status_res = runner.invoke(app, ["status"])
+    assert status_res.exit_code == 0, (status_res.stdout, status_res.stderr)
+
+    after_status_cache = (
+        (cache_path.read_bytes(), cache_path.stat().st_mtime_ns) if cache_path.exists() else None
+    )
+    assert after_status_cache == before_cache
+
+    push_err = " ".join((pushed.stderr or "").split())
+    status_out = " ".join((status_res.stdout or "").split())
+
+    no_release_notice = (
+        "host-usage snapshot skipped (agy unsupported) — "
+        "content sync and git/session capture unaffected. "
+        "Antigravity usage not captured: this mm can't read Antigravity's current record format, "
+        "and no newer mm can yet. See `mm diag`, or run `mm disable-source agy` to stop retrying."
+    )
+    update_notice = (
+        "host-usage snapshot skipped (agy unsupported) — "
+        "content sync and git/session capture unaffected. "
+        "agy wrote a record this version cannot read. "
+        "A newer mm may read it: run `mm update`, or run `mm disable-source agy` to stop retrying."
+    )
+
+    if expect_no_release:
+        assert no_release_notice in push_err
+        assert no_release_notice in status_out
+        assert "mm update" not in push_err
+        assert "mm update" not in status_out
+    else:
+        assert update_notice in push_err
+        assert update_notice in status_out
+        assert "mm update" in push_err
+        assert "mm update" in status_out
+        assert "no newer mm can yet" not in push_err
+        assert "no newer mm can yet" not in status_out
+
+    attempt_record, attempt_reason = attemptlog.read()
+    assert attempt_reason is None and attempt_record is not None
+    assert attempt_record["readers"]["agy"] == "dropped:unsupported"
+
+
+def test_agy_unsupported_cached_upgrade_view_exception_keeps_sibling_capture_and_fallback_remedy(
+    tmp_path, monkeypatch
+):
+    _iso, upgrade = _setup_agy_unsupported_fixture(tmp_path, monkeypatch)
+    _enable_test_host_source(tmp_path, "muse")
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_muse_usage",
+        lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=True),
+    )
+
+    def _boom(_cfg):
+        raise RuntimeError("cache read failed")
+
+    monkeypatch.setattr(upgrade, "cached_upgrade_view", _boom)
+
+    pushed = runner.invoke(app, ["push", "--verbose"])
+    assert pushed.exit_code == 0, (pushed.stdout, pushed.stderr)
+    assert "Host usage published (manifest accepted)." in pushed.stdout
+    push_err = " ".join((pushed.stderr or "").split())
+    assert (
+        "host-usage snapshot skipped (agy unsupported) — "
+        "content sync and git/session capture unaffected. "
+        "agy wrote a record this version cannot read. "
+        "A newer mm may read it: run `mm update`, or run `mm disable-source agy` to stop retrying."
+    ) in push_err
+    assert "no newer mm can yet" not in push_err
+
+    events_files = sorted((tmp_path / "mm-events" / "events").glob("*.jsonl"))
+    rows = [
+        json.loads(line)
+        for path in events_files
+        for line in path.read_text().splitlines()
+        if line.strip()
+    ]
+    snapshots = [r for r in rows if r.get("type") == "host-usage-snapshot"]
+    assert snapshots, rows
+    latest = snapshots[-1]
+    assert latest["token_sources"] == ["muse"]
+    assert latest["degraded_sources"] == ["agy"]
+
+
+def test_autopush_breadcrumb_keeps_forensic_detail_when_upgrade_cache_is_current(
+    tmp_path, monkeypatch
+):
+    iso, upgrade = _setup_agy_unsupported_fixture(tmp_path, monkeypatch)
+    _write_upgrade_cache(upgrade.CACHE_PATH, "9.0.0")
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    assert (r.stdout, r.stderr) == ("", "")
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert payload["outcome"] == "degraded", payload
+    assert payload["detail"] == (
+        "host-usage snapshot skipped (agy unsupported) — "
+        "content sync and git/session capture unaffected. "
+        "agy wrote a record this version cannot read. A newer mm may read it: "
+        "run `mm update`, or run `mm disable-source agy` to stop retrying."
+    )

@@ -1721,16 +1721,23 @@ reader and the reason class — never a path, transcript, SQL, model id, or
 exception string. Reasons outside `host_usage.Reason` normalize to
 `unavailable`. `unsupported` says the reader wrote a record this mm cannot
 read; a newer mm **may** read it (`mm update`), or the user can
-`mm disable-source <reader>`. A retry alone is not a remedy. Status and plain-text diag,
-given a cached upgrade view that is `current` (this mm is the newest release
-the cached check knows; never refreshed from either command), replace the
-`mm update` remedy with `_no_release_reads_clause`: "<Reader> usage not
-captured: this mm can't read <Reader>'s current record format, and no newer mm
-can yet. See `mm diag`, or <stop step> to stop retrying." It names only reader
-display names, keeps the `mm diag` pointer on every surface including diag, and
-the status verdict reads `Usage not captured.` followed by it. A missing,
-malformed or skipped view, or a cached newer release, keeps `mm update`. Push,
-init and attempt-record phrases take the default and are unchanged. `partial` takes
+`mm disable-source <reader>`. A retry alone is not a remedy. Status, plain-text
+diag, and attended push capture (`cli._capture_attended_usage` passes `config`
+so `events_tail._capture_skip_phrase` reads `upgrade.cached_upgrade_view(config)`
+once per permanent skip without network I/O or cache writes), given a cached
+upgrade view that is `current` (this mm is the newest release the cached check
+knows; never refreshed from any of those surfaces), replace the `mm update`
+remedy with `_no_release_reads_clause`: "<Reader> usage not captured: this mm
+can't read <Reader>'s current record format, and no newer mm can yet. See
+`mm diag`, or <stop step> to stop retrying." It names only reader display names,
+keeps the `mm diag` pointer on every surface including diag, and the status
+verdict reads `Usage not captured.` followed by it. A missing, malformed, contended or
+skipped view, or a cached newer release, keeps `mm update`, and so does an
+exception reading the cached view on attended push capture and plain-text diag
+(status does not guard that read). Tail (`events_tail._run_events_tail`, which
+captures for autopush and for the push inside `mm recapture`), init and
+attempt-record (`attemptlog.run_details`) callers keep the default and do not
+change persisted `attemptlog.run_details` or autorun breadcrumbs. `partial` takes
 the generic retry sentence naming `mm push` and `mm diag`.
 `deadline` states that this push/init's read did not finish inside its budget.
 When `left = max(0, files_on_disk - files_cached)` is a positive integer — from
@@ -2064,7 +2071,8 @@ for other callers) carry
 `unverified: <reason>`; `push-failed` is
 the content-sync stop, an `mm: error:` line with exit 1, followed by its final
 `Run: <command>` line. A permanent format failure calls for
-upgrade; a background deadline can use attended warming, while an exhausted
+upgrade unless the cached upgrade view is `current`, when the no-release clause
+above applies; a background deadline can use attended warming, while an exhausted
 attended warm allowance needs an honest diagnostic, not a promise to bypass its
 own budget. Include/exclude failures name the setting to change. Non-publication
 requires proof: config exclusion wins before reading; an absent file in the
@@ -2155,7 +2163,8 @@ them). This is the stopping criterion for a subsystem that has consumed roughly
 18 Tracks.
 
 **Per-reader outcome labels (65A).** `_capture_attended_usage` reports dropped
-readers via `_host_skip_phrase(attended=True)`, then partial/absent readers in one
+readers via `_capture_skip_phrase(attended=True, config=config)`, which formats
+them with `_host_skip_phrase`, then partial/absent readers in one
 stderr summary. Contributed and completed-empty labels are verbose-only.
 `HostUsageCapture.usage_days` replaces the lifetime `empty` field. A reader can
 contribute under `other` (for example an unrecognized Codex model id), so reader

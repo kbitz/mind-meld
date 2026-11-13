@@ -1184,6 +1184,7 @@ def _capture_skip_phrase(
     *,
     attended: bool,
     evidence: HostReadEvidence | None = None,
+    config: dict | None = None,
 ) -> str:
     """Build a notice for a reader the capture caller already consented to.
 
@@ -1192,8 +1193,22 @@ def _capture_skip_phrase(
     """
     if evidence is None and attended and reason == "deadline" and reader in HOST_READER_SOURCE_GATE:
         evidence = _deadline_read_evidence(reader)
+    no_release_reads: tuple[str, ...] = ()
+    if reason in _HOST_PERMANENT_REASONS and config is not None:
+        try:
+            view = upgrade.cached_upgrade_view(config)
+        except Exception:
+            pass
+        else:
+            if view.state == "current":
+                no_release_reads = (reader,)
     return _host_skip_phrase(
-        reader, reason, readiness="ready", evidence=evidence, attended=attended
+        reader,
+        reason,
+        readiness="ready",
+        no_release_reads=no_release_reads,
+        evidence=evidence,
+        attended=attended,
     )
 
 
@@ -1212,8 +1227,9 @@ def _host_skip_phrase(
     """Closed-vocabulary reader remedy; callers escape at their display sink.
 
     ``no_release_reads`` names the unsupported readers whose format no release
-    reads yet, decided by the status/diag caller from the cached upgrade view;
-    push, init and attempt-record callers keep the default and their text.
+    reads yet, decided by status/diag and by ``_capture_skip_phrase`` when
+    attended push supplies ``config``; tail, init and attempt-record callers
+    keep the default and their text.
     """
     phrase = (
         f"host-usage snapshot skipped ({reader} {reason}) — "

@@ -965,7 +965,7 @@ The mm-events rescan replaces its sources, so it takes their holds from its own 
 | State | What you see | What to do |
 |---|---|---|
 | **Held** (still changing, vanished or grew) | `PushResult.held`; the attended outcome names the count; paths and reasons are verbose-only as *not yet synced*; autopush records them in a `degraded` breadcrumb and prints nothing | Nothing: the prior version stays published and the file goes with a later push. A file held on every push is one something keeps writing; `exclude_patterns` ends it. |
-| **Frozen** (under a nested git checkout) | `skipped: nested git repository`; its published entries are kept | See [Nested git checkouts](#nested-git-checkouts-are-frozen-never-published) for resuming sync or excluding the subtree |
+| **Frozen** (under a nested git checkout) | `skipped: nested git repository` with `--verbose` or `--dry-run`; its published entries are kept | See [Nested git checkouts](#nested-git-checkouts-are-frozen-never-published) for resuming sync or excluding the subtree |
 | **Skipped / excluded** (oversized at the scan, glob, marker) | `skipped:` lines with `--verbose`; excluded paths silent | Raise `sync.max_file_size` or adjust the glob |
 | **Tombstoned** | The deletion record is published (with the deleted version's sha256); a path with a tombstone is never frozen or held | Nothing: the record suppresses restoration of the missing file, and a peer that last synced exactly those bytes from this machine deletes its copy with a 30-day recovery copy (see "Fast-forward, propagated deletions and anchors (Track 91A)"); a peer holding different bytes keeps its file |
 | **Refused** (could not read, enumeration, confinement, missing root, recovered prior with a changing file) | One four-part `Cannot publish: ...` reason in `mm: error: Push refused [snapshot-refused]: ...` followed by `Run: <command>`, exit 1, previous snapshot kept | The fix in the message; blobs uploaded before the stop remain as orphans for GC |
@@ -1293,7 +1293,8 @@ removing a glob. Those paths lose delete convergence like the exclusion they
 amount to.
 
 Verbose attended push and previews print one `mm: notice: skipped: nested git repository
-source:rel` line per root; autopush stays silent (a skip deletes nothing, so it
+source:rel` line per root; autopush and `mm recapture` stay silent (recapture passes
+`report_nested_repositories=False` to its inner `_push_core`; a skip deletes nothing, so it
 is not a data-at-risk warning), and status summarizes the selected roots with an exact count and mm diag
 for path detail. Diag retains roots. Attended pull (not
 `--dry-run` or autopull, which write no `excluded` history) logs one `excluded`

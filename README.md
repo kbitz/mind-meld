@@ -887,7 +887,7 @@ Expected: a new `as_of`, the enabled readers in `consulted`, and their actual wo
 
 After the next real capture, repeat the second-Mac check: `as_of` must advance with Antigravity still consulted. Upgrade the **producing Mac** for delivery and the **rendering Mac** for tables and wording. Run `mm install-skills` and restart the **agent** so it loads the updated decoder.
 
-If Antigravity writes a record this version cannot read, that Mac drops Antigravity (declared on `mm status` / `mm diag` / `mm push --verbose` stderr) and keeps publishing Codex. Push keeps the update advice: run `mm update`, or `mm disable-source agy` to stop retrying. Status and plain-text diag use that advice unless the cached release check says this mm is the newest known; then they say no newer mm can read the format yet, and give that stop step and `mm diag`. See [Host usage capture](#host-usage-capture) for all blockers.
+If Antigravity writes a record this version cannot read, that Mac drops Antigravity (declared on `mm status` / `mm diag` / `mm push --verbose` stderr) and keeps publishing Codex. The advice is to run `mm update`, or `mm disable-source agy` to stop retrying. Status, plain-text diag and the `mm push --verbose` usage-capture warning use that advice unless the cached release check says this mm is the newest known; then they say no newer mm can read the format yet, and give that stop step and `mm diag`. The automatic-push breadcrumb, the `mm recapture` and init notices, and attempt records keep the `mm update` advice. See [Host usage capture](#host-usage-capture) for all blockers.
 
 Then give each agent the same lifecycle contract. For Codex, add this to `~/.codex/AGENTS.md` (or merge it into your existing global guidance):
 
@@ -1194,7 +1194,7 @@ behavior. Ordinary directories still sync; there is no opt-out setting.
 
 Attended `mm push --verbose` and the `--dry-run` preview report each skipped root once:
 `skipped: nested git repository <source>:<relative-root>`. `mm status` shows
-the exact selected-source count plus `mm diag` for details; diag lists paths. `mm autopush` stays silent about them.
+the exact selected-source count plus `mm diag` for details; diag lists paths. `mm autopush` and `mm recapture` stay silent about them.
 `mm diag --json` adds `sync_scope`, whose `skipped_nested_repositories` maps
 source names to relative roots (empty lists mean none found; null means config
 unavailable). Inspection is best-effort and never reads checkout contents.
@@ -2253,8 +2253,12 @@ plain-text diag say, for example, "Muse usage not captured: this mm can't read M
 record format, and no newer mm can yet. See `mm diag`, or run `mm disable-source
 muse` to stop retrying." On those surfaces a sibling non-permanent line, such as a
 deadline, and Codex's rebuilding, warming, and awaiting-re-walk hints, carry that
-no-release sentence instead of their own remedy. Push, init, and attempt-record
-phrases keep the update advice. Neither command refreshes that cache.
+no-release sentence instead of their own remedy. The `mm push --verbose`
+usage-capture warning gives the same no-release sentence for the unsupported
+reader itself, reading the same cached check. Automatic-push, `mm recapture`,
+init, and attempt-record phrases keep the update advice. Neither status nor diag
+refreshes that cache; push's usage capture reads it without refreshing it, and
+push's own update check runs after capture.
 
 Upgrade **both producing and rendering Macs** for corrected init counts. Init
 now marks its Git rows as `origin: init`; older renderers still count that unknown
@@ -2382,7 +2386,7 @@ Older undated blockers gain a date when this version first observes them.
 
 | Reason | Meaning | Remedy |
 |---|---|---|
-| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source grok` / `mm disable-source agy` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. When the cached release check says this mm is the newest known, `mm status` and plain-text `mm diag` say instead that no newer mm can read the format yet, and give the stop step and `mm diag`. `mm diag --json` does not print that sentence. |
+| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source grok` / `mm disable-source agy` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. When the cached release check says this mm is the newest known, `mm status`, plain-text `mm diag` and the `mm push --verbose` usage-capture warning say instead that no newer mm can read the format yet, and give the stop step and `mm diag`. `mm diag --json` does not print that sentence. |
 | `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then `mm push`. If it persists, report the mm version and Host usage diag block. |
 | `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
 | `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |
@@ -2534,7 +2538,7 @@ Run: mm push
 | State | You see | Do |
 |---|---|---|
 | Held (still changing, vanished or grew) | `Push: N file(s) held.` in the outcome; *not yet synced* paths with `--verbose` | Nothing; the prior version stays published. Exclude it if it is always being written. |
-| Frozen (inside a nested git checkout) | `skipped: nested git repository`; published entries kept | See [Nested git repositories](#nested-git-repositories) for resuming sync or excluding the subtree |
+| Frozen (inside a nested git checkout) | `skipped: nested git repository` with `--verbose` or `--dry-run`; published entries kept | See [Nested git repositories](#nested-git-repositories) for resuming sync or excluding the subtree |
 | Skipped or excluded | `skipped:` lines with `--verbose` | Raise `sync.max_file_size` or adjust the glob |
 | Tombstoned | the deletion is published with the deleted version's hash | Nothing. Other Macs holding exactly those bytes move their copy to a 30-day recovery folder ([Recovering a deleted file](#recovering-a-deleted-file)) |
 | Refused | `mm: error: Push refused [snapshot-refused]: Cannot publish: …` followed by `Run: <command>`, previous snapshot kept | The fix in the message. Blobs uploaded before the stop remain as orphans until GC. |

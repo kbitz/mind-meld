@@ -13014,6 +13014,59 @@ def test_nested_checkout_freezes_published_entries_and_converges_on_delete(captu
     assert {f"gstack:{rel}", f"gstack:{linked}"} <= set(accepted()["tombstones"])
 
 
+def test_recapture_and_plain_push_stay_silent_on_nested_checkouts(capture61, monkeypatch):
+    root = capture61["path"].parent / "gstack"
+    checkout = root / "projects" / "literal*" / "checkout"
+    checkout.mkdir(parents=True)
+    published_file = checkout / "note.md"
+    published_file.write_text("published before this folder became a checkout")
+    sibling = root / "projects" / "other" / "note.md"
+    sibling.parent.mkdir()
+    sibling.write_text("ordinary content")
+    src = {
+        "name": "gstack",
+        "type": "generic",
+        "path": str(root),
+        "include_dirs": ["projects", "projects/literal*/checkout"],
+        "include_files": ["projects/literal*/checkout/note.md"],
+    }
+    capture61["cfg"]["sync"]["sources"].append(src)
+    save_config(capture61["cfg"], capture61["path"])
+    first = runner.invoke(app, ["push"])
+    assert first.exit_code == 0, first.output
+    prior = cli_module.sidecar.read("dev-a")
+    rel = "projects/literal*/checkout/note.md"
+    published = prior["sources"]["gstack"]["files"][rel]
+
+    (checkout / ".git").write_text("gitdir: elsewhere")
+    published_file.write_text("edited inside the checkout")
+    (checkout / "new.md").write_text("never published")
+    (root / "projects" / "other" / "fresh.md").write_text("ordinary change")
+
+    pushed = runner.invoke(app, ["push"])
+    assert pushed.exit_code == 0, pushed.output
+    assert "skipped: nested git repository" not in pushed.stdout
+    assert "skipped: nested git repository" not in pushed.stderr
+
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **kw: _mm_events.GitRootDiscovery([capture61["claude"]], [], False),
+    )
+    monkeypatch.setattr(_mm_events, "_walk_one_repo", lambda *a: (None, None))
+    recaptured = runner.invoke(app, ["recapture", "1d"])
+    assert recaptured.exit_code == 0, recaptured.output
+    assert "skipped: nested git repository" not in recaptured.stdout
+    assert "skipped: nested git repository" not in recaptured.stderr
+    assert "Recapture complete" in recaptured.stdout
+
+    key = storage_keys.manifest_key("dev-a")
+    accepted = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
+    files = accepted["sources"]["gstack"]["files"]
+    assert "projects/literal*/checkout/new.md" not in files
+    assert files[rel]["sha256"] == published["sha256"]
+
+
 def test_corrupt_manifest_recovery_keeps_frozen_entries_that_have_blobs(capture61):
     # The scan root is `projects`; the folder deleted at the end sits one level below it.
     # A deleted scan root itself mints nothing (Track 91A), so only a real deletion below a

@@ -44,7 +44,34 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-None.
+### [review:files=src/mind_meld/statusflow.py|src/mind_meld/events_tail.py|src/mind_meld/cli.py] Base issue: status shows two Antigravity remedies after an automatic push
+- **Base issue:** present at merge base `fb2ef59`; filed under `blocking=shown`
+- **Description:** With an unsupported reader (for example `agy`) and a current cached release check, `mm status` run after an automatic push prints the verdict "no newer mm can yet" and, on its `Last auto-push` line, the stored autopush detail that still says "A newer mm may read it: run `mm update`". Plain-text `mm diag`'s last-autorun block repeats the same stored detail. A sibling path: `mm recapture`'s own push captures host usage in the tail, which writes the same default `mm update` sentence to stderr, and its follow-up line suggests `mm push` even for the permanent `unsupported` reason. Track 132A deliberately kept the tail, init and attempt-record wording, so these surfaces still disagree with status whenever the newest push was automatic or the owner runs recapture.
+- **Evidence:** A review probe test (an autopush, then status, with `agy` unsupported and a current cache) passed identically on this branch at `2445045` and at the merge base `fb2ef59`: status printed `Last auto-push`, the `mm update` advice and "no newer mm can yet" together. The recapture path was read in code (`capture_attempted = attended and not dry_run`; recapture sets no diagnostic scope) and not separately run.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/statusflow.py:963
+- **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=tests/test_integration.py] Test gap: recapture nested-checkout test has no positive control
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** `test_recapture_and_plain_push_stay_silent_on_nested_checkouts` checks that recapture prints no nested-repository notice, but nothing in its recapture half directly shows that recapture's own scan reached the checkout. The manifest assertions after recapture (frozen entry kept, `new.md` unpublished) may already act as that control if recapture's push re-scans the source; that is unconfirmed.
+- **Hypothesis (untested):** first check whether those manifest assertions would fail if recapture's push skipped the source; if not, add an observation of recapture's own push (for example an ordinary file changed outside the checkout that recapture's push must publish). `mm status` and `mm diag` are not a control here, because they find nested roots with their own scan.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_integration.py:13017
+- **Evidence:** Review read only. A reverted-fix copy of the branch printed the notice from this same test, so the scan does reach the checkout today; no failure was reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/cli.py|src/mind_meld/events_tail.py] Test gap: unsupported-reader advice with a current cache is unpinned for recapture, init and multi-reader push
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** README now states that `mm recapture` and init notices keep the `mm update` advice for an unsupported reader even when the cached release check is current. `tests/test_init_events_backfill.py` pins init's unsupported notice without a cache state, but no test pins either surface with a current cache. No test covers an attended `mm push --verbose` with two unsupported readers, where each reader reads the cached release check separately.
+- **Hypothesis (untested):** add current-cache cases for recapture's and init's unsupported-reader notice, and a two-reader case to the push/status parity test; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/events_tail.py:1181
+- **Evidence:** Review read only (adversarial delta pass); the full suite passed on this branch and no failure was reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
+- **Effort:** ? (user triages in /roadmap)
 
 ## Drain records
 
