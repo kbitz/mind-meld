@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.44] - 2026-11-13
+
+`mm gc`, `mm recapture`, status and history advice, diff warnings and update notices use the shared output style, with routine recapture details available through `--verbose`.
+
+### Changed
+
+- `mm gc`, `mm recapture`, status and history advice, diff warnings and update notices use the shared output style, with routine recapture details available through `--verbose`.
+- `mm gc` now ends with one `Gc:` outcome line, or with one `mm: warning:` line ending `Run: mm gc -v` when retention cleanup is incomplete, and prints per-reaper summaries only with `-v`.
+- `mm recapture` now ends with one `Recapture:` outcome line, gains `--verbose` / `-v` for the window, repository, record-count and size breakdown, and names the `mm retro-fleet <N>d` window when recovered commits are older than seven days.
+- A partial `mm recapture` now prints its cause lines, then one `mm: error:` line and a single `Run:` fix on stderr, and still exits 4.
+- `mm diff`, `mm log`, `mm status` advice and the update notices now use the shared `mm: error:`, `mm: warning:` and `mm: notice:` forms with the fix given as `Run: <command>`.
+
+### Upgrade notes
+
+- Scripts that match the old human-readable messages must use the new outcome and `Run:` forms; stored data and `mm log --format jsonl` records keep their existing formats.
+
 ## [1.12.43] - 2026-11-13
 
 `mm recapture` omits nested-repository notices, and verbose push diagnostics use the same cached release information as `mm status` when suggesting a remedy for unreadable Antigravity usage.
