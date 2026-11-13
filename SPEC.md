@@ -914,8 +914,9 @@ Snapshot refusals use a four-part message: location (source/path), problem, pres
 
 Shared CLI error helpers print `mm: error: <what broke>` on stderr, with
 `Run: <command>` on its own last line when the caller supplies a fix command.
-Attended push/pull failures use this form; remaining command output conversion
-is tracked separately (see [Sync outcomes](README.md#sync-outcomes)).
+Attended push/pull failures use this form; [Sync outcomes](README.md#sync-outcomes)
+lists the other commands that use the shared forms, and conversion of the
+remaining commands is tracked separately.
 
 Illustrative problem messages, rather than exact CLI transcripts:
 - `push: failed to write blob abc123.enc — disk full. Free space on iCloud Drive.`
