@@ -768,7 +768,7 @@ equal that device before counting or deleting an orphan. Malformed keys are
 preserved with sanitized notices. Peer registry entries and manifests neither
 authorize nor veto collection; no peer namespace is collected.
 
-A missing own manifest returns zero without listing or deleting blob candidates,
+A missing own manifest returns `GcBlobResult(deleted=0, collected=False)` without listing or deleting blob candidates,
 with a visible warning naming this device, skipped collection and no blobs
 deleted. Wait for sync, inspect with `mm diag`, then retry GC; inspection does not
 repair missing metadata. Explicit `mm gc` ends with
