@@ -1732,8 +1732,9 @@ can't read <Reader>'s current record format, and no newer mm can yet. See
 `mm diag`, or <stop step> to stop retrying." It names only reader display names,
 keeps the `mm diag` pointer on every surface including diag, and the status
 verdict reads `Usage not captured.` followed by it. A missing, malformed or
-skipped view, a cached newer release, or an exception reading the cached view
-keeps `mm update`. Tail (`events_tail._run_events_tail`), init and
+skipped view, or a cached newer release, keeps `mm update`, and so does an
+exception reading the cached view on attended push capture and plain-text diag
+(status does not guard that read). Tail (`events_tail._run_events_tail`), init and
 attempt-record (`attemptlog.run_details`) callers keep the default and do not
 change persisted `attemptlog.run_details` or autorun breadcrumbs. `partial` takes
 the generic retry sentence naming `mm push` and `mm diag`.
