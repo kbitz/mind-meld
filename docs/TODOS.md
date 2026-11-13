@@ -73,6 +73,44 @@ here by hand, use the H3 form.
 - **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
 - **Effort:** ? (user triages in /roadmap)
 
+### [review:files=src/mind_meld/gcflow.py|src/mind_meld/retention.py] Base issue: mm gc --conflicts reports kept conflict copies as a permissions or locks failure
+- **Base issue:** present at merge base `3b84432`; filed under `blocking=shown`
+- **Description:** The conflict reaper counts every copy it keeps on purpose (a live conflict older than 30 days, a `v0-` sidecar, a name whose age cannot be read) as `skipped`, and `ReapOutcome.needs_remediation` treats any skip as an incomplete cleanup. So `mm gc --conflicts` on a Mac with one unresolved old conflict tells the owner to fix permissions or locks, and its `Run: mm gc -v` fix omits `--conflicts`, so following it never shows the reaper that kept the file. Since Track 133A the warning also replaces the `Gc:` outcome line, so that run no longer reports the orphaned-blob count.
+- **Evidence:** A review probe test (push, then a `doc.sync-conflict-20260101-120000-abcd1234.md` sidecar beside a differing `doc.md`, then `mm gc --conflicts`) printed "Fix permissions or locks" at this branch and at the merge base; at the branch stdout was empty and the warning was the only line.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/gcflow.py:104
+- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/recaptureflow.py|src/mind_meld/cli.py] Base issue: mm recapture still prints the inner push's legacy summary block
+- **Base issue:** present at merge base `3b84432`; filed under `blocking=shown`
+- **Description:** Recapture calls `_push_core` with neither `diagnostics` nor `result_observer`, so the inner push runs with its display on and prints "Building manifest...", the scan count, "Uploading N files...", a bold-green "Push complete.", the add/modify counts, timings and transfer size before recapture's own outcome. A non-verbose `mm recapture` therefore still shows a bold-green completion banner and counts the owner does not act on, which O8 asks to keep behind `-v`.
+- **Evidence:** A review probe test (one new historical commit, `mm recapture 14d` without `-v`) printed the "Push complete." block at this branch, before the new `Recapture:` line, and at the merge base, before the old "Recapture complete." banner.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/recaptureflow.py:264
+- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/diffflow.py|tests/test_integration.py] Test gap: mm diff's newer-format remote manifest refusal is unpinned
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No test drives `mm diff` (own or `--from`) against a newer-format remote manifest, so the refusal line and its `Run: mm update` fix in `diffflow.diff_cmd` are not asserted for this command.
+- **Hypothesis (untested):** add a `preview62` case beside `test_diff_corrupt_remote_warns_in_shared_style` that plants a newer-format manifest and pins the exit code, the stderr error and its final fix line; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/diffflow.py:52
+- **Evidence:** Coverage audit read only (Track 133A review); no failure was reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/diffflow.py|tests/test_integration.py] Test gap: mm diff's "No differences" and pull-prediction lines are unpinned
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No `mm diff` test asserts the "No differences." line or the `(pull would: <outcome>)` suffix on a pushed change, so a wording or branch change there would pass the suite.
+- **Hypothesis (untested):** add assertions to an existing `preview62` diff test for both lines; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/diffflow.py:117
+- **Evidence:** Coverage audit read only (Track 133A review); no failure was reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-13
