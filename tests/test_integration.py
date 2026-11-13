@@ -10741,6 +10741,29 @@ def test_diff_corrupt_remote_warns_in_shared_style(preview62, from_device):
     )
 
 
+@pytest.mark.parametrize("remote", ["corrupt", "missing"])
+def test_diff_from_a_hostile_device_id_stays_inert(preview62, remote):
+    # Value: protects=mm diff --from display text neutralizes markup and terminal escapes;
+    # fails_when=a raw device id reaches the corrupt warning or the Rich lines; seam=none
+    env = preview62
+    hostile = "dev-[bold]evil\x1b]52;c;Zm9v\x07"
+    if remote == "corrupt":
+        env["backend"].put(storage_keys.manifest_key(hostile), b"corrupt-bytes")
+    result = env["audit"](["diff", "--from", hostile])
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    for stream in (result.stdout, result.stderr):
+        assert "\x1b" not in stream and "\x07" not in stream, ascii(stream)
+    shown = " ".join(result.stdout.split())
+    assert "Diff against device dev-[bold]evil" in shown, ascii(result.stdout)
+    if remote == "corrupt":
+        (warning,) = result.stderr.strip().splitlines()
+        assert warning.startswith("mm: warning: remote manifest for device dev-[bold]evil")
+        assert warning.endswith("is corrupt — showing diff against empty remote. Run: mm diag")
+    else:
+        assert "No remote manifest for device dev-[bold]evil" in shown, ascii(result.stdout)
+        assert result.stderr == ""
+
+
 @pytest.mark.parametrize("case", ["empty", "already_present", "new_old_commits"])
 @pytest.mark.parametrize("verbose", [False, True])
 def test_recapture_outcomes_and_verbose_details(preview62, monkeypatch, case, verbose):
