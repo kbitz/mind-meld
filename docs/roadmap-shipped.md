@@ -940,3 +940,36 @@ _tombstone: 123, 124, 127_
 - 2026-11-11: merged [PR #308](https://github.com/kbitz/mind-meld/pull/308) (commit `a6f3e73c47c38cad101b21ef4b62aa39fa210e81`); verified land-time Track 127A, original/current Group 127, factory branch `mmm/316ac594`. Card placed by the 2026-11-09 promotion (`409998d`, PR #301). Plan SHA-256 `466145df42de1d9a4e2810e15f925e815dc14fd4301486aa51a9697c88457ce5`. PATCH release (PROGRESS.md dates the v1.12.35 row 2026-11-10).
 - Closure evidence: the review receipt's completion matrix records 13 obligations VERIFIED, none partial, missing, unverifiable or deferred by the user. It landed before Tracks 125A and 126A, which its `_blocked-by: Track 126A` had ordered for collision only. Recorded as shipped by the 2026-11-10 regeneration.
 - Delivered: a joining machine no longer copies gstack's generated Codex install (`skills/gstack/`) from peers, and a managed `mm init` waits for the key header after accepting the fleet; four managed-join test gaps went to Track 130B.
+
+## Individual Track history
+
+_tombstone: 125, 128, 129, 130, 131_
+
+### Track 125A: Resume stopped scans, show progress, and word a deadline stop "catching up (N left)" on the push and in status ✓ Shipped (v1.12.36)
+- 2026-11-11: merged PR #310 (`9778834`); verified land-time Track 125A, original Group 125. Introduction/lineage: 2026-11-10 plan at `a198f69` (125A introduced in 2026-11-09 plan at `409998d`; 131A relabeled from 126A on 2026-11-10).
+- Approved-scope evidence: merged PR review/prep receipt and ship receipt, merged implementation/tests and release row; full portable check passed at release head. Resumable capture, delayed measured progress, catch-up push/status and saved-run advice; review fixed consent and display race defects.
+
+### Track 129B: Name the shared output style, and end push and pull with one line per thing that happened ✓ Shipped (v1.12.37)
+- 2026-11-11: merged PR #311 (`82652b2`); verified land-time Track 129B, original Group 129. Introduction/lineage: 2026-11-10 plan at `a198f69` (125A introduced in 2026-11-09 plan at `409998d`; 131A relabeled from 126A on 2026-11-10).
+- Approved-scope evidence: merged PR review/prep receipt and ship receipt, merged implementation/tests and release row; full portable check passed at release head. Shared diagnostics and push/pull outcomes; usage suffix moved behind verbose/status. Quiet-output checkpoint remains owner-unaccepted.
+
+### Track 128A: Price the Claude 5.5 models and keep an extrapolated rate out of the retro's `≥` floor ✓ Shipped (v1.12.38)
+- 2026-11-11: merged PR #312 (`70b02b5`); verified land-time Track 128A, original Group 128. Introduction/lineage: 2026-11-10 plan at `a198f69` (125A introduced in 2026-11-09 plan at `409998d`; 131A relabeled from 126A on 2026-11-10).
+- Approved-scope evidence: merged PR review/prep receipt and ship receipt, merged implementation/tests and release row; full portable check passed at release head. Claude 5.5 cards, honest priced floors and save confirmations. Owner accepted standard-rate Haiku card with long-context tier limitation deferred.
+
+### Track 129A: Name the machine in the retro's floor causes and peer remedy, and classify version-prefixed commits ✓ Shipped (v1.12.39)
+- 2026-11-12: merged PR #313 (`11f20cc`); verified land-time Track 129A, original Group 129. Introduction/lineage: 2026-11-10 plan at `a198f69` (125A introduced in 2026-11-09 plan at `409998d`; 131A relabeled from 126A on 2026-11-10).
+- Approved-scope evidence: merged PR review/prep receipt and ship receipt, merged implementation/tests and release row; full portable check passed at release head. Named coverage causes, peer-version remedy gates and version-prefixed commit classification; real corpus reclassified 40 commits. Follow-up wording defects are new Track 132C.
+
+### Track 130A: Give push, pull and update one progress display, and show an update that runs during a push or pull ✓ Shipped (v1.12.40)
+- 2026-11-12: merged PR #315 (`9025dd9`); verified land-time Track 130A, original Group 130. Introduction/lineage: 2026-11-10 plan at `a198f69` (125A introduced in 2026-11-09 plan at `409998d`; 131A relabeled from 126A on 2026-11-10).
+- Approved-scope evidence: merged PR review/prep receipt and ship receipt, merged implementation/tests and release row; full portable check passed at release head. Shared push/pull/update transient progress, foreground attended updates and deferred update outcomes.
+
+### Track 130B: Bring init, devices, sources, conflicts and resolve, and pull's own warnings, to the shared style ✓ Shipped (v1.12.41)
+- 2026-11-12: merged PR #314 (`94b3e25`); verified land-time Track 130B, original Group 130. Introduction/lineage: 2026-11-10 plan at `a198f69` (125A introduced in 2026-11-09 plan at `409998d`; 131A relabeled from 126A on 2026-11-10).
+- Approved-scope evidence: merged PR review/prep receipt and ship receipt, merged implementation/tests and release row; full portable check passed at release head. Setup/source/resolve outcomes, pull stderr diagnostics and all four managed-join test cases. Approved scope excluded empty CLI outcomes (now 134A); pre-existing settlement defect is 132D.
+
+### Track 131A: Carry a reader's progress to the retro and word it "catching up (N left)" in `MM_HEALTH` ✓ Shipped (v1.12.42)
+- 2026-11-13: merged PR #316 (`bbbe943`); verified land-time Track 131A, original Group 131. Introduction/lineage: 2026-11-10 plan at `a198f69` (125A introduced in 2026-11-09 plan at `409998d`; 131A relabeled from 126A on 2026-11-10).
+- Approved-scope evidence: merged PR review/prep receipt and ship receipt, merged implementation/tests and release row; full portable check passed at release head. Additive reader/Git progress, fleet catching-up wording and legacy fallback; attended-cap precedence test included. Historical abort accounting preserved by approved scope.
+
