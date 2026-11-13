@@ -4289,9 +4289,9 @@ def _reader_catching_up_note(
         for reader, left in pairs:
             display = _reader_display_labels((reader,))
             reader_label = display[0] if display else _safe_short(reader)
-            sort_key = (machine, reader_order.get(reader, len(reader_order)), reader_label)
+            entry_order = (machine, reader_order.get(reader, len(reader_order)), reader_label)
             entry = f"{reader_label} on `{machine}` is catching up ({left} left)"
-            items.append((sort_key, entry, machine))
+            items.append((entry_order, entry, machine))
     if not items:
         return None
     items.sort(key=lambda item: item[0])
