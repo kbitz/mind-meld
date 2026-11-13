@@ -798,6 +798,7 @@ def _capture_attended_usage(
                         dropped[name],
                         attended=True,
                         evidence=capture.deadline_evidence.get(name),
+                        config=config,
                     )
                 )
             elif outcomes.get(name) == "partial":
@@ -1967,6 +1968,7 @@ def _push_core(
     attempt: attemptlog.Attempt | None = None,
     diagnostics: bool | None = None,
     result_observer: Callable[[PushResult], None] | None = None,
+    report_nested_repositories: bool = True,
 ) -> PushResult | None:
     """Core push logic shared by push, autopush, and recapture.
 
@@ -2129,8 +2131,8 @@ def _push_core(
                 console.print(f"  [dim]skipped: {safe_str(path)} ({safe_str(reason)})[/dim]")
             return
         if reason == manifest.NESTED_REPO_SKIP_REASON:
-            # Autopush stays silent; attended push, preview, status and diag report it.
-            if show and path not in skipped_repos:
+            # Verbose push and previews report it; autopush and recapture stay silent.
+            if show and report_nested_repositories and path not in skipped_repos:
                 skipped_repos.add(path)
                 core._notice(f"skipped: nested git repository {path}")
             return
@@ -4081,7 +4083,14 @@ def recapture(
             )
             try:
                 with pullhistory.batch():
-                    result = _push_core(config, passphrase, memory_kb, verbose=False, dry_run=False)
+                    result = _push_core(
+                        config,
+                        passphrase,
+                        memory_kb,
+                        verbose=False,
+                        dry_run=False,
+                        report_nested_repositories=False,
+                    )
             except SnapshotError as e:
                 console.print(
                     "Recapture was written locally but not synced. "

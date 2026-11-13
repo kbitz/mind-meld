@@ -1721,16 +1721,21 @@ reader and the reason class — never a path, transcript, SQL, model id, or
 exception string. Reasons outside `host_usage.Reason` normalize to
 `unavailable`. `unsupported` says the reader wrote a record this mm cannot
 read; a newer mm **may** read it (`mm update`), or the user can
-`mm disable-source <reader>`. A retry alone is not a remedy. Status and plain-text diag,
-given a cached upgrade view that is `current` (this mm is the newest release
-the cached check knows; never refreshed from either command), replace the
-`mm update` remedy with `_no_release_reads_clause`: "<Reader> usage not
-captured: this mm can't read <Reader>'s current record format, and no newer mm
-can yet. See `mm diag`, or <stop step> to stop retrying." It names only reader
-display names, keeps the `mm diag` pointer on every surface including diag, and
-the status verdict reads `Usage not captured.` followed by it. A missing,
-malformed or skipped view, or a cached newer release, keeps `mm update`. Push,
-init and attempt-record phrases take the default and are unchanged. `partial` takes
+`mm disable-source <reader>`. A retry alone is not a remedy. Status, plain-text
+diag, and attended push capture (`cli._capture_attended_usage` passes `config`
+so `events_tail._capture_skip_phrase` reads `upgrade.cached_upgrade_view(config)`
+once per permanent skip without network I/O or cache writes), given a cached
+upgrade view that is `current` (this mm is the newest release the cached check
+knows; never refreshed from any of those surfaces), replace the `mm update`
+remedy with `_no_release_reads_clause`: "<Reader> usage not captured: this mm
+can't read <Reader>'s current record format, and no newer mm can yet. See
+`mm diag`, or <stop step> to stop retrying." It names only reader display names,
+keeps the `mm diag` pointer on every surface including diag, and the status
+verdict reads `Usage not captured.` followed by it. A missing, malformed or
+skipped view, a cached newer release, or an exception reading the cached view
+keeps `mm update`. Tail (`events_tail._run_events_tail`), init and
+attempt-record (`attemptlog.run_details`) callers keep the default and do not
+change persisted `attemptlog.run_details` or autorun breadcrumbs. `partial` takes
 the generic retry sentence naming `mm push` and `mm diag`.
 `deadline` states that this push/init's read did not finish inside its budget.
 When `left = max(0, files_on_disk - files_cached)` is a positive integer — from
