@@ -399,7 +399,9 @@ record and size breakdown and the commit-date note. The `mm diff` corrupt-manife
 warning, the incomplete-retention warning, the newer-history-database error, status
 advice, and the update nudge and failure notices use the shared `mm: error:` /
 `mm: warning:` / `mm: notice:` forms with the fix as `Run: <command>`. Recapture's
-errors, its partial-recovery causes and its host-usage notice now print on stderr.
+errors (including a partial recovery's `mm: error:` headline and its single `Run:`
+fix) and its host-usage notice now print on stderr; partial-recovery cause lines
+stay on stdout.
 Human-readable text and streams change; commands, flags (apart from the new recapture
 `-v`), exit codes, stored data and `mm log --format jsonl` records are unchanged. No
 migration is needed.
@@ -936,7 +938,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm devices approve <device-id>` | On a fleet machine where mm manages Syncthing, approve a joining machine by its pasted device ID: exact match among Syncthing's pending devices, then add it, mark it introducer and share `mind-meld`; a rerun finishes a half-finished approval (a device it already added that does not yet share `mind-meld`); a device that already shares `mind-meld` (a repeat after success, or one another fleet machine introduced) reports already approved (exit 0); any other malformed, non-pending or near-match ID changes nothing (exit 1); never automatic |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
-| `mm gc` | Delete this device's orphaned blobs using its raw manifest and run local retention cleanup (including recovery copies of deleted files older than 30 days), ending with one `Gc: ... .` outcome line (`--verbose` / `-v` shows per-reaper retention summaries). When a retention reaper could not finish, it ends instead with the `mm: warning: Retention cleanup was incomplete ...` line and `Run: mm gc -v`, with no `Gc:` line; a missing own manifest skips blob collection with a warning |
+| `mm gc` | Delete this device's orphaned blobs using its raw manifest and run local retention cleanup (including recovery copies of deleted files older than 30 days), ending with one `Gc: ... .` outcome line (`--verbose` / `-v` shows per-reaper retention summaries). When a retention reaper reports a failed or skipped item (with `--conflicts`, a conflict copy kept on purpose counts as skipped), it ends instead with one `mm: warning: Retention cleanup was incomplete ... Run: mm gc -v` line and no `Gc:` line; a missing own manifest skips blob collection with a warning |
 | `mm gc --dry-run` | Preview this device's orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
 | `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or cannot be hashed, is preserved |
 | `mm sources` | List configured sync sources |
