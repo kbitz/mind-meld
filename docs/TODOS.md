@@ -55,18 +55,18 @@ here by hand, use the H3 form.
 
 ### [review:files=tests/test_integration.py] Test gap: recapture nested-checkout test has no positive control
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `test_recapture_and_plain_push_stay_silent_on_nested_checkouts` checks that recapture prints no nested-repository notice, but nothing in its recapture half shows that recapture's scan still reached the checkout. If recapture stopped scanning that source, the absence assertions would still pass.
-- **Hypothesis (untested):** add one positive observation for the same run, such as the nested root still being reported by `mm status` or `mm diag` after recapture; re-verify first.
+- **Description:** `test_recapture_and_plain_push_stay_silent_on_nested_checkouts` checks that recapture prints no nested-repository notice, but nothing in its recapture half directly shows that recapture's own scan reached the checkout. The manifest assertions after recapture (frozen entry kept, `new.md` unpublished) may already act as that control if recapture's push re-scans the source; that is unconfirmed.
+- **Hypothesis (untested):** first check whether those manifest assertions would fail if recapture's push skipped the source; if not, add an observation of recapture's own push (for example an ordinary file changed outside the checkout that recapture's push must publish). `mm status` and `mm diag` are not a control here, because they find nested roots with their own scan.
 - **Upstream severity:** INFORMATIONAL
 - **Found in:** tests/test_integration.py:13017
 - **Evidence:** Review read only. A reverted-fix copy of the branch printed the notice from this same test, so the scan does reach the checkout today; no failure was reproduced.
 - **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
 - **Effort:** ? (user triages in /roadmap)
 
-### [review:files=src/mind_meld/cli.py|src/mind_meld/events_tail.py] Test gap: unsupported-reader advice on recapture, init and multi-reader push is unpinned
+### [review:files=src/mind_meld/cli.py|src/mind_meld/events_tail.py] Test gap: unsupported-reader advice with a current cache is unpinned for recapture, init and multi-reader push
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** README now states that `mm recapture` and init notices keep the `mm update` advice for an unsupported reader, but no test pins either text. No test covers an attended `mm push --verbose` with two unsupported readers, where each reader reads the cached release check separately.
-- **Hypothesis (untested):** pin recapture's and init's unsupported-reader notice text with a current cache, and add a two-reader case to the push/status parity test; re-verify first.
+- **Description:** README now states that `mm recapture` and init notices keep the `mm update` advice for an unsupported reader even when the cached release check is current. `tests/test_init_events_backfill.py` pins init's unsupported notice without a cache state, but no test pins either surface with a current cache. No test covers an attended `mm push --verbose` with two unsupported readers, where each reader reads the cached release check separately.
+- **Hypothesis (untested):** add current-cache cases for recapture's and init's unsupported-reader notice, and a two-reader case to the push/status parity test; re-verify first.
 - **Upstream severity:** INFORMATIONAL
 - **Found in:** src/mind_meld/events_tail.py:1181
 - **Evidence:** Review read only (adversarial delta pass); the full suite passed on this branch and no failure was reproduced.
