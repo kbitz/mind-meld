@@ -2097,8 +2097,8 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
         )
         # The recapture bridge must use the same reader's own readiness test.
         lines = []
-        ready.setattr(cli.console, "print", lambda *args, **kw: lines.append(args))
-        cli._notice_recapture_host_usage(cfg, cfg["sync"]["sources"])
+        ready.setattr(cli.recaptureflow.console, "print", lambda *args, **kw: lines.append(args))
+        cli.recaptureflow._notice_recapture_host_usage(cfg, cfg["sync"]["sources"])
         assert lines == []
 
 
@@ -2120,8 +2120,8 @@ def test_legacy_cursor_consent_omits_cursor_from_status_diag_and_recapture(tmp_p
     payload = json.loads(json_res.stdout)
     assert "cursor" not in payload["host_usage"]
     lines = []
-    monkeypatch.setattr(cli.console, "print", lambda *args, **kw: lines.append(args))
-    cli._notice_recapture_host_usage(cfg, cfg["sync"]["sources"])
+    monkeypatch.setattr(cli.recaptureflow.console, "print", lambda *args, **kw: lines.append(args))
+    cli.recaptureflow._notice_recapture_host_usage(cfg, cfg["sync"]["sources"])
     assert lines == []
 
 

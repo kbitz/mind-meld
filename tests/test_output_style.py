@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 
 import mind_meld.cli as cli_module
 from mind_meld import config as config_module
-from mind_meld import core
+from mind_meld import core, outputstyle
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
@@ -25,10 +25,35 @@ SRC_DIR = Path(core.__file__).resolve().parent
 
 
 def test_output_style_helpers_pin_exact_forms(capsys):
-    assert core._error_line("x") == "mm: error: x"
-    assert core._fix_line("mm diag") == "Run: mm diag"
-    assert core._outcome_line("push", "no content changes") == "Push: no content changes."
-    assert core._outcome_line("pull", "no changes") == "Pull: no changes."
+    assert outputstyle._error_line("x") == core._error_line("x") == "mm: error: x"
+    assert outputstyle._fix_line("mm diag") == core._fix_line("mm diag") == "Run: mm diag"
+    assert outputstyle._warning_line("x") == "mm: warning: x"
+    assert outputstyle._warning_line("x", fix="mm diag") == "mm: warning: x Run: mm diag"
+    assert outputstyle._notice_line("x") == "mm: notice: x"
+    assert outputstyle._notice_line("x", fix="mm update") == "mm: notice: x Run: mm update"
+    assert (
+        outputstyle._outcome_line("push", "no content changes")
+        == core._outcome_line("push", "no content changes")
+        == "Push: no content changes."
+    )
+    assert (
+        outputstyle._outcome_line("pull", "no changes")
+        == core._outcome_line("pull", "no changes")
+        == "Pull: no changes."
+    )
+    assert (
+        outputstyle._outcome_line("gc", "0 orphaned blobs deleted")
+        == core._outcome_line("gc", "0 orphaned blobs deleted")
+        == "Gc: 0 orphaned blobs deleted."
+    )
+    assert (
+        outputstyle._outcome_line("recapture", "0 commit records found")
+        == core._outcome_line("recapture", "0 commit records found")
+        == "Recapture: 0 commit records found."
+    )
+    assert outputstyle._fix_for("No config — run 'mm init'") == core._fix_for(
+        "No config — run 'mm init'"
+    )
 
     core._print_error("x", fix="mm init")
     captured = capsys.readouterr()
@@ -40,10 +65,20 @@ def test_output_style_helpers_pin_exact_forms(capsys):
     assert captured.out == ""
     assert captured.err == "mm: warning: x\n"
 
+    core._warning("x", fix="mm diag")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "mm: warning: x Run: mm diag\n"
+
     core._notice("x")
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "mm: notice: x\n"
+
+    core._notice("x", fix="mm update")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "mm: notice: x Run: mm update\n"
 
 
 def test_print_error_writes_plain_text_even_when_stderr_forces_terminal(monkeypatch):

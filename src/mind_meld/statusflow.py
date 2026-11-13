@@ -1340,8 +1340,8 @@ def status(
             )
         elif names_ready:
             console.print(
-                "\n  [yellow]Project memory ready to publish under shared names[/yellow] "
-                "(run `mm push`)."
+                "\n  [yellow]Project memory ready to publish under shared names.[/yellow] "
+                f"{core._fix_line('mm push')}"
             )
         elif metadata_pending:
             # Symmetric with _push_core's mtime-only republish gate (v0.12.6).
@@ -1351,8 +1351,8 @@ def status(
             # iter_source_diffs filter above so `mm status --source X` doesn't
             # surface metadata-pending hints from sources Y, Z.
             console.print(
-                "\n  [yellow]Metadata-only changes pending[/yellow] "
-                "(run `mm push` to publish updated mtimes)."
+                "\n  [yellow]Metadata-only changes pending (updated mtimes).[/yellow] "
+                f"{core._fix_line('mm push')}"
             )
         elif not source and not names_held:
             console.print("\n  Local content matches this device's last push.")

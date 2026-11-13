@@ -19,7 +19,7 @@ from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -34,18 +34,21 @@ from mind_meld import (
     core,
     crypto,
     devicesflow,
+    diffflow,
     events,
     events_tail,
     fsutil,
+    gcflow,
     identity,
     initflow,
     manifest,
     projectid,
     pullflow,
     pullhistory,
-    pullplan,
+    pullplan,  # noqa: F401
+    recaptureflow,
     resolveflow,
-    retention,
+    retention,  # noqa: F401
     safety,
     sidecar,
     skill_link,
@@ -120,7 +123,7 @@ from mind_meld.devices import (
 )
 from mind_meld.errors import (
     DELETED_FILES_URL,
-    GIT_WALK_FAILURES_URL,
+    GIT_WALK_FAILURES_URL,  # noqa: F401
     HOST_USAGE_CAPTURE_URL,
     LEDGER_URL,
     ConfigError,
@@ -191,12 +194,10 @@ from mind_meld.statusflow import (  # noqa: F401
     _usage_capture_remedy,
 )
 from mind_meld.storage import get_backend
-from mind_meld.storage import keys as storage_keys
 from mind_meld.storage.keys import (
     blob_key,
     device_key,
     manifest_key,
-    parse_blob_key,
 )
 from mind_meld.storage.local import LocalBackend
 
@@ -339,12 +340,6 @@ def _main(
     # `detect_self_version_transition` for this process.
     if no_check_version:
         upgrade.set_invocation_skip(True)
-
-
-RECAPTURE_NOT_PREVIEWED = (
-    "Not previewed: writing the git-snapshot rows and the full push that publishes "
-    "them together with any other pending local changes."
-)
 
 
 def _filter_unselected_sources(manifest: dict, selected: set[str] | list[str]) -> dict:
@@ -1580,7 +1575,7 @@ def push(
                 ):
                     try:
                         core._sync_progress_phase("Cleaning up orphaned blobs")
-                        gc_count = _do_gc(
+                        gc_res = gcflow._do_gc(
                             config,
                             passphrase,
                             memory_kb,
@@ -1588,8 +1583,9 @@ def push(
                             verbose=False,
                             emit_retention_summary=False,
                         )
-                        if gc_count and verbose:
-                            console.print(f"  GC: deleted {gc_count} orphaned blobs.")
+                        gc_pruned = gc_res.deleted if hasattr(gc_res, "deleted") else gc_res
+                        if gc_pruned and verbose:
+                            console.print(f"  GC: deleted {gc_pruned} orphaned blobs.")
                     except typer.Exit:
                         result.maintenance_failures += 1
                         if not result.host_usage_published:
@@ -1824,11 +1820,6 @@ def _held_breadcrumb_detail(held: list[tuple[str, str, str]], budget: int) -> st
         path = safety.safe_terminal_str(f"{name}:{rel}")
         return f"{lead}: {path[: path_budget - 1]}…{tail}"
     return lead
-
-
-def _held_blocks_recapture(held: list[tuple[str, str, str]]) -> bool:
-    """True when a recapture's own mm-events day file did not go out this push."""
-    return any(name in MM_INTERNAL_SOURCE_NAMES for name, _rel, _reason in held)
 
 
 def _inject_held_entries(
@@ -2986,24 +2977,6 @@ def status(
 # ── diag ──────────────────────────────────────────────────────────────
 
 
-def _notice_recapture_host_usage(config: dict, sources: list[dict]) -> None:
-    """Cache-only bridge for operators who previously used git recapture."""
-    from mind_meld import host_registry
-
-    for name, _ in events_tail._default_host_readers(
-        sources,
-        grok_consented=_config_module.grok_usage_consented(config),
-    ):
-        state = host_registry.reader_usage_diag(name)
-        cold = host_registry.reader_cache_cold(name, state)
-        if cold or state.get("last_reason"):
-            console.print(
-                "Recapture covers Git history only. Refresh host usage on this Mac: "
-                "[bold]mm push[/bold]"
-            )
-            return
-
-
 def _retro_catchup_pending(sources: list[dict], device_id: str) -> bool:
     """Read local progress without probing projects or mutating capture state."""
     source = next((s for s in sources if s.get("name") == "mm-events"), None)
@@ -3110,109 +3083,7 @@ def diff_cmd(
     Changes nothing, not even the lock file. For incoming changes from other
     Macs, use mm pull --dry-run.
     """
-    config = core._get_config(read_only=True)
-    passphrase = core._get_passphrase_or_exit()
-    device_id = config["device"]["id"]
-    device_name = config["device"]["name"]
-    max_file_size = config["sync"]["max_file_size"]
-
-    backend = get_backend(config)
-    try:
-        pending: list[str] = []
-        memory_kb = core._init_crypto_session(
-            backend, passphrase, config, read_only=True, pending=pending
-        )
-        for note in pending:
-            console.print(safe_str(note))
-    except MindMeldError as e:
-        core._error(str(e))
-
-    target_id = from_device or device_id
-
-    # Build local manifest (v2)
-    sources_configs = get_sources(config)
-    local_manifest = build_manifest_v2(device_id, device_name, sources_configs, max_file_size)
-
-    diff_fetch = core._fetch_remote_manifest(backend, target_id, passphrase, memory_kb)
-    if diff_fetch.status == "missing":
-        console.print(
-            f"[dim]No remote manifest for "
-            f"{'device ' + target_id if from_device else 'this device'} yet.[/dim]"
-        )
-    elif diff_fetch.newer_version is not None:
-        core._error(core._newer_format_message(diff_fetch.newer_version, "manifest"))
-    elif diff_fetch.status == "corrupt":
-        console.print(
-            f"[yellow]Warning:[/yellow] remote manifest for "
-            f"{'device ' + target_id if from_device else 'this device'} is "
-            f"corrupt — showing diff against empty remote."
-        )
-    # diff_fetch.manifest is pre-normalized via load_manifest.
-    remote_manifest = diff_fetch.manifest if diff_fetch.is_ok else None
-
-    if remote_manifest is not None:
-        remote_manifest = core._filter_disabled_sources(remote_manifest, [])
-        # Same checkout probe as pull, so the diff predicts what pull applies.
-        exclude_map, skip_prefixes = core._build_exclude_map(
-            config,
-            sources_configs,
-            nested_roots=core._incoming_nested_roots(sources_configs, [remote_manifest]),
-        )
-        remote_manifest = core._filter_excluded_paths(
-            remote_manifest,
-            exclude_map,
-            skip_prefixes,
-            core._build_include_map(config, sources_configs),
-        )
-
-    remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
-
-    console.print(
-        f"\n[bold]Diff against {'device ' + target_id if from_device else 'remote'}:[/bold]"
-    )
-
-    # Map source names → local base paths for pull-outcome prediction
-    src_base_paths: dict[str, Path] = {
-        s["name"]: Path(s["path"]).expanduser().resolve() for s in sources_configs
-    }
-
-    # `--from DEVICE` previews with that peer's ledger, as the pull itself would.
-    diff_planner = pullplan.PullPlanner(core.load_ledger([target_id])[0]) if from_device else None
-    any_changes = False
-    for src_name, src_data, remote_src, diff in core.iter_source_diffs(
-        local_manifest, remote_sources, source_filter=source, skip_unchanged=True
-    ):
-        remote_files = remote_src.get("files", {})
-
-        any_changes = True
-        console.print(f"\n  [bold]Source '{safe_str(src_name)}':[/bold]")
-        console.print("  [dim](push direction: local → remote)[/dim]")
-        for path in sorted(diff.new):
-            console.print(f"    [green]+ push  [/green] {safe_str(path)}")
-        for path in sorted(diff.modified):
-            # Predict what pulling the REMOTE version would do to local. The
-            # manifests were built from the same state, so local hash matches
-            # src_data; remote hash is the divergent one.
-            remote_info = remote_files.get(path, {})
-            base_path = src_base_paths.get(src_name)
-            if base_path is not None and remote_info:
-                outcome = (
-                    diff_planner.predict(
-                        target_id, "", src_name, path, remote_info, base_path
-                    ).outcome
-                    if diff_planner is not None
-                    else pullplan._predict_pull_outcome(path, remote_info, base_path)
-                )
-                console.print(
-                    f"    [yellow]~ push  [/yellow] {safe_str(path)} (pull would: {outcome})"
-                )
-            else:
-                console.print(f"    [yellow]~ push  [/yellow] {safe_str(path)}")
-        for path in sorted(diff.deleted):
-            console.print(f"    [red]- only-remote[/red] {safe_str(path)}")
-
-    if not any_changes:
-        console.print("[green]No differences.[/green]")
+    diffflow.diff_cmd(from_device=from_device, source=source)
 
 
 # ── gc ────────────────────────────────────────────────────────────────
@@ -3244,195 +3115,7 @@ def gc(
     including a preview of the conflict-sidecar reaper. ``--conflicts`` is
     required to actually reap stale conflict copies.
     """
-    config = core._get_config(read_only=dry_run)
-    refusal_suffix = core.DRY_RUN_REFUSAL if dry_run else ""
-    passphrase = core._get_passphrase_or_exit()
-
-    try:
-        acquire_lock()
-    except LockError as e:
-        core._error(str(e))
-
-    try:
-        backend = get_backend(config)
-        try:
-            pending: list[str] = []
-            memory_kb = core._init_crypto_session(
-                backend, passphrase, config, read_only=dry_run, pending=pending
-            )
-            for note in pending:
-                console.print(safe_str(note))
-        except MindMeldError as e:
-            core._error(str(e) + refusal_suffix)
-        _do_gc(config, passphrase, memory_kb, dry_run, verbose)
-        # Track 7B: events retention is always-on (fleet policy, not opt-in).
-        # See `_gc_old_event_files` for the tombstone-propagation framing.
-        retention._gc_old_event_files(config, dry_run, verbose)
-        # v0.11.14+: token cache reaper. Stale entries (no living jsonl OR
-        # by_day older than 90d) are dropped. Dry-run reports without
-        # mutating the cache file.
-        retention._gc_token_cache(dry_run, verbose)
-        # v0.12.39: leftover v0.12.0 trend-snapshot files. Best-effort,
-        # filename-matched only, then rmdir if empty. Never rm -rf.
-        retention._gc_orphan_retros_dir(dry_run, verbose)
-        # Bare `--dry-run` previews the conflict reaper (the one that
-        # touches user content). Apply still requires `--conflicts`.
-        if prune_conflicts or dry_run:
-            retention._gc_old_conflict_files(
-                config, dry_run, verbose, deletion_requires_flag=dry_run and not prune_conflicts
-            )
-        retention._gc_deleted_copies(dry_run, verbose)
-        if dry_run:
-            console.print(core.DRY_RUN_COMPLETE)
-    except MindMeldError as e:
-        if dry_run:
-            core._error(str(e) + refusal_suffix)
-        raise
-    finally:
-        release_lock()
-
-
-def _do_gc(
-    config: dict,
-    passphrase: str,
-    memory_kb: int,
-    dry_run: bool,
-    verbose: bool,
-    *,
-    emit_retention_summary: bool = True,
-) -> int:
-    """Collect this device's orphaned blobs from its raw manifest only."""
-    backend = get_backend(config)
-    my_device_id = config["device"]["id"]
-    own_prefix = storage_keys.data_prefix(my_device_id)
-
-    # Sweep this device's stale tmp*.tmp files before ref-counting.
-    # Runs UNDER the caller's lock (acquire_lock already held by gc()),
-    # so no concurrent writer can race with the sweep.
-    retention._sweep_local_tmp_files(
-        backend,
-        my_device_id,
-        dry_run,
-        verbose,
-        emit_summary=emit_retention_summary,
-    )
-
-    # Only this device's raw manifest can authorize collecting its blobs.
-    # Consumer exclusions/disabled sources must never filter these references.
-    gc_fetch = core._fetch_remote_manifest(backend, my_device_id, passphrase, memory_kb)
-    # _error escapes markup itself; only the direct stderr print adds safe_str.
-    label = safety.safe_terminal_str(
-        f"{config['device'].get('name', my_device_id)} ({my_device_id})"
-    )
-    referenced_hashes: set[str] = set()
-
-    def _skip_missing() -> int:
-        with core._pause_sync_progress():
-            stderr_console.print(
-                f"mm: warning: this device's manifest is missing: {safe_str(label)}. "
-                "Blob collection was skipped; no blobs were deleted. "
-                "Wait for sync, inspect with 'mm diag', then retry 'mm gc'."
-            )
-        return 0
-
-    def _refuse_unless_complete(fetch: core.ManifestFetch) -> None:
-        if fetch.newer_version is not None:
-            core._error(
-                "cannot GC safely — newer-format manifest is corrupt on: "
-                f"{label}. Leave it in place. "
-                f"Upgrade with: {upgrade.INSTALL_CMD}." + (core.DRY_RUN_REFUSAL if dry_run else "")
-            )
-        # A conflict copy alone cannot stand in for an absent or unreadable
-        # canonical. Refuse previews too: an incomplete reference set cannot
-        # supply a trustworthy orphan list for a separate delete flow.
-        if fetch.conflict_copies_only:
-            core._error(
-                "cannot GC safely — this device's manifest is held only by "
-                f"conflict copies (its main copy is missing or unreadable): {label}. "
-                "Run 'mm push' on this device to rewrite it, then retry GC."
-                + (core.DRY_RUN_REFUSAL if dry_run else "")
-            )
-        if fetch.status == "corrupt":
-            core._error(
-                "cannot GC safely — this device's manifest is corrupt: "
-                f"{label}. It may reference blobs that would be reaped as orphans. "
-                "Run 'mm push' on this device to recover its manifest, then retry GC."
-                + (core.DRY_RUN_REFUSAL if dry_run else "")
-            )
-
-    def _add_references(fetch: core.ManifestFetch) -> None:
-        # The manifest is validated/normalized by load_manifest, unfiltered.
-        for src_data in fetch.manifest.get("sources", {}).values():
-            for info in src_data.get("files", {}).values():
-                referenced_hashes.add(info["sha256"])
-
-    if gc_fetch.status == "missing":
-        return _skip_missing()
-    _refuse_unless_complete(gc_fetch)
-    _add_references(gc_fetch)
-
-    # The own manifest can change after the reference scan (a reserved
-    # version, a conflict copy, or a failed read). Revalidate this device only
-    # before listing/deleting blob candidates and keep any added references.
-    again = core._fetch_remote_manifest(backend, my_device_id, passphrase, memory_kb)
-    if again.status == "missing":
-        return _skip_missing()
-    _refuse_unless_complete(again)
-    _add_references(again)
-
-    # The trailing slash excludes prefix-sharing peer identities.
-    all_blobs = backend.list_keys(own_prefix)
-    orphan_count = 0
-    malformed_count = 0
-
-    for bkey in all_blobs:
-        if not bkey.endswith(".enc"):
-            continue
-        parsed = parse_blob_key(bkey)
-        if parsed is None:
-            # Wrong-depth .enc under data/ — not a known blob shape. Could be
-            # a misplaced artifact from a future format, an external write, or
-            # corruption. Surface it (verbose/dry-run) so the user can audit;
-            # never auto-reap (we don't know what it is). `.tmp` artifacts from
-            # crashed pushes are handled separately by _sweep_local_tmp_files
-            # at the start of _do_gc, so they're not seen here.
-            malformed_count += 1
-            if verbose or dry_run:
-                # Printable-escape first, then Rich markup: the field helper
-                # keeps literal brackets, so markup escaping is still required.
-                console.print(
-                    f"  [yellow]malformed (skipped):[/yellow] "
-                    f"{safe_str(safety.safe_terminal_str(bkey))}"
-                )
-            continue
-        did, sha = parsed
-        if did != my_device_id:
-            continue
-        if sha not in referenced_hashes:
-            orphan_count += 1
-            if verbose:
-                console.print(f"  [red]orphan:[/red] {safe_str(safety.safe_terminal_str(bkey))}")
-            if not dry_run:
-                backend.delete(bkey)
-
-    if malformed_count and not (verbose or dry_run):
-        # Always summarize malformed-path count even in non-verbose mode, so
-        # the user has a signal that something weird is sitting in storage.
-        with core._pause_sync_progress():
-            console.print(
-                f"  [yellow]warning:[/yellow] {malformed_count} blob(s) at unexpected "
-                f"path depth (skipped; run with --verbose to see)."
-            )
-
-    if dry_run:
-        console.print(f"\n[bold]Dry run:[/bold] {orphan_count} orphaned blobs found.")
-    else:
-        if core._SYNC_OUTPUT.get() is None or core._SYNC_OUTPUT.get()["verbose"]:
-            console.print(
-                f"\n[bold green]GC complete.[/bold green] Deleted {orphan_count} orphaned blobs."
-            )
-
-    return orphan_count
+    gcflow.gc(dry_run=dry_run, verbose=verbose, prune_conflicts=prune_conflicts)
 
 
 # ── sources ───────────────────────────────────────────────────────────
@@ -3856,51 +3539,6 @@ def retro_fleet_cmd(
 # ── recapture ─────────────────────────────────────────────────────────
 
 
-RECAPTURE_EXIT_PARTIAL = 4
-"""Partial recapture exit. Distinct from pull ``--conflict-mode fail`` (3)."""
-
-
-def _parse_recapture_window(window: str) -> int:
-    days = events.parse_nd_window(window)
-    if days is None:
-        core._error(events.window_syntax_error(window))
-    if days < events.RECAPTURE_WINDOW_MIN_DAYS or days > events.RECAPTURE_WINDOW_MAX_DAYS:
-        core._error(
-            f"WINDOW must be between {events.RECAPTURE_WINDOW_MIN_DAYS}d and "
-            f"{events.RECAPTURE_WINDOW_MAX_DAYS}d; got {days}d. "
-            "The limit keeps the synced event log bounded."
-        )
-    return days
-
-
-def _recapture_commit_stats(
-    git_rows: list[dict], events_dir: Path
-) -> tuple[list[dict], list[dict]]:
-    already = events.recorded_commit_keys(events_dir)
-    records = []
-    for row in git_rows:
-        records.extend(events.git_row_commit_records(row))
-    new = [c for c in records if (c.get("remote", ""), c.get("sha", "")) not in already]
-    return records, new
-
-
-def _oldest_commit_date(commits: list[dict]) -> datetime | None:
-    oldest: datetime | None = None
-    for commit in commits:
-        raw = commit.get("date")
-        if not isinstance(raw, str):
-            continue
-        try:
-            ts = datetime.fromisoformat(raw)
-        except ValueError:
-            continue
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        if oldest is None or ts < oldest:
-            oldest = ts
-    return oldest
-
-
 @app.command()
 def recapture(
     window: str = typer.Argument(
@@ -3921,6 +3559,7 @@ def recapture(
             "stops or finds no repositories; a partial scan exits 0 and says so."
         ),
     ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Recover omitted git commits into the fleet retro.
 
@@ -3928,284 +3567,12 @@ def recapture(
     substantive-change gate passes without a special case. Partial recovery
     exits 4. Zero discovered repositories writes nothing and exits 1.
     """
-    with pullhistory.command_scope(attended=True):
-        days = _parse_recapture_window(window)
-        config = core._get_config(read_only=dry_run)
-        core._maybe_prompt_migration(config, read_only=dry_run)
-        if not dry_run:
-            config = core._get_config(read_only=False)
-        refusal_suffix = core.DRY_RUN_REFUSAL if dry_run else ""
-        passphrase = core._get_passphrase_or_exit()
-
-        try:
-            acquire_lock()
-        except LockError as e:
-            core._error(str(e))
-
-        try:
-            if not dry_run and not pullhistory.failed():
-                pullhistory.record_failure(statedb.recover_if_needed())
-            backend = get_backend(config)
-            try:
-                pending: list[str] = []
-                memory_kb = core._init_crypto_session(
-                    backend, passphrase, config, read_only=dry_run, pending=pending
-                )
-                for note in pending:
-                    console.print(safe_str(note))
-            except MindMeldError as e:
-                core._error(str(e) + refusal_suffix)
-            try:
-                resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
-                sources = resolution.available
-                for src in resolution.selected:
-                    if src["name"] == "mm-events" and src not in sources:
-                        raise SnapshotError(
-                            _config_module._missing_custom_mm_events_message(src["path"])
-                        )
-            except SnapshotError as e:
-                suffix = refusal_suffix
-                core._error(f"{e} No recapture rows were written.{suffix}")
-            disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
-            if "mm-events" in disabled or not any(s.get("name") == "mm-events" for s in sources):
-                state = "disabled" if "mm-events" in disabled else "not configured"
-                stderr_console.print(
-                    "[red]Error:[/red] recapture requires the 'mm-events' source, "
-                    f"but it is {state} on this Mac."
-                )
-                if dry_run:
-                    stderr_console.print("Fix (changes config): mm enable-source mm-events")
-                    stderr_console.print(
-                        f"Then preview again: mm recapture --dry-run {safe_str(window)}"
-                    )
-                    stderr_console.print(core.DRY_RUN_REFUSAL.strip())
-                else:
-                    stderr_console.print("Fix: mm enable-source mm-events")
-                    stderr_console.print(f"Then retry: mm recapture {safe_str(window)}")
-                raise typer.Exit(1)
-
-            since = datetime.now(timezone.utc) - timedelta(days=days)
-            prepared = events_tail._prepare_recapture(
-                config, sources, config["device"]["id"], since=since, persist=not dry_run
-            )
-            assert prepared is not None  # mm-events availability was checked above.
-
-            n_roots = len(prepared.root_discovery.roots)
-            skipped = prepared.walk_budget_aborts + prepared.walk_errors
-            records, new_records = _recapture_commit_stats(prepared.git_rows, prepared.events_dir)
-            until = prepared.until
-            since_day = prepared.since.date().isoformat()
-            until_day = until.date().isoformat()
-
-            if dry_run:
-                row_bytes = sum(
-                    len(json.dumps(row, sort_keys=True).encode("utf-8"))
-                    for row in prepared.git_rows
-                )
-                console.print("[bold]Recapture dry-run[/bold] — no commits written or uploaded.")
-                console.print(f"  Window scanned:   {since_day} → {until_day} ({days}d)")
-                console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
-                non_benign_skip = False
-                if prepared.git_rows:
-                    for entry in prepared.git_rows[0].get("skipped", []):
-                        reason = entry["reason"]
-                        if reason == events.WALK_SKIP_NO_COMMITS:
-                            reason = "no commits yet (benign)"
-                        else:
-                            non_benign_skip = True
-                        console.print(
-                            f"    skipped: {safe_str(entry['path'])} — {safe_str(reason)}"
-                        )
-                if non_benign_skip:
-                    console.print(f"  See {GIT_WALK_FAILURES_URL}")
-                console.print(f"  Commit records:   {len(records)} captured")
-                console.print(f"  Estimated size:   {row_bytes} bytes")
-                if n_roots == 0:
-                    console.print(
-                        "Recapture stopped: no Git repositories were discovered on this Mac. "
-                        "Add their absolute paths under [retro].repo_roots, verify with "
-                        f"'mm diag', then preview again: mm recapture --dry-run {safe_str(window)}"
-                    )
-                    stderr_console.print(core.DRY_RUN_REFUSAL.strip())
-                    raise typer.Exit(1)
-                if skipped:
-                    console.print(
-                        f"Preview incomplete: {skipped} repositories could not be walked "
-                        "(see the skipped lines above)."
-                    )
-                if prepared.root_discovery.exceeded:
-                    console.print(
-                        "Preview incomplete: repository discovery exceeded its budget; "
-                        "more repositories may exist."
-                    )
-                if prepared.root_discovery.errors:
-                    reasons = "; ".join(
-                        safe_str(reason) for reason in prepared.root_discovery.errors
-                    )
-                    console.print(
-                        f"Preview incomplete: repository discovery reported errors: {reasons}"
-                    )
-                console.print(core.DRY_RUN_COMPLETE)
-                console.print(RECAPTURE_NOT_PREVIEWED)
-                return
-
-            if n_roots == 0:
-                console.print(
-                    "Recapture stopped: no Git repositories were discovered on this Mac. "
-                    "Add their absolute paths under [retro].repo_roots, verify with "
-                    "'mm diag', then retry."
-                )
-                raise typer.Exit(1)
-
-            device_id = config["device"]["id"]
-            appended = events.write_push_event(
-                prepared.events_dir,
-                device_id,
-                prepared.git_rows,
-                max_file_size=config["sync"]["max_file_size"],
-            )
-            if isinstance(appended, events.EventAppendSkipped):
-                core._error(
-                    "Recapture stopped: event batch was not written. Fix sync.max_file_size "
-                    "or shrink the day file, then retry mm recapture."
-                )
-
-            events_tail._commit_recorded_git_rows(
-                prepared.events_dir,
-                device_id,
-                prepared.git_rows,
-                since=prepared.since,
-                complete=(
-                    events.classify_discovery(prepared.root_discovery) not in {"partial", "empty"}
-                    and not prepared.walk_budget_aborts
-                    and not prepared.walk_errors
-                ),
-            )
-            try:
-                with pullhistory.batch():
-                    result = _push_core(
-                        config,
-                        passphrase,
-                        memory_kb,
-                        verbose=False,
-                        dry_run=False,
-                        report_nested_repositories=False,
-                    )
-            except SnapshotError as e:
-                console.print(
-                    "Recapture was written locally but not synced. "
-                    "Fix the snapshot refusal below, then run 'mm push'."
-                )
-                core._error(str(e))
-            except typer.Exit:
-                console.print(
-                    "Recapture was written locally but not synced. "
-                    "Fix the storage error above, then run 'mm push'."
-                )
-                raise
-
-            synced = result is not None
-            if not synced:
-                console.print(
-                    "Recapture was written locally but not synced. "
-                    "Fix the storage error above, then run 'mm push'."
-                )
-                raise typer.Exit(1)
-            if result is not None and _held_blocks_recapture(result.held):
-                # The push held an mm-events file (a recapture day file was still
-                # changing): the rows exist locally but have not gone out.
-                console.print(
-                    "Recapture was written locally but not synced. "
-                    "A recapture file was still changing; run 'mm push' to publish it."
-                )
-                raise typer.Exit(1)
-
-            _notice_recapture_host_usage(config, sources)
-            partial = (
-                prepared.root_discovery.exceeded
-                or bool(prepared.root_discovery.errors)
-                or skipped > 0
-            )
-            n_scanned_ok = n_roots - skipped
-            if partial:
-                narrower = "7d" if days > 7 else "1d"
-                console.print(
-                    f"Recapture incomplete: captured {len(records)} commit records "
-                    f"from {n_scanned_ok} of {n_roots} repositories for "
-                    f"{since_day} → {until_day}."
-                )
-                if prepared.walk_errors:
-                    n = prepared.walk_errors
-                    noun = "repository was" if n == 1 else "repositories were"
-                    console.print(
-                        f"{n} {noun} skipped because the Git walk failed for those repositories. "
-                        "Check current repository failures: mm recapture --dry-run, "
-                        f"then retry mm recapture {window}. See {GIT_WALK_FAILURES_URL}"
-                    )
-                if prepared.walk_budget_aborts:
-                    n = prepared.walk_budget_aborts
-                    noun = "repository was" if n == 1 else "repositories were"
-                    console.print(
-                        f"{n} {noun} skipped because the Git walk exceeded its budget. "
-                        f"Retry a narrower window: mm recapture {narrower}"
-                    )
-                if prepared.root_discovery.exceeded:
-                    console.print(
-                        "Git repository discovery was incomplete. "
-                        f"Retry a narrower window: mm recapture {narrower}"
-                    )
-                elif prepared.root_discovery.errors:
-                    console.print(
-                        "Git repository discovery reported errors. "
-                        f"Check mm diag, then retry mm recapture {window}"
-                    )
-                raise typer.Exit(RECAPTURE_EXIT_PARTIAL)
-
-            if not records:
-                console.print(
-                    f"Recapture complete: scanned {n_roots} repositories but found "
-                    f"no commits dated {since_day} → {until_day}. "
-                    "No retro output will change."
-                )
-                return
-
-            if not new_records:
-                console.print(
-                    "Recapture found no commits that were not already recorded. "
-                    f"This Mac's events log already covers {since_day} → {until_day} "
-                    f"for all {n_roots} repositories it can see.\n"
-                    "If the retro is still short, the gap is on another Mac "
-                    "(mm devices) or in a repo discovery cannot see "
-                    "(mm diag, then [retro] repo_roots)."
-                )
-                return
-
-            oldest = _oldest_commit_date(new_records)
-            cover_days = days
-            if oldest is not None:
-                cover_days = max(days, (until.date() - oldest.date()).days + 1)
-                cover_days = min(cover_days, events.RECAPTURE_WINDOW_MAX_DAYS)
-            console.print("[bold green]Recapture complete.[/bold green]")
-            console.print(f"  Window scanned:   {since_day} → {until_day} ({days}d)")
-            console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
-            console.print(f"  Commit records:   {len(records)} captured")
-            console.print(f"  Synced:           {'yes' if synced else 'no'}")
-            console.print("")
-            console.print(
-                "Retros window by the COMMIT's date, not by when mm captured it, so a short"
-            )
-            console.print("window will not show the older recoveries:")
-            console.print(f"  mm retro-fleet {cover_days}d   # covers everything just recaptured")
-            console.print("  mm retro-fleet 7d    # covers the last 7 days only")
-        except MindMeldError as e:
-            if dry_run:
-                core._error(str(e) + refusal_suffix)
-            raise
-        finally:
-            release_lock()
-
-        if not dry_run:
-            upgrade.emit_nudge_if_due(config)
+    recaptureflow.recapture(
+        window=window,
+        dry_run=dry_run,
+        verbose=verbose,
+        push_core=_push_core,
+    )
 
 
 # ── update ────────────────────────────────────────────────────────────

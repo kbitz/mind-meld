@@ -76,7 +76,7 @@ from typing import Any, Iterator
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from mind_meld import __version__, fsutil, lockfile, pullhistory, updateprogress
+from mind_meld import __version__, fsutil, lockfile, outputstyle, pullhistory, updateprogress
 from mind_meld.errors import LockError
 from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
 from mind_meld.safety import safe_terminal_str, strip_terminal_escapes
@@ -916,14 +916,24 @@ def run_transition_hook(config: dict[str, Any]) -> None:
 # ── Nudge formatting + emission ───────────────────────────────────────────
 
 
-def format_upgrade_message(local: str, latest: str, install_cmd: str) -> str:
+def format_upgrade_message(
+    local: str,
+    latest: str,
+    install_cmd: str,
+    *,
+    detail: str | None = None,
+) -> str:
     """Produce the one-line nudge for stderr.
 
     Plain str output — caller MUST emit via `print(..., file=sys.stderr)`,
-    NOT `rich.console.Console.print`. Rich would interpret the backticks /
-    brackets in `install_cmd` as markup. Pinned by a regression test.
+    NOT `rich.console.Console.print`. Rich would interpret brackets in
+    `install_cmd` as markup. Pinned by a regression test.
     """
-    return f"mm: notice: {local} → {latest} available — run `{install_cmd}`"
+    suffix = f" ({detail})" if detail else ""
+    return outputstyle._notice_line(
+        f"{local} → {latest} available{suffix}.",
+        fix=install_cmd,
+    )
 
 
 def emit_nudge_if_due(config: dict[str, Any] | None) -> None:
@@ -942,9 +952,17 @@ def _nudge_if_due(result: UpgradeCheckResult, *, failed_install: bool = False) -
         return
     if result.latest is None or result.install_cmd is None:
         return
-    message = format_upgrade_message(result.local, result.latest, result.install_cmd)
-    if failed_install:
-        message += f" (the automatic update did not complete; see {update_log_path()})"
+    detail = (
+        f"the automatic update did not complete; see {update_log_path()}"
+        if failed_install
+        else None
+    )
+    message = format_upgrade_message(
+        result.local,
+        result.latest,
+        result.install_cmd,
+        detail=detail,
+    )
     print(message, file=sys.stderr)
     record_nudge(result.latest)
 
@@ -1910,8 +1928,8 @@ def _auto_install(
         if claim == "claimed":
             _record_install_failed(result.latest, cause=None)
         _write_update_log(argv, "Automatic update cancelled.\n")
-        cancel_line = (
-            "mm: notice: automatic update cancelled; sync outcome is reported separately. "
+        cancel_line = outputstyle._notice_line(
+            "automatic update cancelled; sync outcome is reported separately. "
             f"If mm is now missing, reinstall with: {reinstall_cmd(install)}"
         )
         if display is not None:
@@ -1925,8 +1943,11 @@ def _auto_install(
         _record_install_problem(_unexpected_cause(error))
         if display is not None and claim == "claimed":
             display.problems.append(
-                f"mm: notice: automatic update to {result.latest} did not complete "
-                f"({type(error).__name__}). Run: mm update"
+                outputstyle._notice_line(
+                    f"automatic update to {result.latest} did not complete "
+                    f"({type(error).__name__}).",
+                    fix="mm update",
+                )
             )
             record_nudge(result.latest)
             return True, False
@@ -1951,13 +1972,18 @@ def _auto_install(
     reason = outcome.detail if outcome.status == "failed" else "pipx found no newer build"
     if display is not None:
         display.problems.append(
-            f"mm: notice: automatic update to {result.latest} did not complete "
-            f"({reason}). Run: mm update"
+            outputstyle._notice_line(
+                f"automatic update to {result.latest} did not complete ({reason}).",
+                fix="mm update",
+            )
         )
     else:
         print(
-            f"mm: notice: automatic update to {result.latest} did not complete ({reason}) — "
-            f"run `mm update`, or `{reinstall_cmd(install)}`",
+            outputstyle._notice_line(
+                f"automatic update to {result.latest} did not complete ({reason}); "
+                f"if mm is now missing, reinstall with: {reinstall_cmd(install)}.",
+                fix="mm update",
+            ),
             file=sys.stderr,
         )
     record_nudge(result.latest)

@@ -567,8 +567,8 @@ pullhistory.append_self_upgrade(device='d', old_version='1', new_version='2')
         ),
         (
             "new",
-            "/state/state.db uses history schema v2; this mm reads up to v1; run `mm "
-            "update`, and if `mm --version` is already newer, an older mm is first "
+            "/state/state.db uses history schema v2; this mm reads up to v1; "
+            "if `mm --version` is already newer, an older mm is first "
             "on PATH (`which -a mm`)",
         ),
         (
@@ -616,12 +616,13 @@ def test_exact_message_table(kind, body):
         "stale": pullhistory.LegacyHistoryDiverged("2026-01-01"),
     }
     suffix = ". See https://github.com/kbitz/mind-meld#history-database-statedb"
+    tail = f"{suffix} Run: mm update" if kind == "new" else suffix
     prefix = "mm: notice: " if kind in ("pending", "stale") else "mm: error: "
-    assert pullhistory.explain(exceptions[kind]) == prefix + body + suffix
+    assert pullhistory.explain(exceptions[kind]) == prefix + body + tail
     if kind not in ("pending", "stale"):
         expected = (
             "mm: notice: history not recorded (these rows are dropped and not replayed; "
-            "fast-forward and deletions pause too while state.db is unavailable): " + body + suffix
+            "fast-forward and deletions pause too while state.db is unavailable): " + body + tail
         )
         assert pullhistory.explain(pullhistory.HistoryNotRecorded(exceptions[kind])) == expected
 

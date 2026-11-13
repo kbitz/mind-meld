@@ -7,7 +7,6 @@ import fnmatch
 import hashlib
 import json
 import os
-import re
 import secrets
 import stat
 import sys
@@ -28,6 +27,7 @@ from mind_meld import (
     crypto,
     fsutil,
     manifest,
+    outputstyle,
     projectid,
     pullplan,
     safety,
@@ -154,15 +154,15 @@ class ManifestFetch:
 
 
 def _error_line(message: str) -> str:
-    return f"mm: error: {message}"
+    return outputstyle._error_line(message)
 
 
 def _fix_line(command: str) -> str:
-    return f"Run: {command}"
+    return outputstyle._fix_line(command)
 
 
 def _outcome_line(verb: str, text: str) -> str:
-    return f"{verb.title()}: {text}."
+    return outputstyle._outcome_line(verb, text)
 
 
 def _stderr_lines(lines: Iterable[str]) -> None:
@@ -173,12 +173,12 @@ def _stderr_lines(lines: Iterable[str]) -> None:
         stream.flush()
 
 
-def _warning(message: str) -> None:
-    _stderr_lines((f"mm: warning: {message}",))
+def _warning(message: str, *, fix: str | None = None) -> None:
+    _stderr_lines((outputstyle._warning_line(message, fix=fix),))
 
 
-def _notice(message: str) -> None:
-    _stderr_lines((f"mm: notice: {message}",))
+def _notice(message: str, *, fix: str | None = None) -> None:
+    _stderr_lines((outputstyle._notice_line(message, fix=fix),))
 
 
 def _print_error(message: str, *, fix: str | None = None) -> None:
@@ -190,30 +190,7 @@ def _print_error(message: str, *, fix: str | None = None) -> None:
 
 
 def _fix_for(message: str, fallback: str | None = None) -> tuple[str, str | None]:
-    command: str | None
-    if "newer mm" in message or "unsupported format" in message:
-        command = "mm update"
-    elif "mm migrate-config" in message:
-        command = "mm migrate-config"
-    elif "mm init" in message:
-        command = "mm init"
-    elif message.startswith("Device not found"):
-        command = "mm devices"
-    else:
-        command = fallback
-    problem = message
-    if command is not None:
-        escaped = re.escape(command)
-        stripped = re.sub(
-            rf"(?:,? then (?:run |retry )?|(?:(?:\s*—\s*|\.\s+))(?:run|retry) )"
-            rf"[`']?{escaped}[`']?(?:\s+first)?\.?$",
-            "",
-            problem,
-            flags=re.IGNORECASE,
-        )
-        if stripped != problem:
-            problem = stripped.rstrip(". —")
-    return problem, command
+    return outputstyle._fix_for(message, fallback)
 
 
 def _error(msg: str, *, fix: str | None = None) -> None:

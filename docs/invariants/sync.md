@@ -15,7 +15,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/lockedjson.py` — `locked_json_durable_rmw` / (see "Atomic write publication failures") / `locked_json_rmw` / `locked_json_snapshot` / (see "Shared JSON locking")
 - `src/mind_meld/storage/keys.py` — `manifest_key` / `blob_key` / `data_prefix` / `device_key` / `parse_blob_key` / (see "Validated storage keys")
 - `src/mind_meld/projectid.py` / `src/mind_meld/manifest.py` — `manifest_to_wire` / `manifest_from_wire` (see "Project identity on the wire (Track 90A)")
-- `src/mind_meld/cli.py` — `_do_gc` / (see "Own-device blob collection (Track 71A)"; also read init-devices.md)
+- `src/mind_meld/gcflow.py` — `gc` / `_do_gc` / (see "Own-device blob collection (Track 71A)"; also read init-devices.md)
 - `src/mind_meld/cli.py` — `autopull` / `autopush` / `_auto_command_setup` / (see "Visible failures in automatic commands")
 - `src/mind_meld/cli.py` — `_quarantine_corrupt_manifest` / (also read init-devices.md)
 - `src/mind_meld/initflow.py` — `_register_and_save` / (also read init-devices.md)
@@ -34,7 +34,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/sourceflow.py`
 - `src/mind_meld/sidecar.py`
 - `src/mind_meld/pullhistory.py`
-- `src/mind_meld/statedb.py` / `src/mind_meld/cli.py` — `log_cmd` / `recapture` (history scope) / (see "Pull/push history log (Track 73B)")
+- `src/mind_meld/statedb.py` / `src/mind_meld/cli.py` / `src/mind_meld/recaptureflow.py` — `log_cmd` / `recapture` (history scope) / (see "Pull/push history log (Track 73B)")
 - `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner` / `totals` / (see "Fast-forward, propagated deletions and anchors (Track 91A)"; also read conflicts.md)
 - `src/mind_meld/pullflow.py` — `_deletion_candidates` / `_run_deletions` / `_move_into_copy` / `_make_copy_dirs` / `_copy_then_unlink` / `_remove_owned_copy` / `_classify_with_ledger` / `_apply_fast_forward` / `_ledger_verdict` / `_own_lookup` / `deleted_clause` / `ledger_notice`
 - `src/mind_meld/core.py` — `MintGuard` / `compute_mint_guard` / `stamp_left_out` / `anchor_pending` / `publish_anchors` / `stamp_ancestry` / `record_published` / `load_ledger` / `flush_ledger_files` / `commit_ledger` / `ledger_cause`
@@ -771,7 +771,11 @@ authorize nor veto collection; no peer namespace is collected.
 A missing own manifest returns zero without listing or deleting blob candidates,
 with a visible warning naming this device, skipped collection and no blobs
 deleted. Wait for sync, inspect with `mm diag`, then retry GC; inspection does not
-repair missing metadata. No blob completion/orphan-success summary is printed.
+repair missing metadata. Explicit `mm gc` ends with
+`Gc: blob collection skipped (own manifest missing); local retention complete.`
+instead of a deleted-blob count, while normal `mm gc` ends with
+`Gc: <N> orphaned blob(s) deleted.` (per-reaper retention summaries print under
+`-v` / `--dry-run`).
 A valid empty manifest is distinct and can collect own orphans. Own corrupt or
 newer-format metadata refuses in apply and preview. So does an own manifest held
 only by conflict copies (iCloud, Dropbox or Syncthing) because the canonical is absent or unreadable

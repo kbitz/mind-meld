@@ -3038,7 +3038,7 @@ def test_attended77_accepted_content_survives_later_gc_failure(tmp_path, monkeyp
     def stopped(*a, **k):
         raise typer.Exit(1)
 
-    monkeypatch.setattr(cli_module, "_do_gc", stopped)
+    monkeypatch.setattr(cli_module.gcflow, "_do_gc", stopped)
     shown = runner.invoke(app, ["push"])
     assert shown.exit_code == 1
     record = attemptlog.read_runs()["runs"]["push"]

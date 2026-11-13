@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal, get_args
 
-from mind_meld import errors, safety, statedb
+from mind_meld import errors, outputstyle, safety, statedb
 
 HISTORY_DIR = Path.home() / ".config" / "mind-meld"
 ROTATED_SUFFIX = ".1"
@@ -77,21 +77,21 @@ class LegacyHistoryDiverged:
 
 def explain(exc) -> str:
     """Single message table for plain errors and all history notices."""
-    prefix = "mm: error: "
+    is_notice = False
     if isinstance(exc, HistoryNotRecorded):
         cause = explain(exc.cause).removeprefix("mm: error: ")
-        return (
-            "mm: notice: history not recorded (these rows are dropped and not replayed; "
+        return outputstyle._notice_line(
+            "history not recorded (these rows are dropped and not replayed; "
             "fast-forward and deletions pause too while state.db is unavailable): " + cause
         )
     if isinstance(exc, LegacyHistoryPending):
-        prefix = "mm: notice: "
+        is_notice = True
         message = (
             f"legacy history in {exc.path} is not imported yet ({exc.cause}); "
             "it is still in that file"
         )
     elif isinstance(exc, LegacyHistoryDiverged):
-        prefix = "mm: notice: "
+        is_notice = True
         message = (
             f"rows written after {exc.imported} by an older mm are in "
             "~/.config/mind-meld/pull-history.jsonl or pull-history.jsonl.1 and not shown "
@@ -109,7 +109,7 @@ def explain(exc) -> str:
         message = (
             f"{exc.path} uses history schema v{exc.version}; "
             f"this mm reads up to v{exc.known_version}; "
-            "run `mm update`, and if `mm --version` is already newer, an older mm is first "
+            "if `mm --version` is already newer, an older mm is first "
             "on PATH (`which -a mm`)"
         )
     elif isinstance(exc, statedb.StateDBUnavailable):
@@ -131,7 +131,12 @@ def explain(exc) -> str:
             f"{path}: {name}; mm could not read or write its "
             "history database; see the README section"
         )
-    return f"{prefix}{message}. See {errors.STATEDB_HELP_URL}"
+    body = f"{message}. See {errors.STATEDB_HELP_URL}"
+    if is_notice:
+        return outputstyle._notice_line(body)
+    if isinstance(exc, statedb.StateDBTooNew):
+        return f"{outputstyle._error_line(body)} {outputstyle._fix_line('mm update')}"
+    return outputstyle._error_line(body)
 
 
 def record_failure(exc):

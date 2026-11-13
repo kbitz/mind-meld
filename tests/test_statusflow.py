@@ -73,7 +73,10 @@ def inspection(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("published", [False, True])
-def test_status_contract(inspection, published):
+def test_status_contract(inspection, monkeypatch, published):
+    import os
+    from types import SimpleNamespace
+
     backend, root = inspection
     if published:
         cfg = config.load_config()
@@ -96,6 +99,50 @@ def test_status_contract(inspection, published):
         else "This device has not pushed yet. Run: mm push"
     )
     if published:
+        stat = (root / "note.md").stat()
+        os.utime(root / "note.md", (stat.st_atime + 60, stat.st_mtime + 60))
+        mtime_only = runner.invoke(app, ["status"])
+        assert mtime_only.exit_code == 0, mtime_only.output
+        assert "Metadata-only changes pending (updated mtimes). Run: mm push" in mtime_only.stdout
+        os.utime(root / "note.md", (stat.st_atime, stat.st_mtime))
+
+        claude_dir = root.parent / ".claude"
+        (claude_dir / "projects" / "-Users-user-app" / "memory").mkdir(parents=True)
+        (claude_dir / "projects" / "-Users-user-app" / "memory" / "MEMORY.md").write_text("m\n")
+        cfg = config.load_config()
+        cfg["sync"]["claude_dir"] = str(claude_dir)
+        cfg["sync"]["sources"].append(
+            {
+                "name": "claude",
+                "type": "claude",
+                "path": str(claude_dir),
+                "include_dirs": ["projects"],
+            }
+        )
+        config.save_config(cfg)
+        snapshot_with_claude = manifest.build_manifest_v2(
+            cfg["device"]["id"],
+            cfg["device"]["name"],
+            config.get_sources(cfg, bootstrap=False),
+            cfg["sync"]["max_file_size"],
+        )
+        backend.put(
+            manifest_key(cfg["device"]["id"]),
+            crypto.encrypt(
+                manifest.serialize_manifest(snapshot_with_claude), "contract-passphrase", 1024
+            ),
+        )
+        monkeypatch.setattr(
+            core,
+            "project_form_state",
+            lambda *a, **kw: SimpleNamespace(switch_held=False, due=True),
+        )
+        names_ready = runner.invoke(app, ["status"])
+        assert names_ready.exit_code == 0, names_ready.output
+        assert (
+            "Project memory ready to publish under shared names. Run: mm push" in names_ready.stdout
+        )
+
         (root / "note.md").write_text("changed context\n")
         changed = runner.invoke(app, ["status"])
         assert changed.exit_code == 0, changed.output
@@ -454,3 +501,54 @@ def test_track_125a_status_git_capture_catching_up_and_error_shows_failure(tmp_p
     assert "1 repository was skipped." in err_out
     assert "mm recapture" in err_out
     assert "catching up (" not in err_out
+
+
+def test_status_incomplete_discovery_with_zero_pending_has_no_positive_catching_up_count(
+    tmp_path, monkeypatch
+):
+    from datetime import datetime, timedelta, timezone
+    from io import StringIO
+
+    from rich.console import Console
+
+    from mind_meld import events, lockedjson
+
+    cache_path = tmp_path / "git-capture.json"
+    monkeypatch.setattr(config, "GIT_CAPTURE_CACHE_PATH", cache_path)
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=2)
+    push_ts = now - timedelta(minutes=1)
+    with lockedjson.locked_json_rmw(cache_path) as state:
+        state.data.update(events._default_git_capture_cache())
+        state.data.update({"incomplete_streak": 1, "repo_cursors": {}})
+    assert state.data["incomplete_streak"] < 3
+
+    mm_push = events.make_mm_push_event(
+        device="dev-a",
+        mm_version="1.0.0",
+        sources=["claude", "mm-events"],
+        discovery_errors=[],
+        local_emails=["user@example.com"],
+        git_capture=events.make_git_capture(
+            since=since,
+            discovery="partial",
+            walk_budget_aborts=0,
+            walk_errors=0,
+        ),
+    )
+    mm_push["ts"] = push_ts.isoformat()
+    events.write_push_event(events_dir, "dev-a", [mm_push])
+    assert events.count_pending_repositories([], push_ts) == 0
+
+    buf = StringIO()
+    monkeypatch.setattr(statusflow, "console", Console(file=buf, force_terminal=False, width=100))
+    sources = [{"name": "mm-events", "type": "mm-events", "path": str(tmp_path)}]
+    assert statusflow._print_retro_capture_status(sources, "dev-a") is True
+    out = " ".join(buf.getvalue().split())
+    assert "Retro capture: 0 known repositories left to catch up." in out
+    assert "Repository discovery is still catching up." in out
+    assert "Continue capture on this Mac: mm push" in out
+    assert "catching up (" not in out

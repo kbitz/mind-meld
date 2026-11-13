@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mind_meld import fsutil, resolveflow, statedb, token_usage
+from mind_meld import core, fsutil, resolveflow, statedb, token_usage
 from mind_meld.config import get_sources
 from mind_meld.consoles import console
 from mind_meld.manifest import (
@@ -51,7 +51,7 @@ from mind_meld.storage.local import LocalBackend
 CONFLICT_AGE_DAYS = 30
 # Track 91A: a file a pull deleted because a peer deleted it is kept this long in
 # ``~/.config/mind-meld/deleted/<UTC stamp>-<rand>/``. Thirty days is a minimum:
-# hooks never run `mm gc`, so a pull's own deletion pass also reaps.
+# hooks never invoke `mm gc`, so a pull's own deletion pass also reaps.
 DELETED_COPY_DAYS = 30
 _DELETED_FOLDER_RE = re.compile(r"^(\d{8})-(\d{6})-[0-9a-f]{4}$")
 # Track 7B (v0.10.3): per-device daily JSONL events files older than this
@@ -86,7 +86,13 @@ class ReapOutcome:
 
 
 def _render_reap_outcome(
-    label: str, outcome: ReapOutcome, *, dry_run: bool, note: str = ""
+    label: str,
+    outcome: ReapOutcome,
+    *,
+    dry_run: bool,
+    note: str = "",
+    emit_summary: bool = True,
+    emit_remediation: bool = True,
 ) -> None:
     """Print the one stable non-verbose result line for a reaper."""
     if dry_run:
@@ -96,20 +102,28 @@ def _render_reap_outcome(
         )
         return
 
-    console.print(
-        f"[bold]{label}[/bold]: candidates={outcome.candidates} "
-        f"deleted={outcome.deleted} failed={outcome.failed} "
-        f"skipped={outcome.skipped} repairs={outcome.repairs} "
-        f"repair-failed={outcome.repair_failed}"
-    )
-    if outcome.needs_remediation:
+    if emit_summary:
         console.print(
-            "[yellow]Retention cleanup was incomplete. Fix permissions or locks, "
-            "then rerun `mm gc`; use `-v` for paths and details.[/yellow]"
+            f"[bold]{label}[/bold]: candidates={outcome.candidates} "
+            f"deleted={outcome.deleted} failed={outcome.failed} "
+            f"skipped={outcome.skipped} repairs={outcome.repairs} "
+            f"repair-failed={outcome.repair_failed}"
+        )
+    if emit_remediation and outcome.needs_remediation:
+        core._warning(
+            "Retention cleanup was incomplete. Fix permissions or locks; "
+            "use -v for paths and details.",
+            fix="mm gc -v",
         )
 
 
-def _gc_token_cache(dry_run: bool, verbose: bool) -> ReapOutcome:
+def _gc_token_cache(
+    dry_run: bool,
+    verbose: bool,
+    *,
+    emit_summary: bool = True,
+    emit_remediation: bool = True,
+) -> ReapOutcome:
     """Reap session-tokens.json entries with no living jsonl AND entries
     whose most recent by_day key is older than 90 days. Best-effort —
     cache reconstruction on the next push backstops a GC failure."""
@@ -152,7 +166,13 @@ def _gc_token_cache(dry_run: bool, verbose: bool) -> ReapOutcome:
             f"mm: notice: token cache gc failed: {type(e).__name__}: {safe_terminal_str(e)}\n"
         )
         outcome = ReapOutcome(skipped=1)
-    _render_reap_outcome("Token cache", outcome, dry_run=dry_run)
+    _render_reap_outcome(
+        "Token cache",
+        outcome,
+        dry_run=dry_run,
+        emit_summary=emit_summary,
+        emit_remediation=emit_remediation,
+    )
     return outcome
 
 
@@ -163,6 +183,7 @@ def _sweep_local_tmp_files(
     verbose: bool,
     *,
     emit_summary: bool = True,
+    emit_remediation: bool = True,
 ) -> ReapOutcome:
     """Reap stale tmp*.tmp left by crashed atomic_write_bytes calls.
 
@@ -224,8 +245,14 @@ def _sweep_local_tmp_files(
             deleted += 1
 
     outcome = ReapOutcome(candidates=len(victims), deleted=deleted, failed=failed, skipped=skipped)
-    if emit_summary:
-        _render_reap_outcome("Temporary files", outcome, dry_run=dry_run)
+    if emit_summary or dry_run:
+        _render_reap_outcome(
+            "Temporary files",
+            outcome,
+            dry_run=dry_run,
+            emit_summary=emit_summary,
+            emit_remediation=emit_remediation and emit_summary,
+        )
     return outcome
 
 
@@ -235,6 +262,8 @@ def _gc_old_event_files(
     verbose: bool,
     *,
     now: datetime | None = None,
+    emit_summary: bool = True,
+    emit_remediation: bool = True,
 ) -> ReapOutcome:
     """Reap mm-events JSONL files older than ``EVENTS_RETENTION_DAYS``.
 
@@ -258,12 +287,24 @@ def _gc_old_event_files(
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
         outcome = ReapOutcome()
-        _render_reap_outcome("Events", outcome, dry_run=dry_run)
+        _render_reap_outcome(
+            "Events",
+            outcome,
+            dry_run=dry_run,
+            emit_summary=emit_summary,
+            emit_remediation=emit_remediation,
+        )
         return outcome
     events_dir = Path(mm_events_src["path"]).expanduser() / "events"
     if not events_dir.is_dir():
         outcome = ReapOutcome()
-        _render_reap_outcome("Events", outcome, dry_run=dry_run)
+        _render_reap_outcome(
+            "Events",
+            outcome,
+            dry_run=dry_run,
+            emit_summary=emit_summary,
+            emit_remediation=emit_remediation,
+        )
         return outcome
 
     today = (now or datetime.now(timezone.utc)).date()
@@ -310,7 +351,13 @@ def _gc_old_event_files(
             )
 
     outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
-    _render_reap_outcome("Events", outcome, dry_run=dry_run)
+    _render_reap_outcome(
+        "Events",
+        outcome,
+        dry_run=dry_run,
+        emit_summary=emit_summary,
+        emit_remediation=emit_remediation,
+    )
     return outcome
 
 
@@ -332,6 +379,8 @@ def _gc_deleted_copies(
     *,
     now: datetime | None = None,
     quiet: bool = False,
+    emit_summary: bool = True,
+    emit_remediation: bool = True,
 ) -> ReapOutcome:
     """Reap recovery folders older than DELETED_COPY_DAYS, whole folder at a time.
 
@@ -378,7 +427,13 @@ def _gc_deleted_copies(
                 console.print(f"  deleted recovery folder {safe_str(entry)}")
     outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
     if not quiet:
-        _render_reap_outcome("Deleted-file copies", outcome, dry_run=dry_run)
+        _render_reap_outcome(
+            "Deleted-file copies",
+            outcome,
+            dry_run=dry_run,
+            emit_summary=emit_summary,
+            emit_remediation=emit_remediation,
+        )
     return outcome
 
 
@@ -389,6 +444,8 @@ def _gc_old_conflict_files(
     *,
     now: datetime | None = None,
     deletion_requires_flag: bool = False,
+    emit_summary: bool = True,
+    emit_remediation: bool = True,
 ) -> ReapOutcome:
     """Delete .sync-conflict-* files older than CONFLICT_AGE_DAYS.
 
@@ -409,7 +466,14 @@ def _gc_old_conflict_files(
         outcome = ReapOutcome(skipped=1)
         if verbose:
             console.print(f"  [yellow]conflict scan skipped: {safe_str(e)}[/yellow]")
-        _render_reap_outcome("Conflicts", outcome, dry_run=dry_run, note=note)
+        _render_reap_outcome(
+            "Conflicts",
+            outcome,
+            dry_run=dry_run,
+            note=note,
+            emit_summary=emit_summary,
+            emit_remediation=emit_remediation,
+        )
         return outcome
     current_time = now or datetime.now(timezone.utc)
     cutoff = current_time - timedelta(days=CONFLICT_AGE_DAYS)
@@ -455,7 +519,14 @@ def _gc_old_conflict_files(
         deleted += 1
         console.print(f"  [dim]deleted (age {age_days}d):[/dim] {safe_str(cpath)}")
     outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
-    _render_reap_outcome("Conflicts", outcome, dry_run=dry_run, note=note)
+    _render_reap_outcome(
+        "Conflicts",
+        outcome,
+        dry_run=dry_run,
+        note=note,
+        emit_summary=emit_summary,
+        emit_remediation=emit_remediation,
+    )
     return outcome
 
 
@@ -493,6 +564,8 @@ def _gc_orphan_retros_dir(
     verbose: bool,
     *,
     retros_dir: Path | None = None,
+    emit_summary: bool = True,
+    emit_remediation: bool = True,
 ) -> ReapOutcome:
     """Reap leftover v0.12.0 trend-snapshot files.
 
@@ -506,7 +579,13 @@ def _gc_orphan_retros_dir(
     target = retros_dir if retros_dir is not None else DEFAULT_RETROS_DIR
     if not target.is_dir():
         outcome = ReapOutcome()
-        _render_reap_outcome("Orphan retros", outcome, dry_run=dry_run)
+        _render_reap_outcome(
+            "Orphan retros",
+            outcome,
+            dry_run=dry_run,
+            emit_summary=emit_summary,
+            emit_remediation=emit_remediation,
+        )
         return outcome
 
     candidates = 0
@@ -523,7 +602,13 @@ def _gc_orphan_retros_dir(
             console.print(
                 f"  [yellow]orphan retros scan skipped: {safe_str(target)} — {safe_str(e)}[/yellow]"
             )
-        _render_reap_outcome("Orphan retros", outcome, dry_run=dry_run)
+        _render_reap_outcome(
+            "Orphan retros",
+            outcome,
+            dry_run=dry_run,
+            emit_summary=emit_summary,
+            emit_remediation=emit_remediation,
+        )
         return outcome
 
     matching: list[Path] = []
@@ -586,7 +671,13 @@ def _gc_orphan_retros_dir(
         repairs=repairs,
         repair_failed=repair_failed,
     )
-    _render_reap_outcome("Orphan retros", outcome, dry_run=dry_run)
+    _render_reap_outcome(
+        "Orphan retros",
+        outcome,
+        dry_run=dry_run,
+        emit_summary=emit_summary,
+        emit_remediation=emit_remediation,
+    )
     return outcome
 
 

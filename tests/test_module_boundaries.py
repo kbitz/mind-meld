@@ -43,6 +43,10 @@ EXTRACTED = [
     "initflow",
     "sourceflow",
     "devicesflow",
+    "diffflow",
+    "gcflow",
+    "recaptureflow",
+    "outputstyle",
     "host_registry",
     "rootprobes",
     "syncthing",
@@ -59,6 +63,7 @@ LEAVES = [
     "conflictdiff",
     "fsutil",
     "gitenv",
+    "outputstyle",
     "updateprogress",
     "projectid",
     "rootprobes",
@@ -250,6 +255,11 @@ def test_rootprobes_imports_only_token_usage_and_the_standard_library() -> None:
 def test_syncthing_imports_only_the_standard_library() -> None:
     """Track 92A: syncthing.py is a stdlib-only leaf."""
     assert _mind_meld_imports(SRC / "syncthing.py") == set()
+
+
+def test_outputstyle_imports_only_the_standard_library() -> None:
+    """Track 133A: outputstyle.py is a stdlib-only leaf."""
+    assert _mind_meld_imports(SRC / "outputstyle.py") == set()
 
 
 def test_events_imports_no_host_usage_reader() -> None:
@@ -1341,6 +1351,36 @@ DEVICESFLOW_DEFINITIONS = frozenset(
 )
 DEVICES_SHELLS = frozenset("devices devices_approve".split())
 
+# Track 133A: `mm diff`, `mm gc` and `mm recapture` bodies and command-private
+# helpers live in diffflow.py, gcflow.py and recaptureflow.py; the Typer shells
+# stay in cli.py.
+DIFFFLOW_DEFINITIONS = frozenset(
+    """
+    diff_cmd
+    """.split()
+)
+
+GCFLOW_DEFINITIONS = frozenset(
+    """
+    GcBlobResult
+    _do_gc
+    gc
+    """.split()
+)
+
+RECAPTUREFLOW_DEFINITIONS = frozenset(
+    """
+    RECAPTURE_EXIT_PARTIAL
+    RECAPTURE_NOT_PREVIEWED
+    _held_blocks_recapture
+    _notice_recapture_host_usage
+    _oldest_commit_date
+    _parse_recapture_window
+    _recapture_commit_stats
+    recapture
+    """.split()
+)
+
 
 def _top_level_definitions(source: str) -> set[str]:
     names = set()
@@ -1386,11 +1426,24 @@ def _unqualified_owner_calls(
         owners.update(dict.fromkeys(INITFLOW_DEFINITIONS, "initflow"))
         owners.update(dict.fromkeys(SOURCEFLOW_DEFINITIONS, "sourceflow"))
         owners.update(dict.fromkeys(DEVICESFLOW_DEFINITIONS, "devicesflow"))
+        owners.update(dict.fromkeys(DIFFFLOW_DEFINITIONS, "diffflow"))
+        owners.update(dict.fromkeys(GCFLOW_DEFINITIONS, "gcflow"))
+        owners.update(dict.fromkeys(RECAPTUREFLOW_DEFINITIONS, "recaptureflow"))
     owners.update(dict.fromkeys(PULLFLOW_DEFINITIONS, "pullflow"))
     tree = ast.parse(source)
     module_aliases = {
         name: name
-        for name in ("core", "statusflow", "pullflow", "initflow", "sourceflow", "devicesflow")
+        for name in (
+            "core",
+            "statusflow",
+            "pullflow",
+            "initflow",
+            "sourceflow",
+            "devicesflow",
+            "diffflow",
+            "gcflow",
+            "recaptureflow",
+        )
     }
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -1565,6 +1618,39 @@ def test_devicesflow_single_ownership_and_qualified_calls():
     assert len(DEVICESFLOW_DEFINITIONS) == 6
 
 
+def test_diffflow_single_ownership_and_qualified_calls():
+    inventories = {"cli": {"diff_cmd"}, "diffflow": DIFFFLOW_DEFINITIONS}
+    for module, expected in inventories.items():
+        source = (SRC / f"{module}.py").read_text()
+        assert _top_level_definitions(source) & DIFFFLOW_DEFINITIONS == expected, (
+            f"{module}: expected owner inventory {expected}"
+        )
+        assert _unqualified_owner_calls(source, module) == []
+    assert len(DIFFFLOW_DEFINITIONS) == 1
+
+
+def test_gcflow_single_ownership_and_qualified_calls():
+    inventories = {"cli": {"gc"}, "gcflow": GCFLOW_DEFINITIONS}
+    for module, expected in inventories.items():
+        source = (SRC / f"{module}.py").read_text()
+        assert _top_level_definitions(source) & GCFLOW_DEFINITIONS == expected, (
+            f"{module}: expected owner inventory {expected}"
+        )
+        assert _unqualified_owner_calls(source, module) == []
+    assert len(GCFLOW_DEFINITIONS) == 3
+
+
+def test_recaptureflow_single_ownership_and_qualified_calls():
+    inventories = {"cli": {"recapture"}, "recaptureflow": RECAPTUREFLOW_DEFINITIONS}
+    for module, expected in inventories.items():
+        source = (SRC / f"{module}.py").read_text()
+        assert _top_level_definitions(source) & RECAPTUREFLOW_DEFINITIONS == expected, (
+            f"{module}: expected owner inventory {expected}"
+        )
+        assert _unqualified_owner_calls(source, module) == []
+    assert len(RECAPTUREFLOW_DEFINITIONS) == 8
+
+
 def test_pull_test_consumers_use_qualified_owner_names():
     offenders = {}
     for path in Path(__file__).resolve().parent.rglob("*.py"):
@@ -1605,7 +1691,17 @@ def test_owner_call_gate_rejects_dead_aliases(source, consumer, flags):
 
 
 @pytest.mark.parametrize(
-    "forbidden", ["statusflow", "pullflow", "initflow", "sourceflow", "devicesflow"]
+    "forbidden",
+    [
+        "statusflow",
+        "pullflow",
+        "initflow",
+        "sourceflow",
+        "devicesflow",
+        "diffflow",
+        "gcflow",
+        "recaptureflow",
+    ],
 )
 def test_core_does_not_import_statusflow(forbidden):
     tree = ast.parse((SRC / "core.py").read_text())
@@ -1673,6 +1769,46 @@ def test_devicesflow_import_does_not_register_cli():
     assert result.returncode == 0, result.stderr
 
 
+def test_diffflow_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import diffflow; assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_gcflow_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import gcflow; assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_recaptureflow_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import recaptureflow; "
+            "assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_core_sync_output_is_shared_with_cli():
     from mind_meld import cli, core
 
@@ -1700,6 +1836,21 @@ def test_source_bindings_have_one_owner():
         "DEFAULT_SOURCES",
         "walk_source",
     }:
+        assert not hasattr(cli, name), f"{name}: use its expected owner; no cli re-export"
+
+
+def test_diff_gc_recapture_bindings_have_one_owner():
+    from mind_meld import cli, consoles, diffflow, gcflow, recaptureflow, safety
+
+    assert diffflow.console is gcflow.console is recaptureflow.console is consoles.console
+    assert gcflow.stderr_console is recaptureflow.stderr_console is consoles.stderr_console
+    assert diffflow.safe_str is gcflow.safe_str is recaptureflow.safe_str is safety.safe_str
+    moved = (
+        (GCFLOW_DEFINITIONS - {"gc"})
+        | (RECAPTUREFLOW_DEFINITIONS - {"recapture"})
+        | {"parse_blob_key", "storage_keys"}
+    )
+    for name in moved:
         assert not hasattr(cli, name), f"{name}: use its expected owner; no cli re-export"
 
 

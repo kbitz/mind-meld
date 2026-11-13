@@ -635,7 +635,7 @@ class TestGCRefusesOnCorruptOwnManifest:
     C3)."""
 
     def test_dry_run_refuses_when_corrupt_own_manifest(self, tmp_path):
-        from mind_meld.cli import _do_gc
+        from mind_meld.gcflow import _do_gc
 
         storage = LocalBackend(tmp_path / "storage")
         register_device(storage, "dev1", "Test")
@@ -652,7 +652,7 @@ class TestGCRefusesOnCorruptOwnManifest:
             _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=True, verbose=False)
 
     def test_write_mode_refuses_when_corrupt_own_manifest(self, tmp_path):
-        from mind_meld.cli import _do_gc
+        from mind_meld.gcflow import _do_gc
 
         storage = LocalBackend(tmp_path / "storage")
         register_device(storage, "dev1", "Test")
