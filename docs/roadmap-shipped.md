@@ -972,4 +972,3 @@ _tombstone: 125, 128, 129, 130, 131_
 ### Track 131A: Carry a reader's progress to the retro and word it "catching up (N left)" in `MM_HEALTH` ✓ Shipped (v1.12.42)
 - 2026-11-13: merged PR #316 (`bbbe943`); verified land-time Track 131A, original Group 131. Introduction/lineage: 2026-11-10 plan at `a198f69` (125A introduced in 2026-11-09 plan at `409998d`; 131A relabeled from 126A on 2026-11-10).
 - Approved-scope evidence: merged PR review/prep receipt and ship receipt, merged implementation/tests and release row; full portable check passed at release head. Additive reader/Git progress, fleet catching-up wording and legacy fallback; attended-cap precedence test included. Historical abort accounting preserved by approved scope.
-
