@@ -44,6 +44,26 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/events_tail.py|tests/test_host_usage_snapshot.py|tests/test_events.py] Test gap: Capture progress write failure isolation
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Progress-cache read failures are covered, but save and clear failures are not injected while checking that event append, push outcome and stderr remain unchanged.
+- **Hypothesis (untested):** Extend a lifecycle fixture with a failing progress-cache update and assert the capture still publishes normally. Re-verify the reachable boundary first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/events_tail.py:1002
+- **Evidence:** Read-only coverage audit at `5596cb5` found 28 of 30 changed paths protected; no write-failure defect was reproduced.
+- **Context:** /review-and-prep for Track 131A, branch `mmm/800c8955`, 2026-11-12; PR link belongs to the review receipt. Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/events_tail.py|tests/test_host_usage_snapshot.py|tests/test_events.py] Test gap: Capture progress sibling section retention
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Host and Git lifecycle fixtures seed their sections separately, leaving interleaved saves and clears without a direct assertion that the other section and its timestamp survive.
+- **Hypothesis (untested):** Seed both sections and alternate host and Git updates, checking that each preserves the untouched section. Re-verify the behavior first; this would not prove live process concurrency.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/events_tail.py:1102
+- **Evidence:** Read-only coverage audit at `5596cb5` found no dedicated sibling-retention case and reproduced no failure.
+- **Context:** /review-and-prep for Track 131A, branch `mmm/800c8955`, 2026-11-12; PR link belongs to the review receipt. Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_fleet_aggregator.py] Base issue: Historical Git budget warning survives a completed capture
 - **Base issue:** present at merge base `94b3e25`; filed under `blocking=shown`.
 - **Description:** An aborted walk followed by a clean in-window capture still leaves the earlier abort in the window's `git_budget` warning. This Track preserves historical abort accounting and no-field wording.
