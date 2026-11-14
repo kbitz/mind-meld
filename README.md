@@ -406,6 +406,14 @@ Human-readable text and streams change; commands, flags (apart from the new reca
 `-v`), exit codes, stored data and `mm log --format jsonl` records are unchanged. No
 migration is needed.
 
+**Empty conflict results (Track 134A):** when they find no conflict files,
+`mm conflicts` and `mm resolve` now print `Conflicts: no conflict files.` and
+`Resolve: no conflict files.` instead of a green `No conflict files.`, and both
+still exit 0. `mm resolve ""` (an empty PATH, such as a script's unset quoted
+variable) now fails like any PATH that matches no conflict file
+(`mm: error: No conflict file matching: <path>` on stderr, exit 1) instead of
+being treated as no PATH, which walks every conflict. No migration is needed.
+
 
 **Status verdict and local run evidence (Track 77A):** `mm status` now opens
 its report after authentication with a verdict about this device's last push.
@@ -953,9 +961,10 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 
 ### Sync outcomes
 
-The shared output style has five plain-text forms (Tracks 129B / 130B / 133A).
-Push/pull, setup, device approval, source toggles, resolution, status, gc,
-diff, log, recapture, update notices and the shared error helpers use them:
+The shared output style has five plain-text forms (Tracks 129B / 130B / 133A / 134A).
+Push/pull, setup, device approval, source toggles, resolution, empty conflict
+listings, status, gc, diff, log, recapture, update notices and the shared error
+helpers use them:
 
 - **Outcome:** `<Verb>: <what happened>.` on stdout, one line per thing that happened (`Push: 3 content changes published.`, `Push: 1 file held.`, `Pull: 3 files applied (1 conflict copy).`, `Gc: 2 orphaned blobs deleted.`, `Recapture: 14 commit records captured and published across 3 repositories (2026-10-14 → 2026-11-13).`).
 - **Error:** `mm: error: <what broke>` on stderr, followed by `Run: <command>` on its own last line when a fix command is supplied. History-database errors stay on one line, so a newer history schema ends that line with `Run: mm update`.
