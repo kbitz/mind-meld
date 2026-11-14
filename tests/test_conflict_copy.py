@@ -723,6 +723,38 @@ class TestGcOldConflictFiles:
         assert reaped.deleted == 0
         assert sidecar.exists(), "unresolved conflict must survive gc regardless of age"
 
+    def test_canonical_symlinked_to_its_sidecar_is_never_reaped(self, tmp_path: Path) -> None:
+        """A canonical that is a symlink to its own 30-day-old sidecar reads as
+        identical bytes, but the sidecar is the only real file: gc must keep
+        both names and leave the pair to mm resolve's same-file refusal."""
+        src = tmp_path / "src"
+        (src / "memory").mkdir(parents=True)
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        old_ts = (pinned_now - timedelta(days=40)).strftime("%Y%m%d-%H%M%S")
+        sidecar = src / "memory" / f"note.sync-conflict-{old_ts}-v1-devA1234.md"
+        sidecar.write_bytes(b"only copy")
+        canonical = src / "memory" / "note.md"
+        canonical.symlink_to(sidecar.name)
+
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            },
+        }
+        reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False, now=pinned_now)
+        assert reaped.deleted == 0
+        assert sidecar.read_bytes() == b"only copy"
+        assert canonical.is_symlink()
+        assert canonical.read_bytes() == b"only copy"
+
     def test_dry_run_does_not_delete(self, tmp_path: Path) -> None:
         """dry_run=True lists but preserves everything."""
 
