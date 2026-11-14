@@ -715,6 +715,31 @@ def _resolve_interactive_loop(
             # else: skip (default)
             continue
 
+        # Two names for one file (a symlink either way, or two hard links
+        # such as a promote interrupted between its link and unlink) make
+        # every choice unsafe or empty: the diff shows nothing, renaming a
+        # link over its own target leaves a self-referencing link, and
+        # unlinking the real name leaves a dangling one. Refuse before the
+        # prompt and name the manual repair; never delete (Track 132D).
+        try:
+            same_file = os.path.samefile(cpath, canonical)
+        except OSError:
+            same_file = False
+        if same_file:
+            copy_name = safe_terminal_str(cpath.name)
+            if canonical.is_symlink() and not cpath.is_symlink():
+                # Only the copy is a real file, so it holds the bytes.
+                repair = f"move {copy_name} over {safe_terminal_str(canonical.name)}"
+            else:
+                repair = f"delete {copy_name}"
+            core._print_error(
+                f"resolve refused: {copy_name} — same file as "
+                f"{safe_terminal_str(canonical.name)} (a symlink or hard link); "
+                f"{repair}, then run mm resolve again"
+            )
+            failed += 1
+            continue
+
         # Dual-mode dispatch by filename prefix. `v0-` = pre-inversion
         # (sidecar HOLDS local bytes; canonical holds remote). No prefix =
         # post-inversion (canonical IS local; sidecar holds remote bytes).

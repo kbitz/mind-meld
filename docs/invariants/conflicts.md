@@ -172,6 +172,19 @@ ends the walk, after counting and settlement. A settlement notice therefore
 prints before its choice's outcome line. Pinned by
 `tests/test_conflict_copy.py::TestResolveOutputFailureAfterMutation`.
 
+**Same-file pairs are refused (Track 132D).** Before the two-file prompt,
+`_resolve_interactive_loop` refuses a conflict copy and original that
+`os.path.samefile` reports as one file: a symlink in either direction, two
+hard links (such as a promote interrupted between its link and unlink), or two
+links to one target. Every choice is unsafe or empty there: the diff is empty,
+renaming a link over its own target leaves a self-referencing link, and
+unlinking the real name leaves a dangling one. The refusal deletes nothing,
+counts as failed (exit 1) and names the repair: move the copy over the original
+when only the copy is a real file, otherwise delete the copy. A `samefile`
+error falls through to the reads, whose failure is counted as before. Pinned by
+`tests/test_conflict_copy.py::TestResolveInteractiveLoop` (a copy linked to its
+original, an original linked to its copy).
+
 **Inline keep-local deferral and abort.** At the inline prompt `(l)ocal` calls
 `_ApplyReporter.defer_settle`, which queues the settlement on the ledger; it is
 applied by `ledger.flush_deferred()` right after `_drain_inline_bumps`, inside

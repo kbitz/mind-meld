@@ -1514,6 +1514,62 @@ class TestResolveInteractiveLoop:
         assert c2.read_bytes() == b"b-local"
         assert not conflict2.exists()
 
+    def test_refuses_a_copy_that_is_a_symlink_to_its_original(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A conflict copy linked to its own original is refused before the
+        prompt: (r)emote would rename the link over the original, leaving a
+        self-referencing link where the only copy of its bytes was."""
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"only copy")
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.symlink_to(canonical.name)
+        prompts: list[object] = []
+
+        def answer_remote(*a, **_kw):
+            prompts.append(a)
+            return "r"
+
+        monkeypatch.setattr(typer, "prompt", answer_remote)
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        assert prompts == []
+        assert not canonical.is_symlink()
+        assert canonical.read_bytes() == b"only copy"
+        assert conflict.is_symlink()
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); delete {conflict.name}, then run mm resolve again"
+        ) in capsys.readouterr().err
+
+    def test_refuses_an_original_that_is_a_symlink_to_its_copy(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """An original linked to its own conflict copy is refused before the
+        prompt: (l)ocal would unlink the copy, the only real file, and leave the
+        original dangling. The repair moves the copy over the link."""
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"only copy")
+        canonical = tmp_path / "user.md"
+        canonical.symlink_to(conflict.name)
+        prompts: list[object] = []
+
+        def answer_local(*a, **_kw):
+            prompts.append(a)
+            return "l"
+
+        monkeypatch.setattr(typer, "prompt", answer_local)
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        assert prompts == []
+        assert not conflict.is_symlink()
+        assert conflict.read_bytes() == b"only copy"
+        assert canonical.is_symlink()
+        assert os.readlink(canonical) == conflict.name
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); move {conflict.name} over user.md, then run "
+            "mm resolve again"
+        ) in capsys.readouterr().err
+
 
 class TestResolveExitCode:
     """Tests for the (resolved, failed) return shape and resolve()'s exit code.
