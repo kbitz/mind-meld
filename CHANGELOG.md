@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.47] - 2026-11-14
+
+`mm retro-fleet` names peers needing an upgrade and gives separate recovery advice for unidentified rejected usage rows.
+
+### Changed
+
+- `mm retro-fleet` names peers needing an upgrade and gives separate recovery advice for unidentified rejected usage rows.
+
+### Fixed
+
+- `mm retro-fleet` recovery advice now names every peer whose last reported push is below v0.14.17, including when every affected peer is that old.
+- `mm retro-fleet` gives unidentified rejected usage rows their own `mm push` advice and lists the affected peers in the `sessions_incomplete` detail.
+
 ## [1.12.46] - 2026-11-14
 
 Empty `mm conflicts` and `mm resolve` results use the same plain outcome style as the other commands, and `mm resolve ""` is treated as an unmatched path.
