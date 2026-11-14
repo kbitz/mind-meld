@@ -3948,7 +3948,12 @@ def conflicts() -> None:
     config = core._get_config(read_only=True)
     hits = resolveflow._find_conflict_files(config)
     if not hits:
-        console.print("[green]No conflict files.[/green]")
+        console.print(
+            core._outcome_line("conflicts", "no conflict files"),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
         return
 
     table = Table(title=f"Conflict files ({len(hits)})")
@@ -4234,14 +4239,19 @@ def resolve(
         # `v0-` prefix before resolve dispatches on the prefix below.
         hits = resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
 
-        if path:
+        if path is not None:
             target = Path(path).expanduser().resolve()
             hits = [h for h in hits if h[1] == target]
             if not hits:
                 core._error(f"No conflict file matching: {path}")
 
         if not hits:
-            console.print("[green]No conflict files.[/green]")
+            console.print(
+                core._outcome_line("resolve", "no conflict files"),
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
+            )
             return
         # Cache the device list ONCE -- N-conflict walks would otherwise hit
         # storage N times to attribute the REMOTE side, and iCloud cold-cache

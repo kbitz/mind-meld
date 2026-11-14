@@ -111,6 +111,51 @@ here by hand, use the H3 form.
 - **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
 - **Effort:** ? (user triages in /roadmap)
 
+### [review:files=src/mind_meld/resolveflow.py] Base issue: conflict discovery drops a sidecar it cannot stat and still reports no conflict files
+- **Base issue:** present at merge base `c6a6335`; filed under `blocking=shown`
+- **Description:** `resolveflow._find_conflict_files` lists sidecars with `rglob` and keeps only those where `Path.is_file()` is true. A sidecar in a directory that can be listed but not searched (mode 0444) is dropped with no warning: on Python 3.14 `Path.is_file()` returns False instead of raising, so the "conflict sidecar unreadable (left in place)" branches never run. `mm conflicts` then prints `Conflicts: no conflict files.` and exits 0 while a conflict copy exists, and `mm resolve` and `mm gc --conflicts` share the same discovery. A directory with no read permission is skipped silently on every Python version.
+- **Evidence:** A review probe with a v1 sidecar and its canonical inside a mode-0444 directory under a Claude memory folder printed the empty outcome, exit 0 and empty stderr on this branch at `10178b6`, and printed `No conflict files.` the same way at the merge base `c6a6335`, both on Python 3.14.8.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/resolveflow.py:346
+- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/cli.py] Base issue: conflict commands keep two lines outside the shared output style
+- **Base issue:** present at merge base `c6a6335`; filed under `blocking=shown`
+- **Description:** Two lines of the conflict commands still bypass the shared forms. `mm resolve PATH` with an unmatched path ends with `mm: error: No conflict file matching: <path>` and no `Run:` fix line (for example `mm conflicts` to list the real paths). A nonempty `mm conflicts` listing ends with the Rich-markup prose "Run mm resolve to keep local, remote, or both interactively, or delete files manually with rm." and, for pre-v0.9.2 copies, a dim note, instead of the shared `Run:` and `mm: notice:` forms. The empty outcomes now use the shared style, so the command reads differently depending on whether conflicts exist (SPEC O8.1 and O8.6).
+- **Evidence:** Review probes on this branch at `10178b6` and at the merge base `c6a6335` printed the same unmatched-path stderr with no `Run:` line, and the same trailing hint after the conflicts table.
+- **Upstream severity:** CRITICAL (unmatched-path line); INFORMATIONAL (listing hint)
+- **Found in:** src/mind_meld/cli.py:4246 and src/mind_meld/cli.py:3993
+- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14). The new test pins today's unmatched-path stderr exactly, so a fix line updates that assertion.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/resolveflow.py|src/mind_meld/consoles.py] Base issue: outcome lines turn emoji codes in peer-controlled file names into emoji
+- **Base issue:** present at merge base `c6a6335`; filed under `blocking=shown`
+- **Description:** The shared outcome print (`console.print(..., markup=False, highlight=False, soft_wrap=True)`) leaves Rich's emoji substitution on, and `safe_terminal_str` keeps colons. A sidecar a peer named `notes:fire:.sync-conflict-…md` is reported as `notes🔥.sync-conflict-…md` by `mm resolve`'s "deleted" and "promoted" outcome lines and by its markup-enabled `Conflict in …` header, which names a file that does not exist on disk. Any other outcome line that interpolates a peer- or user-controlled name has the same exposure. Passing `emoji=False` at those prints, or building the shared consoles with `Console(emoji=False)`, would show names verbatim.
+- **Evidence:** A review probe with an orphan sidecar `notes:fire:.sync-conflict-20260420-120000-v1-devA1234.md` and the answer `d` printed `Resolve: deleted notes🔥.sync-conflict-20260420-120000-v1-devA1234.md.` on this branch at `10178b6` and identically at the merge base `c6a6335`.
+- **Upstream severity:** CRITICAL
+- **Found in:** src/mind_meld/resolveflow.py:672
+- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/cli.py|src/mind_meld/resolveflow.py] Decide whether mm resolve may walk every conflict when stdin is not a terminal
+- **Description:** `mm resolve` with no PATH walks every conflict and reads answers from stdin, which need not be a terminal (README and the conflict invariants say it "needs a terminal", but nothing checks `isatty`). A script that runs `mm resolve $F` with an unquoted, empty `$F` drops the argument, so the walk starts and its piped answers apply to whichever conflict sorts first; `r` on a post-inversion conflict renames the sidecar over the canonical, replacing that file's local edits with no recovery copy. Track 134A fixed the quoted form (`mm resolve ""` now fails like an unmatched PATH); the unquoted form is the bare command. Closing it means refusing a walk-all on non-terminal stdin or requiring an explicit flag such as `--all`.
+- **Why it can wait:** pre-existing since resolve gained its PATH argument; needs a script bug plus piped answers; CHANGELOG records piped answers as supported (about line 3996), so a refusal is a behavior change; the CliRunner-driven resolve tests would need a terminal seam; the project's planning rule asks for demonstrated demand before adding a control.
+- **Revisit trigger:** an owner report of a script resolving the wrong conflict, the next Track that changes `mm resolve`'s input handling, or a decision to drop piped-answer support.
+- **Evidence:** Track 134A cycle 2 native adversarial review (finding p2-adv-1); the delta did not widen it.
+- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14) as an auto-chosen deferral open to veto on the PR.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=tests/test_integration.py] Test gap: empty-PATH resolve test has no witness that discovery found the conflict
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** `TestInversion5E.test_resolve_empty_path_argument_errors_instead_of_walking[True]` writes a v1 sidecar and asserts the error, exit 1 and unchanged files, but nothing asserts that discovery returned that sidecar. If the fixture's config or discovery scope drifted, the case would quietly become the no-conflict case and still pass.
+- **Hypothesis (untested):** wrap `cli_module.resolveflow._find_conflict_files` in a spy and assert one hit, as the sibling unmatched-PATH test witnesses its legacy rename; re-verify first.
+- **Upstream severity:** CRITICAL
+- **Found in:** tests/test_integration.py:3546
+- **Evidence:** Track 134A cycle 2 native adversarial review (finding p2-adv-4). No failure was reproduced: the red proof at `10178b6` shows the True case reached `list_devices`, so discovery found the sidecar with today's fixture.
+- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-13

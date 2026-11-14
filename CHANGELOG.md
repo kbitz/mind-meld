@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.46] - 2026-11-14
+
+Empty `mm conflicts` and `mm resolve` results use the same plain outcome style as the other commands, and `mm resolve ""` is treated as an unmatched path.
+
+### Changed
+
+- Empty `mm conflicts` and `mm resolve` results use the same plain outcome style as the other commands.
+- Empty `mm conflicts` and `mm resolve` runs now print `Conflicts: no conflict files.` and `Resolve: no conflict files.` in plain text instead of a green `No conflict files.` line.
+
+### Fixed
+
+- `mm resolve ""` now exits 1 with `mm: error: No conflict file matching: ` instead of walking every conflict file.
+
 ## [1.12.45] - 2026-11-13
 
 The pipx self-update tests wait for complete JSON from the detached child before they parse it.
