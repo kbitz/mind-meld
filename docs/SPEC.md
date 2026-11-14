@@ -136,8 +136,8 @@ Grok row counts Grok Build's own runs only.
   have two Arch-based (Omarchy) Linux machines, which wait for 2.0 to join.
 - Audience ceiling: potentially-public. The code is MIT and the README stays
   readable by a newcomer, but no alpha group or public stage is planned. The
-  owner made the repository private on 2026-11-06; making it public again
-  is the owner's separate decision.
+  repository is public and stays public (owner's decision, 2026-11-14); it
+  installs with no GitHub login.
 - Selected target: MVP-1, the owner's fleet of macOS and Arch-based Linux
   machines syncing over Syncthing, with complete usage reporting and quiet,
   honest output.
