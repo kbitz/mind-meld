@@ -400,7 +400,13 @@ def test_fleet_refresh_remedies_require_the_attended_producer_version():
         for r in agg._agent_coverage_notes(unknown_absent)
     )
 
-    # Proven-old registry evidence (< v0.14.17) triggers the upgrade remedy.
+    assert agg._host_detail_phrase("absent", None) == (
+        "per-model host tokens absent — pre-v0.12.49 peer or an empty host scan; "
+        "run `mm push` on the machine; run `mm diag` if it persists."
+    )
+
+    # Proven-old registry evidence (< v0.14.17) triggers the upgrade remedy
+    # and names every old peer explicitly.
     old_fleet = agg.FleetState(
         devices_known=2,
         devices_in_events={"dev-a", "dev-b"},
@@ -411,12 +417,28 @@ def test_fleet_refresh_remedies_require_the_attended_producer_version():
     )
     old_absent = presentation_data("absent")
     old_absent.fleet = old_fleet
-    old_remedies = [
-        agg._host_detail_phrase("absent", None, device="dev-a", fleet=old_fleet),
-        *agg._agent_coverage_notes(old_absent),
-        *agg._host_reader_coverage_notes([snap], fleet=old_fleet),
+    old_detail = agg._host_detail_phrase("absent", None, device="dev-a", fleet=old_fleet)
+    old_coverage = agg._agent_coverage_notes(old_absent)
+    old_reader = agg._host_reader_coverage_notes([snap], fleet=old_fleet)
+    assert old_detail == (
+        "per-model host tokens absent — pre-v0.12.49 peer or an empty host scan; "
+        "for mac-a (last reported push below v0.14.17), upgrade mind-meld to v0.14.17+ "
+        "on that machine, verify with `mm --version`, then run `mm push`; "
+        "run `mm diag` if it persists."
+    )
+    assert old_coverage == [
+        "No agent-log snapshots yet from 2 machine(s) (arch-b, mac-a; unknown, not zero) — "
+        "for arch-b, mac-a, run `mm push` on the machine, or wait for Syncthing to deliver "
+        "(last reported push was below v0.14.17 — upgrade mind-meld to v0.14.17+ on that "
+        "machine, verify with `mm --version`, then run `mm push`)."
     ]
-    for remedy in old_remedies:
+    assert old_reader == [
+        "Host-usage captures from mac-a predate this window (oldest 2026-09-07 UTC) — "
+        "for mac-a (last reported push below v0.14.17), upgrade mind-meld to v0.14.17+ on "
+        "that machine, verify with `mm --version`, then run `mm push`, then `mm status`; "
+        "pull again on this machine."
+    ]
+    for remedy in [old_detail, *old_coverage, *old_reader]:
         assert f"upgrade mind-meld to {agg.ATTENDED_USAGE_MIN_VERSION}+ on that machine" in remedy
         assert "verify with `mm --version`, then run `mm push`" in remedy
         assert "Mac" not in remedy
@@ -492,23 +514,336 @@ def test_session_and_token_health_remedies_require_peer_version_evidence(case):
         records[1]["last_seen_version"] = "0.14.16" if case == "old" else "1.2.0"
     data.fleet.devices_known_list = records
     entries = {e["code"]: e for e in health(agg.format_retro(data))}
-    assert "published pre-v0.11.0" in entries["sessions_incomplete"]["detail"]
-    assert "omitted rather than double-counted" in entries["sessions_incomplete"]["detail"]
+    assert entries["sessions_incomplete"]["detail"] == (
+        "2 peer(s) (machine-a, machine-b) published pre-v0.11.0 delta-semantics "
+        "session snapshots; their session totals are omitted rather than double-counted."
+    )
     assert "machine-a, machine-b" in entries["tokens_incomplete"]["detail"]
     for code in ("sessions_incomplete", "tokens_incomplete"):
         remedy = entries[code]["remedy"]
         assert "Mac" not in remedy
-        if case in {"old", "mixed"}:
-            assert "last reported push" in remedy
-            assert "upgrade mind-meld to v0.14.17+" in remedy
-            assert "verify with `mm --version`, then run `mm push`" in remedy
-        else:
-            assert "upgrade" not in remedy
-            assert "run `mm push` on the machine" in remedy
-        if case == "mixed":
-            assert "for machine-b, run `mm push` on the machine;" in remedy
-            assert "for machine-a (last reported push below v0.14.17), upgrade" in remedy
-    assert "run `mm diag` if it persists" in entries["tokens_incomplete"]["remedy"]
+        assert "On those machines" not in remedy
+    if case in {"unknown", "current"}:
+        assert entries["sessions_incomplete"]["remedy"] == "run `mm push` on the machine."
+        assert entries["tokens_incomplete"]["remedy"] == (
+            "run `mm push` on the machine; run `mm diag` if it persists."
+        )
+    elif case == "old":
+        assert entries["sessions_incomplete"]["remedy"] == (
+            "for machine-a, machine-b (last reported push below v0.14.17), "
+            "upgrade mind-meld to v0.14.17+ on that machine, verify with `mm --version`, "
+            "then run `mm push`."
+        )
+        assert entries["tokens_incomplete"]["remedy"] == (
+            "for machine-a, machine-b (last reported push below v0.14.17), "
+            "upgrade mind-meld to v0.14.17+ on that machine, verify with `mm --version`, "
+            "then run `mm push`; run `mm diag` if it persists."
+        )
+    else:
+        assert entries["sessions_incomplete"]["remedy"] == (
+            "for machine-b, run `mm push` on the machine; "
+            "for machine-a (last reported push below v0.14.17), "
+            "upgrade mind-meld to v0.14.17+ on that machine, verify with `mm --version`, "
+            "then run `mm push`."
+        )
+        assert entries["tokens_incomplete"]["remedy"] == (
+            "for machine-b, run `mm push` on the machine; "
+            "for machine-a (last reported push below v0.14.17), "
+            "upgrade mind-meld to v0.14.17+ on that machine, verify with `mm --version`, "
+            "then run `mm push`; run `mm diag` if it persists."
+        )
+
+
+# Value: protects=all-old, single-old, mixed, and current-only remedies name every old peer;
+# fails_when=all-old remedies drop peer names or claim unknown/current peers are old;
+# why_new=Track 132C unifies all-old and mixed peer-naming shapes across delivery modes; seam=none;
+# no_claim=synthetic FleetState records, not live Syncthing or registry I/O.
+@pytest.mark.parametrize(
+    "records,target_ids,delivery,expected",
+    [
+        (
+            [{"device_id": "dev-a", "device_name": "mac-a", "last_seen_version": "0.14.16"}],
+            ["dev-a"],
+            False,
+            (
+                "for mac-a (last reported push below v0.14.17), "
+                "upgrade mind-meld to v0.14.17+ on that machine, "
+                "verify with `mm --version`, then run `mm push`"
+            ),
+        ),
+        (
+            [
+                {"device_id": "dev-a", "device_name": "mac-a", "last_seen_version": "0.14.16"},
+                {"device_id": "dev-b", "device_name": "arch-b", "last_seen_version": "v0.14.16"},
+            ],
+            ["dev-a", "dev-b"],
+            False,
+            (
+                "for arch-b, mac-a (last reported push below v0.14.17), "
+                "upgrade mind-meld to v0.14.17+ on that machine, "
+                "verify with `mm --version`, then run `mm push`"
+            ),
+        ),
+        (
+            [
+                {"device_id": "dev-a", "device_name": "mac-a", "last_seen_version": "0.14.16"},
+                {"device_id": "dev-b", "device_name": "arch-b", "last_seen_version": "v0.14.16"},
+            ],
+            ["dev-a", "dev-b"],
+            True,
+            (
+                "for arch-b, mac-a, run `mm push` on the machine, or wait for Syncthing "
+                "to deliver (last reported push was below v0.14.17 — upgrade mind-meld to "
+                "v0.14.17+ on that machine, verify with `mm --version`, then run `mm push`)"
+            ),
+        ),
+        (
+            [
+                {"device_id": "dev-a", "device_name": "mac-a", "last_seen_version": "0.14.16"},
+                {"device_id": "dev-b", "device_name": "arch-b", "last_seen_version": "1.2.0"},
+            ],
+            ["dev-a", "dev-b"],
+            False,
+            (
+                "for arch-b, run `mm push` on the machine; "
+                "for mac-a (last reported push below v0.14.17), "
+                "upgrade mind-meld to v0.14.17+ on that machine, "
+                "verify with `mm --version`, then run `mm push`"
+            ),
+        ),
+        (
+            [{"device_id": "dev-a", "device_name": "mac-a", "last_seen_version": "0.14.16"}],
+            ["dev-a", "arch-b"],
+            False,
+            (
+                "for arch-b, run `mm push` on the machine; "
+                "for mac-a (last reported push below v0.14.17), "
+                "upgrade mind-meld to v0.14.17+ on that machine, "
+                "verify with `mm --version`, then run `mm push`"
+            ),
+        ),
+        (
+            [
+                {"device_id": "dev-a", "device_name": "mac-a", "last_seen_version": "0.14.17"},
+                {"device_id": "dev-b", "device_name": "arch-b", "last_seen_version": "1.2.0"},
+            ],
+            ["dev-a", "dev-b"],
+            False,
+            "run `mm push` on the machine",
+        ),
+    ],
+)
+def test_attended_usage_remedy_names_every_old_peer_across_topologies(
+    records, target_ids, delivery, expected
+):
+    for ordered_records in (records, list(reversed(records))):
+        for ordered_targets in (target_ids, list(reversed(target_ids))):
+            fleet = agg.FleetState(
+                devices_known=len(ordered_records),
+                devices_known_list=ordered_records,
+            )
+            assert (
+                agg._attended_usage_remedy(
+                    devices=ordered_targets,
+                    fleet=fleet,
+                    delivery=delivery,
+                )
+                == expected
+            )
+
+
+def test_rejected_coverage_notes_separate_named_old_and_unidentified_rows():
+    data = presentation_data()
+    data.fleet.devices_known_list = [
+        {"device_id": "dev-a", "device_name": "mac-a", "last_seen_version": "0.14.16"},
+        {"device_id": "dev-b", "device_name": "arch-b", "last_seen_version": "1.2.0"},
+    ]
+    data.host_inventory.rejected = (
+        agg.HostReject(device="dev-a", reason="unsupported_schema"),
+        agg.HostReject(device="dev-a", reason="unsupported_schema"),
+        agg.HostReject(device="", reason="unsupported_schema"),
+    )
+    mixed_reject_note = next(n for n in agg._agent_coverage_notes(data) if "were rejected" in n)
+    assert mixed_reject_note == (
+        "Agent-log snapshots from 1 machine(s) plus 1 unidentified row(s) were rejected "
+        "(unsupported_schema) — for mac-a (last reported push below v0.14.17), "
+        "upgrade mind-meld to v0.14.17+ on that machine, verify with `mm --version`, "
+        "then run `mm push`; for the machine(s) behind the unidentified row(s), "
+        "run `mm push` on the machine; run `mm diag` if it persists."
+    )
+
+    data.host_inventory.rejected = (agg.HostReject(device="", reason="unsupported_schema"),)
+    unnamed_only_note = next(n for n in agg._agent_coverage_notes(data) if "were rejected" in n)
+    assert unnamed_only_note == (
+        "Agent-log snapshots from 1 unidentified row(s) were rejected "
+        "(unsupported_schema) — for the machine(s) behind the unidentified row(s), "
+        "run `mm push` on the machine; run `mm diag` if it persists."
+    )
+    assert "upgrade" not in unnamed_only_note
+    assert "mac-a" not in unnamed_only_note
+
+
+def test_no_reader_all_stale_and_legacy_counter_remedies_read_cleanly_for_old_peers():
+    from dataclasses import replace
+
+    old_fleet = agg.FleetState(
+        devices_known=1,
+        devices_in_events={"dev-a"},
+        devices_known_list=[
+            {"device_id": "dev-a", "device_name": "mac-a", "last_seen_version": "0.14.16"},
+        ],
+    )
+    stale = stale_data()
+    stale.fleet = old_fleet
+    all_stale_notes = agg._agent_coverage_notes(stale)
+    assert all_stale_notes == [
+        "Agent-log snapshots all predate this window — for mac-a "
+        "(last reported push below v0.14.17), upgrade mind-meld to v0.14.17+ "
+        "on that machine, verify with `mm --version`, then run `mm push` "
+        "for current agent activity.",
+        "Host-usage captures from mac-a predate this window (oldest 2026-09-07 UTC) — "
+        "for mac-a (last reported push below v0.14.17), upgrade mind-meld to v0.14.17+ on "
+        "that machine, verify with `mm --version`, then run `mm push`, then `mm status`; "
+        "pull again on this machine.",
+    ]
+
+    no_reader = presentation_data("absent")
+    no_reader.fleet = old_fleet
+    snap = replace(stale.host_inventory.by_device["dev-a"], stale=False, consulted=())
+    no_reader.host_inventory = agg.HostUsageInventory(by_device={"dev-a": snap})
+    no_reader_notes = agg._agent_coverage_notes(no_reader)
+    assert no_reader_notes == [
+        "No agent-log reader contributed on any machine. If no source is enabled, "
+        "enable with `mm enable-source codex` (or `grok`, `muse`, or `agy`); "
+        "readers with no attributable local ledger are also omitted. "
+        "Refresh usage: for mac-a (last reported push below v0.14.17), "
+        "upgrade mind-meld to v0.14.17+ on that machine, verify with `mm --version`, "
+        "then run `mm push`."
+    ]
+
+    legacy_data = _single_grok_retro_111b({"grok-4.6-build": usage(input=1_000_000)})
+    legacy_data.fleet = old_fleet
+    legacy_snap = legacy_data.host_inventory.by_device["dev-a"]
+    legacy_data.host_inventory.by_device["dev-a"] = replace(
+        legacy_snap,
+        counter_semantics=None,
+    )
+    legacy_issue = entry(agg.format_retro(legacy_data), "legacy_counters")
+    assert legacy_issue["remedy"] == (
+        "for mac-a (last reported push below v0.14.17), "
+        "upgrade mind-meld to v0.14.17+ on that machine, verify with `mm --version`, "
+        "then run `mm push`."
+    )
+
+
+def test_old_peer_labels_are_sanitized_disambiguated_and_bounded():
+    colliding_and_hostile_fleet = agg.FleetState(
+        devices_known=3,
+        devices_known_list=[
+            {"device_id": "dev-1", "device_name": "shared-box", "last_seen_version": "0.14.16"},
+            {"device_id": "dev-2", "device_name": "shared-box", "last_seen_version": "0.14.16"},
+            {
+                "device_id": "dev-3",
+                "device_name": "host\x1b[31m\nname",
+                "last_seen_version": "0.14.16",
+            },
+        ],
+    )
+    remedy = agg._attended_usage_remedy(
+        devices=["dev-1", "dev-2", "dev-3"],
+        fleet=colliding_and_hostile_fleet,
+    )
+    assert "\x1b" not in remedy and "\n" not in remedy
+    assert remedy == (
+        "for host_name, shared-box (dev-1), shared-box (dev-2) "
+        "(last reported push below v0.14.17), upgrade mind-meld to v0.14.17+ "
+        "on that machine, verify with `mm --version`, then run `mm push`"
+    )
+
+    seven_old_fleet = agg.FleetState(
+        devices_known=7,
+        devices_known_list=[
+            {
+                "device_id": f"dev-{i}",
+                "device_name": f"mac-{i}",
+                "last_seen_version": "0.14.16",
+            }
+            for i in range(7)
+        ],
+    )
+    bounded = agg._attended_usage_remedy(
+        devices=[f"dev-{i}" for i in range(7)],
+        fleet=seven_old_fleet,
+    )
+    assert bounded == (
+        "for mac-0, mac-1, mac-2, mac-3, mac-4 (+2 more) "
+        "(last reported push below v0.14.17), upgrade mind-meld to v0.14.17+ "
+        "on that machine, verify with `mm --version`, then run `mm push`"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_container",
+    [
+        None,
+        {"device_id": "dev-a", "last_seen_version": "0.14.16"},
+        "dev-a",
+        123,
+        ({"device_id": "dev-a", "last_seen_version": "0.14.16"},),
+    ],
+)
+def test_malformed_registry_containers_and_entries_remain_unknown(bad_container):
+    assert agg._device_versions(None) == {}
+    assert agg.device_labels(None) == {}
+    assert agg._is_peer_below_attended_floor("dev-a", fleet=None) is False
+    assert (
+        agg._attended_usage_remedy(devices=["dev-a"], fleet=None) == "run `mm push` on the machine"
+    )
+
+    bad_fleet = agg.FleetState(devices_known=1, devices_known_list=bad_container)
+    assert agg._device_versions(bad_fleet) == {}
+    assert agg.device_labels(bad_fleet) == {}
+    assert agg._is_peer_below_attended_floor("dev-a", fleet=bad_fleet) is False
+    assert (
+        agg._attended_usage_remedy(devices=["dev-a"], fleet=bad_fleet)
+        == "run `mm push` on the machine"
+    )
+
+    mixed_malformed_fleet = agg.FleetState(
+        devices_known=10,
+        devices_known_list=[
+            None,
+            "dev-a",
+            123,
+            ["dev-a", "0.14.16"],
+            {"last_seen_version": "0.14.16"},
+            {"device_id": "", "last_seen_version": "0.14.16"},
+            {"device_id": None, "last_seen_version": "0.14.16"},
+            {"device_id": 123, "last_seen_version": "0.14.16"},
+            {"device_id": ["dev-a"], "last_seen_version": "0.14.16"},
+            {"device_id": {"id": "dev-a"}, "last_seen_version": "0.14.16"},
+            {
+                "device_id": "dev-old",
+                "device_name": "mac-old",
+                "last_seen_version": "0.14.16",
+            },
+        ],
+    )
+    versions = agg._device_versions(mixed_malformed_fleet)
+    assert set(versions) == {"dev-old"}
+    assert agg._is_peer_below_attended_floor("dev-old", versions) is True
+    assert agg._is_peer_below_attended_floor("dev-unk", versions) is False
+    for non_str_device in (None, "", 123, ["dev-a"], {"id": "dev-a"}):
+        assert agg._is_peer_below_attended_floor(non_str_device, versions) is False
+    assert agg._attended_usage_remedy(
+        devices=["dev-old", "dev-unk", "", None, 123, ["dev-a"]],
+        fleet=mixed_malformed_fleet,
+    ) == (
+        "for dev-unk, run `mm push` on the machine; "
+        "for mac-old (last reported push below v0.14.17), "
+        "upgrade mind-meld to v0.14.17+ on that machine, "
+        "verify with `mm --version`, then run `mm push`"
+    )
 
 
 def test_populated_absent_degraded_goldens_at_terminal_widths(monkeypatch):
