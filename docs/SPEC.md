@@ -83,8 +83,11 @@ consistently formatted output -- they all need to look like they come from
 the same tool". Push and pull end with one line per thing that happened,
 including mm updating itself, and every hand-run command shares one output
 style; Purpose's one-line sentence follows. O8.2 to O8.5, the target,
-audience and release policy are unchanged. Earlier text lives in
-`git log -- docs/SPEC.md`.
+audience and release policy are unchanged. Amended 2026-11-14 by
+`/project-spec` on the owner's decision that the repository is public ("change
+the docs"): Audience and target now says so, and the README install returns to
+the anonymous curl one-liner. Outcomes, target, audience ceiling and release
+policy are unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -136,8 +139,8 @@ Grok row counts Grok Build's own runs only.
   have two Arch-based (Omarchy) Linux machines, which wait for 2.0 to join.
 - Audience ceiling: potentially-public. The code is MIT and the README stays
   readable by a newcomer, but no alpha group or public stage is planned. The
-  owner made the repository private on 2026-11-06; making it public again
-  is the owner's separate decision.
+  repository is public and stays public (owner's decision, 2026-11-14); it
+  installs with no GitHub login.
 - Selected target: MVP-1, the owner's fleet of macOS and Arch-based Linux
   machines syncing over Syncthing, with complete usage reporting and quiet,
   honest output.
