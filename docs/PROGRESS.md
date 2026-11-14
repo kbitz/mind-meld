@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.45 | 2026-11-13 | The pipx self-update tests wait for complete JSON from the detached child before they parse it. |
 | 1.12.44 | 2026-11-13 | `mm gc`, `mm recapture`, status and history advice, diff warnings and update notices use the shared output style, with routine recapture details available through `--verbose`. |
 | 1.12.43 | 2026-11-13 | `mm recapture` omits nested-repository notices, and verbose push diagnostics use the same cached release information as `mm status` when suggesting a remedy for unreadable Antigravity usage. |
 | 1.12.42 | 2026-11-12 | `mm retro-fleet` now says a peer's host-usage reader or Git walk is catching up when that peer's latest push stopped on its scan deadline with work left, and points to that machine's next attended `mm push`. |

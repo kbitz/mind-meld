@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.45] - 2026-11-13
+
+The pipx self-update tests wait for complete JSON from the detached child before they parse it.
+
+### Fixed
+
+- The pipx self-update tests wait for complete JSON from the detached child before they parse it.
+
 ## [1.12.44] - 2026-11-13
 
 `mm gc`, `mm recapture`, status and history advice, diff warnings and update notices use the shared output style, with routine recapture details available through `--verbose`.
