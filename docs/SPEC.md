@@ -83,8 +83,11 @@ consistently formatted output -- they all need to look like they come from
 the same tool". Push and pull end with one line per thing that happened,
 including mm updating itself, and every hand-run command shares one output
 style; Purpose's one-line sentence follows. O8.2 to O8.5, the target,
-audience and release policy are unchanged. Earlier text lives in
-`git log -- docs/SPEC.md`.
+audience and release policy are unchanged. Amended 2026-11-14 by
+`/project-spec` on the owner's decision that the repository is public ("change
+the docs"): Audience and target now says so, and the README install returns to
+the anonymous curl one-liner. Outcomes, target, audience ceiling and release
+policy are unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
