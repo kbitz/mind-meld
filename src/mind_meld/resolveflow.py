@@ -453,13 +453,14 @@ def _promote_conflict_file(cpath: Path, target: Path) -> Path:
     first-class user filename, so silent clobber is real data loss. On the
     rare race, retry once with a fresh 4-hex suffix. Returns the actual path
     written. Raises ``OSError`` on any other failure (caller counts it as
-    ``failed``).
+    ``failed``). ``follow_symlinks=False`` moves a symlinked sidecar as the
+    link itself, as a rename would, never as a hard link to its target.
     """
     try:
-        os.link(cpath, target)
+        os.link(cpath, target, follow_symlinks=False)
     except FileExistsError:
         target = target.with_name(f"{target.stem}-{secrets.token_hex(2)}{target.suffix}")
-        os.link(cpath, target)
+        os.link(cpath, target, follow_symlinks=False)
     os.unlink(cpath)
     return target
 

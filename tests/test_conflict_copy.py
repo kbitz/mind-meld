@@ -2778,6 +2778,30 @@ class TestResolvePromote:
         assert conflict.exists(), "sidecar left in place on failure"
         assert canonical.exists()
 
+    def test_promote_does_not_follow_a_symlinked_sidecar(self, tmp_path: Path, monkeypatch) -> None:
+        """Keep-both promotes a symlinked sidecar as the link itself, as a rename
+        would move it: it never turns the link's target into a regular file
+        beside the canonical, where it would sync."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "secret.json"
+        target.write_bytes(b"not for sync")
+        work = tmp_path / "work"
+        work.mkdir()
+        canonical = work / "report.md"
+        canonical.write_bytes(b"local report\n")
+        conflict = work / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.symlink_to(target)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (1, 0)
+        promoted = list(work.glob("report.from-*"))
+        assert len(promoted) == 1
+        assert promoted[0].is_symlink()
+        assert os.stat(target).st_nlink == 1
+        assert not os.path.lexists(conflict)
+        assert canonical.read_bytes() == b"local report\n"
+
     def test_promote_include_files_source_warns(self, tmp_path: Path, monkeypatch, capsys) -> None:
         """A promoted file under an include_files-only source falls outside the
         sync surface -- promote succeeds but warns."""
