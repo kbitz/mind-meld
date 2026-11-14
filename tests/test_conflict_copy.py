@@ -16,6 +16,7 @@ mm conflicts / resolve / gc --conflicts commands.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import sys
@@ -919,6 +920,25 @@ class TestFindConflictFilesGrokType:
             {"sync": {"sources": [{"name": "grok", "path": str(root), "type": "grok"}]}}
         )
         assert hits == []
+
+    def test_skips_nested_symlinked_dir_inside_real_skills_dir(self, tmp_path: Path) -> None:
+        root = tmp_path / ".grok"
+        real_dir = root / "skills" / "real"
+        real_dir.mkdir(parents=True)
+        real_sidecar = real_dir / "real.sync-conflict-20260421-143055-devA1234.md"
+        real_sidecar.write_bytes(b"real")
+        sessions = root / "sessions"
+        sessions.mkdir(parents=True)
+        session_conflict = sessions / "chat.sync-conflict-20260421-143055-devA1234.md"
+        session_conflict.write_bytes(b"private")
+        linked = root / "skills" / "linked"
+        linked.symlink_to(sessions, target_is_directory=True)
+
+        hits = _find_conflict_files(
+            {"sync": {"sources": [{"name": "grok", "path": str(root), "type": "grok"}]}}
+        )
+        assert hits == [("grok", real_sidecar, None)]
+        assert all(not path.is_relative_to(linked) for _name, path, _canonical in hits)
 
 
 class TestFindConflictFilesMuseType:
@@ -4994,3 +5014,311 @@ class TestSharedStyleResolveAndConflictsOutput:
             for line in source.splitlines():
                 if "[red]" in line:
                     assert name == "sourceflow.py" and '"[red]N[/red]"' in line, (name, line)
+
+
+# ── Track 132D: settle resolved conflicts before reporting to stdout ─────
+
+_RESOLVE_OUTPUT_ERRORS = [
+    pytest.param(
+        lambda: BrokenPipeError(errno.EPIPE, "Broken pipe"),
+        id="epipe",
+    ),
+    pytest.param(
+        lambda: OSError(errno.EIO, "Input/output error"),
+        id="eio",
+    ),
+]
+
+
+class TestResolveOutputFailureAfterMutation:
+    @staticmethod
+    def _install_outcome_print_failure(
+        monkeypatch: pytest.MonkeyPatch, exc_factory: object
+    ) -> None:
+        def _fake_print(*args: object, **_kwargs: object) -> None:
+            if args and isinstance(args[0], str) and args[0].startswith("Resolve: "):
+                raise exc_factory()  # type: ignore[operator]
+
+        monkeypatch.setattr(resolveflow.console, "print", _fake_print)
+
+    @staticmethod
+    def _devices_and_sources(tmp_path: Path) -> tuple[list[dict[str, str]], dict[str, dict]]:
+        return (
+            [{"device_id": "devA1234", "device_name": "Peer"}],
+            {"s1": {"name": "s1", "path": str(tmp_path), "type": "generic"}},
+        )
+
+    @pytest.mark.parametrize(
+        ("is_pre_inversion", "choice"),
+        [
+            pytest.param(True, "l", id="pre-l"),
+            pytest.param(False, "l", id="post-l"),
+            pytest.param(True, "r", id="pre-r"),
+            pytest.param(False, "r", id="post-r"),
+        ],
+    )
+    @pytest.mark.parametrize("exc_factory", _RESOLVE_OUTPUT_ERRORS)
+    def test_local_and_remote_choices_stay_counted_and_settled_after_output_oserror(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        is_pre_inversion: bool,
+        choice: str,
+        exc_factory: object,
+    ) -> None:
+        canonical = tmp_path / "note.md"
+        if is_pre_inversion:
+            sidecar = tmp_path / "note.sync-conflict-v0-20260101-100000-devA1234.md"
+            canonical.write_bytes(b"remote bytes\n")
+            sidecar.write_bytes(b"local bytes\n")
+        else:
+            sidecar = tmp_path / "note.sync-conflict-20260421-143055-v1-devA1234.md"
+            canonical.write_bytes(b"local bytes\n")
+            sidecar.write_bytes(b"remote bytes\n")
+
+        self._install_outcome_print_failure(monkeypatch, exc_factory)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", sidecar, canonical)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (1, 0)
+        assert not sidecar.exists()
+        expected_bytes = b"local bytes\n" if choice == "l" else b"remote bytes\n"
+        assert canonical.read_bytes() == expected_bytes
+        assert "mm: error:" not in capsys.readouterr().err
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        remote_sha = hashlib.sha256(b"remote bytes\n").hexdigest()
+        assert ledger.base("devA1234", "s1", "note.md") == remote_sha
+
+        canonical_sha = hashlib.sha256(canonical.read_bytes()).hexdigest()
+        verdict = pullplan.decide(
+            ledger,
+            "devA1234",
+            "s1",
+            "note.md",
+            pullplan.LocalFile(True, canonical_sha),
+            remote_sha,
+            None,
+            [],
+        )
+        assert verdict in ("skip", "matched")
+        assert verdict != "fallback"
+
+    @pytest.mark.parametrize("choice", ["p", "d"])
+    @pytest.mark.parametrize("exc_factory", _RESOLVE_OUTPUT_ERRORS)
+    def test_orphan_promote_and_delete_stay_counted_without_settling(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        choice: str,
+        exc_factory: object,
+    ) -> None:
+        sidecar = tmp_path / "orphan.sync-conflict-20260421-143055-v1-devA1234.md"
+        sidecar.write_bytes(b"orphan bytes\n")
+        target = tmp_path / "orphan.md"
+
+        self._install_outcome_print_failure(monkeypatch, exc_factory)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", sidecar, None)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (1, 0)
+        assert not sidecar.exists()
+        if choice == "p":
+            assert target.read_bytes() == b"orphan bytes\n"
+        else:
+            assert not target.exists()
+        assert "mm: error:" not in capsys.readouterr().err
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        assert ledger.base("devA1234", "s1", "orphan.md") is None
+
+    @pytest.mark.parametrize("exc_factory", _RESOLVE_OUTPUT_ERRORS)
+    def test_merge_and_canonical_promote_stay_counted_and_merge_settled(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        exc_factory: object,
+    ) -> None:
+        m_canon = tmp_path / "merge.md"
+        m_canon.write_bytes(b"line1\nline2\n")
+        m_sidecar = tmp_path / "merge.sync-conflict-20260421-143055-v1-devA1234.md"
+        m_sidecar.write_bytes(b"line1\nline2\nline3\n")
+
+        p_canon = tmp_path / "prom.md"
+        p_canon.write_bytes(b"local\n")
+        p_sidecar = tmp_path / "prom.sync-conflict-20260421-143055-v1-devA1234.md"
+        p_sidecar.write_bytes(b"remote\n")
+
+        self._install_outcome_print_failure(monkeypatch, exc_factory)
+        answers = iter(["m", "p"])
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(answers))
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", m_sidecar, m_canon), ("s1", p_sidecar, p_canon)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (2, 0)
+        assert not m_sidecar.exists()
+        assert m_canon.read_bytes() == b"line1\nline2\nline3\n"
+        assert not p_sidecar.exists()
+        assert p_canon.read_bytes() == b"local\n"
+        promoted = list(tmp_path.glob("prom.from-devA1234-*.md"))
+        assert len(promoted) == 1
+        assert promoted[0].read_bytes() == b"remote\n"
+        assert "mm: error:" not in capsys.readouterr().err
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        remote_sha = hashlib.sha256(b"line1\nline2\nline3\n").hexdigest()
+        assert ledger.base("devA1234", "s1", "merge.md") == remote_sha
+        assert ledger.base("devA1234", "s1", "prom.md") is None
+
+    @pytest.mark.parametrize("choice", ["l", "r"])
+    def test_system_exit_from_outcome_print_preserves_mutation_and_ledger_base(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        choice: str,
+    ) -> None:
+        canonical = tmp_path / "sysexit.md"
+        canonical.write_bytes(b"local bytes\n")
+        sidecar = tmp_path / "sysexit.sync-conflict-20260421-143055-v1-devA1234.md"
+        sidecar.write_bytes(b"remote bytes\n")
+
+        self._install_outcome_print_failure(monkeypatch, lambda: SystemExit(1))
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+
+        with pytest.raises(SystemExit) as exc_info:
+            resolveflow._resolve_interactive_loop(
+                [("s1", sidecar, canonical)],
+                devices=devices,
+                sources_by_name=sources_by_name,
+            )
+
+        assert exc_info.value.code == 1
+        assert not sidecar.exists()
+        expected_bytes = b"local bytes\n" if choice == "l" else b"remote bytes\n"
+        assert canonical.read_bytes() == expected_bytes
+        assert "failed" not in capsys.readouterr().err
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        remote_sha = hashlib.sha256(b"remote bytes\n").hexdigest()
+        assert ledger.base("devA1234", "s1", "sysexit.md") == remote_sha
+
+    @pytest.mark.parametrize(
+        ("choice", "expected_prefix"),
+        [
+            pytest.param("l", "delete failed:", id="post-l-unlink-fail"),
+            pytest.param("r", "rename failed:", id="post-r-rename-fail"),
+        ],
+    )
+    def test_genuine_disk_failure_stays_failed_with_output_fake_installed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        choice: str,
+        expected_prefix: str,
+    ) -> None:
+        canonical = tmp_path / "diskfail.md"
+        canonical.write_bytes(b"local bytes\n")
+        sidecar = tmp_path / "diskfail.sync-conflict-20260421-143055-v1-devA1234.md"
+        sidecar.write_bytes(b"remote bytes\n")
+
+        self._install_outcome_print_failure(
+            monkeypatch, lambda: BrokenPipeError(errno.EPIPE, "Broken pipe")
+        )
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+        if choice == "l":
+            real_unlink = Path.unlink
+
+            def _fail_unlink(self_path: Path, missing_ok: bool = False) -> None:
+                if self_path == sidecar:
+                    raise OSError(errno.EIO, "disk I/O error")
+                real_unlink(self_path, missing_ok=missing_ok)
+
+            monkeypatch.setattr(Path, "unlink", _fail_unlink)
+        else:
+            real_rename = Path.rename
+
+            def _fail_rename(self_path: Path, target: Path) -> Path:
+                if self_path == sidecar:
+                    raise OSError(errno.EIO, "disk I/O error")
+                return real_rename(self_path, target)
+
+            monkeypatch.setattr(Path, "rename", _fail_rename)
+
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", sidecar, canonical)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (0, 1)
+        err = capsys.readouterr().err
+        assert f"mm: error: {expected_prefix} {sidecar.name}" in err
+        assert sidecar.exists()
+        assert canonical.read_bytes() == b"local bytes\n"
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        assert ledger.base("devA1234", "s1", "diskfail.md") is None
+
+    def test_output_failure_does_not_retry_mutation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        canonical = tmp_path / "noretry.md"
+        canonical.write_bytes(b"local bytes\n")
+        sidecar = tmp_path / "noretry.sync-conflict-20260421-143055-v1-devA1234.md"
+        sidecar.write_bytes(b"remote bytes\n")
+
+        self._install_outcome_print_failure(
+            monkeypatch, lambda: BrokenPipeError(errno.EPIPE, "Broken pipe")
+        )
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
+        real_rename = Path.rename
+        rename_calls = 0
+
+        def _counting_rename(self_path: Path, target: Path) -> Path:
+            nonlocal rename_calls
+            if self_path == sidecar:
+                rename_calls += 1
+            return real_rename(self_path, target)
+
+        monkeypatch.setattr(Path, "rename", _counting_rename)
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", sidecar, canonical)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (1, 0)
+        assert rename_calls == 1

@@ -566,6 +566,23 @@ def _record_resolution(
         notice(core.ledger_cause(error) or "unreadable")
 
 
+def _print_outcome(text: str) -> None:
+    """Print a resolve outcome line to stdout, ignoring OSError.
+
+    A stdout failure after a committed disk mutation is not a resolve failure.
+    Looks up module-global ``console`` at call time so test rebindings apply.
+    """
+    try:
+        console.print(
+            core._outcome_line("resolve", text),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+    except OSError:
+        return
+
+
 def _resolve_interactive_loop(
     hits: list[tuple[str, Path, Path | None]],
     devices: list[dict[str, Any]] | None = None,
@@ -649,42 +666,30 @@ def _resolve_interactive_loop(
                 else:
                     try:
                         cpath.rename(target_canonical)
-                        console.print(
-                            core._outcome_line(
-                                "resolve",
-                                f"promoted {safe_terminal_str(cpath.name)} -> "
-                                f"{safe_terminal_str(target_canonical.name)}",
-                            ),
-                            markup=False,
-                            highlight=False,
-                            soft_wrap=True,
-                        )
-                        resolved += 1
                     except OSError as e:
                         core._print_error(
                             f"promote failed: {safe_terminal_str(cpath.name)} \u2014 "
                             f"{safe_terminal_str(e)}"
                         )
                         failed += 1
+                    else:
+                        resolved += 1
+                        _print_outcome(
+                            f"promoted {safe_terminal_str(cpath.name)} -> "
+                            f"{safe_terminal_str(target_canonical.name)}"
+                        )
             elif choice in ("d", "delete"):
                 try:
                     cpath.unlink()
-                    console.print(
-                        core._outcome_line(
-                            "resolve",
-                            f"deleted {safe_terminal_str(cpath.name)}",
-                        ),
-                        markup=False,
-                        highlight=False,
-                        soft_wrap=True,
-                    )
-                    resolved += 1
                 except OSError as e:
                     core._print_error(
                         f"delete failed: {safe_terminal_str(cpath.name)} \u2014 "
                         f"{safe_terminal_str(e)}"
                     )
                     failed += 1
+                else:
+                    resolved += 1
+                    _print_outcome(f"deleted {safe_terminal_str(cpath.name)}")
             # else: skip (default)
             continue
 
@@ -928,6 +933,8 @@ def _resolve_interactive_loop(
         # delete the conflict file. (codex /review v0.9.0 — caught a real
         # silent-data-loss footgun the eng review missed.)
         resolved_before = resolved
+        outcome: str | None = None
+        promoted_target: Path | None = None
         if choice in ("l", "local"):
             # Capture peer's mtime BEFORE the rename/unlink so we can bump
             # canonical past it afterward -- see _bump_canonical_mtime_post_resolve
@@ -942,87 +949,63 @@ def _resolve_interactive_loop(
                 # Pre-inversion: sidecar HOLDS local bytes — promote.
                 try:
                     cpath.rename(canonical)
-                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
-                    console.print(
-                        core._outcome_line(
-                            "resolve",
-                            f"kept local; promoted {safe_terminal_str(cpath.name)} -> "
-                            f"{safe_terminal_str(canonical.name)}",
-                        ),
-                        markup=False,
-                        highlight=False,
-                        soft_wrap=True,
-                    )
-                    resolved += 1
                 except OSError as e:
                     core._print_error(
                         f"rename failed: {safe_terminal_str(cpath.name)} \u2014 "
                         f"{safe_terminal_str(e)}"
                     )
                     failed += 1
+                else:
+                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
+                    resolved += 1
+                    outcome = (
+                        f"kept local; promoted {safe_terminal_str(cpath.name)} -> "
+                        f"{safe_terminal_str(canonical.name)}"
+                    )
             else:
                 # Post-inversion: canonical IS local — drop the remote sidecar.
                 try:
                     cpath.unlink()
-                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
-                    console.print(
-                        core._outcome_line(
-                            "resolve",
-                            f"kept local; discarded remote {safe_terminal_str(cpath.name)}",
-                        ),
-                        markup=False,
-                        highlight=False,
-                        soft_wrap=True,
-                    )
-                    resolved += 1
                 except OSError as e:
                     core._print_error(
                         f"delete failed: {safe_terminal_str(cpath.name)} \u2014 "
                         f"{safe_terminal_str(e)}"
                     )
                     failed += 1
+                else:
+                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
+                    resolved += 1
+                    outcome = f"kept local; discarded remote {safe_terminal_str(cpath.name)}"
         elif choice in ("r", "remote"):
             if is_pre_inversion:
                 # Pre-inversion: canonical IS remote — drop the local sidecar.
                 try:
                     cpath.unlink()
-                    console.print(
-                        core._outcome_line(
-                            "resolve",
-                            f"kept remote; discarded local {safe_terminal_str(cpath.name)}",
-                        ),
-                        markup=False,
-                        highlight=False,
-                        soft_wrap=True,
-                    )
-                    resolved += 1
                 except OSError as e:
                     core._print_error(
                         f"delete failed: {safe_terminal_str(cpath.name)} \u2014 "
                         f"{safe_terminal_str(e)}"
                     )
                     failed += 1
+                else:
+                    resolved += 1
+                    outcome = f"kept remote; discarded local {safe_terminal_str(cpath.name)}"
             else:
                 # Post-inversion: sidecar HOLDS remote bytes — promote over local.
                 try:
                     cpath.rename(canonical)
-                    console.print(
-                        core._outcome_line(
-                            "resolve",
-                            f"kept remote; promoted {safe_terminal_str(cpath.name)} -> "
-                            f"{safe_terminal_str(canonical.name)}",
-                        ),
-                        markup=False,
-                        highlight=False,
-                        soft_wrap=True,
-                    )
-                    resolved += 1
                 except OSError as e:
                     core._print_error(
                         f"rename failed: {safe_terminal_str(cpath.name)} \u2014 "
                         f"{safe_terminal_str(e)}"
                     )
                     failed += 1
+                else:
+                    resolved += 1
+                    outcome = (
+                        f"kept remote; promoted {safe_terminal_str(cpath.name)} -> "
+                        f"{safe_terminal_str(canonical.name)}"
+                    )
         elif choice in ("m", "merge"):
             # (m)erge accept: write merged_bytes to canonical, drop sidecar.
             # Refuse silently when merge_available is False -- (m) was not
@@ -1052,30 +1035,16 @@ def _resolve_interactive_loop(
                 core._warning(
                     f"merged result written; sidecar unlink failed: {cpath.name} \u2014 {e}"
                 )
-            if merge_conflicts == 0:
-                console.print(
-                    core._outcome_line(
-                        "resolve",
-                        f"merged {safe_terminal_str(canonical.name)} (clean LCS merge)",
-                    ),
-                    markup=False,
-                    highlight=False,
-                    soft_wrap=True,
-                )
-            else:
-                console.print(
-                    core._outcome_line(
-                        "resolve",
-                        f"merged {safe_terminal_str(canonical.name)} "
-                        f"(contains {merge_conflicts} <<<<<<< region"
-                        f"{'s' if merge_conflicts != 1 else ''}; "
-                        f"resolve in editor)",
-                    ),
-                    markup=False,
-                    highlight=False,
-                    soft_wrap=True,
-                )
             resolved += 1
+            if merge_conflicts == 0:
+                outcome = f"merged {safe_terminal_str(canonical.name)} (clean LCS merge)"
+            else:
+                outcome = (
+                    f"merged {safe_terminal_str(canonical.name)} "
+                    f"(contains {merge_conflicts} <<<<<<< region"
+                    f"{'s' if merge_conflicts != 1 else ''}; "
+                    f"resolve in editor)"
+                )
         elif choice in ("p", "promote"):
             # Keep BOTH: rename the sidecar to its own first-class filename.
             # Per-mode naming -- post-inversion sidecar holds the peer's
@@ -1110,26 +1079,11 @@ def _resolve_interactive_loop(
             else:
                 if not is_pre_inversion and peer_mtime > 0.0:
                     _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
-                console.print(
-                    core._outcome_line(
-                        "resolve",
-                        f"promoted {safe_terminal_str(cpath.name)} -> "
-                        f"{safe_terminal_str(target.name)}",
-                    ),
-                    markup=False,
-                    highlight=False,
-                    soft_wrap=True,
-                )
                 resolved += 1
-                # Warn if the promoted file landed outside the source's sync
-                # surface (an include_files source matches only exact configured
-                # names -- a from-/local- name will never be one of them).
-                src_cfg = sources_by_name.get(src_name)
-                if src_cfg is not None and not _promote_target_will_sync(src_cfg, target):
-                    core._warning(
-                        f"{target.name} is under an include_files source and will not "
-                        "sync until you add it to config."
-                    )
+                outcome = (
+                    f"promoted {safe_terminal_str(cpath.name)} -> {safe_terminal_str(target.name)}"
+                )
+                promoted_target = target
         elif choice in ("a", "abort"):
             raise typer.Abort()
         else:
@@ -1150,6 +1104,18 @@ def _resolve_interactive_loop(
                 cpath_bytes if is_pre_inversion else canonical_bytes,
                 choice,
             )
+        if outcome is not None:
+            _print_outcome(outcome)
+        if promoted_target is not None:
+            # Warn if the promoted file landed outside the source's sync
+            # surface (an include_files source matches only exact configured
+            # names -- a from-/local- name will never be one of them).
+            src_cfg = sources_by_name.get(src_name)
+            if src_cfg is not None and not _promote_target_will_sync(src_cfg, promoted_target):
+                core._warning(
+                    f"{promoted_target.name} is under an include_files source and will not "
+                    "sync until you add it to config."
+                )
 
     if failed:
         core._print_error(
@@ -1157,12 +1123,7 @@ def _resolve_interactive_loop(
             fix="mm resolve",
         )
     else:
-        console.print(
-            core._outcome_line("resolve", f"resolved {resolved} of {len(hits)}"),
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
-        )
+        _print_outcome(f"resolved {resolved} of {len(hits)}")
     return resolved, failed
 
 
