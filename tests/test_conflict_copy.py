@@ -2904,6 +2904,48 @@ class TestResolvePromote:
             "run mm resolve again"
         ) in err
 
+    def test_no_base_promote_reports_a_broken_symlink_at_the_canonical_name(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Discovery treats a dangling symlink as no canonical, but the name is
+        taken. Promote must not replace the link and must not send the owner
+        round a rerun that fails the same way."""
+        conflict = tmp_path / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"orphan bytes")
+        canonical = tmp_path / "report.md"
+        canonical.symlink_to(tmp_path / "missing-target.md")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
+        assert (resolved, failed) == (0, 1)
+        assert canonical.is_symlink()
+        assert conflict.read_bytes() == b"orphan bytes"
+        err = capsys.readouterr().err
+        assert (
+            f"mm: error: promote failed: {conflict.name} — report.md is a broken "
+            "symlink; repair or remove it, then run mm resolve again"
+        ) in err
+
+    def test_no_base_promote_does_not_follow_a_symlinked_sidecar(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A symlinked sidecar is moved as a link, as a rename would move it:
+        promote never turns the link's target into a regular synced file."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "secret.json"
+        target.write_bytes(b"not for sync")
+        work = tmp_path / "work"
+        work.mkdir()
+        conflict = work / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.symlink_to(target)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
+        assert (resolved, failed) == (1, 0)
+        canonical = work / "report.md"
+        assert canonical.is_symlink()
+        assert os.stat(target).st_nlink == 1
+        assert not os.path.lexists(conflict)
+
     def test_promote_post_inversion_bumps_canonical_mtime(
         self, tmp_path: Path, monkeypatch
     ) -> None:

@@ -645,7 +645,7 @@ REVIEWED = {
         "interactive resolution renames overwrite canonical files; the no-canonical "
         "promote links without overwrite; outside frozen inventory",
         [
-            "os.link(cpath, target_canonical)",
+            "os.link(cpath, target_canonical, follow_symlinks=False)",
             "os.unlink(cpath)",
             "cpath.unlink()",
             "cpath.rename(canonical)",

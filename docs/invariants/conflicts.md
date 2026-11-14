@@ -159,6 +159,17 @@ keeps completed settlements. An unidentified peer, flush failure or unavailable
 ledger leaves the chosen bytes intact and warns that a later pull may conflict
 again. The local-choice mtime bump remains a propagation hint.
 
+**Count and settle, then report (Track 132D).** `_resolve_interactive_loop` puts
+only the rename, unlink or merged write inside each choice's `try`. Once it
+succeeds the choice is counted and, for `(l)ocal`, `(r)emote` and `(m)erge`,
+settled through `_record_resolution`, and only then is its outcome line printed.
+Outcome and summary lines go through `_print_outcome`, which ignores `OSError`, so
+a stdout failure after a committed change is never reported as a failed rename or
+delete and never skips the settlement. Rich's closed-pipe `SystemExit(1)` still
+ends the walk, after counting and settlement. A settlement notice therefore
+prints before its choice's outcome line. Pinned by
+`tests/test_conflict_copy.py::TestResolveOutputFailureAfterMutation`.
+
 **Inline keep-local deferral and abort.** At the inline prompt `(l)ocal` calls
 `_ApplyReporter.defer_settle`, which queues the settlement on the ledger; it is
 applied by `ledger.flush_deferred()` right after `_drain_inline_bumps`, inside
@@ -337,7 +348,7 @@ Three properties this relies on, all deliberate:
 
 Keep it narrow: the suppression is `<= 1` line, NOT "no shared lines." Two multi-line documents with zero overlap still get `(m)erge`, because the markered output is at least editable there, and the never-default-to-`(m)` rule above already covers that footgun. Pinned by `tests/test_conflictdiff.py::TestMergeHasLineStructure` (pure) and `tests/test_conflict_copy.py::TestSuppressMergeWithoutLineStructure` (both prompt sites, plus a `test_multiline_file_still_offers_merge` regression guard against over-broad suppression).
 
-**`(p)romote` on the canonical-exists path.** `_resolve_interactive_loop` already had a `(p)romote` option, but ONLY in the `canonical is None` (no-base) branch, where it renames the sidecar to the canonical name via `_canonical_for_conflict`. v0.12.8 adds `(p)romote` to the canonical-exists dispatch too: it keeps BOTH files by renaming the `.sync-conflict-*` sidecar to its own first-class filename. Outcome string `promoted` (counted in `resolved` / `failed`; NOT written to pullhistory — `mm resolve` is interactive, nothing to audit silently). `render_prompt` gains a `promote_available` kwarg that adds the `(p)romote` line; the resolve-loop site passes `promote_available=True`, the inline site does NOT (see below).
+**`(p)romote` on the canonical-exists path.** `_resolve_interactive_loop` already had a `(p)romote` option, but ONLY in the `canonical is None` (no-base) branch, where it moves the sidecar to the canonical name via `_canonical_for_conflict` without overwriting (since Track 132D: `os.link(..., follow_symlinks=False)` then `os.unlink`, so a symlinked sidecar moves as the link itself). A file that took that name after discovery (another writer, while the prompt waited) makes `os.link` raise `FileExistsError`: the conflict fails with `<name> now exists; run mm resolve again`, or `<name> is a broken symlink; repair or remove it, then run mm resolve again` when the occupant is a dangling link (discovery's `exists()` follows links, so it reported no canonical), and both files stay. v0.12.8 adds `(p)romote` to the canonical-exists dispatch too: it keeps BOTH files by renaming the `.sync-conflict-*` sidecar to its own first-class filename. Outcome string `promoted` (counted in `resolved` / `failed`; NOT written to pullhistory — `mm resolve` is interactive, nothing to audit silently). `render_prompt` gains a `promote_available` kwarg that adds the `(p)romote` line; the resolve-loop site passes `promote_available=True`, the inline site does NOT (see below).
 
 **`(p)romote` is `mm resolve`-only.** It is deliberately NOT offered at the inline pull-time prompt (`_prompt_conflict_choice`). At that site the sidecar is not on disk yet (`_apply_conflict` writes it AFTER the prompt returns), so a promote there would require a new branch in `_apply_incoming_file` — the autopull path Approach A's design contract keeps untouched.
 
@@ -350,7 +361,7 @@ Keep it narrow: the suppression is `<= 1` line, NOT "no shared lines." Two multi
 
 **Sync-surface warning (`_promote_target_will_sync`).** A promoted file is a NEW filename, so it only syncs if it lands inside one of the source's `_synced_scan_dirs` (recursive `include_dirs` surface) and is not excluded by `manifest._is_excluded` (including `exclude_patterns` and generic-source `include_patterns`). Under an `include_files`-only source, or when a generic source's `include_patterns` allowlists an exact filename (`projects/*/learnings.jsonl`), the `from-`/`local-` name will not match → it will not sync. `_resolve_interactive_loop` warns (one `mm: warning:` stderr line) when this is detected; promote still succeeds (it never silently half-fails, and mm does NOT auto-mutate user config). Requires the `sources_by_name` arg threaded from `resolve()`; when that arg is None (unit tests, library callers) the warning is skipped.
 
-Pinned by `tests/test_conflict_copy.py::TestNeverDefaultToMerge` (default `s` at both sites on a clean merge, `(m)erge` still works when typed), `::TestPromoteHelpers` (per-mode naming, none-peer fallback, collision → `-<4hex>`, `os.link` no-clobber, happy path), `::TestResolvePromote` (post-inversion + pre-inversion promote, link `OSError` → failed, `include_files` warning vs `include_dirs` no-warning, no-base promote unchanged), and `tests/test_conflictdiff.py::TestRenderPrompt` (`promote_available` line).
+Pinned by `tests/test_conflict_copy.py::TestNeverDefaultToMerge` (default `s` at both sites on a clean merge, `(m)erge` still works when typed), `::TestPromoteHelpers` (per-mode naming, none-peer fallback, collision → `-<4hex>`, `os.link` no-clobber, happy path), `::TestResolvePromote` (post-inversion + pre-inversion promote, link `OSError` → failed, `include_files` warning vs `include_dirs` no-warning; the no-base promote still promotes, keeps a canonical created after discovery, reports a broken symlink at the name and moves a symlinked sidecar as a link), and `tests/test_conflictdiff.py::TestRenderPrompt` (`promote_available` line).
 
 **Phase 2 classifier: not built, cancelled.** The LCS-similarity classifier (`classify_divergence`, a `DivergenceClass` enum, a `Class` column on `mm conflicts`, similarity-gated silent merge) is NOT built; the v0.12.51 analysis below cancelled it (see the refusal in `TODOS.md`).
 

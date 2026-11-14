@@ -667,15 +667,22 @@ def _resolve_interactive_loop(
                     # No-clobber, like _promote_conflict_file: another writer may
                     # have created the canonical while this prompt waited, and a
                     # plain rename would silently replace it. os.link raises
-                    # FileExistsError instead.
+                    # FileExistsError instead. follow_symlinks=False moves a
+                    # symlinked sidecar as the link itself, as rename did.
                     try:
-                        os.link(cpath, target_canonical)
+                        os.link(cpath, target_canonical, follow_symlinks=False)
                         os.unlink(cpath)
                     except FileExistsError:
+                        # Discovery's exists() follows links, so a dangling
+                        # symlink at the name lands here on every run.
+                        occupant = (
+                            "is a broken symlink; repair or remove it, then run mm resolve again"
+                            if target_canonical.is_symlink() and not target_canonical.exists()
+                            else "now exists; run mm resolve again"
+                        )
                         core._print_error(
                             f"promote failed: {safe_terminal_str(cpath.name)} \u2014 "
-                            f"{safe_terminal_str(target_canonical.name)} now exists; "
-                            "run mm resolve again"
+                            f"{safe_terminal_str(target_canonical.name)} {occupant}"
                         )
                         failed += 1
                     except OSError as e:
