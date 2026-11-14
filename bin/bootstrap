@@ -13,7 +13,7 @@
 set -eu
 
 MM_INSTALL_SPEC="git+https://github.com/kbitz/mind-meld.git@latest"
-MM_RELEASE="1.12.44"
+MM_RELEASE="1.12.45"
 SYNCTHING_PLISTS="sh.brew.syncthing.plist homebrew.mxcl.syncthing.plist"
 HOMEBREW_INSTALL_CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
