@@ -3538,6 +3538,39 @@ class TestInversion5E:
         lockfile.acquire_lock()
         lockfile.release_lock()
 
+    @pytest.mark.parametrize("has_conflict", [False, True])
+    def test_resolve_empty_path_argument_errors_instead_of_walking(
+        self, tmp_path, monkeypatch, has_conflict
+    ):
+        # `mm resolve ""` (a script's unset variable) is an explicit PATH that
+        # matches nothing: it must fail like any unmatched PATH, never print the
+        # empty outcome or walk every conflict with the script's piped answers.
+        from mind_meld import lockfile
+
+        memory, _, _ = self._setup_empty_conflicts_env(tmp_path, monkeypatch)
+        sidecar = memory / "role.sync-conflict-20260420-120000-v1-devA1234.md"
+        if has_conflict:
+            sidecar.write_bytes(b"peer content")
+        real_release = cli_module.release_lock
+        release_calls = []
+
+        def spy_release():
+            release_calls.append(True)
+            real_release()
+
+        monkeypatch.setattr(cli_module, "release_lock", spy_release)
+
+        result = runner.invoke(app, ["resolve", ""], input="r\n")
+        assert result.exit_code == 1, result.output
+        assert result.stdout == ""
+        assert result.stderr == "mm: error: No conflict file matching: \n"
+        assert len(release_calls) == 1
+        assert (memory / "role.md").read_bytes() == b"canonical content"
+        if has_conflict:
+            assert sidecar.read_bytes() == b"peer content"
+        lockfile.acquire_lock()
+        lockfile.release_lock()
+
 
 class TestShipFixes5E:
     """Pre-landing review fixes (5E ship-fix). Pinned per IRON RULE.

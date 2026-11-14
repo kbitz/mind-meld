@@ -4239,7 +4239,7 @@ def resolve(
         # `v0-` prefix before resolve dispatches on the prefix below.
         hits = resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
 
-        if path:
+        if path is not None:
             target = Path(path).expanduser().resolve()
             hits = [h for h in hits if h[1] == target]
             if not hits:
