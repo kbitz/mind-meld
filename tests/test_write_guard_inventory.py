@@ -642,9 +642,11 @@ REVIEWED = {
     ),
     "resolveflow.py:_resolve_interactive_loop": (
         "residual",
-        "interactive resolution renames overwrite canonical files; outside frozen inventory",
+        "interactive resolution renames overwrite canonical files; the no-canonical "
+        "promote links without overwrite; outside frozen inventory",
         [
-            "cpath.rename(target_canonical)",
+            "os.link(cpath, target_canonical)",
+            "os.unlink(cpath)",
             "cpath.unlink()",
             "cpath.rename(canonical)",
             "cpath.unlink()",

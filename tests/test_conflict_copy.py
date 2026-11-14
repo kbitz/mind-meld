@@ -1526,17 +1526,17 @@ class TestResolveExitCode:
     """
 
     def test_loop_counts_rename_failure(self, tmp_path: Path, monkeypatch) -> None:
-        """Promote choice + rename raises OSError -> failed += 1, walk continues."""
+        """Promote choice + its no-clobber link raises OSError -> failed += 1, walk continues."""
 
         conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
         conflict.write_bytes(b"conflict")
-        # canonical=None branch -> 'p' choice -> rename
+        # canonical=None branch -> 'p' choice -> os.link (no-clobber promote)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
 
         def boom(*a, **kw):
-            raise OSError("simulated rename failure")
+            raise OSError("simulated link failure")
 
-        monkeypatch.setattr(Path, "rename", boom)
+        monkeypatch.setattr(os, "link", boom)
 
         resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
         assert (resolved, failed) == (0, 1)
@@ -2878,6 +2878,31 @@ class TestResolvePromote:
         canonical = tmp_path / "report.md"
         assert canonical.read_bytes() == b"orphan bytes"
         assert not conflict.exists()
+
+    def test_no_base_promote_keeps_a_canonical_created_after_discovery(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Another writer (an agent or editor) can create the canonical while the
+        prompt waits. (p)romote must not replace it: the promote fails, both
+        files keep their bytes, and the walk counts the failure."""
+        conflict = tmp_path / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"orphan bytes")
+        canonical = tmp_path / "report.md"
+
+        def prompt_after_another_writer(*_a, **_kw):
+            canonical.write_bytes(b"written after discovery")
+            return "p"
+
+        monkeypatch.setattr(typer, "prompt", prompt_after_another_writer)
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
+        assert (resolved, failed) == (0, 1)
+        assert canonical.read_bytes() == b"written after discovery"
+        assert conflict.read_bytes() == b"orphan bytes"
+        err = capsys.readouterr().err
+        assert (
+            f"mm: error: promote failed: {conflict.name} — report.md now exists; "
+            "run mm resolve again"
+        ) in err
 
     def test_promote_post_inversion_bumps_canonical_mtime(
         self, tmp_path: Path, monkeypatch
@@ -4896,6 +4921,9 @@ class TestSharedStyleResolveAndConflictsOutput:
         monkeypatch.setattr(
             Path, "unlink", lambda *a, **kw: (_ for _ in ()).throw(OSError("u-err"))
         )
+        # The no-canonical (p)romote links without overwriting (os.link), so its
+        # failure is injected there rather than through Path.rename.
+        monkeypatch.setattr(os, "link", lambda *a, **kw: (_ for _ in ()).throw(OSError("l-err")))
         monkeypatch.setattr(
             resolveflow.fsutil,
             "atomic_write_bytes",
@@ -4924,7 +4952,7 @@ class TestSharedStyleResolveAndConflictsOutput:
         assert (resolved, failed) == (0, 8)
         err = capsys.readouterr().err
         expected_errors = [
-            f"mm: error: promote failed: {orphan_p.name} \u2014 r-err",
+            f"mm: error: promote failed: {orphan_p.name} \u2014 l-err",
             f"mm: error: delete failed: {orphan_d.name} \u2014 u-err",
             f"mm: error: rename failed: {pre_l_sc.name} \u2014 r-err",
             f"mm: error: delete failed: {pre_r_sc.name} \u2014 u-err",

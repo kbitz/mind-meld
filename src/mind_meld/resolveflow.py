@@ -664,8 +664,20 @@ def _resolve_interactive_loop(
                     )
                     failed += 1
                 else:
+                    # No-clobber, like _promote_conflict_file: another writer may
+                    # have created the canonical while this prompt waited, and a
+                    # plain rename would silently replace it. os.link raises
+                    # FileExistsError instead.
                     try:
-                        cpath.rename(target_canonical)
+                        os.link(cpath, target_canonical)
+                        os.unlink(cpath)
+                    except FileExistsError:
+                        core._print_error(
+                            f"promote failed: {safe_terminal_str(cpath.name)} \u2014 "
+                            f"{safe_terminal_str(target_canonical.name)} now exists; "
+                            "run mm resolve again"
+                        )
+                        failed += 1
                     except OSError as e:
                         core._print_error(
                             f"promote failed: {safe_terminal_str(cpath.name)} \u2014 "
