@@ -166,6 +166,71 @@ here by hand, use the H3 form.
 - **Context:** Filed by /review-and-prep on branch `mmm/6e947e30` (Track 132C, draft PR not yet opened) at `ca770b2` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
 
+### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: no-original promote whose link succeeds and unlink fails
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** `mm resolve`'s `(p)romote` for a conflict copy whose original is missing links the copy to the original's name, then unlinks the copy. No test covers the link succeeding and the unlink then failing, which leaves both names in place and counts a failure. The link failure, an occupied name and a dangling symlink at the name are pinned.
+- **Hypothesis (untested):** add a `TestResolvePromote` case that lets the real `os.link` run and makes `os.unlink` raise `OSError`, then pin the error line, `(0, 1)` and both names on disk. Re-verify first. The single-step rename entry below would remove this state, so the test may belong with that change.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/resolveflow.py:674
+- **Evidence:** Track 132D cycle 2 testing specialist; review read only, no failure reproduced. Cycle 3's maintainability reviewer noted that this state's error line does not say the original now exists.
+- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: keep-both promote warning after a failed outcome print
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Track 132D moved the keep-both `(p)romote` "will not sync until you add it to config" warning after the outcome line, which now goes through `_print_outcome`. The output-failure test for that promote pins the count, but nothing pins that the warning still prints when the outcome print raises `OSError`.
+- **Hypothesis (untested):** add a promote case under an `include_files` source to `TestResolveOutputFailureAfterMutation` and assert the warning reaches stderr after an outcome-print `OSError`; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/resolveflow.py:1129
+- **Evidence:** Track 132D coverage audit (audit-only; weak path); review read only, no failure reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/resolveflow.py] Make both mm resolve promotes a single no-overwrite rename
+- **Description:** Both `(p)romote` paths in `mm resolve` (the keep-both `_promote_conflict_file` and the promote of a copy whose original is missing) move the conflict copy in two steps: `os.link`, which refuses a taken name, then `os.unlink` of the copy. Three cases fall between the steps. An editor's atomic save of the copy (a temporary file renamed over it) is deleted by the unlink while resolve reports the promote as done. An interruption (crash, kill, power loss) leaves the original and the copy as two names for one file, and a later `(l)ocal` or `(r)emote` reports it resolved without removing the copy; no bytes are lost. An unlink that fails after the link counts a failure although the original now exists. A single rename that refuses a taken name closes all three: `renameat2(..., RENAME_NOREPLACE)` on Linux and `renamex_np(..., RENAME_EXCL)` on macOS, called through ctypes because Python's `os` module exposes neither (CPython 3.14.8 on Linux has no `os.renameat2`), with today's link-then-unlink as the fallback where the call or the filesystem refuses it. Until then, the walk could also check `os.path.samefile(cpath, canonical)` before a choice: from the two-names state, `(r)emote` (or `(l)ocal` on a `v0-` copy) renames between two links to one file, which Linux treats as a no-op that resolve still reports and settles, and `(p)romote` leaves two names on one inode. The single rename also lifts the hard-link requirement that Linux `fs.protected_hardlinks` enforces (EPERM for a copy owned by another uid, EOVERFLOW in a rootless user namespace), which `os.link` meets and the old `rename` did not.
+- **Why it can wait:** the owner chose to keep link-then-unlink for Track 132D (2026-11-14, D2 = A). The windows are microseconds wide and need a concurrent writer on the copy itself. The keep-both promote has had the same window since v0.12.8 with no report. The change needs platform calls with a fallback and its own review.
+- **Revisit trigger:** an owner report of a lost save on a conflict copy, or of a promoted file left beside its copy as a second name; the next Track that changes either promote path; or Python's `os` module gaining a no-replace rename.
+- **Evidence:** Track 132D cycle 2 Codex challenge (concurrent replace, Medium) and native adversarial review (interrupted pair); cycle 3 maintainability note (unlink failure), red team (no-op rename between two links) and native adversarial review (protected hard links). Code read; not reproduced.
+- **Found in:** src/mind_meld/resolveflow.py:460 and src/mind_meld/resolveflow.py:674
+- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14) on the owner's decision.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/resolveflow.py] A rerun after a failed promote of a v0- conflict copy shows pre-inversion labels
+- **Description:** When the promote of a pre-v0.9.2 (`v0-`) conflict copy fails because a file has appeared at the original's name, the error says to run `mm resolve` again. The rerun pairs the copy with that new file and dispatches by the `v0-` prefix, whose labels assume the original holds the peer's bytes and the copy holds the owner's: `(l)ocal` renames the copy over the new file and `(r)emote` deletes the copy. A file another writer just created is shown as the remote side, so `(l)ocal` reads as keeping your version while it replaces that file. The same pairing already happens on `main` whenever an original appears beside a `v0-` copy with no original.
+- **Why it can wait:** the owner chose to backlog it for Track 132D (2026-11-14, D2 = A). `v0-` copies come only from pre-v0.9.2 conflicts migrated at discovery, so few if any remain. The mislabel predates this change, and the prompt still shows both files' bytes before the choice.
+- **Revisit trigger:** a `v0-` conflict copy found on any machine (`mm conflicts` marks them pre-v0.9.2), or the next Track that changes the pre-inversion dispatch or its migration.
+- **Evidence:** Track 132D cycle 2 native adversarial review; code read, not reproduced.
+- **Found in:** src/mind_meld/resolveflow.py:724
+- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14) on the owner's decision.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/resolveflow.py] mm resolve's replace choices overwrite the original from a read taken before the prompt
+- **Description:** In the walk where both files exist, `mm resolve` reads them, shows the diff and waits. `(r)emote` on a post-inversion copy (or `(l)ocal` on a `v0-` copy) then renames the copy over the original, and `(m)erge` writes bytes merged from the earlier read. An edit made to the original while the prompt waits, by an agent or an editor, is replaced without notice. Re-reading the original before replacing it, and refusing when it changed, would close this, as the missing-original promote now refuses a taken name.
+- **Why it can wait:** it predates Track 132D, needs a concurrent writer during the prompt, and was found as a low-confidence (4/10) appendix item unrelated to the change.
+- **Revisit trigger:** an owner report of an edit lost during `mm resolve`, or the next Track that changes these replace choices.
+- **Evidence:** Track 132D cycle 2 red team (appendix); code read, not reproduced.
+- **Found in:** src/mind_meld/resolveflow.py:1016 and src/mind_meld/resolveflow.py:1041
+- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/resolveflow.py|src/mind_meld/conflictmtime.py] Keep-both promote of a symlinked conflict copy gets the wrong sync warning
+- **Description:** Since Track 132D, the keep-both `(p)romote` of a conflict copy that is a symlink creates the new `from-`/`local-` name as the link itself. Symlinks below a source root never sync, but `_promote_target_will_sync` resolves the link and judges its destination: a link to a file inside the sync surface gets no warning although the new name never syncs, and a link pointing outside the source gets the include_files warning, whose "add it to config" remedy cannot help. A symlink check that says the promoted name is a link and will not sync would fix both. Related and older: `_bump_canonical_mtime_post_resolve` calls `os.utime` on the original, which follows a symlinked original and changes only its destination's mtime.
+- **Why it can wait:** a conflict copy is a symlink only when something local replaced mm's regular file with a link; the outcome is a file that stays local, the safe direction; Track 132D's owner-approved change (D1) made the link stay a link instead of syncing its target.
+- **Revisit trigger:** the next Track that changes the promote paths or the sync-surface warning, or an owner report of a promoted file that did not sync without a warning.
+- **Evidence:** Track 132D cycle 3 red team and native adversarial review (independently); code read, not reproduced.
+- **Found in:** src/mind_meld/resolveflow.py:483 and src/mind_meld/conflictmtime.py:121
+- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/resolveflow.py] A second copy of the same missing original keeps a stale prompt in one mm resolve walk
+- **Description:** Discovery pairs each conflict copy with its original once. When two copies share one missing original (two peers, or a `v0-` and a newer copy), promoting the first creates the original; the second is still told "No canonical file exists" and offered `(p)romote`, which now fails with "<name> now exists; run mm resolve again", so the walk exits 1 and a rerun is needed to reach the two-file prompt. Before Track 132D the second promote silently renamed over the first. Re-checking the name before each missing-original prompt and switching to the two-file prompt would save the rerun.
+- **Why it can wait:** the refusal is the owner-approved Track 132D behavior and loses nothing; two copies of one missing original are rare.
+- **Revisit trigger:** an owner report of the rerun, or the next Track that changes `mm resolve`'s discovery or the missing-original prompt.
+- **Evidence:** Track 132D cycle 3 native adversarial review; code read, not reproduced.
+- **Found in:** src/mind_meld/resolveflow.py:659
+- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-13
