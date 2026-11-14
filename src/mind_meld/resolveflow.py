@@ -604,8 +604,10 @@ def _resolve_interactive_loop(
     source's sync surface (an ``include_files`` source). None disables the
     warning -- unit tests that don't exercise promote can omit it.
 
-    Returns (resolved, failed). `failed` covers per-conflict OSErrors
-    (rename/unlink/read) that left the conflict file in place. `resolve`
+    Returns (resolved, failed). `failed` counts per-conflict failures that
+    left the conflict in place: a failed read, rename, link, unlink or merged
+    write, or a refused promote. A conflict copy that cannot be removed after
+    a successful merge only warns. `resolve`
     uses the failure count to decide its exit code; the walk itself does
     not abort on per-file errors (so the user gets to triage every conflict
     in one pass).

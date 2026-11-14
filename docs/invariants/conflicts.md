@@ -159,8 +159,10 @@ keeps completed settlements. An unidentified peer, flush failure or unavailable
 ledger leaves the chosen bytes intact and warns that a later pull may conflict
 again. The local-choice mtime bump remains a propagation hint.
 
-**Count and settle, then report (Track 132D).** `_resolve_interactive_loop` puts
-only the rename, link, unlink or merged write inside each choice's `try`. Once it
+**Count and settle, then report (Track 132D).** In `_resolve_interactive_loop`,
+the `try` whose failure a choice counts holds only its rename, link, unlink or
+merged write; the stat reads that fall back to 0.0 and the merge's warn-only
+removal of the copy sit in their own `try`s and never count a failure. Once it
 succeeds the choice is counted and, for `(l)ocal`, `(r)emote` and `(m)erge`,
 settled through `_record_resolution`, and only then is its outcome line printed.
 Outcome and summary lines go through `_print_outcome`, which ignores `OSError`, so
