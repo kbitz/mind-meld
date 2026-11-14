@@ -292,6 +292,16 @@ def _attended_usage_remedy(
     )
 
 
+def _scope_bare_remedy(remedy: str, scope: str) -> str:
+    """Keep a caller's location phrase when an attended remedy names no machine.
+
+    ``_attended_usage_remedy`` names its targets only when registry evidence proves
+    one old; its bare clause (no delivery alternative) names none, so ``scope``
+    stays with it.
+    """
+    return f"{scope} {remedy}" if remedy == _attended_usage_remedy() else remedy
+
+
 CARD_INNER_WIDTH = CARD_WIDTH - 6  # ║ + 2 spaces + content + 2 spaces + ║ = 6
 """Usable content width inside the card. Themes/noteworthy strings
 longer than this are truncated with an ellipsis suffix at render time."""
@@ -4155,7 +4165,8 @@ def _agent_coverage_notes(
                     labels=labels,
                 )
                 notes.append(
-                    f"Agent-log snapshots all predate this window — {remedy} "
+                    "Agent-log snapshots all predate this window — "
+                    f"{_scope_bare_remedy(remedy, 'for each affected machine,')} "
                     "for current agent activity."
                 )
             else:
@@ -5085,11 +5096,6 @@ def format_retro(
                 versions=versions,
                 labels=labels,
             )
-            legacy_remedy_text = (
-                f"{legacy_remedy}."
-                if legacy_remedy.startswith("for ")
-                else f"On the named machines, {legacy_remedy}."
-            )
             note(
                 "legacy_counters",
                 f"{row.label} tokens are unavailable (not zero): "
@@ -5098,7 +5104,7 @@ def format_retro(
                 agent=row.label,
                 machines=sorted(machines)[:MAX_TOKEN_COVERAGE_PEER_NAMES],
                 machines_omitted=max(0, len(machines) - MAX_TOKEN_COVERAGE_PEER_NAMES),
-                remedy=legacy_remedy_text,
+                remedy=f"{_scope_bare_remedy(legacy_remedy, 'On the named machines,')}.",
             )
         else:
             causes = agent_row_floor_causes(row)
@@ -5136,7 +5142,7 @@ def format_retro(
             f"{len(data.sessions.pre_v2_peers)} peer(s) ({session_peer_names}) published "
             "pre-v0.11.0 delta-semantics session snapshots; their session totals are "
             "omitted rather than double-counted.",
-            remedy=f"{sessions_remedy}.",
+            remedy=f"{_scope_bare_remedy(sessions_remedy, 'On those machines,')}.",
         )
     token_coverage_peers = _token_coverage_peers(data.sessions)
     if token_coverage_peers:
@@ -5157,7 +5163,10 @@ def format_retro(
         note(
             "tokens_incomplete",
             f"Claude token coverage is incomplete on {token_peer_names}: {' + '.join(reasons)}.",
-            remedy=f"{tokens_remedy}; run `mm diag` if it persists.",
+            remedy=(
+                f"{_scope_bare_remedy(tokens_remedy, 'On those machines,')}; "
+                "run `mm diag` if it persists."
+            ),
         )
     if data.skills.pre_skills_peers:
         note(

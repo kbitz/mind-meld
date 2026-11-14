@@ -518,15 +518,19 @@ def test_session_and_token_health_remedies_require_peer_version_evidence(case):
         "2 peer(s) (machine-a, machine-b) published pre-v0.11.0 delta-semantics "
         "session snapshots; their session totals are omitted rather than double-counted."
     )
-    assert "machine-a, machine-b" in entries["tokens_incomplete"]["detail"]
+    assert entries["tokens_incomplete"]["detail"] == (
+        "Claude token coverage is incomplete on machine-a, machine-b: "
+        "pre-v0.11.0 session schema + pre-v0.11.14 OR cold token cache."
+    )
     for code in ("sessions_incomplete", "tokens_incomplete"):
-        remedy = entries[code]["remedy"]
-        assert "Mac" not in remedy
-        assert "On those machines" not in remedy
+        assert "Mac" not in entries[code]["remedy"]
     if case in {"unknown", "current"}:
-        assert entries["sessions_incomplete"]["remedy"] == "run `mm push` on the machine."
+        # The bare no-old clause names no machine, so the location phrase stays.
+        assert entries["sessions_incomplete"]["remedy"] == (
+            "On those machines, run `mm push` on the machine."
+        )
         assert entries["tokens_incomplete"]["remedy"] == (
-            "run `mm push` on the machine; run `mm diag` if it persists."
+            "On those machines, run `mm push` on the machine; run `mm diag` if it persists."
         )
     elif case == "old":
         assert entries["sessions_incomplete"]["remedy"] == (
@@ -736,6 +740,19 @@ def test_no_reader_all_stale_and_legacy_counter_remedies_read_cleanly_for_old_pe
     )
 
 
+# Value: protects=a stale-only note keeps its machine scope when no peer is proven old;
+# fails_when=the all-stale note drops "for each affected machine" around the bare remedy;
+# why_new=the old-peer test above pins only the named branch of this note; seam=none;
+# no_claim=synthetic stale snapshot and registry without versions, not live peer state.
+def test_all_stale_note_keeps_its_scope_when_no_peer_is_proven_old():
+    assert agg._agent_coverage_notes(stale_data()) == [
+        "Agent-log snapshots all predate this window — for each affected machine, "
+        "run `mm push` on the machine for current agent activity.",
+        "Host-usage captures from dev-a predate this window (oldest 2026-09-07 UTC) — "
+        "run `mm push` on the machine, then `mm status`; pull again on this machine.",
+    ]
+
+
 def test_old_peer_labels_are_sanitized_disambiguated_and_bounded():
     colliding_and_hostile_fleet = agg.FleetState(
         devices_known=3,
@@ -799,6 +816,9 @@ def test_malformed_registry_containers_and_entries_remain_unknown(bad_container)
     assert (
         agg._attended_usage_remedy(devices=["dev-a"], fleet=None) == "run `mm push` on the machine"
     )
+    assert agg._attended_usage_remedy(devices=["dev-a"], fleet=None, delivery=True) == (
+        "run `mm push` on the machine, or wait for Syncthing to deliver"
+    )
 
     bad_fleet = agg.FleetState(devices_known=1, devices_known_list=bad_container)
     assert agg._device_versions(bad_fleet) == {}
@@ -807,6 +827,9 @@ def test_malformed_registry_containers_and_entries_remain_unknown(bad_container)
     assert (
         agg._attended_usage_remedy(devices=["dev-a"], fleet=bad_fleet)
         == "run `mm push` on the machine"
+    )
+    assert agg._attended_usage_remedy(devices=["dev-a"], fleet=bad_fleet, delivery=True) == (
+        "run `mm push` on the machine, or wait for Syncthing to deliver"
     )
 
     mixed_malformed_fleet = agg.FleetState(
@@ -840,6 +863,16 @@ def test_malformed_registry_containers_and_entries_remain_unknown(bad_container)
         fleet=mixed_malformed_fleet,
     ) == (
         "for dev-unk, run `mm push` on the machine; "
+        "for mac-old (last reported push below v0.14.17), "
+        "upgrade mind-meld to v0.14.17+ on that machine, "
+        "verify with `mm --version`, then run `mm push`"
+    )
+    assert agg._attended_usage_remedy(
+        devices=["dev-old", "dev-unk", "", None, 123, ["dev-a"]],
+        fleet=mixed_malformed_fleet,
+        delivery=True,
+    ) == (
+        "for dev-unk, run `mm push` on the machine, or wait for Syncthing to deliver; "
         "for mac-old (last reported push below v0.14.17), "
         "upgrade mind-meld to v0.14.17+ on that machine, "
         "verify with `mm --version`, then run `mm push`"
