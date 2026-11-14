@@ -1524,11 +1524,12 @@ missing-snapshot notes, names the missing machine(s) and says `"run \`mm push\`
 on the machine, or wait for Syncthing to deliver"`). Only when registry
 evidence shows a target peer last pushed below `ATTENDED_USAGE_MIN_VERSION`
 does the remedy instruct upgrading mind-meld to `v0.14.17+` on that machine,
-verifying with `mm --version`, and running `mm push` (naming the old subset in
-mixed groups). No retro diagnostic says `"Mac"` for a machine. Tag-pinned pipx
-installs can remain old after `pipx upgrade`; README supplies the
-force-install fallback. Both producer and renderer must upgrade for the
-init-origin counting fix.
+verifying with `mm --version`, and running `mm push`. That remedy names the old
+peers (at most five, then `(+N more)`), whether every target is old or only
+some; a mixed group also names the other peers, with the push clause above. No
+retro diagnostic says `"Mac"` for a machine. Tag-pinned pipx installs can
+remain old after `pipx upgrade`; README supplies the force-install fallback.
+Both producer and renderer must upgrade for the init-origin counting fix.
 
 #### Acceptor and schema
 

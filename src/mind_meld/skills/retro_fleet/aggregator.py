@@ -266,17 +266,21 @@ def _attended_usage_remedy(
     )
     if not old_devices:
         return base_clause
+    resolved_labels = labels if labels is not None else (device_labels(fleet) if fleet else {})
+    old_names = _format_coverage_peer_names({device_label(d, resolved_labels) for d in old_devices})
     if not other_devices:
-        upgrade_clause = (
-            f"last reported push was below {ATTENDED_USAGE_MIN_VERSION} — "
+        if delivery:
+            upgrade_clause = (
+                f"last reported push was below {ATTENDED_USAGE_MIN_VERSION} — "
+                f"upgrade mind-meld to {ATTENDED_USAGE_MIN_VERSION}+ on that machine, "
+                "verify with `mm --version`, then run `mm push`"
+            )
+            return f"for {old_names}, {base_clause} ({upgrade_clause})"
+        return (
+            f"for {old_names} (last reported push below {ATTENDED_USAGE_MIN_VERSION}), "
             f"upgrade mind-meld to {ATTENDED_USAGE_MIN_VERSION}+ on that machine, "
             "verify with `mm --version`, then run `mm push`"
         )
-        if delivery:
-            return f"{base_clause} ({upgrade_clause})"
-        return upgrade_clause
-    resolved_labels = labels if labels is not None else (device_labels(fleet) if fleet else {})
-    old_names = _format_coverage_peer_names({device_label(d, resolved_labels) for d in old_devices})
     other_names = _format_coverage_peer_names(
         {device_label(d, resolved_labels) for d in other_devices}
     )
@@ -286,6 +290,16 @@ def _attended_usage_remedy(
         f"upgrade mind-meld to {ATTENDED_USAGE_MIN_VERSION}+ on that machine, "
         "verify with `mm --version`, then run `mm push`"
     )
+
+
+def _scope_bare_remedy(remedy: str, scope: str) -> str:
+    """Keep a caller's location phrase when an attended remedy names no machine.
+
+    ``_attended_usage_remedy`` names its targets only when registry evidence proves
+    one old; its bare clause (no delivery alternative) names none, so ``scope``
+    stays with it.
+    """
+    return f"{scope} {remedy}" if remedy == _attended_usage_remedy() else remedy
 
 
 CARD_INNER_WIDTH = CARD_WIDTH - 6  # ║ + 2 spaces + content + 2 spaces + ║ = 6
@@ -4138,9 +4152,9 @@ def _agent_coverage_notes(
             )
             notes.append(
                 "No agent-log reader contributed on any machine. If no source is enabled, "
-                "enable with `mm enable-source codex` (or `grok`, `muse`, or `agy`), then "
-                f"{remedy}; readers with no attributable local ledger "
-                "are also omitted."
+                "enable with `mm enable-source codex` (or `grok`, `muse`, or `agy`); "
+                "readers with no attributable local ledger are also omitted. "
+                f"Refresh usage: {remedy}."
             )
         elif not view.any_activity:
             if all(s.stale for s in snaps):
@@ -4152,7 +4166,7 @@ def _agent_coverage_notes(
                 )
                 notes.append(
                     "Agent-log snapshots all predate this window — "
-                    f"for each affected machine, {remedy} "
+                    f"{_scope_bare_remedy(remedy, 'for each affected machine,')} "
                     "for current agent activity."
                 )
             else:
@@ -4192,12 +4206,26 @@ def _agent_coverage_notes(
         if unnamed:
             who.append(f"{unnamed} unidentified row(s)")
         rejected_ids = {row.device for row in inventory.rejected if row.device}
-        remedy = _attended_usage_remedy(
-            devices=rejected_ids,
-            fleet=data.fleet,
-            versions=versions,
-            labels=labels,
+        unidentified_clause = (
+            f"for the machine(s) behind the unidentified row(s), {_attended_usage_remedy()}"
         )
+        if named and unnamed:
+            named_remedy = _attended_usage_remedy(
+                devices=rejected_ids,
+                fleet=data.fleet,
+                versions=versions,
+                labels=labels,
+            )
+            remedy = f"{named_remedy}; {unidentified_clause}"
+        elif unnamed:
+            remedy = unidentified_clause
+        else:
+            remedy = _attended_usage_remedy(
+                devices=rejected_ids,
+                fleet=data.fleet,
+                versions=versions,
+                labels=labels,
+            )
         notes.append(
             f"Agent-log snapshots from {' plus '.join(who)} were rejected "
             f"({reasons}) — {remedy}; run `mm diag` if it persists."
@@ -4435,7 +4463,7 @@ def _render_ascii_card(
     return out
 
 
-def device_labels(fleet: FleetState) -> dict[str, str]:
+def device_labels(fleet: FleetState | None) -> dict[str, str]:
     """``device_id -> hostname`` from the registry, for humans.
 
     ``mm devices --format json`` has always carried ``device_name`` (set from
@@ -4445,6 +4473,8 @@ def device_labels(fleet: FleetState) -> dict[str, str]:
     ``_safe_short`` path as every other string from the wire, and falls back to
     the short id whenever the registry read failed or the name is unusable.
     """
+    if fleet is None or not isinstance(fleet.devices_known_list, list):
+        return {}
     out: dict[str, str] = {}
     for rec in fleet.devices_known_list:
         if not isinstance(rec, dict):
@@ -5074,7 +5104,7 @@ def format_retro(
                 agent=row.label,
                 machines=sorted(machines)[:MAX_TOKEN_COVERAGE_PEER_NAMES],
                 machines_omitted=max(0, len(machines) - MAX_TOKEN_COVERAGE_PEER_NAMES),
-                remedy=f"On the named machines, {legacy_remedy}.",
+                remedy=f"{_scope_bare_remedy(legacy_remedy, 'On the named machines,')}.",
             )
         else:
             causes = agent_row_floor_causes(row)
@@ -5098,6 +5128,9 @@ def format_retro(
                         causes=list(causes),
                     )
     if data.sessions.pre_v2_peers:
+        session_peer_names = _format_coverage_peer_names(
+            {device_label(d, labels) for d in data.sessions.pre_v2_peers}
+        )
         sessions_remedy = _attended_usage_remedy(
             devices=data.sessions.pre_v2_peers,
             fleet=data.fleet,
@@ -5106,9 +5139,10 @@ def format_retro(
         )
         note(
             "sessions_incomplete",
-            f"{len(data.sessions.pre_v2_peers)} peer(s) published pre-v0.11.0 delta-semantics "
-            "session snapshots; their session totals are omitted rather than double-counted.",
-            remedy=f"On those machines, {sessions_remedy}.",
+            f"{len(data.sessions.pre_v2_peers)} peer(s) ({session_peer_names}) published "
+            "pre-v0.11.0 delta-semantics session snapshots; their session totals are "
+            "omitted rather than double-counted.",
+            remedy=f"{_scope_bare_remedy(sessions_remedy, 'On those machines,')}.",
         )
     token_coverage_peers = _token_coverage_peers(data.sessions)
     if token_coverage_peers:
@@ -5129,7 +5163,10 @@ def format_retro(
         note(
             "tokens_incomplete",
             f"Claude token coverage is incomplete on {token_peer_names}: {' + '.join(reasons)}.",
-            remedy=f"On those machines, {tokens_remedy}; run `mm diag` if it persists.",
+            remedy=(
+                f"{_scope_bare_remedy(tokens_remedy, 'On those machines,')}; "
+                "run `mm diag` if it persists."
+            ),
         )
     if data.skills.pre_skills_peers:
         note(

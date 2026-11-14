@@ -156,6 +156,16 @@ here by hand, use the H3 form.
 - **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
 
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_usage_presentation.py] Test gap: no-reader coverage note without a proven-old peer is unpinned
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Track 132C reworded the "No agent-log reader contributed on any machine" note so its refresh advice follows a `Refresh usage:` lead. Only the variant with a proven-old peer is pinned as an exact string; the common variant, where no registry version is below the attended floor and the remedy is the bare clause (run `mm push` on the machine), is not asserted, so a later rewording could leave stray punctuation or drop the remedy there without a failing test.
+- **Hypothesis (untested):** pin the whole no-version note beside the old-peer case in `test_no_reader_all_stale_and_legacy_counter_remedies_read_cleanly_for_old_peers`; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:4157
+- **Evidence:** Coverage audit read only (Track 132C review); the full suite passed on this branch and no failure was reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/6e947e30` (Track 132C, draft PR not yet opened) at `ca770b2` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-13

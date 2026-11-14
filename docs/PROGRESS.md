@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.47 | 2026-11-14 | `mm retro-fleet` names peers needing an upgrade and gives separate recovery advice for unidentified rejected usage rows. |
 | 1.12.46 | 2026-11-14 | Empty `mm conflicts` and `mm resolve` results use the same plain outcome style as the other commands, and `mm resolve ""` is treated as an unmatched path. |
 | 1.12.45 | 2026-11-13 | The pipx self-update tests wait for complete JSON from the detached child before they parse it. |
 | 1.12.44 | 2026-11-13 | `mm gc`, `mm recapture`, status and history advice, diff warnings and update notices use the shared output style, with routine recapture details available through `--verbose`. |
