@@ -20,10 +20,10 @@ README = ROOT / "README.md"
 RELEASE = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 README_BOOTSTRAP_CMD = (
-    "mm_bootstrap=$(gh api 'repos/kbitz/mind-meld/contents/bin/bootstrap?ref=latest'"
-    " -H 'Accept: application/vnd.github.raw')"
+    "mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap)"
     ' && sh -c "$mm_bootstrap"'
 )
+README_BOOTSTRAP_URL = "https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap"
 HOMEBREW_INSTALL_CMD = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
 SYNCTHING_CONFIG_PATHS = (
@@ -99,25 +99,22 @@ exit 2
     def install_mm(self, directory: Path) -> None:
         _make_fake_script(directory / "mm", "mm", "exit 0\n")
 
-    def install_gh(self, *, serve: Path | None) -> None:
-        # Serves `serve` for the exact Contents API call, or fails with exit 1.
+    def install_curl(self, *, serve: Path | None) -> None:
+        # Serves `serve` for the exact README download, like `curl -fsSL`, or
+        # fails with curl's HTTP error exit.
         if serve is None:
-            logic = "exit 1\n"
+            logic = "exit 22\n"
         else:
             logic = f"""\
-if [ "${{#}}" -eq 4 ] \\
-   && [ "$1" = "api" ] \\
-   && [ "$2" = "repos/kbitz/mind-meld/contents/bin/bootstrap?ref=latest" ] \\
-   && [ "$3" = "-H" ] \\
-   && [ "$4" = "Accept: application/vnd.github.raw" ]; then
+if [ "${{#}}" -eq 2 ] && [ "$1" = "-fsSL" ] && [ "$2" = "{README_BOOTSTRAP_URL}" ]; then
   while IFS= read -r _line || [ -n "$_line" ]; do
     printf '%s\\n' "$_line"
   done < "{serve}"
   exit 0
 fi
-exit 1
+exit 22
 """
-        _make_fake_script(self.sysbin / "gh", "gh", logic)
+        _make_fake_script(self.sysbin / "curl", "curl", logic)
 
     def install_logging_curl(self) -> None:
         _make_fake_script(self.sysbin / "curl", "curl", "exit 0\n")
@@ -517,7 +514,7 @@ class TestBootstrapContract:
         body = match.group("body")
         assert README_BOOTSTRAP_CMD in body
         url_match = re.search(
-            r"repos/kbitz/mind-meld/contents/(?P<path>[^?']+)\?ref=(?P<ref>[^']+)",
+            r"https://raw\.githubusercontent\.com/kbitz/mind-meld/(?P<ref>[^/]+)/(?P<path>[^\s\")]+)",
             body,
         )
         assert url_match is not None
@@ -856,39 +853,24 @@ class TestBootstrapDownload:
         )
 
     def test_readme_command_fails_when_download_fails(self, harness: BootstrapHarness) -> None:
-        # A failed download must stop with gh's failure status, not run an
+        # A failed download must stop with curl's failure status, not run an
         # empty script and report success.
         harness.install_uname("Darwin")
-        harness.install_gh(serve=None)
+        harness.install_curl(serve=None)
 
         proc = self._run_readme_command(harness)
         assert proc.returncode != 0, proc.stdout
-        assert [row[0] for row in harness.calls()] == ["gh"]
-        assert harness.calls() == [
-            [
-                "gh",
-                "api",
-                "repos/kbitz/mind-meld/contents/bin/bootstrap?ref=latest",
-                "-H",
-                "Accept: application/vnd.github.raw",
-            ]
-        ]
+        assert harness.calls() == [["curl", "-fsSL", README_BOOTSTRAP_URL]]
 
     def test_readme_command_runs_downloaded_script(self, harness: BootstrapHarness) -> None:
         harness.install_uname("Darwin")
-        harness.install_gh(serve=BOOTSTRAP)
+        harness.install_curl(serve=BOOTSTRAP)
 
         proc = self._run_readme_command(harness)
         assert proc.returncode == 1
         assert "Homebrew is not installed" in _last_line(proc.stdout)
-        assert [row[0] for row in harness.calls()] == ["gh", "uname"]
-        assert harness.calls()[0] == [
-            "gh",
-            "api",
-            "repos/kbitz/mind-meld/contents/bin/bootstrap?ref=latest",
-            "-H",
-            "Accept: application/vnd.github.raw",
-        ]
+        assert [row[0] for row in harness.calls()] == ["curl", "uname"]
+        assert harness.calls()[0] == ["curl", "-fsSL", README_BOOTSTRAP_URL]
 
     @pytest.mark.parametrize("cut", ["quarter", "half", "three-quarters", "all-but-last-line"])
     def test_truncated_download_runs_nothing(self, harness: BootstrapHarness, cut: str) -> None:
