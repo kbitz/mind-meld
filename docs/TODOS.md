@@ -44,129 +44,29 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/statusflow.py|src/mind_meld/events_tail.py|src/mind_meld/cli.py] Base issue: status shows two Antigravity remedies after an automatic push
-- **Base issue:** present at merge base `fb2ef59`; filed under `blocking=shown`
-- **Description:** With an unsupported reader (for example `agy`) and a current cached release check, `mm status` run after an automatic push prints the verdict "no newer mm can yet" and, on its `Last auto-push` line, the stored autopush detail that still says "A newer mm may read it: run `mm update`". Plain-text `mm diag`'s last-autorun block repeats the same stored detail. A sibling path: `mm recapture`'s own push captures host usage in the tail, which writes the same default `mm update` sentence to stderr, and its follow-up line suggests `mm push` even for the permanent `unsupported` reason. Track 132A deliberately kept the tail, init and attempt-record wording, so these surfaces still disagree with status whenever the newest push was automatic or the owner runs recapture.
-- **Evidence:** A review probe test (an autopush, then status, with `agy` unsupported and a current cache) passed identically on this branch at `2445045` and at the merge base `fb2ef59`: status printed `Last auto-push`, the `mm update` advice and "no newer mm can yet" together. The recapture path was read in code (`capture_attempted = attended and not dry_run`; recapture sets no diagnostic scope) and not separately run.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/statusflow.py:963
-- **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=tests/test_integration.py] Test gap: recapture nested-checkout test has no positive control
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `test_recapture_and_plain_push_stay_silent_on_nested_checkouts` checks that recapture prints no nested-repository notice, but nothing in its recapture half directly shows that recapture's own scan reached the checkout. The manifest assertions after recapture (frozen entry kept, `new.md` unpublished) may already act as that control if recapture's push re-scans the source; that is unconfirmed.
-- **Hypothesis (untested):** first check whether those manifest assertions would fail if recapture's push skipped the source; if not, add an observation of recapture's own push (for example an ordinary file changed outside the checkout that recapture's push must publish). `mm status` and `mm diag` are not a control here, because they find nested roots with their own scan.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** tests/test_integration.py:13017
-- **Evidence:** Review read only. A reverted-fix copy of the branch printed the notice from this same test, so the scan does reach the checkout today; no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py|src/mind_meld/events_tail.py] Test gap: unsupported-reader advice with a current cache is unpinned for recapture, init and multi-reader push
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** README now states that `mm recapture` and init notices keep the `mm update` advice for an unsupported reader even when the cached release check is current. `tests/test_init_events_backfill.py` pins init's unsupported notice without a cache state, but no test pins either surface with a current cache. No test covers an attended `mm push --verbose` with two unsupported readers, where each reader reads the cached release check separately.
-- **Hypothesis (untested):** add current-cache cases for recapture's and init's unsupported-reader notice, and a two-reader case to the push/status parity test; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py:1181
-- **Evidence:** Review read only (adversarial delta pass); the full suite passed on this branch and no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/gcflow.py|src/mind_meld/retention.py] Base issue: mm gc --conflicts reports kept conflict copies as a permissions or locks failure
-- **Base issue:** present at merge base `3b84432`; filed under `blocking=shown`
-- **Description:** The conflict reaper counts every copy it keeps on purpose (a live conflict older than 30 days, a `v0-` sidecar, a name whose age cannot be read) as `skipped`, and `ReapOutcome.needs_remediation` treats any skip as an incomplete cleanup. So `mm gc --conflicts` on a Mac with one unresolved old conflict tells the owner to fix permissions or locks, and its `Run: mm gc -v` fix omits `--conflicts`, so following it never shows the reaper that kept the file. Since Track 133A the warning also replaces the `Gc:` outcome line, so that run no longer reports the orphaned-blob count.
-- **Evidence:** A review probe test (push, then a `doc.sync-conflict-20260101-120000-abcd1234.md` sidecar beside a differing `doc.md`, then `mm gc --conflicts`) printed "Fix permissions or locks" at this branch and at the merge base; at the branch stdout was empty and the warning was the only line.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/gcflow.py:104
-- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/recaptureflow.py|src/mind_meld/cli.py] Base issue: mm recapture still prints the inner push's legacy summary block
-- **Base issue:** present at merge base `3b84432`; filed under `blocking=shown`
-- **Description:** Recapture calls `_push_core` with neither `diagnostics` nor `result_observer`, so the inner push runs with its display on and prints "Building manifest...", the scan count, "Uploading N files...", a bold-green "Push complete.", the add/modify counts, timings and transfer size before recapture's own outcome. A non-verbose `mm recapture` therefore still shows a bold-green completion banner and counts the owner does not act on, which O8 asks to keep behind `-v`.
-- **Evidence:** A review probe test (one new historical commit, `mm recapture 14d` without `-v`) printed the "Push complete." block at this branch, before the new `Recapture:` line, and at the merge base, before the old "Recapture complete." banner.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/recaptureflow.py:264
-- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/diffflow.py|tests/test_integration.py] Test gap: mm diff's newer-format remote manifest refusal is unpinned
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No test drives `mm diff` (own or `--from`) against a newer-format remote manifest, so the refusal line and its `Run: mm update` fix in `diffflow.diff_cmd` are not asserted for this command.
-- **Hypothesis (untested):** add a `preview62` case beside `test_diff_corrupt_remote_warns_in_shared_style` that plants a newer-format manifest and pins the exit code, the stderr error and its final fix line; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/diffflow.py:52
-- **Evidence:** Coverage audit read only (Track 133A review); no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/diffflow.py|tests/test_integration.py] Test gap: mm diff's "No differences" and pull-prediction lines are unpinned
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No `mm diff` test asserts the "No differences." line or the `(pull would: <outcome>)` suffix on a pushed change, so a wording or branch change there would pass the suite.
-- **Hypothesis (untested):** add assertions to an existing `preview62` diff test for both lines; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/diffflow.py:117
-- **Evidence:** Coverage audit read only (Track 133A review); no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py] Base issue: conflict discovery drops a sidecar it cannot stat and still reports no conflict files
-- **Base issue:** present at merge base `c6a6335`; filed under `blocking=shown`
-- **Description:** `resolveflow._find_conflict_files` lists sidecars with `rglob` and keeps only those where `Path.is_file()` is true. A sidecar in a directory that can be listed but not searched (mode 0444) is dropped with no warning: on Python 3.14 `Path.is_file()` returns False instead of raising, so the "conflict sidecar unreadable (left in place)" branches never run. `mm conflicts` then prints `Conflicts: no conflict files.` and exits 0 while a conflict copy exists, and `mm resolve` and `mm gc --conflicts` share the same discovery. A directory with no read permission is skipped silently on every Python version.
-- **Evidence:** A review probe with a v1 sidecar and its canonical inside a mode-0444 directory under a Claude memory folder printed the empty outcome, exit 0 and empty stderr on this branch at `10178b6`, and printed `No conflict files.` the same way at the merge base `c6a6335`, both on Python 3.14.8.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/resolveflow.py:346
-- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py] Base issue: conflict commands keep two lines outside the shared output style
-- **Base issue:** present at merge base `c6a6335`; filed under `blocking=shown`
-- **Description:** Two lines of the conflict commands still bypass the shared forms. `mm resolve PATH` with an unmatched path ends with `mm: error: No conflict file matching: <path>` and no `Run:` fix line (for example `mm conflicts` to list the real paths). A nonempty `mm conflicts` listing ends with the Rich-markup prose "Run mm resolve to keep local, remote, or both interactively, or delete files manually with rm." and, for pre-v0.9.2 copies, a dim note, instead of the shared `Run:` and `mm: notice:` forms. The empty outcomes now use the shared style, so the command reads differently depending on whether conflicts exist (SPEC O8.1 and O8.6).
-- **Evidence:** Review probes on this branch at `10178b6` and at the merge base `c6a6335` printed the same unmatched-path stderr with no `Run:` line, and the same trailing hint after the conflicts table.
-- **Upstream severity:** CRITICAL (unmatched-path line); INFORMATIONAL (listing hint)
-- **Found in:** src/mind_meld/cli.py:4246 and src/mind_meld/cli.py:3993
-- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14). The new test pins today's unmatched-path stderr exactly, so a fix line updates that assertion.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py|src/mind_meld/consoles.py] Base issue: outcome lines turn emoji codes in peer-controlled file names into emoji
-- **Base issue:** present at merge base `c6a6335`; filed under `blocking=shown`
-- **Description:** The shared outcome print (`console.print(..., markup=False, highlight=False, soft_wrap=True)`) leaves Rich's emoji substitution on, and `safe_terminal_str` keeps colons. A sidecar a peer named `notes:fire:.sync-conflict-…md` is reported as `notes🔥.sync-conflict-…md` by `mm resolve`'s "deleted" and "promoted" outcome lines and by its markup-enabled `Conflict in …` header, which names a file that does not exist on disk. Any other outcome line that interpolates a peer- or user-controlled name has the same exposure. Passing `emoji=False` at those prints, or building the shared consoles with `Console(emoji=False)`, would show names verbatim.
-- **Evidence:** A review probe with an orphan sidecar `notes:fire:.sync-conflict-20260420-120000-v1-devA1234.md` and the answer `d` printed `Resolve: deleted notes🔥.sync-conflict-20260420-120000-v1-devA1234.md.` on this branch at `10178b6` and identically at the merge base `c6a6335`.
-- **Upstream severity:** CRITICAL
-- **Found in:** src/mind_meld/resolveflow.py:672
-- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py|src/mind_meld/resolveflow.py] Decide whether mm resolve may walk every conflict when stdin is not a terminal
-- **Description:** `mm resolve` with no PATH walks every conflict and reads answers from stdin, which need not be a terminal (README and the conflict invariants say it "needs a terminal", but nothing checks `isatty`). A script that runs `mm resolve $F` with an unquoted, empty `$F` drops the argument, so the walk starts and its piped answers apply to whichever conflict sorts first; `r` on a post-inversion conflict renames the sidecar over the canonical, replacing that file's local edits with no recovery copy. Track 134A fixed the quoted form (`mm resolve ""` now fails like an unmatched PATH); the unquoted form is the bare command. Closing it means refusing a walk-all on non-terminal stdin or requiring an explicit flag such as `--all`.
-- **Why it can wait:** pre-existing since resolve gained its PATH argument; needs a script bug plus piped answers; CHANGELOG records piped answers as supported (about line 3996), so a refusal is a behavior change; the CliRunner-driven resolve tests would need a terminal seam; the project's planning rule asks for demonstrated demand before adding a control.
-- **Revisit trigger:** an owner report of a script resolving the wrong conflict, the next Track that changes `mm resolve`'s input handling, or a decision to drop piped-answer support.
-- **Evidence:** Track 134A cycle 2 native adversarial review (finding p2-adv-1); the delta did not widen it.
-- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14) as an auto-chosen deferral open to veto on the PR.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=tests/test_integration.py] Test gap: empty-PATH resolve test has no witness that discovery found the conflict
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `TestInversion5E.test_resolve_empty_path_argument_errors_instead_of_walking[True]` writes a v1 sidecar and asserts the error, exit 1 and unchanged files, but nothing asserts that discovery returned that sidecar. If the fixture's config or discovery scope drifted, the case would quietly become the no-conflict case and still pass.
-- **Hypothesis (untested):** wrap `cli_module.resolveflow._find_conflict_files` in a spy and assert one hit, as the sibling unmatched-PATH test witnesses its legacy rename; re-verify first.
-- **Upstream severity:** CRITICAL
-- **Found in:** tests/test_integration.py:3546
-- **Evidence:** Track 134A cycle 2 native adversarial review (finding p2-adv-4). No failure was reproduced: the red proof at `10178b6` shows the True case reached `list_devices`, so discovery found the sidecar with today's fixture.
-- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_usage_presentation.py] Test gap: no-reader coverage note without a proven-old peer is unpinned
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Track 132C reworded the "No agent-log reader contributed on any machine" note so its refresh advice follows a `Refresh usage:` lead. Only the variant with a proven-old peer is pinned as an exact string; the common variant, where no registry version is below the attended floor and the remedy is the bare clause (run `mm push` on the machine), is not asserted, so a later rewording could leave stray punctuation or drop the remedy there without a failing test.
-- **Hypothesis (untested):** pin the whole no-version note beside the old-peer case in `test_no_reader_all_stale_and_legacy_counter_remedies_read_cleanly_for_old_peers`; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:4157
-- **Evidence:** Coverage audit read only (Track 132C review); the full suite passed on this branch and no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/6e947e30` (Track 132C, draft PR not yet opened) at `ca770b2` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
 ## Drain records
+
+### Roadmap regeneration — 2026-11-15
+
+Verified against `888ada2` (v1.12.47), from the approved manager brief. Five merged Tracks recorded independently (132A, 133A, 132E, 134A, 132C); Group 132 stays pinned by active Track 132D (PR #324). Brief bug 1 is Track 132F: the cause is an empty placeholder `.git` directory that mm treats as a nested checkout, not the files' 0600 mode. Brief bug 2 is Track 132G. 132B stays open. The review entries PR #324 adds to this inbox are not on main yet and are left for the next regeneration.
+
+| Inbox item | Disposition |
+|---|---|
+| Base issue: status shows two Antigravity remedies after an automatic push | place (Track 135A) |
+| Test gap: recapture nested-checkout test has no positive control | place (Track 135A) |
+| Test gap: unsupported-reader advice with a current cache is unpinned for recapture, init and multi-reader push | place (Track 135A) |
+| Base issue: mm gc --conflicts reports kept conflict copies as a permissions or locks failure | place (Track 136A) |
+| Base issue: mm recapture still prints the inner push's legacy summary block | place (Track 135A) |
+| Test gap: mm diff's newer-format remote manifest refusal is unpinned | defer |
+| Test gap: mm diff's "No differences" and pull-prediction lines are unpinned | defer |
+| Base issue: conflict discovery drops a sidecar it cannot stat and still reports no conflict files | kill — unobserved; reversible (the copy stays on disk; only a crafted mode-0444 directory reaches it); reopen if it manifests |
+| Base issue: conflict commands keep two lines outside the shared output style | place (Track 136A) |
+| Base issue: outcome lines turn emoji codes in peer-controlled file names into emoji | kill — unobserved; inconsequential (display only, no file touched; needs a peer to name a file with an emoji code); reopen if it manifests |
+| Decide whether mm resolve may walk every conflict when stdin is not a terminal | defer (design decision; trigger as filed) |
+| Test gap: empty-PATH resolve test has no witness that discovery found the conflict | place (Track 136A) |
+| Test gap: no-reader coverage note without a proven-old peer is unpinned | defer |
+
+13 drained: 7 placed, 4 deferred, 2 killed, 0 discharged. Future: 4 inbox deferrals plus one new design deferral (pulled copies of owner-only files land with the umask) added; staying-deferred text preserved. No bump under SPEC documentation-only policy.
 
 ### Roadmap regeneration — 2026-11-13
 

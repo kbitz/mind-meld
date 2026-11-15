@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Seven more Tracks shipped through v1.12.42 (independent receipts in shipped history). Track 132A is active; the remaining output work and encountered bugs are planned below. The owner will decide the path to 2.0 after using the Syncthing fleet for a while. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); its qualification, Track 96A, waits in Future for 2.0.0's acceptance.
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Five more Tracks shipped through v1.12.47 (independent receipts in shipped history). Track 132D is active in review; two encountered bugs (gstack-extend run history frozen by an empty `.git` directory, and a manifest property test failing under host load) and the remaining output fixes are planned below. The owner will decide the path to 2.0 after using the Syncthing fleet for a while. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); its qualification, Track 96A, waits in Future for 2.0.0's acceptance.
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -22,38 +22,13 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 
 ## In Progress
 
-Track 132A is declared active by the manager’s 2026-11-13 brief (factory session for Track 132A); its complete card and ID are pinned. No other active pin is declared.
+Track 132D is declared active by the 2026-11-15 brief (PR #324, factory branch `mmm/e01a68d2`, in review); its card and ID are pinned. No other active pin is declared. Track 132B waits on its real-machine observation.
 
-### Group 132: Quiet notices ∥ named peer remedies ∥ conflict settlement ∥ update observation and test
+### Group 132: Encountered sync and test bugs ∥ conflict settlement ∥ update observation
 
 _Depends on: none_
 
-**This group delivers:** Quiet recapture notices, consistent Antigravity advice, actionable peer remedies, durable conflict settlement, the open real-machine automatic-update observation and a stable detached-child test. Only Track 132A is in flight; its disjoint siblings may launch.
-
-#### Track 132A: Keep recapture's own push quiet about nested repositories, and give the push and status the same Antigravity advice
-_2 tasks . ~170 LOC . low risk . 5 files_
-**Outcome:** An owner who runs `mm recapture` is not shown one "skipped: nested git repository" line per checkout, and the push notice and `mm status` give one advice, not two that contradict each other, when Antigravity's record format is one no release reads.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O8.1 ("nothing else is printed unless the owner must act") and O7.3. The owner, 2026-11-09: "Anything that is a reproducible bug we actually encountered should be current"; observed as 107 notice lines in one push and as `mm status` and the push notice disagreeing about Antigravity.
-**Done when:** the acceptance list below passes: recapture's inner push prints no nested-repository line, a plain `mm push` and its `-v` and `--dry-run` forms behave as today, and the push notice and `mm status` agree for a format no release reads.
-_touches: src/mind_meld/cli.py, src/mind_meld/events_tail.py, tests/test_integration.py, tests/test_silent_failure_contract.py, docs/invariants/events-retro.md_
-_blocked-by: Track 129A, Track 131A_
-_read-first: docs/invariants/README.md, docs/invariants/sync.md ("Nested git checkouts are frozen"), docs/invariants/events-retro.md, src/mind_meld/cli.py (`_push_core`'s `diagnostics`, `show` and `on_skip`; `recapture`'s `_push_core` call), src/mind_meld/events_tail.py (`_host_skip_phrase`, `_no_release_reads_clause`)_
-_produces: a recapture push that prints no nested-repository notices, and one advice for an unreadable Antigravity format_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
-
-_Source: manager Ephesus 17's observations on mm 1.12.30, 2026-11-09 (Future entries "`mm recapture`'s own push prints one \"skipped: nested git repository\" notice per checkout (finding 7, corrected)" and the 2026-11-09 half of "Antigravity reader logs `dropped: unsupported` on this Mac", whose unsupported-cause half is Track 123B), promoted on the owner's rule above. Verified at `e04cfa0`: in `cli.py`, `_push_core` computes `show = not quiet and (diagnostics if diagnostics is not None else True)` and `on_skip` prints "mm: notice: skipped: nested git repository ..." when `show` is true; the attended push passes `diagnostics=verbose or dry_run` (so a plain `mm push` is silent, pinned by `tests/test_integration.py` for `push -v`, `push --dry-run` and `autopush`), while `recapture`'s inner `_push_core(config, passphrase, memory_kb, verbose=False, dry_run=False)` leaves `diagnostics` unset and therefore prints them; which command printed the observer's 107 lines is not confirmed (the manager's finding said every push; it is `mm recapture` or `mm push -v` by the code). For the advice: `_host_skip_phrase` reaches `_no_release_reads_clause` ("no newer mm can yet") only when the status or diag caller passes `no_release_reads`, while push, init and attempt-record callers keep the default and fall through to the permanent-reason text that recommends `mm update`._
-
-- **Recapture's push prints no nested-repository lines** -- Pass `diagnostics=False` from recapture's inner `_push_core` (or the equivalent the plan prefers), so the notice stays what it is today for `mm push -v` and `--dry-run` and silent elsewhere; a test beside the existing three pins recapture. _src/mind_meld/cli.py, tests/test_integration.py, ~40 lines._ (S)
-- **One advice for an Antigravity format no release reads** -- Have the push-side notice read the same cached upgrade view as `mm status` and `mm diag` (or drop the `mm update` suggestion for a reason no release reads), so the two surfaces agree whenever `no_release_reads` names the reader; tests pin both surfaces for the same fixture, and events-retro.md says where the push gets the view. _src/mind_meld/events_tail.py, tests/test_silent_failure_contract.py, docs/invariants/events-retro.md, ~130 lines._ (M)
-
-**Acceptance:**
-
-1. `mm recapture` on a fixture with nested checkouts prints no "skipped: nested git repository" line; a test pins it.
-2. `mm push`, `mm push -v`, `mm push --dry-run` and `mm autopush` print exactly what they print today for nested checkouts; the existing tests still pass unchanged.
-3. For an Antigravity record format no release reads, the push notice and `mm status` give the same advice (neither recommends `mm update` when the other says no newer mm can read it); a test pins both for one fixture.
-4. For a format a newer release does read, both surfaces still recommend `mm update`; a test pins it.
-5. docs/invariants/events-retro.md records where the push-side notice gets the upgrade view.
-6. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
+**This group delivers:** gstack-extend run history and any folder holding an empty `.git` placeholder sync again, the manifest property tests stop failing falsely on a loaded host, resolved conflicts settle even when stdout fails, and the open real-machine automatic-update observation. Only Track 132D is in flight; its disjoint siblings may launch.
 
 #### Track 132B: Observe one automatic update on a real machine (Track 124B's post-merge check)
 _1 task . ~10 LOC . low risk . 1 file_
@@ -67,24 +42,9 @@ _Source: Track 124B (PR #307, merged 2026-11-10 at `ea8215b`, v1.12.34) met acce
 
 _Latest check, 2026-11-13 at `bbbe943`: the Linux home machine's upgrade-state.json still has checked_at and attempted_at 2026-11-11T01:55:05Z, latest_version and last_seen_self_version 1.12.35; the file has not advanced since 2026-11-11 while HEAD is 1.12.42. Code does not prove this machine was inactive: upgrade.check_for_upgrade returns before cache access for a dev build, invocation skip or auto_check=false; cache I/O can also fail. A failed fetch normally advances attempted_at and records a cause, so the unchanged attempted_at is not evidence of an ordinary recent network failure. cli.autopush can return from _auto_command_scope or no-sources before update_or_nudge; reaching the normal tail does check even without content changes. Establish which path ran using noncredential local run evidence before diagnosing a repair; no update was induced during regeneration._
 
+_Check at regeneration, 2026-11-15 at `888ada2`: the Linux home machine now runs 1.12.47, and its upgrade-state.json has checked_at and attempted_at 2026-11-15T02:47:52Z with latest_version and last_seen_self_version 1.12.47 and no recorded cause, so the release check is running again. Its auto-update.log has no entry after the 2026-11-11 upgrade to 1.12.35, so the move from 1.12.35 to 1.12.47 is not recorded as an automatic update by 124B's code and criterion 9 stays open; that machine is now current, not one release behind._
+
 - **Record the observation** -- After the next release, on one machine on a tracking install one release behind, let its next push or autopush update mm, and record `mm --version` before and after, the `upgrade-state.json` fields and `mm status` (placeholders only) as Track 124B's post-merge row; if it does not update, file the cause in TODOS.md. _docs/invariants/auto-upgrade.md only if the observation contradicts it, ~50 lines._ (S)
-
-#### Track 132C: Name every old peer in retro recovery advice
-_2 tasks . ~155 LOC . low risk . 2 files_
-**Outcome:** The owner can tell exactly which peer needs upgrading, even when rejected rows include unidentified devices; coverage notes read naturally.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O7.3 and O8.6, plus the owner-approved 2026-11-13 regeneration brief.
-**Done when:** Exact-output tests cover one old peer, all-old, mixed, and named-old plus unidentified rejected rows; named peers are explicit, unknown peers are never claimed old, and malformed registry inputs remain unknown.
-_touches: src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_retro_usage_presentation.py_
-
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
-
-_Source: Owner 2026-11-12 “1”; shadow/129A/carbon-final.txt (data) and the regeneration brief. _attended_usage_remedy's all-old branch never computes labels, and sessions_incomplete emits only a peer count. Verified against `bbbe943` on 2026-11-13._
-
-- **Name and separate remedies** -- Name proven-old peers in rejected, all-old, mixed and sessions_incomplete notes; unidentified/current/unknown peers get push-or-delivery advice without an unsupported upgrade claim. Remove duplicated “for” and awkward “then last reported” joins; preserve version gates and counters. _src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_retro_usage_presentation.py, ~110 lines._ (M)
-- **Malformed registry containers** -- Close the recorded test gap from Track 129A: malformed containers, records and IDs stay unknown and never generate an upgrade recommendation. _src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_retro_usage_presentation.py, ~45 lines._ (S)
-
-**Acceptance:** Exact-output tests cover one old peer, all-old, mixed, and named-old plus unidentified rejected rows; named peers are explicit, unknown peers are never claimed old, and malformed registry inputs remain unknown. `./bin/check --affected` passes; full portable and platform checks remain CI obligations.
 
 #### Track 132D: Settle resolved conflicts before reporting to stdout
 _2 tasks . ~170 LOC . low risk . 2 files_
@@ -103,81 +63,114 @@ _Source: Owner 2026-11-12 “1 a”; shadow/130B/carbon-final.txt (data). Six mu
 
 **Acceptance:** Each successful disk mutation remains counted and settled after output failure; no false rename/delete failure and no repeated conflict on the next pull; genuine disk failures stay failures; nested Grok symlinks are skipped. `./bin/check --affected` passes; full portable and platform checks remain CI obligations.
 
-#### Track 132E: Wait for the detached pipx test child to finish writing
-_1 tasks . ~55 LOC . low risk . 1 files_
-**Outcome:** The portable suite stops intermittently parsing an empty or partial result from its detached synthetic child.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O7.3 and O8.6, plus the owner-approved 2026-11-13 regeneration brief.
-**Done when:** The detached test waits for complete JSON under a bounded deadline and still proves its existing subprocess contract.
-_touches: tests/test_self_update.py_
-
-_read-first: docs/invariants/README.md, docs/invariants/auto-upgrade.md_
+#### Track 132F: Stop an empty `.git` directory from freezing a synced folder (gstack-extend run history stopped syncing)
+_3 tasks . ~170 LOC . medium risk . 8 files_
+**Outcome:** Each machine's gstack-extend run history (`~/.gstack-extend/analytics/stage-runs/<host>.jsonl`, written owner-only) reaches every other machine again, and an empty placeholder `.git` directory anywhere in a synced source no longer stops that subtree from publishing or receiving.
+**Supports:** MVP-1 on Syncthing; docs/SPEC.md O1 (sync converges across macOS and Linux) and O6 (the allowlisted gstack-extend run history). Encountered: the Linux home machine's own file is current (last row 2026-11-15T02:36Z) while its copy of the laptop's file stops at 2026-11-09T04:07Z, and the laptop's copy of the home machine's file stops on 2026-11-09.
+**Done when:** the acceptance list below passes: an empty `.git` directory freezes nothing, a real checkout (`.git/HEAD`, or a `.git` file) freezes exactly as today, and a previously frozen entry publishes its current bytes once the marker is found to be empty.
+_touches: src/mind_meld/manifest.py, tests/conftest.py, tests/test_manifest.py, tests/test_integration.py, tests/test_diag.py, tests/test_grok_memory.py, tests/test_track_30a.py, docs/invariants/sync.md_
+_read-first: docs/invariants/README.md, docs/invariants/sync.md ("Nested git checkouts are frozen, never published"), src/mind_meld/manifest.py (`_directory_is_git_repo`, `nested_repo_root`, `nested_repo_roots_for_paths`), src/mind_meld/cli.py (`_freeze_nested_checkout_entries`)_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
 
-_Source: Encountered test failure in the regeneration brief: TestPipxSeams.test_pipx_subprocesses_receive_no_prompt_env_closed_stdin_and_new_session[True]. The parent polls only exists(), while Path.write_text creates the child output before completing its JSON write. Verified against `bbbe943` on 2026-11-13._
+_Source: the 2026-11-15 roadmap brief, encountered bug 1 (gstack-extend's manager, confirmed by the manager on the Linux home machine). The brief's hypotheses were the 0600 mode or replace-by-rename; the code shows neither. Verified at `888ada2`: `manifest._directory_is_git_repo` returns `stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)` for `<dir>/.git` without checking that a repository is there, so `nested_repo_root` treats `analytics/` as a nested checkout; push then copies the prior entries forward unchanged and pull never writes inside it (docs/invariants/sync.md). On the Linux home machine `~/.gstack-extend/analytics/.git` is an empty directory created 2026-11-10 18:17Z, beside other empty placeholders made in the same second (the pattern of a sandboxed agent run, not gstack-extend); the last-push manifest still holds that machine's file at its 2026-11-09 size, and every pull since 2026-11-11 logs `gstack-extend analytics excluded`. Killed: mm never reads file mode on scan, allowlist or pull, and gstack-extend's `telemetry.append_row` only appends with `O_APPEND|O_CREAT`, mode 0600, never renames and writes only its own host's file. The two hosts whose files still sync have 0644 files only because those are copies mm pulled. Whether the laptop also has the placeholder was not checked; the home machine's freeze alone explains both directions it reports. Workaround until this ships: `rmdir ~/.gstack-extend/analytics/.git` on an affected machine, then `mm push`._
 
-- **Wait for complete child evidence** -- Use bounded completion evidence rather than file existence; retain assertions on closed stdin, new session and noninteractive environment. Make incomplete output retryable and genuine timeout fail with useful evidence; never run real pipx. _tests/test_self_update.py, ~55 lines._ (S)
-
-**Acceptance:** The detached test waits for complete JSON under a bounded deadline and still proves its existing subprocess contract. `./bin/check --affected` passes; full portable and platform checks remain CI obligations.
-
-## Current Plan
-
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131_
-
-### Group 133: Remaining command output
-
-_Depends on: Group 132_
-
-**This group delivers:** Status, gc, diff, log, recapture and update notices use the shared output style, with deferred-stream and zero-count tests.
-
-#### Track 133A: Bring status, gc, diff, log, recapture and the update notices to the shared style
-_4 tasks . ~310 LOC . low risk . 11 files_
-**Outcome:** An owner who runs `mm status`, `mm gc`, `mm diff`, `mm log` or `mm recapture`, or reads the update notice a push prints, sees the same outcome, warning, error and fix-command forms as push and pull.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O8.6 as amended 2026-11-10. The owner, 2026-11-10: "they all need to look like they come from the same tool".
-**Done when:** the acceptance list below passes: each site the survey names prints in the shared style, with tests pinning the new text.
-_touches: src/mind_meld/cli.py, src/mind_meld/retention.py, src/mind_meld/pullhistory.py, src/mind_meld/statusflow.py, src/mind_meld/upgrade.py, tests/test_retention.py, tests/test_gc_events.py, tests/test_pullhistory.py, tests/test_statusflow.py, tests/test_self_update.py, tests/test_integration.py_
-_blocked-by: Track 130A, Track 132A_
-_read-first: docs/invariants/README.md (the output style Track 129B wrote), src/mind_meld/cli.py (`gc`, `diff_cmd`, `recapture`), src/mind_meld/retention.py, src/mind_meld/pullhistory.py, src/mind_meld/statusflow.py, src/mind_meld/upgrade.py (`format_upgrade_message`, `_auto_install`'s failure notice)_
-_produces: status, gc, diff, log, recapture and the update notices in the shared style_
-_session: fresh · effort: medium · verify: ./bin/check --affected_
-
-_Source: the survey in Track 129B's source note, verified at `a6f3e73`. Sites that do not follow the shared style once 129B has moved `core._error`: `mm gc` ends `[bold green]GC complete.[/bold green]` (`cli.py`) and `retention.py` warns in `[yellow]` with "rerun `mm gc`"; `mm recapture` prints a literal `[red]Error:[/red]` and ends `[bold green]Recapture complete.`; `mm diff` warns `[yellow]Warning:[/yellow] remote manifest for ...`; `mm log` (`pullhistory.py`) gives "run `mm update`"; `mm status` gives "(run `mm push`)" in two places beside its own `Run: mm diag`; the update nudge ends "— run `<install command>`" and the failed automatic update "run `mm update`, or `<reinstall>`" (`upgrade.py`). `install-skills` already prints `mm: error:` and `recover` errors through `core._error`, so neither is in this Track._
-
-- **Errors, warnings and fix commands** -- Move the `gc`, `diff`, `recapture`, `log` and `status` warnings and errors listed above, and the update nudge and failure notices, to the shared helpers, with each fix command as `Run: <command>` printed last. _src/mind_meld/cli.py, src/mind_meld/retention.py, src/mind_meld/pullhistory.py, src/mind_meld/statusflow.py, src/mind_meld/upgrade.py, tests/test_retention.py, tests/test_pullhistory.py, tests/test_statusflow.py, tests/test_self_update.py, ~140 lines._ (M)
-- **Outcome lines** -- `mm gc` and `mm recapture` end with an outcome line in the shared form instead of bold green "complete" lines; counts the owner does not act on move behind `-v`. _src/mind_meld/cli.py, tests/test_gc_events.py, tests/test_integration.py, ~80 lines._ (S)
-
-- **Deferred update stream failures** -- Close the recorded no-defect test gap from Track 130A (`459828f`): populate the deferred display, fail its write and flush, and assert no installer retry or changed sync exit code. _src/mind_meld/cli.py, tests/test_self_update.py, ~45 lines._ (S)
-- **Zero pending capture** -- Close the recorded no-defect test gap from PR #310 (`97ae07a`): incomplete discovery with zero pending repositories must not invent a positive catching-up prefix in status. _src/mind_meld/statusflow.py, tests/test_statusflow.py, ~45 lines._ (S)
+- **A repository needs `.git/HEAD`** -- Count a `.git` directory as a nested checkout only when `lstat` finds `HEAD` inside it (a file or symlink); keep accepting a regular `.git` file (worktrees, submodules); in strict mode keep refusing on probe errors other than not-found. The same predicate feeds pull's `nested_repo_roots_for_paths`, so both directions recover. File modes are unchanged: mm writes no mode on the files it reads, and the anchor stays 0600. _src/mind_meld/manifest.py, docs/invariants/sync.md, ~25 lines._ (S)
+- **Fixtures make real markers** -- Replace bare `.git` `mkdir` calls that stand for a nested checkout with a helper that also writes `.git/HEAD`. _tests/conftest.py, tests/test_manifest.py, tests/test_integration.py, tests/test_diag.py, tests/test_grok_memory.py, tests/test_track_30a.py, ~80 lines._ (M)
+- **Empty-marker cases** -- Add `TestNestedRepositories` cases (empty `.git` directory freezes nothing; `.git/HEAD` and a `.git` file still freeze; unreadable `HEAD` probe still refuses in strict mode) and one integration test where a frozen entry from the prior manifest publishes its current bytes with no tombstones and a peer receives them. _tests/test_manifest.py, tests/test_integration.py, ~70 lines._ (S)
 
 **Acceptance:**
 
-1. Each site in the source note prints the shared form; no `[yellow]Warning:`, `[red]Error:` or "run `...`" fix form remains in the touched files; tests pin each command's new text.
-2. `mm gc` and `mm recapture` end with one outcome line in the shared form; tests pin both.
-3. `mm status` still opens with its one-line verdict (O8.4); a test pins it.
-4. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
+1. An empty `<root>/sub/.git/` directory freezes nothing: files under `sub/` publish on push and peer files under it are written on pull; a test pins both.
+2. A `.git` directory with `HEAD`, and a regular `.git` file, still freeze and stay excluded exactly as today; the existing freeze and delete-convergence tests pass.
+3. An integration test: an entry frozen in the prior manifest publishes its current bytes once the `.git` is found to be empty, with no tombstones, and a peer receives them.
+4. In strict mode, an unreadable `.git/HEAD` probe still refuses with the existing snapshot error.
+5. docs/invariants/sync.md says what counts as a nested checkout.
+6. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
 
-5. Deferred-update stream failures preserve the sync result without retry; zero pending capture has no positive catching-up count.
+#### Track 132G: Keep the manifest property tests from failing on a loaded host
+_1 task . ~25 LOC . low risk . 1 file_
+**Outcome:** The developer's `./bin/check --affected` runs stop failing falsely when two verifies overlap on one host, while the manifest property tests keep checking the same properties with the same example counts.
+**Supports:** MVP-1 on Syncthing; the release discipline in AGENTS.md (`./bin/check` is the verification entry point). Encountered on 2026-11-14: Hypothesis `HealthCheck.too_slow` failed both Track 132C's and Track 132D's implement verify at a load average of about 24; each passed when run alone.
+**Done when:** every Hypothesis test in `tests/test_manifest_fuzz.py` runs with no deadline and with `HealthCheck.too_slow` suppressed, keeps its current `max_examples`, and the file still passes `./bin/check tests/test_manifest_fuzz.py`.
+_touches: tests/test_manifest_fuzz.py_
+_read-first: tests/test_manifest_fuzz.py_
+_session: fresh · effort: low · verify: ./bin/check tests/test_manifest_fuzz.py_
 
-### Group 134: Empty conflict outcomes
+_Source: the 2026-11-15 roadmap brief, encountered bug 2. The three tests named there are `test_load_manifest_round_trip_preserves_keys`, `test_v1_promotion_migrates_bare_tombstone_keys` and `test_normalize_never_crashes_on_arbitrary_dict`. Verified at `888ada2`: every `@settings(...)` in the file sets only `max_examples` (100 or 200), so Hypothesis's default 200 ms deadline and its `too_slow` health check apply; no `register_profile` exists in `tests/conftest.py`. `tests/test_safe_str.py` also uses Hypothesis but has not failed, so it is out of scope._
 
-_Depends on: Group 133_
+- **Loaded-host settings** -- Add one file-local settings object (`deadline=None`, `suppress_health_check=[HealthCheck.too_slow]`) and apply it to each `@settings` in the file, keeping each test's `max_examples`; no strategy or assertion changes. _tests/test_manifest_fuzz.py, ~25 lines._ (S)
 
-**This group delivers:** Conflicts and resolve use the shared style even when there is nothing to resolve.
+**Acceptance:**
 
-#### Track 134A: Use shared outcomes when conflicts and resolve find nothing
-_1 tasks . ~50 LOC . low risk . 2 files_
-**Outcome:** An owner with no conflict files sees the shared plain outcome style from both conflict commands.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O7.3 and O8.6, plus the owner-approved 2026-11-13 regeneration brief.
-**Done when:** Both empty commands print one shared plain outcome with no green markup, keep exit semantics and perform no inspection writes.
-_touches: src/mind_meld/cli.py, tests/test_integration.py_
-_blocked-by: Track 133A_
-_read-first: docs/invariants/README.md, docs/invariants/README.md (shared output style)_
+1. Every `@given` test in `tests/test_manifest_fuzz.py` has `deadline=None` and suppresses `HealthCheck.too_slow`, with its current `max_examples`.
+2. No strategy, assertion or test is removed or weakened.
+3. `./bin/check tests/test_manifest_fuzz.py` passes, and the full `./bin/check` passes in CI.
+
+## Current Plan
+
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 133, 134_
+
+### Group 135: Recapture quiet and one Antigravity advice
+
+_Depends on: Group 132_
+
+**This group delivers:** A plain `mm recapture` prints only its own outcome, and status, diag and recapture give the same Antigravity advice as the push.
+
+#### Track 135A: Quiet recapture's inner push, and give status, diag and recapture the push's Antigravity advice
+_4 tasks . ~230 LOC . low risk . 8 files_
+**Outcome:** A plain `mm recapture` ends with its own outcome line and no "Push complete." block, timings or counts, and `mm status`, `mm diag` and `mm recapture` no longer suggest `mm update` beside a verdict that says no newer mm can read an unsupported reader's format.
+**Supports:** MVP-1 on Syncthing; docs/SPEC.md O8.1 ("nothing else is printed unless the owner must act") and O8.6, finishing what Tracks 132A and 133A started on the same surfaces.
+**Done when:** the acceptance list below passes: non-verbose recapture prints no inner-push summary, `-v` still shows it, and the stored auto-push detail, diag's last-autorun block and recapture's tail agree with the status verdict for a format no release reads.
+_touches: src/mind_meld/recaptureflow.py, src/mind_meld/cli.py, src/mind_meld/events_tail.py, src/mind_meld/statusflow.py, tests/test_integration.py, tests/test_silent_failure_contract.py, tests/test_statusflow.py, tests/test_init_events_backfill.py, docs/invariants/events-retro.md_
+_blocked-by: Track 132F_
+_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, docs/invariants/sync.md ("Nested git checkouts are frozen"), src/mind_meld/recaptureflow.py (the `push_core(...)` call), src/mind_meld/cli.py (`_push_core`'s `diagnostics` and `result_observer`), src/mind_meld/events_tail.py (`_host_skip_phrase`, `_no_release_reads_clause`), src/mind_meld/statusflow.py (the `Last auto-push` breadcrumb render)_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
 
-_Source: Regeneration brief item 2; Track 130B intentionally excluded these CLI lines. Correction: both sites currently say [green]No conflict files.[/green], not “No unresolved conflicts.” Verified against `bbbe943` on 2026-11-13._
+_Source: four inbox items filed by the reviews of Tracks 132A (`88cb0b0`) and 133A (`d9180e7`), verified at `888ada2`. Recapture: `recaptureflow` calls `push_core(config, passphrase, memory_kb, verbose=False, dry_run=False, report_nested_repositories=False)` with neither `diagnostics` nor `result_observer`, so `_push_core` keeps its display and prints "Push complete." (`cli.py`) and its counts before `Recapture:`; running a non-verbose `mm recapture` shows it. Advice: the review probe (an autopush, then `mm status`, `agy` unsupported, current cache) printed the stored "run `mm update`" detail on the `Last auto-push` line beside "no newer mm can yet", identically at the merge base; recapture's tail capture writes the same default sentence. This is the same disagreement the developer saw on 2026-11-09 (Track 132A), on the surfaces 132A left alone. Ordered after Track 132F, which shares `tests/test_integration.py`, so the encountered sync bug lands first. Deferred test gap "Git pending count cutoff fallbacks" (events_tail.py, tests/test_silent_failure_contract.py) meets its trigger here but stays in Future because this card is at the session-weight limit._
 
-- **Unify empty results** -- Use the existing shared outcome helper in conflicts and resolve empty-result paths, with exact output and exit-code assertions; inspection remains read-only. _src/mind_meld/cli.py, tests/test_integration.py, ~50 lines._ (S)
+- **Recapture's inner push is quiet** -- Run recapture's push with its display off unless `-v`, so only recapture's own outcome (and any failure with its fix) prints; `-v` keeps today's inner detail. _src/mind_meld/recaptureflow.py, src/mind_meld/cli.py, tests/test_integration.py, ~50 lines._ (S)
+- **One advice everywhere for a format no release reads** -- Make the autopush breadcrumb detail, diag's last-autorun block and recapture's tail notice use the cached upgrade view the push and status already read, so none recommends `mm update` when the view says no newer release reads the format; a format a newer release reads still gets `mm update`. _src/mind_meld/events_tail.py, src/mind_meld/statusflow.py, tests/test_statusflow.py, tests/test_silent_failure_contract.py, docs/invariants/events-retro.md, ~110 lines._ (M)
+- **Recapture positive control** -- Close the recorded test gap from Track 132A: give `test_recapture_and_plain_push_stay_silent_on_nested_checkouts` an observation that recapture's own push reached the source (for example an ordinary file outside the checkout that it must publish). _tests/test_integration.py, ~30 lines._ (S)
+- **Current-cache advice cases** -- Close the recorded test gap from Track 132A: pin recapture's and init's unsupported-reader notice with a current cache, and add a two-reader case to the push/status parity test. _tests/test_init_events_backfill.py, tests/test_silent_failure_contract.py, ~40 lines._ (S)
 
-**Acceptance:** Both empty commands print one shared plain outcome with no green markup, keep exit semantics and perform no inspection writes. `./bin/check --affected` passes; full portable and platform checks remain CI obligations.
+**Acceptance:**
+
+1. A non-verbose `mm recapture` prints no "Building manifest", "Uploading", "Push complete." or count lines from its inner push; `mm recapture -v` still does; a test pins both.
+2. With an unsupported reader and a current cache saying no release reads its format, `mm status` after an autopush, plain-text `mm diag` and `mm recapture` give the same advice as the status verdict; a test pins each.
+3. For a format a newer release reads, every one of those surfaces still recommends `mm update`; a test pins it.
+4. The recapture nested-checkout test fails if recapture's push skips the source.
+5. docs/invariants/events-retro.md says where each surface gets the upgrade view.
+6. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
+
+### Group 136: Truthful conflict reaper and conflict-command lines
+
+_Depends on: Group 132, Group 135_
+
+**This group delivers:** `mm gc --conflicts` stops calling kept conflict copies a failure, and the conflict commands' remaining lines use the shared style.
+
+#### Track 136A: Make gc's conflict reaper and the conflict commands' last two lines tell the truth in the shared style
+_3 tasks . ~170 LOC . low risk . 6 files_
+**Outcome:** `mm gc --conflicts` with an unresolved conflict copy reports the copy it kept as kept, not as a permissions or locks failure, and still prints its `Gc:` outcome; an unmatched `mm resolve PATH` ends with a `Run:` fix, and the `mm conflicts` listing ends in the shared forms.
+**Supports:** MVP-1 on Syncthing; docs/SPEC.md O8.1 and O8.6 (the developer, 2026-11-10: "they all need to look like they come from the same tool").
+**Done when:** the acceptance list below passes: kept copies are not remediation, wrong fix commands are gone, and both conflict-command lines use the shared helpers, with tests pinning the new text.
+_touches: src/mind_meld/retention.py, src/mind_meld/gcflow.py, src/mind_meld/cli.py, tests/test_conflict_copy.py, tests/test_gc_events.py, tests/test_integration.py_
+_blocked-by: Track 132D, Track 135A_
+_read-first: docs/invariants/README.md, docs/invariants/conflicts.md, src/mind_meld/retention.py (`ReapOutcome.needs_remediation`, `_render_reap_outcome`), src/mind_meld/gcflow.py, src/mind_meld/cli.py (`conflicts`, `resolve`)_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
+
+_Source: three inbox items filed by the reviews of Tracks 133A (`d9180e7`) and 134A (`411ffde`), verified at `888ada2`. `ReapOutcome.needs_remediation` returns `bool(self.failed or self.skipped or self.repair_failed)`, and the reaper counts deliberate keeps (a live conflict older than 30 days, a `v0-` sidecar, an unreadable age) as `skipped`, so `gcflow` (`elif any(o.needs_remediation ...)`) prints "Fix permissions or locks" with `Run: mm gc -v` (no `--conflicts`) in place of the `Gc:` line; any machine with one old unresolved conflict hits it on the normal path. `cli.py` still ends an unmatched `mm resolve PATH` with `core._error(f"No conflict file matching: {path}")` and no fix, and the `mm conflicts` listing with the markup hint "...or delete files manually with [bold]rm[/bold]." Ordered after Track 135A (shared `cli.py` and `tests/test_integration.py`) and blocked by Track 132D, whose PR #324 also changes `cli.py`, `retention.py` and `tests/test_conflict_copy.py`._
+
+- **Kept copies are not failures** -- Count deliberate keeps separately from skips the owner must fix; only real failures warn, the warning's fix names `mm gc --conflicts -v`, and the `Gc:` outcome line still prints. _src/mind_meld/retention.py, src/mind_meld/gcflow.py, tests/test_conflict_copy.py, tests/test_gc_events.py, ~90 lines._ (M)
+- **Conflict-command lines in the shared style** -- An unmatched `mm resolve PATH` ends with `Run: mm conflicts`; the `mm conflicts` listing ends with a shared `Run: mm resolve` line and a `mm: notice:` for pre-v0.9.2 copies; update the test that pins today's unmatched-path stderr. _src/mind_meld/cli.py, tests/test_integration.py, ~60 lines._ (S)
+- **Empty-PATH witness** -- Close the recorded test gap from Track 134A: spy on `resolveflow._find_conflict_files` in `test_resolve_empty_path_argument_errors_instead_of_walking` and assert it found the planted sidecar. _tests/test_integration.py, ~20 lines._ (S)
+
+**Acceptance:**
+
+1. `mm gc --conflicts` with one unresolved conflict older than 30 days prints no permissions-or-locks warning and still prints its `Gc:` outcome; a test pins it.
+2. A real reap failure still warns, and its fix line names `--conflicts`; a test pins it.
+3. An unmatched `mm resolve PATH` ends with `Run: mm conflicts` and exits 1; the `mm conflicts` listing has no Rich-markup prose hint; tests pin both.
+4. The empty-PATH resolve test fails if discovery finds no sidecar.
+5. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
 
 ### Execution Map
 
@@ -185,11 +178,11 @@ A Group may launch when every Group in its ← set has landed. Document order is
 
 ```
 - Group 132 ← {}
-- Group 133 ← {132}
-- Group 134 ← {133}
+- Group 135 ← {132}
+- Group 136 ← {132, 135}
 ```
 
-**Total: 0 phases . 3 groups . 7 tracks remaining.**
+**Total: 0 phases . 3 groups . 6 tracks remaining.**
 
 The 2.0 cut still needs the owner’s O1 to O4 Syncthing observations on one Mac and both Linux machines, with O6 to O8 holding, recorded in PROGRESS.md Acceptance. A Mac not yet moved holds nothing up; publication is a separate owner decision.
 
@@ -197,7 +190,7 @@ The 2.0 cut still needs the owner’s O1 to O4 Syncthing observations on one Mac
 
 ## Future
 
-Deferred: docs/roadmap-future.md (49 items)
+Deferred: docs/roadmap-future.md (54 items)
 
 ## Shipped
 
