@@ -572,7 +572,8 @@ def _links_through(path: Path, target: Path) -> bool:
     """Whether ``path``'s own symlink chain reaches ``target``'s inode.
 
     For two names of one file. A regular ``target`` with a single link is the
-    file's only name, so a symlink ``path`` must end there: True without walking.
+    file's only name, so ``path`` reaches it exactly when ``path`` is a symlink,
+    checked without walking; True if that check fails, since the two are one file.
     Otherwise follows ``path`` one link at a time (each hop joined onto its link's
     real directory) and compares each hop's ``os.lstat`` identity with
     ``target``'s, never ``path`` itself: a name that only resolves to the same
@@ -584,8 +585,11 @@ def _links_through(path: Path, target: Path) -> bool:
     """
     try:
         want = os.lstat(target)
-        if stat.S_ISREG(want.st_mode) and want.st_nlink == 1 and path.is_symlink():
-            return True
+        if stat.S_ISREG(want.st_mode) and want.st_nlink == 1:
+            try:
+                return stat.S_ISLNK(os.lstat(path).st_mode)
+            except OSError:
+                return True
         step = path
         for _ in range(40):  # the kernel's own symlink-follow limit
             if not step.is_symlink():

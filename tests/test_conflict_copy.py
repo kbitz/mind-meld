@@ -1691,6 +1691,35 @@ class TestResolveInteractiveLoop:
             "mm resolve again"
         ) in capsys.readouterr().err
 
+    def test_single_name_copy_gets_the_move_repair_when_the_original_cannot_be_read(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Once os.path.samefile has found the pair, an original whose own lstat
+        then fails (a transient error) still names the copy, the file's only name.
+        Treating the failure as "not a link" would advise deleting that name."""
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"only copy")
+        canonical = tmp_path / "user.md"
+        canonical.symlink_to(conflict.name)
+        real_lstat = os.lstat
+
+        def failing_for_original(p, *a, **kw):
+            if os.fspath(p) == os.fspath(canonical):
+                raise OSError(errno.EIO, "Input/output error")
+            return real_lstat(p, *a, **kw)
+
+        monkeypatch.setattr(os, "lstat", failing_for_original)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        monkeypatch.setattr(os, "lstat", real_lstat)
+        assert conflict.read_bytes() == b"only copy"
+        assert canonical.is_symlink()
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); move {conflict.name} over user.md, then run "
+            "mm resolve again"
+        ) in capsys.readouterr().err
+
 
 class TestResolveExitCode:
     """Tests for the (resolved, failed) return shape and resolve()'s exit code.
