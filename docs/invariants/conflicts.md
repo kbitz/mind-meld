@@ -180,9 +180,10 @@ links to one target. Every choice is unsafe or empty there: the diff is empty,
 renaming a link over its own target leaves a self-referencing link, and
 unlinking the real name leaves a dangling one. The refusal deletes nothing,
 counts as failed (exit 1) and names the repair: move the copy over the original
-when the original's own symlink chain runs through the copy (`_links_through`,
-which compares `os.lstat` identities, so deleting the copy would leave the
-original dangling), otherwise delete the copy. A `samefile`
+when the original's own symlink chain reaches the copy's inode (`_links_through`
+compares each hop's `os.lstat` identity, so a hard link of the copy in the chain
+counts; deleting the copy would usually leave the original dangling), otherwise
+delete the copy. A `samefile`
 error falls through to the reads, whose failure is counted as before. Pinned by
 `tests/test_conflict_copy.py::TestResolveInteractiveLoop` (a copy linked to its
 original, an original linked to its copy, an original linked through its copy).

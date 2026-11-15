@@ -134,7 +134,7 @@ here by hand, use the H3 form.
 - **Description:** The shared outcome print (`console.print(..., markup=False, highlight=False, soft_wrap=True)`) leaves Rich's emoji substitution on, and `safe_terminal_str` keeps colons. A sidecar a peer named `notes:fire:.sync-conflict-…md` is reported as `notes🔥.sync-conflict-…md` by `mm resolve`'s "deleted" and "promoted" outcome lines and by its markup-enabled `Conflict in …` header, which names a file that does not exist on disk. Any other outcome line that interpolates a peer- or user-controlled name has the same exposure. Passing `emoji=False` at those prints, or building the shared consoles with `Console(emoji=False)`, would show names verbatim.
 - **Evidence:** A review probe with an orphan sidecar `notes:fire:.sync-conflict-20260420-120000-v1-devA1234.md` and the answer `d` printed `Resolve: deleted notes🔥.sync-conflict-20260420-120000-v1-devA1234.md.` on this branch at `10178b6` and identically at the merge base `c6a6335`.
 - **Upstream severity:** CRITICAL
-- **Found in:** src/mind_meld/resolveflow.py:601
+- **Found in:** src/mind_meld/resolveflow.py:602
 - **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
 
@@ -171,7 +171,7 @@ here by hand, use the H3 form.
 - **Description:** `mm resolve`'s `(p)romote` for a conflict copy whose original is missing links the copy to the original's name, then unlinks the copy. No test covers the link succeeding and the unlink then failing, which leaves both names in place and counts a failure. The link failure, an occupied name and a dangling symlink at the name are pinned.
 - **Hypothesis (untested):** add a `TestResolvePromote` case that lets the real `os.link` run and makes `os.unlink` raise `OSError`, then pin the error line, `(0, 1)` and both names on disk. Re-verify first. The single-step rename entry below would remove this state, so the test may belong with that change.
 - **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/resolveflow.py:674
+- **Found in:** src/mind_meld/resolveflow.py:700
 - **Evidence:** Track 132D cycle 2 testing specialist; review read only, no failure reproduced. Cycle 3's maintainability reviewer noted that this state's error line does not say the original now exists.
 - **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
@@ -181,7 +181,7 @@ here by hand, use the H3 form.
 - **Description:** Track 132D moved the keep-both `(p)romote` "will not sync until you add it to config" warning out of the success branch, so it runs after the outcome line, which now goes through `_print_outcome`. The output-failure test for that promote pins the count, but nothing pins that the warning still prints when the outcome print raises `OSError`.
 - **Hypothesis (untested):** add a promote case under an `include_files` source to `TestResolveOutputFailureAfterMutation` and assert the warning reaches stderr after an outcome-print `OSError`; re-verify first.
 - **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/resolveflow.py:1129
+- **Found in:** src/mind_meld/resolveflow.py:1181
 - **Evidence:** Track 132D coverage audit (audit-only; weak path); review read only, no failure reproduced.
 - **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
@@ -191,7 +191,7 @@ here by hand, use the H3 form.
 - **Why it can wait:** the owner chose to keep link-then-unlink for Track 132D (2026-11-14, D2 = A). The windows are microseconds wide: the lost save needs a concurrent writer on the copy, and the two-names state an interruption or a failed unlink between the two calls. The keep-both promote has had the same window since v0.12.8 with no report. The change needs platform calls with a fallback and its own review.
 - **Revisit trigger:** an owner report of a lost save on a conflict copy, or of a promoted file left beside its copy as a second name; the next Track that changes either promote path; or Python's `os` module gaining a no-replace rename.
 - **Evidence:** Track 132D cycle 2 Codex challenge (concurrent replace, Medium) and native adversarial review (interrupted pair); cycle 3 maintainability note (unlink failure), red team (no-op rename between two links) and native adversarial review (protected hard links); the post-review native adversarial pass (Grok and Muse hard-link skip, the samefile caveat, and that `rename` hits the same unmapped-owner EOVERFLOW check as `os.link`). Code read; not reproduced.
-- **Found in:** src/mind_meld/resolveflow.py:460 and src/mind_meld/resolveflow.py:674
+- **Found in:** src/mind_meld/resolveflow.py:460 and src/mind_meld/resolveflow.py:700
 - **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14) on the owner's decision.
 - **Effort:** ? (user triages in /roadmap)
 
@@ -200,7 +200,7 @@ here by hand, use the H3 form.
 - **Why it can wait:** the owner chose to backlog it for Track 132D (2026-11-14, D2 = A). `v0-` copies come only from pre-v0.9.2 conflicts migrated at discovery, so few if any remain. The mislabel predates this change, and the prompt still shows both files' bytes before the choice.
 - **Revisit trigger:** a `v0-` conflict copy found on any machine (`mm conflicts` marks them pre-v0.9.2), or the next Track that changes the pre-inversion dispatch or its migration.
 - **Evidence:** Track 132D cycle 2 native adversarial review; code read, not reproduced.
-- **Found in:** src/mind_meld/resolveflow.py:724
+- **Found in:** src/mind_meld/resolveflow.py:776
 - **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14) on the owner's decision.
 - **Effort:** ? (user triages in /roadmap)
 
@@ -209,7 +209,7 @@ here by hand, use the H3 form.
 - **Why it can wait:** it predates Track 132D, needs a concurrent writer during the prompt, and was found as a low-confidence (4/10) appendix item unrelated to the change.
 - **Revisit trigger:** an owner report of an edit lost during `mm resolve`, or the next Track that changes these replace choices.
 - **Evidence:** Track 132D cycle 2 red team (appendix); code read, not reproduced.
-- **Found in:** src/mind_meld/resolveflow.py:1016 and src/mind_meld/resolveflow.py:1041
+- **Found in:** src/mind_meld/resolveflow.py:1068 and src/mind_meld/resolveflow.py:1093
 - **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
 
@@ -227,17 +227,17 @@ here by hand, use the H3 form.
 - **Why it can wait:** the refusal is the owner-approved Track 132D behavior and loses nothing; two copies of one missing original are rare.
 - **Revisit trigger:** an owner report of the rerun, or the next Track that changes `mm resolve`'s discovery or the missing-original prompt.
 - **Evidence:** Track 132D cycle 3 native adversarial review; code read, not reproduced.
-- **Found in:** src/mind_meld/resolveflow.py:659
+- **Found in:** src/mind_meld/resolveflow.py:685
 - **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
 
-### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: mm resolve's same-file refusal has no hard-link test
+### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: mm resolve's same-file refusal has no hard-link or lstat-pinning tests
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `mm resolve` refuses a conflict copy and original that are one file before the prompt. Tests cover a copy linked to its original, an original linked to its copy and an original linked through its copy; none covers two hard links, the state a promote interrupted between its link and unlink leaves, which takes the `delete <copy>` repair. A change that detected only symlinks would pass the suite.
-- **Hypothesis (untested):** add a `TestResolveInteractiveLoop` case built with `os.link(canonical, conflict)`; assert `(0, 1)`, the `delete <copy>` repair line and both names kept. Re-verify first.
+- **Description:** `mm resolve` refuses a conflict copy and original that are one file before the prompt. Tests cover a copy linked to its original, an original linked to its copy and an original linked through its copy; none covers two hard links, the state a promote interrupted between its link and unlink leaves, which takes the `delete <copy>` repair, so a change that detected only symlinks would pass the suite. Nor does any test pin that `_links_through` compares `os.lstat` identities and never the original itself: with `os.stat` in its place the existing tests still pass, while two names symlinked to one target, and two hard links of one symlink inode (an interrupted promote of a symlinked copy), flip from `delete <copy>` to `move <copy> over <original>`.
+- **Hypothesis (untested):** add `TestResolveInteractiveLoop` cases for `os.link(canonical, conflict)`, for both names symlinked to one target, and for two hard links of one symlink inode; assert `(0, 1)`, the `delete <copy>` repair line and both names kept. Re-verify first.
 - **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/resolveflow.py:751
-- **Evidence:** Track 132D pass 5 testing specialist and native adversarial review; review read only. Functional QA exercised the hard-link pair and it was refused as specified.
+- **Found in:** src/mind_meld/resolveflow.py:752
+- **Evidence:** Track 132D pass 5 testing specialist and native adversarial review, and the pass 6 native adversarial mutation probe; review read only. Functional QA exercised the hard-link pair and it was refused as specified.
 - **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `3ee5fad` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
 

@@ -568,13 +568,14 @@ def _record_resolution(
 
 
 def _links_through(path: Path, target: Path) -> bool:
-    """Whether ``path``'s own symlink chain passes through ``target``'s entry.
+    """Whether ``path``'s own symlink chain reaches ``target``'s inode.
 
-    Follows ``path`` one link at a time and compares each step's ``os.lstat``
-    identity with ``target``'s, so a name that only resolves to the same file
-    does not count. Picks the repair for a same-file pair: when the original's
-    chain runs through the copy, deleting the copy would leave the original
-    dangling. An unreadable link ends the walk with False.
+    Follows ``path`` one link at a time and compares each hop's ``os.lstat``
+    identity with ``target``'s, never ``path`` itself, so a name that only
+    resolves to the same file does not count, while a hard link of ``target``
+    in the chain does. Picks the repair for a same-file pair: when the
+    original's chain runs through the copy, deleting the copy would usually
+    leave the original dangling. An unreadable link ends the walk with False.
     """
     try:
         want = os.lstat(target)
