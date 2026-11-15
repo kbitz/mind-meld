@@ -567,6 +567,30 @@ def _record_resolution(
         notice(core.ledger_cause(error) or "unreadable")
 
 
+def _links_through(path: Path, target: Path) -> bool:
+    """Whether ``path``'s own symlink chain passes through ``target``'s entry.
+
+    Follows ``path`` one link at a time and compares each step's ``os.lstat``
+    identity with ``target``'s, so a name that only resolves to the same file
+    does not count. Picks the repair for a same-file pair: when the original's
+    chain runs through the copy, deleting the copy would leave the original
+    dangling. An unreadable link ends the walk with False.
+    """
+    try:
+        want = os.lstat(target)
+        step = path
+        for _ in range(40):  # the kernel's own symlink-follow limit
+            if not step.is_symlink():
+                return False
+            step = step.parent / os.readlink(step)
+            st = os.lstat(step)
+            if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _print_outcome(text: str) -> None:
     """Print a resolve outcome line to stdout, ignoring OSError.
 
@@ -606,11 +630,10 @@ def _resolve_interactive_loop(
 
     Returns (resolved, failed). `failed` counts per-conflict failures that
     left the conflict in place: a failed read, rename, link, unlink or merged
-    write, or a refused promote. A conflict copy that cannot be removed after
-    a successful merge only warns. `resolve`
-    uses the failure count to decide its exit code; the walk itself does
-    not abort on per-file errors (so the user gets to triage every conflict
-    in one pass).
+    write, or a refused promote or same-file pair. A conflict copy that cannot
+    be removed after a successful merge only warns. `resolve` uses the
+    failure count to decide its exit code; the walk itself does not abort on
+    per-file errors (so the user gets to triage every conflict in one pass).
     """
 
     devices = devices or []
@@ -727,8 +750,9 @@ def _resolve_interactive_loop(
             same_file = False
         if same_file:
             copy_name = safe_terminal_str(cpath.name)
-            if canonical.is_symlink() and not cpath.is_symlink():
-                # Only the copy is a real file, so it holds the bytes.
+            if _links_through(canonical, cpath):
+                # The original reaches its bytes through the copy, so the copy
+                # takes its place; deleting the copy would leave it dangling.
                 repair = f"move {copy_name} over {safe_terminal_str(canonical.name)}"
             else:
                 repair = f"delete {copy_name}"

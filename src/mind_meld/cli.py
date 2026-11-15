@@ -4266,7 +4266,7 @@ def resolve(
         # Surface partial-failure as a non-zero exit so CI / scripts driving
         # `mm resolve` can detect that some conflicts were not actually
         # resolved (a failed read, rename, link, unlink or merged write, or a
-        # refused promote, mid-walk). Walk continues
+        # refused promote or same-file pair, mid-walk). Walk continues
         # through every conflict; only the exit code reflects the failure.
         raise typer.Exit(1)
 

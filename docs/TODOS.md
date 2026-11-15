@@ -134,7 +134,7 @@ here by hand, use the H3 form.
 - **Description:** The shared outcome print (`console.print(..., markup=False, highlight=False, soft_wrap=True)`) leaves Rich's emoji substitution on, and `safe_terminal_str` keeps colons. A sidecar a peer named `notes:fire:.sync-conflict-…md` is reported as `notes🔥.sync-conflict-…md` by `mm resolve`'s "deleted" and "promoted" outcome lines and by its markup-enabled `Conflict in …` header, which names a file that does not exist on disk. Any other outcome line that interpolates a peer- or user-controlled name has the same exposure. Passing `emoji=False` at those prints, or building the shared consoles with `Console(emoji=False)`, would show names verbatim.
 - **Evidence:** A review probe with an orphan sidecar `notes:fire:.sync-conflict-20260420-120000-v1-devA1234.md` and the answer `d` printed `Resolve: deleted notes🔥.sync-conflict-20260420-120000-v1-devA1234.md.` on this branch at `10178b6` and identically at the merge base `c6a6335`.
 - **Upstream severity:** CRITICAL
-- **Found in:** src/mind_meld/resolveflow.py:577
+- **Found in:** src/mind_meld/resolveflow.py:601
 - **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
 
@@ -229,6 +229,26 @@ here by hand, use the H3 form.
 - **Evidence:** Track 132D cycle 3 native adversarial review; code read, not reproduced.
 - **Found in:** src/mind_meld/resolveflow.py:659
 - **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: mm resolve's same-file refusal has no hard-link test
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** `mm resolve` refuses a conflict copy and original that are one file before the prompt. Tests cover a copy linked to its original, an original linked to its copy and an original linked through its copy; none covers two hard links, the state a promote interrupted between its link and unlink leaves, which takes the `delete <copy>` repair. A change that detected only symlinks would pass the suite.
+- **Hypothesis (untested):** add a `TestResolveInteractiveLoop` case built with `os.link(canonical, conflict)`; assert `(0, 1)`, the `delete <copy>` repair line and both names kept. Re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/resolveflow.py:751
+- **Evidence:** Track 132D pass 5 testing specialist and native adversarial review; review read only. Functional QA exercised the hard-link pair and it was refused as specified.
+- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `3ee5fad` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/retention.py|tests/test_conflict_copy.py] Test gap: conflict gc's same-file check has no reverse-symlink or hard-link test
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** `mm gc --conflicts` treats a sidecar and canonical that are one file as live and reaps neither name. The test covers a canonical symlinked to its old sidecar; none covers a sidecar symlinked to its canonical or a hard-linked pair, which reach the same `os.path.samefile` check.
+- **Hypothesis (untested):** parametrize `TestGcOldConflictFiles::test_canonical_symlinked_to_its_sidecar_is_never_reaped` over the three shapes and assert nothing is reaped. Re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/retention.py:562
+- **Evidence:** Track 132D pass 5 testing specialist; review read only. Functional QA exercised both shapes and gc kept both names.
+- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `3ee5fad` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
 
 ## Drain records

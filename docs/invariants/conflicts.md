@@ -6,7 +6,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/pullflow.py` — `_apply_fast_forward` / `_ledger_verdict` / `_classify_with_ledger` / `_ApplyReporter` / `_tidy_line_indexes` (see "The pull rule" below)
 - `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner`
 - `src/mind_meld/core.py` — `_filter_excluded_paths`
-- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_record_resolution` / `_print_outcome` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
+- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_record_resolution` / `_print_outcome` / `_links_through` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
 - `src/mind_meld/manifest.py` — `_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename` / `grok_memory_path_allowed` / `grok_path_allowed` / `grok_memory_scan_dirs`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `render_capped_diff` / `count_divergent_lines`
@@ -180,10 +180,12 @@ links to one target. Every choice is unsafe or empty there: the diff is empty,
 renaming a link over its own target leaves a self-referencing link, and
 unlinking the real name leaves a dangling one. The refusal deletes nothing,
 counts as failed (exit 1) and names the repair: move the copy over the original
-when only the copy is a real file, otherwise delete the copy. A `samefile`
+when the original's own symlink chain runs through the copy (`_links_through`,
+which compares `os.lstat` identities, so deleting the copy would leave the
+original dangling), otherwise delete the copy. A `samefile`
 error falls through to the reads, whose failure is counted as before. Pinned by
 `tests/test_conflict_copy.py::TestResolveInteractiveLoop` (a copy linked to its
-original, an original linked to its copy).
+original, an original linked to its copy, an original linked through its copy).
 
 **Inline keep-local deferral and abort.** At the inline prompt `(l)ocal` calls
 `_ApplyReporter.defer_settle`, which queues the settlement on the ledger; it is

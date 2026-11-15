@@ -1602,6 +1602,29 @@ class TestResolveInteractiveLoop:
             "mm resolve again"
         ) in capsys.readouterr().err
 
+    def test_refuses_an_original_linked_through_its_copy(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """When the original's symlink chain runs through the copy (original ->
+        copy -> real file), deleting the copy would leave the original dangling,
+        so the repair moves the copy over the original instead."""
+        real = tmp_path / "document.md"
+        real.write_bytes(b"real bytes")
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.symlink_to(real.name)
+        canonical = tmp_path / "user.md"
+        canonical.symlink_to(conflict.name)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        assert os.readlink(canonical) == conflict.name
+        assert os.readlink(conflict) == real.name
+        assert real.read_bytes() == b"real bytes"
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); move {conflict.name} over user.md, then run "
+            "mm resolve again"
+        ) in capsys.readouterr().err
+
 
 class TestResolveExitCode:
     """Tests for the (resolved, failed) return shape and resolve()'s exit code.
