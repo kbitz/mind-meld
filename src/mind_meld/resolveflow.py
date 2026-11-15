@@ -752,8 +752,8 @@ def _resolve_interactive_loop(
         if same_file:
             copy_name = safe_terminal_str(cpath.name)
             if _links_through(canonical, cpath):
-                # The original reaches its bytes through the copy, so the copy
-                # takes its place; deleting the copy would leave it dangling.
+                # The original's chain reaches the copy's inode, so the copy takes
+                # its place; deleting the copy would usually leave it dangling.
                 repair = f"move {copy_name} over {safe_terminal_str(canonical.name)}"
             else:
                 repair = f"delete {copy_name}"
