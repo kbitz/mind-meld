@@ -1348,14 +1348,9 @@ class TestDownloadAndApplyQuietAndProgress:
         out = non_tty.file.getvalue()
         assert "downloading" not in out
 
-    def test_quiet_suppresses_per_file_blob_key_error(self, tmp_path, monkeypatch) -> None:
-        """REGRESSION: codex /review v0.9.0.
-
-        Pre-fix, _download_and_apply printed `bad blob key` per-file via
-        console.print regardless of quiet, leaking to stdout in autopull.
-        D11 contract requires per-source totals reach stderr via
-        _print_pull_summary; per-file decoration must be suppressed in
-        quiet mode.
+    def test_quiet_suppresses_per_file_blob_key_error(self, tmp_path, monkeypatch, capsys) -> None:
+        """Per-file bad-blob-key failures never leak to stdout; they emit one
+        `mm: warning:` line with the cause on stderr even in quiet mode.
         """
 
         non_tty = self._force_non_tty_console(monkeypatch)
@@ -1374,15 +1369,18 @@ class TestDownloadAndApplyQuietAndProgress:
             quiet=True,
         )
         out = non_tty.file.getvalue()
-        # Per-file error must NOT leak in quiet mode
+        captured = capsys.readouterr()
         assert "bad blob key" not in out
         assert "local preserved" not in out
+        assert captured.out == ""
+        err_lines = captured.err.splitlines()
+        assert len(err_lines) == 1
+        assert err_lines[0].startswith("mm: warning: bad blob key (local preserved): a.md — ")
 
-    def test_quiet_suppresses_per_file_blob_missing(self, tmp_path, monkeypatch) -> None:
-        """REGRESSION: codex /review v0.9.0 — same contract for blob-missing path.
-
-        With verbose AND quiet, the verbose-gated blob-missing line must
-        still suppress (quiet wins).
+    def test_quiet_suppresses_per_file_blob_missing(self, tmp_path, monkeypatch, capsys) -> None:
+        """Per-file blob-read failures never print `blob missing` on stdout,
+        even with verbose=True; they emit one `mm: warning:` line with the
+        cause on stderr.
         """
 
         non_tty = self._force_non_tty_console(monkeypatch)
@@ -1391,7 +1389,7 @@ class TestDownloadAndApplyQuietAndProgress:
         pullflow._download_and_apply(
             backend,
             tmp_path,
-            {"a.md": _info("abc")},
+            {"a.md": _info(_sha(b"abc"))},
             "peerA",
             "pp",
             1024,
@@ -1399,7 +1397,14 @@ class TestDownloadAndApplyQuietAndProgress:
             quiet=True,
         )
         out = non_tty.file.getvalue()
+        captured = capsys.readouterr()
         assert "blob missing" not in out
+        assert captured.out == ""
+        err_lines = captured.err.splitlines()
+        assert len(err_lines) == 1
+        assert err_lines[0].startswith(
+            "mm: warning: blob read failed (local preserved): a.md — simulated blob miss."
+        )
 
 
 # ── Codex regression pins ────────────────────────────────────────────

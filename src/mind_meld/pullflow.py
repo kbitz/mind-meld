@@ -77,7 +77,6 @@ from mind_meld.errors import (
     DELETED_FILES_URL,
     LEDGER_URL,
     PULL_FAILURES_URL,
-    SNAPSHOT_FAILURES_URL,
     CryptoError,
     MindMeldError,
     NewerFormatError,
@@ -797,29 +796,31 @@ def _warn_apply_failure(
     exc: BaseException,
     *,
     preserved: str,
+    remedy: str | None = None,
 ) -> None:
     """One plain-stderr line: attribution, cause, preservation, and remedy."""
     safe = safety.safe_terminal_str
     location = "/".join(safe(p) for p in (device_name, src_name, rel_path) if p is not None)
-    error_number = getattr(exc, "errno", None) or getattr(exc.__cause__, "errno", None)
-    remedy = ""
-    if isinstance(exc, NewerFormatError):
-        remedy = core._newer_format_message(exc.version, exc.subject) + " "
-    elif error_number in (errno.EEXIST, errno.ENOTDIR, errno.EISDIR):
-        try:
-            collider = _first_existing_ancestor(local_path.parent)
-            if not collider.is_dir():
-                remedy = (
-                    f"{safe(device_name or 'The peer')} published a folder named "
-                    f"'{safe(collider.name)}' where this Mac has a file; "
-                    "keep yours or move it aside, then run mm pull. "
-                )
-        except OSError:
-            pass
-    elif error_number in (errno.EACCES, errno.EPERM, errno.EROFS):
-        remedy = f"check write permission on {safe(local_path.parent)}. "
-    elif error_number == errno.ENOSPC:
-        remedy = "free disk space. "
+    if remedy is None:
+        error_number = getattr(exc, "errno", None) or getattr(exc.__cause__, "errno", None)
+        remedy = ""
+        if isinstance(exc, NewerFormatError):
+            remedy = core._newer_format_message(exc.version, exc.subject) + " "
+        elif error_number in (errno.EEXIST, errno.ENOTDIR, errno.EISDIR):
+            try:
+                collider = _first_existing_ancestor(local_path.parent)
+                if not collider.is_dir():
+                    remedy = (
+                        f"{safe(device_name or 'The peer')} published a folder named "
+                        f"'{safe(collider.name)}' where this Mac has a file; "
+                        "keep yours or move it aside, then run mm pull. "
+                    )
+            except OSError:
+                pass
+        elif error_number in (errno.EACCES, errno.EPERM, errno.EROFS):
+            remedy = f"check write permission on {safe(local_path.parent)}. "
+        elif error_number == errno.ENOSPC:
+            remedy = "free disk space. "
     core._print_apply_warning(
         f"mm: warning: {safe(operation)} ({safe(preserved)}): {location} — "
         f"{safe(exc)}. {remedy}See {safe(PULL_FAILURES_URL)}."
@@ -949,7 +950,14 @@ class _ApplyReporter:
         if self.outcomes is not None:
             self.touched_parents.add(path.parent)
 
-    def failed(self, operation: str, exc: BaseException, *, preserved: str) -> None:
+    def failed(
+        self,
+        operation: str,
+        exc: BaseException,
+        *,
+        preserved: str,
+        remedy: str | None = None,
+    ) -> None:
         self.record("failed")
         _warn_apply_failure(
             self.device_name,
@@ -959,6 +967,7 @@ class _ApplyReporter:
             operation,
             exc,
             preserved=preserved,
+            remedy=remedy,
         )
 
     def follow_up_failed(self, exc: BaseException) -> None:
@@ -1354,6 +1363,17 @@ def _ledger_verdict(
     return verdict
 
 
+def _unchanged_since(path: Path, before: os.stat_result) -> bool:
+    """True when ``path`` still has the size, mtime, ctime and inode of ``before``."""
+    now = path.lstat()
+    return (now.st_size, now.st_mtime_ns, now.st_ctime_ns, now.st_ino) == (
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+        before.st_ino,
+    )
+
+
 def _apply_fast_forward(
     local_path: Path,
     rel_path: str,
@@ -1363,6 +1383,7 @@ def _apply_fast_forward(
     *,
     verbose: bool,
     reporter: _ApplyReporter,
+    note: str = "fast-forward",
 ) -> ApplyOutcome | None:
     """[F] local equals the version the peer built on: write remote, no union.
 
@@ -1371,13 +1392,7 @@ def _apply_fast_forward(
     re-check and the replace are the same exposure as ``_apply_merge``.
     """
     try:
-        now = local_path.lstat()
-        if (now.st_size, now.st_mtime_ns, now.st_ctime_ns, now.st_ino) != (
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-            before.st_ino,
-        ):
+        if not _unchanged_since(local_path, before):
             return None
         fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
     except (OSError, StorageError) as e:
@@ -1388,7 +1403,7 @@ def _apply_fast_forward(
     _restore_mtime_best_effort(local_path, remote_mtime_iso)
     reporter.follow_up = "output"
     if verbose:
-        console.print(f"  [green]\u2193[/green] {safe_str(rel_path)} (fast-forward)")
+        console.print(f"  [green]\u2193[/green] {safe_str(rel_path)} ({note})")
     return "written"
 
 
@@ -1585,42 +1600,43 @@ def _apply_incoming_file(
             if verbose:
                 console.print(f"  [dim]= {safe_str(rel_path)} (kept local by user)[/dim]")
             return "skipped"
-        if choice == "keep-remote":
+        elif choice == "keep-remote":
             # User overrode default keep-both by picking remote \u2014 overwrite
-            # canonical with remote bytes. Same I/O as _apply_write but with
-            # a different verbose string ("remote kept by user").
-            try:
-                fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
-            except (OSError, StorageError) as e:
-                reporter.failed("write failed", e, preserved="local preserved")
-                return "failed"
-            reporter.published("written")
-            reporter.follow_up = "mtime restore"
-            _restore_mtime_best_effort(local_path, remote_mtime_iso)
-            reporter.follow_up = "output"
-            if verbose:
-                console.print(
-                    f"  [yellow]\u2193[/yellow] {safe_str(rel_path)} (remote kept by user)"
-                )
-            return "written"
-        if choice == "merge":
+            # canonical with remote bytes if it did not change while the prompt
+            # waited; otherwise fall through to keep both.
+            forwarded = _apply_fast_forward(
+                local_path,
+                rel_path,
+                plain_data,
+                before,
+                remote_mtime_iso,
+                verbose=verbose,
+                reporter=reporter,
+                note="remote kept by user",
+            )
+            if forwarded is not None:
+                return forwarded
+        elif choice == "merge":
             # User accepted the LCS-merged result inline. Write merged
-            # bytes to canonical; the sidecar was never created (we
-            # suppress _apply_conflict by returning "merged-via-lcs"
-            # here). Refusal of (m) when merge wasn't offered already
-            # mapped to "keep-both" inside _prompt_conflict_choice.
+            # bytes to canonical if it did not change while the prompt waited;
+            # otherwise fall through to keep both. Refusal of (m) when merge
+            # wasn't offered already mapped to "keep-both" inside
+            # _prompt_conflict_choice.
             assert merged_bytes is not None  # invariant: choice=="merge" -> bytes
             try:
-                fsutil.atomic_write_bytes(local_path, merged_bytes, fsync=False)
+                unchanged = _unchanged_since(local_path, before)
+                if unchanged:
+                    fsutil.atomic_write_bytes(local_path, merged_bytes, fsync=False)
             except (OSError, StorageError) as e:
                 reporter.failed("merge write failed", e, preserved="local preserved")
                 return "failed"
-            reporter.published("merged-via-lcs")
-            reporter.follow_up = "output"
-            if verbose:
-                console.print(f"  [cyan]merged[/cyan] {safe_str(rel_path)} (LCS)")
-            return "merged-via-lcs"
-        if choice == "abort":
+            if unchanged:
+                reporter.published("merged-via-lcs")
+                reporter.follow_up = "output"
+                if verbose:
+                    console.print(f"  [cyan]merged[/cyan] {safe_str(rel_path)} (LCS)")
+                return "merged-via-lcs"
+        elif choice == "abort":
             raise typer.Abort()
         # choice == "keep-both" -> fall through to _apply_conflict, returns
         # "conflicted" on success. _ApplyReporter.record invalidates any
@@ -1725,12 +1741,14 @@ def _download_and_apply(
         if not quiet:
             core._sync_progress_advance()
 
-    # Quiet-mode contract: per-file decorations skipped in quiet (autopull);
-    # the summary routes per-source totals to stderr in _print_pull_summary
-    # (D11). Without this gate, autopull leaked per-file lines to stdout on
-    # bad-blob/decrypt errors. (codex /review v0.9.0 caught the gap.)
+    # Quiet-mode contract: apply failures warn on stderr in every mode; only
+    # the symlink-skip decoration below stays quiet-gated.
     try:
         for rel_path, info in to_download.items():
+            local_path = base_path / rel_path
+            reporter.begin(
+                rel_path, local_path, None, info.get("sha256"), pullplan.parse_from(info)
+            )
             try:
                 bkey = blob_key(source_device_id, info.get("sha256", ""))
             except ValueError as e:
@@ -1738,13 +1756,7 @@ def _download_and_apply(
                 # separators / parent-dir refs / null bytes / empty. Per-file
                 # isolation: fail this file, keep walking — matches the
                 # v0.8.1 empty-device_id handling in _apply_conflict.
-                if not quiet:
-                    core._print_error(
-                        f"bad blob key (local preserved): "
-                        f"{safety.safe_terminal_str(rel_path)} \u2014 "
-                        f"{safety.safe_terminal_str(e)}"
-                    )
-                outcomes["failed"].append(rel_path)
+                reporter.failed("bad blob key", e, preserved="local preserved")
                 _advance()
                 continue
             try:
@@ -1756,39 +1768,19 @@ def _download_and_apply(
                 outcomes.setdefault("waiting", []).append(rel_path)
                 _advance()
                 continue
-            except MindMeldError:
-                if verbose and not quiet:
-                    with core._pause_sync_progress():
-                        console.print(f"  [yellow]blob missing: {safe_str(bkey)}[/yellow]")
-                outcomes["failed"].append(rel_path)
+            except MindMeldError as e:
+                reporter.failed("blob read failed", e, preserved="local preserved", remedy="")
                 _advance()
                 continue
 
             try:
                 plain_data = decrypt(enc_data, passphrase, memory_kb)
             except CryptoError as e:
-                if isinstance(e, NewerFormatError):
-                    _warn_apply_failure(
-                        reporter.device_name,
-                        reporter.src_name,
-                        rel_path,
-                        base_path / rel_path,
-                        "decrypt failed",
-                        e,
-                        preserved="local preserved",
-                    )
-                elif not quiet:
-                    core._print_error(
-                        f"decrypt failed: "
-                        f"{safety.safe_terminal_str(rel_path)} \u2014 "
-                        f"{safety.safe_terminal_str(e)}"
-                    )
-                outcomes["failed"].append(rel_path)
+                reporter.failed("decrypt failed", e, preserved="local preserved")
                 _advance()
                 continue
 
             reporter.bytes_transferred += len(enc_data)
-            local_path = base_path / rel_path
 
             # Reject a local link at the destination or in a child component
             # before resolving containment. The root itself may be symlinked,
@@ -1821,30 +1813,26 @@ def _download_and_apply(
             except (OSError, ValueError):
                 _path_inside_base = False
             if not _path_inside_base:
-                if not quiet:
-                    core._print_error(
-                        f"rejected (would escape source root): {safety.safe_terminal_str(rel_path)}"
-                    )
-                outcomes["failed"].append(rel_path)
+                reporter.failed(
+                    "path rejected",
+                    MindMeldError("would escape the source root"),
+                    preserved="local preserved",
+                )
                 _advance()
                 continue
 
             advertised = info.get("sha256")
             actual = hashlib.sha256(plain_data).hexdigest()
             if not isinstance(advertised, str) or actual != advertised:
-                if not quiet:
-                    core._print_error(
-                        f"content check failed: {safety.safe_terminal_str(rel_path)} "
-                        "does not match the sending snapshot. Local file kept. "
-                        f"see {SNAPSHOT_FAILURES_URL}."
-                    )
-                outcomes["failed"].append(rel_path)
+                reporter.failed(
+                    "content check failed",
+                    MindMeldError("does not match the sending snapshot"),
+                    preserved="local preserved",
+                )
                 _advance()
                 continue
 
-            reporter.begin(
-                rel_path, local_path, resolved_local, info.get("sha256"), pullplan.parse_from(info)
-            )
+            reporter.resolved_local = resolved_local
             try:
                 outcome = _apply_incoming_file(
                     local_path=local_path,

@@ -283,17 +283,22 @@ def test_corrupt_blob_failure_lines_and_counts(fleet, monkeypatch, mode):
     result, summaries, output = _run(fleet, monkeypatch, mode, verbose=True)
     _counts(result, total_failed=1, device_names=["Peer B"])
     assert not (fleet.local / "note.md").exists()
+    cause = (
+        "decrypt: GCM tag mismatch — wrong passphrase, wrong root_salt in "
+        "mm-crypto-init, or corrupt blob. Verify mm-crypto-init integrity if "
+        "other decrypts also fail."
+    )
+    warning = (
+        "mm: warning: decrypt failed (local preserved): Peer B/notes/note.md — "
+        f"{cause}. See {errors.PULL_FAILURES_URL}.\n"
+    )
+    assert cause not in " ".join(output[0].split())
     if mode == "quiet":
-        assert summaries == [("", "mm: warning: Peer B/notes — 1 failed: note.md\n")]
-        assert output == ("", "mm: warning: Peer B/notes — 1 failed: note.md\n")
+        count_warning = "mm: warning: Peer B/notes — 1 failed: note.md\n"
+        assert summaries == [("", count_warning)]
+        assert output == ("", warning + count_warning)
     else:
-        cause = (
-            "decrypt failed: note.md — decrypt: GCM tag mismatch — wrong passphrase, "
-            "wrong root_salt in mm-crypto-init, or corrupt blob. "
-            "Verify mm-crypto-init integrity if other decrypts also fail."
-        )
-        assert cause not in " ".join(output[0].split())
-        assert output[1] == f"mm: error: {cause}\n"
+        assert output[1] == warning
         summary = "  notes: 1 failed\n    - note.md\n"
         if mode == "direct":
             summary += (
@@ -302,6 +307,43 @@ def test_corrupt_blob_failure_lines_and_counts(fleet, monkeypatch, mode):
                 "  1 failed\n  Completed in <SECONDS>s\n"
             )
         assert summaries == [(summary, "")]
+
+
+@pytest.mark.parametrize("branch", ("blob-read", "content-check"))
+@pytest.mark.parametrize("mode", ("attended", "quiet"))
+def test_pre_apply_failures_warn_in_autopull_and_attended_pull(fleet, monkeypatch, branch, mode):
+    peer, _ = _seed(fleet, {"note.md": b"peer content\n"})
+    key = blob_key(PEER, peer["sources"]["notes"]["files"]["note.md"]["sha256"])
+    if branch == "blob-read":
+        operation = "blob read failed"
+        cause = "storage: failed to read blob"
+        real_get = LocalBackend.get
+
+        def fail_blob_get(self, requested_key, *args, **kwargs):
+            if requested_key == key:
+                raise errors.StorageError(cause) from OSError(errno.EACCES, "denied")
+            return real_get(self, requested_key, *args, **kwargs)
+
+        monkeypatch.setattr(LocalBackend, "get", fail_blob_get)
+    else:
+        operation = "content check failed"
+        cause = "does not match the sending snapshot"
+        fleet.backend.put(key, crypto.encrypt(b"different content\n", PASSPHRASE, MEMORY_KB))
+
+    result, _, (out, err) = _run(fleet, monkeypatch, mode, verbose=True)
+
+    assert result.total_failed == 1
+    assert not (fleet.local / "note.md").exists()
+    assert cause not in out
+    assert "blob missing" not in out
+    expected = (
+        f"mm: warning: {operation} (local preserved): Peer B/notes/note.md — "
+        f"{cause}. See {errors.PULL_FAILURES_URL}."
+    )
+    if mode == "quiet":
+        assert err.splitlines() == [expected, "mm: warning: Peer B/notes — 1 failed: note.md"]
+    else:
+        assert err.splitlines() == [expected]
 
 
 @pytest.mark.parametrize("mode", ("attended", "quiet"))
@@ -1859,6 +1901,58 @@ def test_an_aborted_pull_drops_the_inline_keep_local_settlements(fleet, monkeypa
     assert _row_kinds(ledger, kept) == {}
 
 
+@pytest.mark.parametrize("choice", ("keep-remote", "merge"))
+def test_an_edit_made_while_the_inline_prompt_waits_keeps_both(fleet, monkeypatch, choice):
+    _seed(fleet, {"note.md": b"peer content\n"})
+    canonical = _put_local(fleet, "note.md", b"local\n", 1_600_000_000)
+
+    def edit_while_waiting(rel_path, local_path, *args, **kwargs):
+        local_path.write_bytes(b"edited while the prompt waited\n")
+        return (choice, b"local\npeer content\n" if choice == "merge" else None)
+
+    monkeypatch.setattr(pullflow, "_prompt_conflict_choice", edit_while_waiting)
+    result, _, _ = _run(fleet, monkeypatch, "attended", conflict_mode="prompt")
+    assert canonical.read_bytes() == b"edited while the prompt waited\n"
+    copies = list(fleet.local.glob("note.sync-conflict-*"))
+    assert len(copies) == 1 and copies[0].read_bytes() == b"peer content\n"
+    assert result.total_conflicted == 1
+    assert result.total_written == 0
+    assert result.total_merged == 0
+    assert result.total_failed == 0
+    ledger = _committed()
+    assert ledger.base(PEER, NOTES, "note.md") == _sha(b"peer content\n")
+    assert _row_kinds(ledger, "note.md")[_sha(b"peer content\n")[:16]] == "seen"
+
+
+@pytest.mark.parametrize(
+    "choice,operation",
+    (("keep-remote", "write failed"), ("merge", "merge write failed")),
+)
+def test_a_file_removed_while_the_inline_prompt_waits_is_one_failure(
+    fleet, monkeypatch, choice, operation
+):
+    _seed(fleet, {"note.md": b"peer content\n"})
+    canonical = _put_local(fleet, "note.md", b"local\n", 1_600_000_000)
+
+    def remove_while_waiting(rel_path, local_path, *args, **kwargs):
+        local_path.unlink()
+        return (choice, b"local\npeer content\n" if choice == "merge" else None)
+
+    monkeypatch.setattr(pullflow, "_prompt_conflict_choice", remove_while_waiting)
+    result, _, (_, err) = _run(fleet, monkeypatch, "attended", conflict_mode="prompt")
+    assert result.total_failed == 1
+    assert result.total_written == 0
+    assert result.total_merged == 0
+    assert result.total_conflicted == 0
+    warnings = [line for line in err.splitlines() if line.startswith("mm: warning:")]
+    assert len(warnings) == 1
+    assert warnings[0].startswith(
+        f"mm: warning: {operation} (local preserved): Peer B/notes/note.md — "
+    )
+    assert not canonical.exists()
+    assert list(fleet.local.glob("note.sync-conflict-*")) == []
+
+
 # ── an unreadable or unwritable ledger pauses the new rule, never the pull ──
 
 
@@ -3411,6 +3505,40 @@ def test_a_failed_tidy_keeps_the_merged_index_and_prints_one_notice(fleet, monke
     assert "lines for missing memory files may remain." in notice_lines[0]
 
 
+def test_a_late_tidy_flush_failure_keeps_the_tidied_index_and_prints_one_notice(fleet, monkeypatch):
+    base_index = b"- [Keep](keep.md)\n"
+    local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
+    peer_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n"
+    _seed(fleet, {"memory/MEMORY.md": peer_index, "memory/keep.md": b"keep\n"})
+    index_path = _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/keep.md", b"keep\n", 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/keep.md", b"keep\n"))
+
+    real_write = pullflow.fsutil.atomic_write_bytes
+
+    def fail_tidy_flush(path, data, *, mode=None, fsync=False):
+        if Path(path).name == "MEMORY.md" and fsync:
+            real_write(path, data, mode=mode, fsync=False)
+            raise pullflow.StorageError("storage: fsync_dir fsync(...) — injected flush failure")
+        return real_write(path, data, mode=mode, fsync=fsync)
+
+    monkeypatch.setattr(pullflow.fsutil, "atomic_write_bytes", fail_tidy_flush)
+
+    result, _, (_, err) = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_merged == 1
+    assert result.total_failed == 0
+    assert index_path.read_bytes() == b"- [Keep](keep.md)\n- [Local](local.md)\n"
+    notice_lines = [line for line in err.splitlines() if line.startswith("mm: notice:")]
+    assert len(notice_lines) == 1
+    assert (
+        "index tidy failed (storage: fsync_dir fsync(...) — injected flush failure)"
+        in notice_lines[0]
+    )
+    assert "lines for missing memory files may remain." in notice_lines[0]
+
+
 def test_a_dry_run_never_tidies_an_index(fleet, monkeypatch):
     base_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n"
     local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
@@ -3466,6 +3594,31 @@ def test_canonical_manifest_with_surrogate_metadata_remains_readable(fleet, monk
     result, _, _ = _run(fleet, monkeypatch, "attended")
     assert result.total_written == 1 and result.total_failed == 0
     assert (fleet.local / "note.md").read_bytes() == b"peer content\n"
+
+
+def test_a_publication_after_prefetch_does_not_change_the_recorded_identity(fleet, monkeypatch):
+    first, _ = _seed(fleet, {"note.md": b"peer content\n"})
+    second, _ = _seed(fleet, {"note.md": b"peer content\n", "late.md": b"late content\n"})
+    second["timestamp"] = first["timestamp"]
+    _republish(fleet, first)
+    assert core._manifest_content_hash(first) != core._manifest_content_hash(second)
+
+    real_prefetch = pullflow._prefetch_manifests
+
+    def prefetch_then_swap(*args, **kwargs):
+        result = real_prefetch(*args, **kwargs)
+        _republish(fleet, second)
+        return result
+
+    monkeypatch.setattr(pullflow, "_prefetch_manifests", prefetch_then_swap)
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_written == 1 and result.total_failed == 0
+    assert (fleet.local / "note.md").read_bytes() == b"peer content\n"
+    assert not (fleet.local / "late.md").exists()
+    assert _cursors() == {PEER: _expected_cursor(first, first, 0)}
+    fetched = core._fetch_remote_manifest(fleet.backend, PEER, PASSPHRASE, MEMORY_KB)
+    assert fetched.manifest == second
 
 
 def test_late_older_manifest_copy_invalidates_applied_then_cleanup_stays_applied(
@@ -3623,24 +3776,44 @@ def test_a_cursor_write_failure_is_one_notice_and_never_fails_the_pull(fleet, mo
 
 class TestDownloadAndApply:
     @pytest.mark.parametrize(
-        "branch",
-        ("bad-blob-key", "decrypt-failed", "escape-root", "content-check"),
+        "branch,operation",
+        (
+            ("bad-blob-key", "bad blob key"),
+            ("blob-read", "blob read failed"),
+            ("decrypt-failed", "decrypt failed"),
+            ("escape-root", "path rejected"),
+            ("content-check", "content check failed"),
+        ),
     )
     @pytest.mark.parametrize("quiet", (False, True))
+    @pytest.mark.parametrize("verbose", (False, True))
     def test_download_and_apply_per_file_error_branches(
-        self, fleet, monkeypatch, capsys, branch, quiet
+        self, fleet, monkeypatch, capsys, branch, operation, quiet, verbose
     ):
         rel = "note-[red]tag[/red]\x1b]52;c;ZGF0YQ==\x07\nextra.md"
         safe_rel = "note-[red]tag[/red]\\nextra.md"
         data = b"peer content\n"
         good_sha = _sha(data)
         enc = crypto.encrypt(data, PASSPHRASE, MEMORY_KB)
-        fleet.backend.put(blob_key(PEER, good_sha), enc)
+        good_key = blob_key(PEER, good_sha)
+        fleet.backend.put(good_key, enc)
 
         if branch == "bad-blob-key":
             info = {"sha256": "../bad\x1b[31m\nsha", "size": len(data)}
+        elif branch == "blob-read":
+            info = {"sha256": good_sha, "size": len(data)}
+            real_get = fleet.backend.get
+
+            def fail_blob_get(requested_key, *args, **kwargs):
+                if requested_key == good_key:
+                    raise errors.StorageError(
+                        "storage: failed to read blob\x1b[31m\n"
+                    ) from OSError(errno.EACCES, "denied")
+                return real_get(requested_key, *args, **kwargs)
+
+            monkeypatch.setattr(fleet.backend, "get", fail_blob_get)
         elif branch == "decrypt-failed":
-            fleet.backend.put(blob_key(PEER, good_sha), enc[:-1] + bytes([enc[-1] ^ 1]))
+            fleet.backend.put(good_key, enc[:-1] + bytes([enc[-1] ^ 1]))
             info = {"sha256": good_sha, "size": len(data)}
         elif branch == "escape-root":
             rel = "../escape-[red]tag[/red]\x1b[31m\n.md"
@@ -3669,7 +3842,7 @@ class TestDownloadAndApply:
                 source_device_id=PEER,
                 passphrase=PASSPHRASE,
                 memory_kb=MEMORY_KB,
-                verbose=True,
+                verbose=verbose,
                 quiet=quiet,
                 reporter=reporter,
             )
@@ -3679,25 +3852,21 @@ class TestDownloadAndApply:
         captured = capsys.readouterr()
         assert reporter.outcomes["failed"] == [rel]
         assert captured.out == ""
-        if quiet:
-            assert captured.err == ""
-        else:
-            lines = captured.err.splitlines()
-            assert len(lines) == 1
-            assert "\x1b" not in lines[0]
-            if branch == "bad-blob-key":
-                assert lines[0].startswith(
-                    f"mm: error: bad blob key (local preserved): {safe_rel} \u2014 "
-                )
-            elif branch == "decrypt-failed":
-                assert lines[0].startswith(f"mm: error: decrypt failed: {safe_rel} \u2014 ")
-            elif branch == "escape-root":
-                assert lines[0] == f"mm: error: rejected (would escape source root): {safe_rel}"
-            else:
-                assert lines[0] == (
-                    f"mm: error: content check failed: {safe_rel} does not match the "
-                    f"sending snapshot. Local file kept. see {errors.SNAPSHOT_FAILURES_URL}."
-                )
+        lines = captured.err.splitlines()
+        assert len(lines) == 1
+        assert "\x1b" not in lines[0]
+        assert lines[0].startswith(
+            f"mm: warning: {operation} (local preserved): Peer B/notes/{safe_rel} \u2014 "
+        )
+        assert lines[0].endswith(f"See {errors.PULL_FAILURES_URL}.")
+        if branch == "blob-read":
+            assert "storage: failed to read blob\\n." in lines[0]
+            assert "check write permission" not in lines[0]
+            assert "blob missing" not in lines[0]
+        elif branch == "escape-root":
+            assert "would escape the source root." in lines[0]
+        elif branch == "content-check":
+            assert "does not match the sending snapshot." in lines[0]
 
 
 @pytest.mark.parametrize(
