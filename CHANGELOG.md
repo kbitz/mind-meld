@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.49] - 2026-11-15
+
+Manifest property tests keep passing when the host is under load.
+
+### Fixed
+
+- Manifest property tests keep passing when the host is under load.
+
 ## [1.12.48] - 2026-11-14
 
 `mm resolve` keeps a completed choice counted and recorded when it can no longer write to the terminal or pipe, so the next `mm pull` does not raise the same conflict again.
