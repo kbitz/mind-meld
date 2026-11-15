@@ -296,6 +296,18 @@ def recapture(
                     "A recapture file was still changing.",
                     fix="mm push",
                 )
+            if result is not None and result.held:
+                # Only user files remain held here (an mm-internal hold exited
+                # above). The inner push prints its own detail only with -v, so
+                # the count keeps the shared outcome line; -v adds the paths.
+                console.print(
+                    core._outcome_line(
+                        "push", core._count(len(result.held), "file held", "files held")
+                    ),
+                    soft_wrap=True,
+                    markup=False,
+                    highlight=False,
+                )
 
             _notice_recapture_host_usage(config, sources)
             partial = (

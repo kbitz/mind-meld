@@ -6432,7 +6432,7 @@ def test_all_emitters_obey_git_batch_origin_contract(capture61, monkeypatch, emi
         assert git_rows and all("origin" not in row for row in git_rows)
 
 
-def _recapture_with_unstable(capture61, monkeypatch, *, held_name):
+def _recapture_with_unstable(capture61, monkeypatch, *, held_name, verbose=False):
     """Run ``mm recapture 1d`` while scan reads of ``held_name`` never settle."""
     env = capture61
     monkeypatch.setattr(
@@ -6448,7 +6448,7 @@ def _recapture_with_unstable(capture61, monkeypatch, *, held_name):
         return real(path, **kw)
 
     monkeypatch.setattr(cli_module.manifest, "read_file_revision", flaky)
-    return runner.invoke(app, ["recapture", "1d"])
+    return runner.invoke(app, ["recapture", "1d", *(["-v"] if verbose else [])])
 
 
 def test_recapture_with_a_held_day_file_takes_the_not_synced_exit_75a(capture61, monkeypatch):
@@ -6501,13 +6501,20 @@ def test_attended_capture_exit_with_a_held_day_file_carries_held_and_not_publish
     assert core.content_accepted is False
 
 
-def test_recapture_is_unaffected_by_a_held_user_file_75a(capture61, monkeypatch):
+@pytest.mark.parametrize("verbose", [False, True])
+def test_recapture_is_unaffected_by_a_held_user_file_75a(capture61, monkeypatch, verbose):
     env = capture61
     (env["claude"] / "projects/-Users-user-myapp/memory/hot.md").write_text("still being written")
-    result = _recapture_with_unstable(capture61, monkeypatch, held_name="hot.md")
+    result = _recapture_with_unstable(capture61, monkeypatch, held_name="hot.md", verbose=verbose)
     flat = " ".join((result.output + (result.stderr or "")).split())
     assert result.exit_code in (0, 4), result.output
     assert "written locally but not synced" not in flat
+    # The quiet inner push still names the held count; only -v lists the path.
+    lines = result.stdout.splitlines()
+    assert "Push: 1 file held." in lines, result.output
+    assert ("hot.md" in result.stdout) is verbose
+    if result.exit_code == 0:
+        assert lines[-1].startswith("Recapture:")
 
 
 @pytest.mark.parametrize("recovery", ["push", "autopush"])

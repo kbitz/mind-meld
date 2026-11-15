@@ -936,7 +936,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture) |
 | `mm push --dry-run` | Preview publication and deletions (files a recreated scan folder hides are not counted as deletions); changes nothing except the local lock file |
 | `mm pull --dry-run` | Preview what a pull would write, merge, conflict, delete or hold back as `older` (add `--verbose` for why a file with a deletion record is kept: `keep (<reason>)`); changes nothing except the local lock file |
-| `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`) and end with one `Recapture: ... .` outcome line (`--verbose` / `-v` adds the window, repository, record-count and size breakdown). When the oldest recovered commit falls outside a 7-day retro window, an `mm: notice:` line names the `mm retro-fleet <N>d` window that covers it. Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Retros window by the COMMIT's date, not by when mm captured it |
+| `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`) and end with one `Recapture: ... .` outcome line (`--verbose` / `-v` adds the window, repository, record-count and size breakdown). When the oldest recovered commit falls outside a 7-day retro window, an `mm: notice:` line names the `mm retro-fleet <N>d` window that covers it. Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Any other held file adds a `Push: N files held.` line (paths with `-v`) and goes with a later push. Retros window by the COMMIT's date, not by when mm captured it |
 | `mm pull` | Pull context; one final line per outcome. Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)) |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
@@ -2280,11 +2280,11 @@ record format, and no newer mm can yet. See `mm diag`, or run `mm disable-source
 muse` to stop retrying." On those surfaces a sibling non-permanent line, such as a
 deadline, and Codex's rebuilding, warming, and awaiting-re-walk hints, carry that
 no-release sentence instead of their own remedy. The `mm push --verbose`
-usage-capture warning gives the same no-release sentence for the unsupported
-reader itself, reading the same cached check. Automatic-push, `mm recapture`,
-init, and attempt-record phrases keep the update advice. Neither status nor diag
-refreshes that cache; push's usage capture reads it without refreshing it, and
-push's own update check runs after capture.
+usage-capture warning, the automatic-push breadcrumb, and the `mm recapture` and
+`mm init` notices give the same no-release sentence for the unsupported reader
+itself, reading the same cached check. Neither status nor diag refreshes that
+cache; push's usage capture, the automatic-push tail and init read it without
+refreshing it, and push's own update check runs after capture.
 
 Upgrade **both producing and rendering Macs** for corrected init counts. Init
 now marks its Git rows as `origin: init`; older renderers still count that unknown
@@ -2412,7 +2412,7 @@ Older undated blockers gain a date when this version first observes them.
 
 | Reason | Meaning | Remedy |
 |---|---|---|
-| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source grok` / `mm disable-source agy` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. When the cached release check says this mm is the newest known, `mm status`, plain-text `mm diag`, the `mm push --verbose` usage-capture warning, the automatic-push breadcrumb, and the `mm recapture` and `mm init` notices say instead that no newer mm can read the format yet, and give the stop step and `mm diag`. `mm diag --json` does not print that sentence. |
+| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source grok` / `mm disable-source agy` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. When the cached release check says this mm is the newest known, `mm status`, plain-text `mm diag`, the `mm push --verbose` usage-capture warning, the automatic-push breadcrumb, and the `mm recapture` and `mm init` notices say instead that no newer mm can read the format yet, and give the stop step and `mm diag`. `mm diag --json` reads no cached check of its own; its `last_autorun` repeats the automatic-push detail as stored, which can carry that sentence. |
 | `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then `mm push`. If it persists, report the mm version and Host usage diag block. |
 | `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
 | `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |
