@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.52] - 2026-11-15
+
+`mm pull` and `mm autopull` now print one `mm: warning:` line with the cause for every file they cannot apply, including unreadable, undecryptable or mismatched peer data, and a file you edit while `mm pull --conflict-mode prompt` waits for your answer is kept, with the peer's version saved beside it as a conflict copy.
+
+### Changed
+
+- `mm pull` and `mm autopull` now print one `mm: warning:` line with the cause for every file they cannot apply, including unreadable, undecryptable or mismatched peer data, and a file you edit while `mm pull --conflict-mode prompt` waits for your answer is kept, with the peer's version saved beside it as a conflict copy.
+- `mm pull` and `mm autopull` report every file-apply failure cause on stderr.
+- Inline `keep-remote` and `merge` preserve local edits and removals made while the conflict prompt waits.
+
+### Upgrade notes
+
+- After this release, `mm pull` and `mm autopull` print one `mm: warning:` line on stderr with the cause for every file they cannot apply, including unreadable, undecryptable or mismatched peer data.
+- After this release, a file you edit while `mm pull --conflict-mode prompt` waits for your answer is kept, with the peer's version saved beside it as a conflict copy, and inline `keep-remote` and `merge` preserve local edits and removals made while the prompt waits.
+
 ## [1.12.51] - 2026-11-15
 
 `mm recapture` no longer prints its inner push summary unless run with `-v`, a held user file shows as `Push: N files held.` before `Recapture:`, and `mm status`, `mm diag` and `mm recapture` stop suggesting `mm update` when no released mm can read a host reader's record format.
