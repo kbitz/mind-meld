@@ -30,6 +30,7 @@ summary for each reaper that actually runs.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sys
@@ -544,6 +545,10 @@ def _is_live_conflict(cpath: Path, canonical: Path | None) -> bool:
         resolver is actively offering to restore. This matches the
         reasoning the `v0-` branch above already applies.
       * hash failure — we cannot tell, so refuse.
+      * canonical and sidecar are the same file (a symlink either way,
+        or hard links) — identical bytes prove nothing, and reaping the
+        sidecar can delete the only real file. `mm resolve` refuses the
+        pair and names its repair (Track 132D).
 
     Reapable is therefore the one provably-safe case: canonical exists and
     its bytes are IDENTICAL to the sidecar, i.e. the conflict converged and
@@ -553,6 +558,8 @@ def _is_live_conflict(cpath: Path, canonical: Path | None) -> bool:
         return True
     try:
         if not canonical.is_file():
+            return True
+        if os.path.samefile(canonical, cpath):
             return True
         return hash_file(canonical) != hash_file(cpath)
     except OSError:
