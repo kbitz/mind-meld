@@ -53,6 +53,7 @@ from mind_meld.manifest import (
     walk_source,
     write_anchor,
 )
+from tests.conftest import make_git_checkout
 from tests.test_config import (
     GSTACK_ARTIFACT_DIRS94A,
     GSTACK_DOCUMENT_EXTENSIONS94A,
@@ -454,12 +455,12 @@ class TestNestedRepositories:
         if gitlink:
             (repo / ".git").write_text("gitdir: /private/git-worktree")
         else:
-            (repo / ".git").mkdir()
+            make_git_checkout(repo)
         (repo / "bulk.txt").write_text("must not read or hash this")
         plain = base / parent / "plain" / "note.md"
         plain.parent.mkdir()
         plain.write_text("sync me")
-        (base / ".git").mkdir()
+        make_git_checkout(base)
         cfg = {"name": "source", "type": source_type, "path": str(base), "include_dirs": ["skills"]}
         original = os.scandir
 
@@ -505,7 +506,7 @@ class TestNestedRepositories:
     ):
         project = tmp_path / "projects" / "app"
         (project / "memory").mkdir(parents=True)
-        (project / ".git").mkdir()
+        make_git_checkout(project)
         original = os.scandir
 
         def guard(path):
@@ -527,14 +528,14 @@ class TestNestedRepositories:
         if kind == "file":
             (base / "projects").write_text("not a dir")
         else:
-            (tmp_path / "elsewhere" / "app" / ".git").mkdir(parents=True)
+            make_git_checkout(tmp_path / "elsewhere" / "app")
             (base / "projects").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
         cfg = {"name": "claude", "type": "claude", "path": str(base)}
         assert walk_source(cfg, strict=True)[1] == {}
         assert nested_repo_skip_prefixes(cfg, strict=True) == []
 
     def test_inventory_reports_checkout_above_absent_include(self, tmp_path):
-        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        make_git_checkout(tmp_path / "repo")
         cfg = {
             "name": "g",
             "type": "generic",
@@ -558,7 +559,7 @@ class TestNestedRepositories:
         assert sorted(walk_source(cfg, strict=strict)[1]) == ["projects/p/memory/real.md"]
 
     def test_walker_reports_checkout_above_an_absent_include(self, tmp_path):
-        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        make_git_checkout(tmp_path / "repo")
         cfg = {"name": "g", "type": "generic", "path": str(tmp_path)}
         cfg["include_dirs"] = ["repo/notes"]
         skipped = []
@@ -566,7 +567,7 @@ class TestNestedRepositories:
         assert skipped == [("repo", "nested git repository")]
 
     def test_linked_include_inside_a_checkout_reports_the_checkout(self, tmp_path):
-        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        make_git_checkout(tmp_path / "repo")
         (tmp_path / "elsewhere").mkdir()
         (tmp_path / "repo" / "link").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
         cfg = {"name": "g", "type": "generic", "path": str(tmp_path)}
@@ -578,7 +579,7 @@ class TestNestedRepositories:
 
     @pytest.mark.parametrize("blocked", ["unsearchable", "link"])
     def test_strict_include_below_a_blocked_path_inside_a_checkout_freezes(self, tmp_path, blocked):
-        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        make_git_checkout(tmp_path / "repo")
         locked = tmp_path / "locked"
         locked.mkdir()
         if blocked == "unsearchable":
@@ -600,7 +601,7 @@ class TestNestedRepositories:
         assert prefixes == ["repo"]
 
     def test_unreadable_descendant_of_a_checkout_stays_a_freeze(self, tmp_path):
-        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        make_git_checkout(tmp_path / "repo")
         locked = tmp_path / "repo" / "secret"
         (locked / "nested" / "deep").mkdir(parents=True)
         (tmp_path / "repo" / "notes.md").write_text("n")
@@ -622,7 +623,7 @@ class TestNestedRepositories:
         assert prefixes == ["repo"]
 
     def test_link_to_a_checkout_is_a_symlink_not_a_checkout(self, tmp_path):
-        (tmp_path / "real" / ".git").mkdir(parents=True)
+        make_git_checkout(tmp_path / "real")
         (tmp_path / "real" / "notes").mkdir()
         (tmp_path / "real" / "notes" / "a.md").write_text("a")
         (tmp_path / "real" / "f.md").write_text("f")
@@ -655,9 +656,9 @@ class TestNestedRepositories:
     def test_incoming_path_probe_finds_checkouts_once_without_listing(self, tmp_path, monkeypatch):
         import mind_meld.manifest as manifest_module
 
-        (tmp_path / "a" / "repo" / ".git").mkdir(parents=True)
+        make_git_checkout(tmp_path / "a" / "repo")
         (tmp_path / "a" / "plain").mkdir()
-        (tmp_path / "linked" / ".git").mkdir(parents=True)
+        make_git_checkout(tmp_path / "linked")
         (tmp_path / "a" / "via").symlink_to(tmp_path / "linked", target_is_directory=True)
         (tmp_path / "gitlink").mkdir()
         (tmp_path / "gitlink" / ".git").write_text("gitdir: elsewhere")
@@ -686,6 +687,116 @@ class TestNestedRepositories:
         ]
         assert nested_repo_roots_for_paths(cfg, paths) == ["a/repo", "gitlink"]
         assert len(probes) == len(set(probes))
+
+    @pytest.mark.parametrize("strict", [False, True])
+    @pytest.mark.parametrize("source_type", ["claude", "generic", "grok", "muse"])
+    @pytest.mark.parametrize("marker", ["empty", "no-head"])
+    def test_empty_or_head_less_git_dir_is_not_a_checkout(
+        self, tmp_path, strict, source_type, marker
+    ):
+        base = tmp_path / "source"
+        parent = {"claude": "projects/app/memory", "muse": "memory"}.get(source_type, "skills")
+        sub = base / parent / "checkout"
+        (sub / ".git").mkdir(parents=True)
+        if marker == "no-head":
+            (sub / ".git" / "config").write_text("[core]\n")
+        (sub / "x.md").write_text("sync me")
+        cfg = {"name": "source", "type": source_type, "path": str(base), "include_dirs": ["skills"]}
+        skipped = []
+        _, files = walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=strict)
+        assert list(files) == [f"{parent}/checkout/x.md"]
+        assert not any(reason == "nested git repository" for _, reason in skipped)
+        assert not any("/.git/" in p or p.endswith("/.git") for p in files)
+        assert nested_repo_skip_prefixes(cfg, strict=strict) == []
+        assert nested_repo_roots_for_paths(cfg, [f"{parent}/checkout/x.md"]) == []
+
+    def test_gstack_extend_stage_runs_syncs_below_empty_analytics_git_and_freezes_when_head_exists(
+        self, tmp_path
+    ):
+        from mind_meld.config import _GSTACK_EXTEND_INCLUDE_PATTERNS
+
+        (tmp_path / "analytics" / ".git").mkdir(parents=True)
+        (tmp_path / "analytics" / "stage-runs").mkdir(parents=True)
+        (tmp_path / "analytics" / "stage-runs" / "mac-a.jsonl").write_text('{"run":1}\n')
+        cfg = {
+            "name": "gstack-extend",
+            "type": "generic",
+            "path": str(tmp_path),
+            "include_dirs": ["projects", "analytics/stage-runs"],
+            "include_patterns": list(_GSTACK_EXTEND_INCLUDE_PATTERNS),
+        }
+        skipped = []
+        _, files = walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=True)
+        assert list(files) == ["analytics/stage-runs/mac-a.jsonl"]
+        assert skipped == []
+        assert nested_repo_roots_for_paths(cfg, ["analytics/stage-runs/linux-a.jsonl"]) == []
+
+        (tmp_path / "analytics" / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        skipped.clear()
+        _, files = walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=True)
+        assert files == {}
+        assert skipped == [("analytics", "nested git repository")]
+        assert nested_repo_skip_prefixes(cfg, strict=True) == ["analytics"]
+        assert nested_repo_roots_for_paths(cfg, ["analytics/stage-runs/linux-a.jsonl"]) == [
+            "analytics"
+        ]
+
+    @pytest.mark.parametrize("strict", [False, True])
+    @pytest.mark.parametrize("marker", ["head-file", "head-symlink", "git-file"])
+    def test_real_markers_freeze_without_entering_checkout(
+        self, tmp_path, monkeypatch, strict, marker
+    ):
+        repo = tmp_path / "skills" / "checkout"
+        repo.mkdir(parents=True)
+        if marker == "head-file":
+            make_git_checkout(repo)
+        elif marker == "head-symlink":
+            (repo / ".git").mkdir()
+            (repo / ".git" / "HEAD").symlink_to("refs/heads/main")
+        else:
+            (repo / ".git").write_text("gitdir: /private/git-worktree")
+        (repo / "note.md").write_text("must not read")
+        cfg = {
+            "name": "codex",
+            "type": "generic",
+            "path": str(tmp_path),
+            "include_dirs": ["skills"],
+        }
+        original = os.scandir
+
+        def guard(path):
+            assert not Path(path).is_relative_to(repo), "entered an excluded checkout"
+            return original(path)
+
+        monkeypatch.setattr(os, "scandir", guard)
+        skipped = []
+        _, files = walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=strict)
+        assert files == {}
+        assert skipped == [("skills/checkout", "nested git repository")]
+        assert nested_repo_skip_prefixes(cfg, strict=strict) == ["skills/checkout"]
+        assert nested_repo_roots_for_paths(cfg, ["skills/checkout/note.md"]) == ["skills/checkout"]
+
+    def test_unreadable_git_head_probe_refuses_strict_and_fails_closed_permissive(
+        self, tmp_path, monkeypatch
+    ):
+        directory = tmp_path / "docs"
+        (directory / ".git").mkdir(parents=True)
+        (directory / "note.md").write_text("content")
+        original = Path.lstat
+
+        def denied(path):
+            if path == directory / ".git" / "HEAD":
+                raise PermissionError(errno.EACCES, "denied")
+            return original(path)
+
+        monkeypatch.setattr(Path, "lstat", denied)
+        cfg = {"name": "notes", "type": "generic", "path": str(tmp_path), "include_dirs": ["docs"]}
+        with pytest.raises(SnapshotError, match="could not check for a nested git repository"):
+            walk_generic_source(cfg, strict=True)
+        assert nested_repo_skip_prefixes(cfg) == ["docs"]
+        assert walk_generic_source(cfg) == {}
+        assert nested_repo_roots_for_paths(cfg, ["docs/x.md"]) == ["docs"]
+        assert list((directory / ".git").iterdir()) == []
 
 
 class TestWalkGenericSource:

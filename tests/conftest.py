@@ -12,6 +12,8 @@ their test body and then re-configure.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from mind_meld import crypto
@@ -805,6 +807,14 @@ def _setup_real_config(tmp_path, monkeypatch):
     _redirect_lock(monkeypatch, tmp_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     return claude_dir
+
+
+def make_git_checkout(directory: Path) -> Path:
+    """Create a `.git/` directory with `HEAD` inside `directory`."""
+    git_dir = directory / ".git"
+    git_dir.mkdir(parents=True, exist_ok=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+    return git_dir
 
 
 # ─── Track 73A non-interactive keyring fakes ─────────────────────────────

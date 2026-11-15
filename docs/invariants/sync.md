@@ -446,8 +446,9 @@ sees them. Ordinary settlement commits at pull end, with a separate transaction
 before the deletion pass moves its first file, and once after a push.
 
 **Who writes it.** A pull (its deletion pass, and its `finally`), a push
-after its manifest is accepted, and each successful explicit `mm resolve` choice
-(`resolveflow._record_resolution`), all under the mm lock. Each transaction is
+after its manifest is accepted, and each successful `mm resolve` choice of
+`(l)ocal`, `(r)emote` or `(m)erge` (`resolveflow._record_resolution`), all under
+the mm lock. Each transaction is
 the innermost lock
 (`core.commit_ledger` → `statedb.commit_ledger`, writing only rows that changed).
 A push records every published version as `held` (`core.record_published`) and
@@ -1240,15 +1241,20 @@ reader, which joins the historical `analytics/stage-runs.jsonl` and the sorted
 
 ## Nested git checkouts are frozen, never published
 
-Every source walker prunes a directory with a regular `.git` file or `.git`
-directory strictly below its source root, before enumerating or hashing checkout
-contents. The source root itself remains exempt. Check ancestors of configured
+Every source walker prunes a directory with a regular `.git` file (worktree or
+submodule) or a `.git` directory in which `lstat` finds `HEAD` as a file or
+symlink strictly below its source root, before enumerating or hashing checkout
+contents. An empty or HEAD-less `.git` directory (a placeholder some sandboxed
+tools leave) is not a checkout: the folder publishes and receives normally, and
+the `.git/` exclusion still keeps anything inside the marker local. The source
+root itself remains exempt. Check ancestors of configured
 includes so a direct include inside a checkout cannot bypass the rule.
 `nested_repo_root` probes components in order and stops at the first missing,
 non-directory or symlinked one, so a checkout above a descendant link is still
 found and nothing is probed through a link; callers check it before the
 descendant-symlink omission. Strict publishing and status refuse an unreadable component
-or checkout-marker probe; other diagnostic scans remain permissive.
+or `.git`/`.git/HEAD` probe; permissive scans treat an unreadable `.git` as no
+checkout and a `.git` directory whose `HEAD` cannot be probed as a checkout.
 
 **One observation per command.** `build_manifest_v2(nested_roots=...)` returns the
 roots its own walk skipped. Push, status and diff never re-walk for them, and
@@ -1293,7 +1299,10 @@ exemption there minted tombstones for files still on disk.
 
 Frozen entries retire when the checkout is deleted (tombstones everywhere), or
 without tombstones (peer copies stay) when an `exclude_patterns` glob such as
-`<folder>/*` or a new `.extend-root` marker above the checkout covers them. The freeze also ends silently whenever the prior
+`<folder>/*` or a new `.extend-root` marker above the checkout covers them. A
+folder that only an empty marker froze (releases before this fix) unfreezes on
+the next push, its current bytes publish over the frozen entries with no
+tombstones, and pulls write peer files there again. The freeze also ends silently whenever the prior
 no longer lists them: disable then enable of the source, `mm recover
 --abandon-manifest`, peer-fallback recovery, blob-less recovery, or adding then
 removing a glob. Those paths lose delete convergence like the exclusion they

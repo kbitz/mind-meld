@@ -1211,8 +1211,9 @@ already collected; this repair does not solve every arrival order.
 
 ### Nested git repositories
 
-Sync walkers skip nested directories containing a `.git` directory or gitlink
-file by default. This applies to every source type, including explicit includes
+Sync walkers skip nested directories containing a `.git` directory with `HEAD`
+or a gitlink `.git` file by default; an empty `.git` directory is not a
+checkout and its folder syncs normally. This applies to every source type, including explicit includes
 that point inside a checkout. The source root's own `.git` keeps its existing
 behavior. Ordinary directories still sync; there is no opt-out setting.
 

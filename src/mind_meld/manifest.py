@@ -424,8 +424,18 @@ def _under_skip_prefix(rel_path: str, prefixes: list[str] | None) -> bool:
 def _directory_is_git_repo(
     directory: Path, base: Path, *, strict: bool, source_name: str | None
 ) -> bool:
+    """Return True when ``directory`` holds a real git checkout marker.
+
+    A regular ``.git`` file (worktree or submodule gitlink) or a ``.git``
+    directory whose ``HEAD`` is a regular file or symlink is a checkout.
+    An empty or HEAD-less ``.git`` directory is ignored (sandboxed tools
+    leave empty placeholders beside ``.agents``, ``.aws`` and ``.codex``).
+    Never reads ``HEAD`` or follows a symlink: at most one extra ``lstat``
+    inside the marker, never inside the work tree.
+    """
+    git_marker = directory / ".git"
     try:
-        marker = (directory / ".git").lstat()
+        marker = git_marker.lstat()
     except (FileNotFoundError, NotADirectoryError):
         return False
     except OSError as e:
@@ -440,7 +450,27 @@ def _directory_is_git_repo(
                 )
             ) from e
         return False
-    return stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)
+    if stat.S_ISREG(marker.st_mode):
+        return True
+    if not stat.S_ISDIR(marker.st_mode):
+        return False
+    try:
+        head = (git_marker / "HEAD").lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    rel_path=_rel_or_name(directory, base),
+                    problem="could not check for a nested git repository",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
+        return True
+    return stat.S_ISREG(head.st_mode) or stat.S_ISLNK(head.st_mode)
 
 
 def nested_repo_root(
@@ -602,7 +632,8 @@ def nested_repo_roots_for_paths(source_config: dict[str, Any], rel_paths: Any) -
     Probes each local ancestor directory at most once. A missing, non-directory
     or symlinked component ends that path's probe: pull never writes through
     it, and descendant symlinks keep their own policy. Best-effort, like any
-    permissive inspection; an unreadable probe is not a checkout.
+    permissive inspection: an unreadable ``.git`` probe is not a checkout; a
+    ``.git`` directory whose ``HEAD`` cannot be probed is.
     """
     source_name = source_config.get("name")
     try:
