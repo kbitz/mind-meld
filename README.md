@@ -1213,7 +1213,8 @@ already collected; this repair does not solve every arrival order.
 
 Sync walkers skip nested directories containing a `.git` directory with `HEAD`
 or a gitlink `.git` file by default; an empty `.git` directory is not a
-checkout and its folder syncs normally. This applies to every source type, including explicit includes
+checkout and its folder syncs normally. A folder that an earlier release froze
+only because of an empty `.git` directory resumes syncing on the next `mm push`. This applies to every source type, including explicit includes
 that point inside a checkout. The source root's own `.git` keeps its existing
 behavior. Ordinary directories still sync; there is no opt-out setting.
 
