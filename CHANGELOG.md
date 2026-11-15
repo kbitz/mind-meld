@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.50] - 2026-11-15
+
+An empty or `HEAD`-less `.git` directory no longer freezes a synced folder, and `mm push` no longer publishes a case-variant `.git` directory.
+
+### Fixed
+
+- An empty `.git` directory inside a synced folder no longer stops that folder from syncing; only a real checkout (a `.git` directory holding `HEAD`, or a `.git` file) is still skipped.
+- An empty or `HEAD`-less `.git` directory no longer freezes the synced folder that holds it, so a folder an earlier release froze this way resumes syncing on the next `mm push`.
+- `mm push` no longer publishes the contents of a `.git` directory spelled in another letter case, such as `.GIT`.
+
+### Upgrade notes
+
+- A folder that an empty `.git` directory had silently stopped syncing resumes on the next `mm push` and `mm pull`, so edits made there meanwhile publish and peer changes arrive through the usual pull rules.
+
 ## [1.12.49] - 2026-11-15
 
 Manifest property tests keep passing when the host is under load.

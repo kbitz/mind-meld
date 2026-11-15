@@ -44,6 +44,26 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/manifest.py|tests/test_manifest.py] Test gap: a symlinked .git marker is not a nested checkout
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** `_directory_is_git_repo` returns False when `<dir>/.git` is neither a regular file nor a directory, for example a symlink, so the folder publishes. Track 132F kept that branch unchanged, and no test pins it; the nested-checkout tests cover a missing `.git`, a regular `.git` file and `.git` directories with or without `HEAD`.
+- **Hypothesis (untested):** add a `.git` symlink row beside the markers in `TestNestedRepositories.test_empty_or_head_less_git_dir_is_not_a_checkout` and assert the file beside it publishes and no nested root is reported; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/manifest.py:466
+- **Evidence:** Track 132F coverage audit (audit-only; gap); review read only, no failure reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/631b9cf6` (Track 132F, draft PR not yet opened) at `7d8229b` (2026-11-15).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/manifest.py|tests/test_manifest.py] Test gap: a .git/HEAD that is a directory is not a checkout
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Track 132F counts a `.git` directory as a checkout only when `lstat` finds `HEAD` as a regular file or symlink; a `HEAD` directory returns False. The tests cover a missing, regular-file and symlink `HEAD`, but not a `HEAD` directory.
+- **Hypothesis (untested):** add a `HEAD`-directory marker row to `TestNestedRepositories.test_empty_or_head_less_git_dir_is_not_a_checkout` and assert the folder publishes; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/manifest.py:484
+- **Evidence:** Track 132F coverage audit (audit-only; gap); review read only, no failure reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/631b9cf6` (Track 132F, draft PR not yet opened) at `7d8229b` (2026-11-15).
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration follow-up — 2026-11-15

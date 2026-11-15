@@ -28,6 +28,7 @@ from mind_meld import (
 )
 from mind_meld.storage.keys import blob_key, manifest_key
 from mind_meld.storage.local import LocalBackend
+from tests.conftest import make_git_checkout
 
 PASSPHRASE = "grok-memory-111a-test-passphrase"
 MEMORY_KB = 1024
@@ -254,7 +255,7 @@ class TestGrokMemoryWalkerFixture:
 
         # Nested .git repo inside topics/
         nested_git = w_proj / "topics" / "subrepo"
-        (nested_git / ".git").mkdir(parents=True)
+        make_git_checkout(nested_git)
         (nested_git / "inside-git.md").write_text("in git\n")
 
         # Symlinked workspace scope directory

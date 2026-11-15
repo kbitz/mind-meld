@@ -679,7 +679,7 @@ SYNCED_SUBDIRS = ["memory", "todos"]
 
 **`muse` type** — Claude-shaped walker for `~/.local/share/muse`. Hardcodes `memory/` at the source root; Muse's `.muse-memory.lock` is excluded on push and pull. Sessions, the session index and bundled skills are never entered, and `~/.config/muse` is not a source. See [host parity](docs/designs/host-parity.md#muse-1x-minor-2026-10-14).
 
-**Nested git checkouts (all types).** Every walker skips a directory strictly below the source root that contains a `.git` directory or file, so a repository cloned inside a synced folder is not published. A folder that was already published and later becomes a checkout is frozen, not deleted. See [Nested git repositories](README.md#nested-git-repositories) and [the sync invariant](docs/invariants/sync.md#nested-git-checkouts-are-frozen-never-published).
+**Nested git checkouts (all types).** Every walker skips a directory strictly below the source root that contains a `.git` file or a `.git` directory holding `HEAD`, so a repository cloned inside a synced folder is not published; an empty or HEAD-less `.git` directory is not a checkout, and nothing inside a `.git` directory (in any letter case) is published. A folder that was already published and later becomes a checkout is frozen, not deleted. See [Nested git repositories](README.md#nested-git-repositories) and [the sync invariant](docs/invariants/sync.md#nested-git-checkouts-are-frozen-never-published).
 
 ### Excluded Patterns
 

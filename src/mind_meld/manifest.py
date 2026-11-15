@@ -364,6 +364,17 @@ EXCLUDED = [
     ANCHOR_NAME,  # per-scan-root generation token; local state
 ]
 
+
+def _is_git_segment(name: str) -> bool:
+    """True for a ``.git`` path segment in any letter case.
+
+    APFS finds ``.GIT`` for a ``.git`` lookup, so a HEAD-less ``.GIT`` directory
+    is no checkout; its contents must still never publish. Pull drops a ``.git``
+    segment in any case too (``core._filter_excluded_paths``).
+    """
+    return name.casefold() == ".git"
+
+
 # Only sync these subdirectories within each project.
 # Everything else (sessions, settings, etc.) is either git-tracked or ephemeral.
 SYNCED_SUBDIRS = ["memory", "todos"]
@@ -424,8 +435,18 @@ def _under_skip_prefix(rel_path: str, prefixes: list[str] | None) -> bool:
 def _directory_is_git_repo(
     directory: Path, base: Path, *, strict: bool, source_name: str | None
 ) -> bool:
+    """Return True when ``directory`` holds a real git checkout marker.
+
+    A regular ``.git`` file (worktree or submodule gitlink) or a ``.git``
+    directory whose ``HEAD`` is a regular file or symlink is a checkout.
+    An empty or HEAD-less ``.git`` directory is ignored (sandboxed tools
+    leave empty placeholders beside ``.agents``, ``.aws`` and ``.codex``).
+    Never reads ``HEAD`` or follows a symlink: at most one extra ``lstat``
+    inside the marker, never inside the work tree.
+    """
+    git_marker = directory / ".git"
     try:
-        marker = (directory / ".git").lstat()
+        marker = git_marker.lstat()
     except (FileNotFoundError, NotADirectoryError):
         return False
     except OSError as e:
@@ -440,7 +461,27 @@ def _directory_is_git_repo(
                 )
             ) from e
         return False
-    return stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)
+    if stat.S_ISREG(marker.st_mode):
+        return True
+    if not stat.S_ISDIR(marker.st_mode):
+        return False
+    try:
+        head = (git_marker / "HEAD").lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    rel_path=_rel_or_name(directory, base),
+                    problem="could not check for a nested git repository",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
+        return True
+    return stat.S_ISREG(head.st_mode) or stat.S_ISLNK(head.st_mode)
 
 
 def nested_repo_root(
@@ -602,7 +643,8 @@ def nested_repo_roots_for_paths(source_config: dict[str, Any], rel_paths: Any) -
     Probes each local ancestor directory at most once. A missing, non-directory
     or symlinked component ends that path's probe: pull never writes through
     it, and descendant symlinks keep their own policy. Best-effort, like any
-    permissive inspection; an unreadable probe is not a checkout.
+    permissive inspection: an unreadable ``.git`` probe is not a checkout; a
+    ``.git`` directory whose ``HEAD`` cannot be probed is.
     """
     source_name = source_config.get("name")
     try:
@@ -1208,9 +1250,10 @@ def _is_excluded(
 ) -> bool:
     """Check if a relative path matches any exclude pattern.
 
-    The hardcoded EXCLUDED list covers universal junk (.git, *.tmp, etc.).
-    Per-source globs in `exclude_patterns` extend the filter for source-
-    specific artifacts (e.g. gstack's per-machine repo-mode.json caches).
+    The hardcoded EXCLUDED list covers universal junk (.git, *.tmp, etc.);
+    a ``.git`` segment matches in any letter case. Per-source globs in
+    `exclude_patterns` extend the filter for source-specific artifacts
+    (e.g. gstack's per-machine repo-mode.json caches).
     Per-source globs are matched against the FULL relative path (so users
     can scope to subtrees like `projects/*/repo-mode.json`), unlike the
     EXCLUDED list which mixes basename (`*.pyc`) and dir-segment (`.git/`)
@@ -1229,7 +1272,7 @@ def _is_excluded(
     if _under_skip_prefix(rel_path, skip_prefixes):
         return True
     excl_dirs, excl_file_re = _compile_excluded_rules(tuple(EXCLUDED))
-    if excl_dirs and any(part in excl_dirs for part in parts):
+    if any(part in excl_dirs or _is_git_segment(part) for part in parts):
         return True
     if excl_file_re is not None and excl_file_re.match(filename) is not None:
         return True
@@ -1644,6 +1687,8 @@ def _dir_is_policy_skipped(rel_dir: str, skip_prefixes: list[str] | None) -> boo
     if _under_skip_prefix(rel_dir, skip_prefixes):
         return True
     parts = rel_dir.split("/")
+    if any(_is_git_segment(part) for part in parts):
+        return True
     for pattern in EXCLUDED:
         if pattern.endswith("/"):
             dir_name = pattern.rstrip("/")

@@ -49,6 +49,7 @@ from mind_meld.manifest import (
 from mind_meld.storage import keys as storage_keys
 from mind_meld.storage.local import LocalBackend
 from mind_meld.synclog import write_sync_log
+from tests.conftest import make_git_checkout
 
 PASSPHRASE = "integration-test-passphrase"
 MEMORY_KB = 1024  # Low for fast tests
@@ -4224,7 +4225,7 @@ class TestGCSafety:
         assert pushed.exit_code == 0, pushed.output
         own = cli_module.sidecar.read("dev-a")
         hashes = [info["sha256"] for info in own["sources"]["claude"]["files"].values()]
-        (env["claude"] / "projects/-Users-user-myapp/.git").mkdir()
+        make_git_checkout(env["claude"] / "projects/-Users-user-myapp")
         before = {
             storage_keys.blob_key("dev-a", sha): env["backend"].get(
                 storage_keys.blob_key("dev-a", sha)
@@ -4402,7 +4403,7 @@ class TestGCSafety:
         ]["sha256"]
         # Lost with the canonical; the project then becomes a frozen checkout.
         backend.delete(storage_keys.blob_key("dev-a", late_sha))
-        (env["claude"] / "projects/-Users-user-myapp/.git").mkdir()
+        make_git_checkout(env["claude"] / "projects/-Users-user-myapp")
         (backend.root / Path(key).with_name("manifest.json 2.enc")).write_bytes(older)
         backend.put(key, b"\x02" + b"unreadable current manifest" * 4)
         healed = runner.invoke(app, ["push"])
@@ -9117,7 +9118,7 @@ class TestHeldFiles75A:
         prior = self._entry(env, rel, "mm-events")["sha256"]
         (sub / "x.jsonl").write_text('{"type":"note","n":2}\n')
         (env["memory"] / "a.md").write_text("content push")
-        state = self._phase_spy(monkeypatch, after_scan=lambda: (sub / ".git").mkdir())
+        state = self._phase_spy(monkeypatch, after_scan=lambda: make_git_checkout(sub))
         self._scan_flaky(monkeypatch, {"x.jsonl"}, when=lambda: state["phase"] == "scan")
         result = self._push()
         assert result.exit_code == 0, result.output
@@ -13495,7 +13496,7 @@ def test_corrupt_manifest_recovery_keeps_frozen_entries_that_have_blobs(capture6
     assert runner.invoke(app, ["push"]).exit_code == 0
     key = storage_keys.manifest_key("dev-a")
     published = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
-    (root / "projects" / "proj" / ".git").mkdir()
+    make_git_checkout(root / "projects" / "proj")
     (root / "projects" / "proj" / "note.md").write_text("edited inside the checkout")
     capture61["backend"].put(key, b"not a manifest")
     result = runner.invoke(app, ["push"])
@@ -13527,7 +13528,7 @@ def test_corrupt_manifest_recovery_excludes_checkout_entries_without_blobs(captu
     published = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
     sha = published["sources"]["gstack"]["files"]["proj/note.md"]["sha256"]
     capture61["backend"].delete(storage_keys.blob_key("dev-a", sha))
-    (root / "proj" / ".git").mkdir()
+    make_git_checkout(root / "proj")
     capture61["backend"].put(key, b"not a manifest")
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
@@ -13542,7 +13543,7 @@ def test_recovery_keeps_frozen_mm_events_entries_across_the_rescan(capture61):
     events.mkdir(parents=True)
     (events / "old.md").write_text("published before the checkout")
     assert runner.invoke(app, ["push"]).exit_code == 0
-    (events / ".git").mkdir()
+    make_git_checkout(events)
     key = storage_keys.manifest_key("dev-a")
     capture61["backend"].put(key, b"not a manifest")
     result = runner.invoke(app, ["push"])
@@ -13553,7 +13554,7 @@ def test_recovery_keeps_frozen_mm_events_entries_across_the_rescan(capture61):
 
 
 def test_tombstoned_checkout_entry_still_on_disk_does_not_wedge_push(tmp_path):
-    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    make_git_checkout(tmp_path / "repo")
     (tmp_path / "repo" / "a.md").write_text("recreated inside the checkout")
     (tmp_path / "repo" / "b.md").write_text("published")
     info = {"sha256": "0" * 64, "size": 1, "mtime": "2026-10-07T00:00:00+00:00"}
@@ -13593,7 +13594,7 @@ def test_linked_explicit_include_inside_a_checkout_still_freezes(capture61):
     (root / "repo" / "note.md").write_text("published")
     (root / "target.md").write_text("elsewhere")
     assert runner.invoke(app, ["push"]).exit_code == 0
-    (root / "repo" / ".git").mkdir()
+    make_git_checkout(root / "repo")
     (root / "repo" / "note.md").unlink()
     (root / "repo" / "note.md").symlink_to(root / "target.md")
     assert runner.invoke(app, ["push"]).exit_code == 0
@@ -13612,7 +13613,7 @@ def test_frozen_checkout_contents_are_never_probed(capture61):
     (root / "repo" / "gone.md").unlink()
     assert runner.invoke(app, ["push"]).exit_code == 0
     assert "gstack:repo/gone.md" in _accepted(capture61)["tombstones"]
-    (root / "repo" / ".git").mkdir()
+    make_git_checkout(root / "repo")
     (root / "repo" / "gone.md").symlink_to(root / "repo" / "locked")
     (root / "repo" / "locked").chmod(0)
     try:
@@ -13632,7 +13633,7 @@ def test_exclude_glob_retires_frozen_entries_without_tombstones(capture61):
     (root / "proj").mkdir()
     (root / "proj" / "note.md").write_text("published")
     assert runner.invoke(app, ["push"]).exit_code == 0
-    (root / "proj" / ".git").mkdir()
+    make_git_checkout(root / "proj")
     assert runner.invoke(app, ["push"]).exit_code == 0
     assert "proj/note.md" in _accepted(capture61)["sources"]["gstack"]["files"]
     src["exclude_patterns"] = ["proj/*"]
@@ -13652,7 +13653,7 @@ def test_status_agrees_with_push_for_a_checkout_below_a_marker_dir(capture61):
     (root / "proj" / "r" / "c").mkdir(parents=True)
     (root / "proj" / "r" / "c" / "note.md").write_text("published")
     assert runner.invoke(app, ["push"]).exit_code == 0
-    (root / "proj" / "r" / "c" / ".git").mkdir()
+    make_git_checkout(root / "proj" / "r" / "c")
     assert runner.invoke(app, ["push"]).exit_code == 0
     assert "proj/r/c/note.md" in _accepted(capture61)["sources"]["gstack"]["files"]
     (root / "proj" / "r" / ".extend-root").write_text("generated")
@@ -13679,7 +13680,7 @@ def test_merged_conflict_copy_tombstone_inside_a_checkout_does_not_wedge_push(ca
     # An iCloud conflict copy carries the stale entry next to the tombstone.
     copy = capture61["backend"].root / key.replace("manifest.json.enc", "manifest.json 2.enc")
     copy.write_bytes(stale)
-    (root / "proj" / ".git").mkdir()
+    make_git_checkout(root / "proj")
     (root / "proj" / "x.md").write_text("recreated inside the checkout")
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
@@ -13695,7 +13696,7 @@ def test_mm_events_rescan_uploads_a_path_whose_checkout_vanished(capture61, monk
     nested.mkdir(parents=True)
     (nested / "old.md").write_text("published")
     assert runner.invoke(app, ["push"]).exit_code == 0
-    (nested / ".git").mkdir()
+    make_git_checkout(nested)
     (capture61["claude"] / "projects/-Users-user-myapp/memory/x.md").write_text("change")
     original = cli_module.build_manifest_v2
 
@@ -13741,7 +13742,7 @@ def test_deselecting_an_include_inside_a_checkout_still_refuses_like_before(capt
     assert runner.invoke(app, ["push"]).exit_code == 0
     key = storage_keys.manifest_key("dev-a")
     before = capture61["backend"].get(key)
-    (root / "checkout" / ".git").mkdir()
+    make_git_checkout(root / "checkout")
     src["include_dirs"] = ["other"]
     save_config(capture61["cfg"], capture61["path"])
     result = runner.invoke(app, ["push"])
@@ -13891,7 +13892,7 @@ def test_deleting_formerly_published_checkout_does_not_resurrect_from_peers(tmp_
     run("b", "pull")
     run("b", "push")
     assert (memory_b / "fixture" / "README.md").read_text() == "scratch"
-    (fixture / ".git").mkdir()
+    make_git_checkout(fixture)
     run("a", "push")
     shutil.rmtree(fixture)
     run("a", "push")
@@ -13911,7 +13912,7 @@ def test_pull_never_writes_or_deletes_inside_a_local_checkout(tmp_path, monkeypa
     (memory_b / "fixture" / "new.md").write_text("peer addition")
     (memory_b / "fixture" / "tracked.md").write_text("peer edit")
     run("b", "push")
-    (fixture / ".git").mkdir()
+    make_git_checkout(fixture)
     (fixture / "tracked.md").write_text("uncommitted local work")
     run("a", "pull")
     assert (fixture / "tracked.md").read_text() == "uncommitted local work"
@@ -13937,7 +13938,7 @@ def test_pull_logs_a_checkout_root_for_skipped_deletions(tmp_path, monkeypatch):
     run("b", "push")
     (memory_b / "fixture" / "tracked.md").unlink()
     run("b", "push")
-    (fixture / ".git").mkdir()
+    make_git_checkout(fixture)
     run("a", "pull")
     assert (fixture / "tracked.md").read_text() == "published"
     logged = run("a", "log", "--action", "excluded", "--format", "jsonl")
@@ -13959,7 +13960,7 @@ def test_pull_logs_each_checkout_root_once_per_peer(tmp_path, monkeypatch):
     (memory_b / "fixture" / "edited.md").write_text("peer edit")
     (memory_b / "fixture" / "deleted.md").unlink()
     run("b", "push")
-    (fixture / ".git").mkdir()
+    make_git_checkout(fixture)
     run("a", "pull")
     logged = run("a", "log", "--action", "excluded", "--format", "jsonl")
     records = [json.loads(line) for line in logged.output.splitlines() if line.startswith("{")]
@@ -13967,6 +13968,71 @@ def test_pull_logs_each_checkout_root_once_per_peer(tmp_path, monkeypatch):
     from_b = [(r["source"], r["rel_path"]) for r in records if r["device"] == "dev-b"]
     # dev-b advertises a file and a tombstone under the root: still one record.
     assert from_b == [("claude", root)]
+
+
+def test_empty_git_directory_publishes_on_push_and_writes_on_pull(tmp_path, monkeypatch):
+    run, memory_a, memory_b = _two_macs(tmp_path, monkeypatch)
+    fixture_a = memory_a / "fixture"
+    (fixture_a / ".git").mkdir(parents=True)
+    (fixture_a / "a.md").write_text("from mac a")
+    pushed = run("a", "push", "-v")
+    assert "skipped: nested git repository" not in pushed.stderr
+    backend = LocalBackend(tmp_path / "storage")
+    accepted_a = load_manifest(
+        decrypt(backend.get(storage_keys.manifest_key("dev-a")), PASSPHRASE, MEMORY_KB)
+    )
+    rel = "projects/-Users-user-myapp/memory/fixture/a.md"
+    assert rel in accepted_a["sources"]["claude"]["files"]
+    assert not any("/.git" in p for p in accepted_a["sources"]["claude"]["files"])
+
+    fixture_b = memory_b / "fixture"
+    (fixture_b / ".git").mkdir(parents=True)
+    run("b", "pull")
+    assert (fixture_b / "a.md").read_text() == "from mac a"
+    logged = run("b", "log", "--action", "excluded", "--format", "jsonl")
+    records = [json.loads(line) for line in logged.output.splitlines() if line.startswith("{")]
+    root = "projects/-Users-user-myapp/memory/fixture"
+    assert not any(r.get("rel_path") == root for r in records)
+    assert list((fixture_b / ".git").iterdir()) == []
+
+
+def test_frozen_entry_publishes_current_bytes_once_git_marker_becomes_empty(tmp_path, monkeypatch):
+    run, memory_a, memory_b = _two_macs(tmp_path, monkeypatch)
+    fixture_a = memory_a / "fixture"
+    fixture_a.mkdir()
+    (fixture_a / "tracked.md").write_text("initial")
+    run("a", "push")
+    run("b", "pull")
+    assert (memory_b / "fixture" / "tracked.md").read_text() == "initial"
+    initial_sha = hashlib.sha256(b"initial").hexdigest()
+    edited_bytes = b"edited while frozen"
+    edited_sha = hashlib.sha256(edited_bytes).hexdigest()
+
+    make_git_checkout(fixture_a)
+    (fixture_a / "tracked.md").write_bytes(edited_bytes)
+    (memory_a / "unrelated.md").write_text("force upload")
+    run("a", "push")
+    backend = LocalBackend(tmp_path / "storage")
+    rel = "projects/-Users-user-myapp/memory/fixture/tracked.md"
+    frozen_manifest = load_manifest(
+        decrypt(backend.get(storage_keys.manifest_key("dev-a")), PASSPHRASE, MEMORY_KB)
+    )
+    assert frozen_manifest["sources"]["claude"]["files"][rel]["sha256"] == initial_sha
+    run("b", "pull")
+    assert (memory_b / "fixture" / "tracked.md").read_text() == "initial"
+
+    (fixture_a / ".git" / "HEAD").unlink()
+    run("a", "push")
+    unfrozen_manifest = load_manifest(
+        decrypt(backend.get(storage_keys.manifest_key("dev-a")), PASSPHRASE, MEMORY_KB)
+    )
+    assert unfrozen_manifest["sources"]["claude"]["files"][rel]["sha256"] == edited_sha
+    assert backend.exists(storage_keys.blob_key("dev-a", edited_sha))
+    assert not any("fixture/" in k for k in unfrozen_manifest["tombstones"])
+
+    run("b", "pull")
+    assert (memory_b / "fixture" / "tracked.md").read_bytes() == edited_bytes
+    assert not [path for path in (memory_b / "fixture").iterdir() if "sync-conflict" in path.name]
 
 
 def test_growth_warning_skips_a_macs_first_push_of_fleet_content(tmp_path, monkeypatch):
@@ -14859,7 +14925,7 @@ def test_status77_source_count_isolation_and_nested_diag_paths(status77):
         (root / "items").mkdir(parents=True)
         for i in range(count):
             (root / "items" / f"new{i}.md").write_text("pending")
-            (root / "items" / f"checkout{i}" / ".git").mkdir(parents=True)
+            make_git_checkout(root / "items" / f"checkout{i}")
         cfg["sync"]["sources"].append(
             {"name": name, "type": "generic", "path": str(root), "include_dirs": ["items"]}
         )
