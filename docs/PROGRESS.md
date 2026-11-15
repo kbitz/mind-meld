@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.52 | 2026-11-15 | `mm pull` and `mm autopull` now print one `mm: warning:` line with the cause for every file they cannot apply, including unreadable, undecryptable or mismatched peer data, and a file you edit while `mm pull --conflict-mode prompt` waits for your answer is kept, with the peer's version saved beside it as a conflict copy. |
 | 1.12.51 | 2026-11-15 | `mm recapture` no longer prints its inner push summary unless run with `-v`, a held user file shows as `Push: N files held.` before `Recapture:`, and `mm status`, `mm diag` and `mm recapture` stop suggesting `mm update` when no released mm can read a host reader's record format. |
 | 1.12.50 | 2026-11-15 | An empty or `HEAD`-less `.git` directory no longer freezes a synced folder, and `mm push` no longer publishes a case-variant `.git` directory. |
 | 1.12.49 | 2026-11-15 | Manifest property tests keep passing when the host is under load. |

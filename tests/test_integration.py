@@ -16507,6 +16507,12 @@ def test_sync_progress_pauses_around_conflict_prompt_and_warnings(apply_failure_
         "stderr_console",
         Console(file=terminal, force_terminal=True, color_system=None, width=80),
     )
+
+    def print_warning_to_terminal(message: str) -> None:
+        with core._pause_sync_progress():
+            terminal.write(f"{message}\n")
+
+    monkeypatch.setattr(core, "_print_apply_warning", print_warning_to_terminal)
     result = runner.invoke(app, ["pull", "--conflict-mode", "prompt"], input="l\n")
     assert result.exit_code == 1, result.output
     assert (fleet.memory / "other.md").read_bytes() == b"other\n"
