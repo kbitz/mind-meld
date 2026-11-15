@@ -32,6 +32,7 @@ import difflib
 import hashlib
 import os
 import secrets
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -570,15 +571,21 @@ def _record_resolution(
 def _links_through(path: Path, target: Path) -> bool:
     """Whether ``path``'s own symlink chain reaches ``target``'s inode.
 
-    Follows ``path`` one link at a time (each hop joined onto its link's real
-    directory) and compares each hop's ``os.lstat`` identity with ``target``'s,
-    never ``path`` itself: a name that only resolves to the same file does not
-    count, a hard link of ``target`` in the chain does. Picks the repair for a
-    same-file pair (when the original's chain runs through the copy, deleting the
-    copy would usually leave it dangling); an unreadable link ends with False.
+    For two names of one file. A regular ``target`` with a single link is the
+    file's only name, so a symlink ``path`` must end there: True without walking.
+    Otherwise follows ``path`` one link at a time (each hop joined onto its link's
+    real directory) and compares each hop's ``os.lstat`` identity with
+    ``target``'s, never ``path`` itself: a name that only resolves to the same
+    file does not count, a hard link of ``target`` in the chain does. Picks the
+    repair for a same-file pair (when the original's chain runs through the copy,
+    deleting the copy would usually leave it dangling). An unreadable or overlong
+    hop ends the walk with False, so the repair it picks deletes only a copy that
+    is a link or has another name.
     """
     try:
         want = os.lstat(target)
+        if stat.S_ISREG(want.st_mode) and want.st_nlink == 1 and path.is_symlink():
+            return True
         step = path
         for _ in range(40):  # the kernel's own symlink-follow limit
             if not step.is_symlink():

@@ -1661,6 +1661,32 @@ class TestResolveInteractiveLoop:
             "mm resolve again"
         ) in capsys.readouterr().err
 
+    def test_single_name_copy_gets_the_move_repair_even_when_the_walk_fails(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A regular conflict copy with a single link is the file's only name, so an
+        original that is the same file must reach it through its chain. The repair
+        moves the copy over the original without walking, so a walk that cannot
+        finish (here every readlink overflows) never advises deleting that name."""
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"only copy")
+        canonical = tmp_path / "user.md"
+        canonical.symlink_to(conflict.name)
+
+        def overlong(*_a, **_kw):
+            raise OSError(errno.ENAMETOOLONG, "File name too long")
+
+        monkeypatch.setattr(os, "readlink", overlong)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        assert conflict.read_bytes() == b"only copy"
+        assert canonical.is_symlink()
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); move {conflict.name} over user.md, then run "
+            "mm resolve again"
+        ) in capsys.readouterr().err
+
 
 class TestResolveExitCode:
     """Tests for the (resolved, failed) return shape and resolve()'s exit code.
