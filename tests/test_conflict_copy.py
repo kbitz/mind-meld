@@ -1628,18 +1628,21 @@ class TestResolveInteractiveLoop:
     def test_long_relative_chain_from_the_original_still_gets_the_move_repair(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
-        """A long chain of relative links through long directory names, from the
-        original to its copy, resolves within the kernel's limits. Joining each hop
-        onto the previous hop's unresolved path would outgrow the path limit, end
-        the walk early and advise deleting the copy, the only real file here."""
+        """A long chain of relative links through long directory names runs from the
+        original through its copy, itself a link to the real file, within the
+        kernel's limits. Joining each hop onto the previous hop's unresolved path
+        would outgrow the path limit, end the walk early and advise deleting the
+        copy, which would leave the original dangling."""
         try:
             path_max = os.pathconf(tmp_path, "PC_PATH_MAX")
         except (OSError, ValueError):
             pytest.skip("PC_PATH_MAX is unavailable")
         mem = tmp_path / "mem"
         mem.mkdir()
+        real = mem / "document.md"
+        real.write_bytes(b"real bytes")
         conflict = mem / "user.sync-conflict-20260421-143055-devA1234.md"
-        conflict.write_bytes(b"only copy")
+        conflict.symlink_to(real.name)
         name_len = 200
         hops = min(30, path_max // (name_len + 4) + 3)
         dirs = [tmp_path / "chain" / (f"{i:03d}" + "d" * (name_len - 3)) for i in range(hops)]
@@ -1653,7 +1656,8 @@ class TestResolveInteractiveLoop:
         assert os.path.samefile(canonical, conflict)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
         assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
-        assert conflict.read_bytes() == b"only copy"
+        assert os.readlink(conflict) == real.name
+        assert real.read_bytes() == b"real bytes"
         assert canonical.is_symlink()
         assert (
             f"mm: error: resolve refused: {conflict.name} — same file as user.md "
