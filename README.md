@@ -936,7 +936,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture) |
 | `mm push --dry-run` | Preview publication and deletions (files a recreated scan folder hides are not counted as deletions); changes nothing except the local lock file |
 | `mm pull --dry-run` | Preview what a pull would write, merge, conflict, delete or hold back as `older` (add `--verbose` for why a file with a deletion record is kept: `keep (<reason>)`); changes nothing except the local lock file |
-| `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`) and end with one `Recapture: ... .` outcome line (`--verbose` / `-v` adds the window, repository, record-count and size breakdown). When the oldest recovered commit falls outside a 7-day retro window, an `mm: notice:` line names the `mm retro-fleet <N>d` window that covers it. Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Any other held file adds a `Push: N files held.` line (paths with `-v`) and goes with a later push. Retros window by the COMMIT's date, not by when mm captured it |
+| `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`) and end with one `Recapture: ... .` outcome line (`--verbose` / `-v` adds the window, repository, record-count and size breakdown, plus the inner push's own progress and detail). When the oldest recovered commit falls outside a 7-day retro window, an `mm: notice:` line names the `mm retro-fleet <N>d` window that covers it. Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Any other held file adds a `Push: N files held.` line (paths with `-v`) and goes with a later push. Retros window by the COMMIT's date, not by when mm captured it |
 | `mm pull` | Pull context; one final line per outcome. Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)) |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
@@ -2283,8 +2283,9 @@ no-release sentence instead of their own remedy. The `mm push --verbose`
 usage-capture warning, the automatic-push breadcrumb, and the `mm recapture` and
 `mm init` notices give the same no-release sentence for the unsupported reader
 itself, reading the same cached check. Neither status nor diag refreshes that
-cache; push's usage capture, the automatic-push tail and init read it without
-refreshing it, and push's own update check runs after capture.
+cache; push's usage capture, the events tail (automatic push and `mm recapture`)
+and init read it without refreshing it, and push's and recapture's own update
+checks run after capture.
 
 Upgrade **both producing and rendering Macs** for corrected init counts. Init
 now marks its Git rows as `origin: init`; older renderers still count that unknown
