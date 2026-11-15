@@ -972,3 +972,31 @@ _tombstone: 125, 128, 129, 130, 131_
 ### Track 131A: Carry a reader's progress to the retro and word it "catching up (N left)" in `MM_HEALTH` ✓ Shipped (v1.12.42)
 - 2026-11-13: merged PR #316 (`bbbe943`); verified land-time Track 131A, original Group 131. Introduction/lineage: 2026-11-10 plan at `a198f69` (125A introduced in 2026-11-09 plan at `409998d`; 131A relabeled from 126A on 2026-11-10).
 - Approved-scope evidence: merged PR review/prep receipt and ship receipt, merged implementation/tests and release row; full portable check passed at release head. Additive reader/Git progress, fleet catching-up wording and legacy fallback; attended-cap precedence test included. Historical abort accounting preserved by approved scope.
+
+## Individual Track history
+
+_tombstone: 133, 134_
+
+### Track 132A: Keep recapture's own push quiet about nested repositories, and give the push and status the same Antigravity advice ✓ Shipped (v1.12.43)
+- 2026-11-13: merged [PR #318](https://github.com/kbitz/mind-meld/pull/318) (commit `3b84432d21c6869215907488a56ce28958fa3049`); verified land-time Track 132A (named in the PR body), original Group 132, factory branch `mmm/ef28cccb`. Introduction/lineage: carded by the 2026-11-13 regeneration (`fb2ef59`, PR #317), declared active there.
+- Approved-scope evidence: merged PR review/prep and ship receipts, merged implementation/tests and the v1.12.43 release row. Recapture's push prints no nested-repository notices; verbose push reads the cached upgrade view, so its Antigravity advice matches `mm status`. The remaining surfaces (autopush breadcrumb, diag, recapture's tail) and two test gaps went to the inbox and are now Track 135A.
+
+### Track 133A: Bring status, gc, diff, log, recapture and the update notices to the shared style ✓ Shipped (v1.12.44)
+- 2026-11-13: merged [PR #319](https://github.com/kbitz/mind-meld/pull/319) (commit `c6a6335fb0614b00b67993ac21e631305d768a8f`); verified land-time Track 133A (named in the PR body), original Group 133, factory branch `mmm/6fd9bd47`. Introduction/lineage: carded by the 2026-11-10 regeneration (`a198f69`), relabeled 133A by the 2026-11-13 regeneration (`fb2ef59`).
+- Approved-scope evidence: merged PR review/prep and ship receipts, merged implementation/tests and the v1.12.44 release row. gc, diff and recapture moved to `gcflow.py`, `diffflow.py` and `recaptureflow.py`; the shared `outputstyle.py` leaf; `Gc:` and `Recapture:` outcome lines; both recorded test gaps (deferred update stream failures, zero pending capture) closed. Two pre-existing issues and two test gaps went to the inbox (gc's kept copies and recapture's inner block are now Tracks 136A and 135A; the diff gaps are deferred).
+
+### Track 132E: Wait for the detached pipx test child to finish writing ✓ Shipped (v1.12.45)
+- 2026-11-14: merged [PR #320](https://github.com/kbitz/mind-meld/pull/320) (commit `a45e3c438c426bd0b58feda5f07e7f25b6a18d61`); verified land-time Track 132E (named in the PR body), original Group 132, factory branch `mmm/d2f93b78`. Introduction/lineage: carded by the 2026-11-13 regeneration (`fb2ef59`).
+- Approved-scope evidence: merged PR review/prep and ship receipts, merged test change and the v1.12.45 release row. The detached case parses complete JSON under the same 5 s deadline, keeps every subprocess-contract assertion and fails with path, last error, last text and `spawn.log`; test-only.
+
+### Track 134A: Use shared outcomes when conflicts and resolve find nothing ✓ Shipped (v1.12.46)
+- 2026-11-14: merged [PR #322](https://github.com/kbitz/mind-meld/pull/322) (commit `6793b43e50c5d2ec3161180f4185807b44ac1e2c`); verified land-time Track 134A (named in the PR body), original Group 134, factory branch `mmm/dc4c6cab`. Introduction/lineage: carded by the 2026-11-13 regeneration (`fb2ef59`).
+- Approved-scope evidence: merged PR review/prep and ship receipts, merged implementation/tests and the v1.12.46 release row. Empty `mm conflicts` and `mm resolve` print `Conflicts:` / `Resolve: no conflict files.`; on the developer's decision `mm resolve ""` fails like an unmatched path. Four pre-existing review findings and one test gap went to the inbox (two lines and the test gap are now Track 136A; the walk-all decision is deferred; two unobserved defects were killed).
+
+### Track 132C: Name every old peer in retro recovery advice ✓ Shipped (v1.12.47)
+- 2026-11-14: merged [PR #323](https://github.com/kbitz/mind-meld/pull/323) (commit `888ada2b8bd80c5bbeab9769626469e02f75d0c1`); verified land-time Track 132C (named in the PR body), original Group 132, factory branch `mmm/6e947e30`. Introduction/lineage: carded by the 2026-11-13 regeneration (`fb2ef59`).
+- Approved-scope evidence: merged PR review/prep and ship receipts, merged implementation/tests and the v1.12.47 release row. Recovery advice names every peer below v0.14.17, including all-old; unidentified rejected rows get their own `mm push` advice; malformed registry inputs stay unknown. One test gap went to the inbox (deferred).
+
+### Track 132D: Settle resolved conflicts before reporting to stdout ✓ Shipped (v1.12.48)
+- 2026-11-15: merged [PR #324](https://github.com/kbitz/mind-meld/pull/324) (commit `c0158f0522bfdbcd40d3e385cbb7541fedfc8578`); verified land-time Track 132D (named in the PR body), original Group 132, factory branch `mmm/e01a68d2`. Introduction/lineage: carded by the 2026-11-13 regeneration (`fb2ef59`), declared active by the 2026-11-15 regeneration (PR #325).
+- Approved-scope evidence: merged PR review/prep and ship receipts (release head `4a3ca6c`, full `./bin/check` passed there), merged implementation/tests and the v1.12.48 release row. Each completed choice is settled and counted before its outcome prints, and an `OSError` from that print (BrokenPipeError, EIO) skips neither (`TestResolveOutputFailureAfterMutation`); the nested Grok directory-link case is pinned (`test_skips_nested_symlinked_dir_inside_real_skills_dir`). Scope grew by the developer's decisions recorded in the PR: promotes never overwrite or follow a symlinked copy (ADV-3, D1, D2), a same-file pair is refused (D3) and `mm gc --conflicts` keeps it (D4); D5 backlogged the unreadable-copy advice. Twelve review entries went to the inbox and were drained by the 2026-11-15 follow-up regeneration.

@@ -44,249 +44,50 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/statusflow.py|src/mind_meld/events_tail.py|src/mind_meld/cli.py] Base issue: status shows two Antigravity remedies after an automatic push
-- **Base issue:** present at merge base `fb2ef59`; filed under `blocking=shown`
-- **Description:** With an unsupported reader (for example `agy`) and a current cached release check, `mm status` run after an automatic push prints the verdict "no newer mm can yet" and, on its `Last auto-push` line, the stored autopush detail that still says "A newer mm may read it: run `mm update`". Plain-text `mm diag`'s last-autorun block repeats the same stored detail. A sibling path: `mm recapture`'s own push captures host usage in the tail, which writes the same default `mm update` sentence to stderr, and its follow-up line suggests `mm push` even for the permanent `unsupported` reason. Track 132A deliberately kept the tail, init and attempt-record wording, so these surfaces still disagree with status whenever the newest push was automatic or the owner runs recapture.
-- **Evidence:** A review probe test (an autopush, then status, with `agy` unsupported and a current cache) passed identically on this branch at `2445045` and at the merge base `fb2ef59`: status printed `Last auto-push`, the `mm update` advice and "no newer mm can yet" together. The recapture path was read in code (`capture_attempted = attended and not dry_run`; recapture sets no diagnostic scope) and not separately run.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/statusflow.py:963
-- **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=tests/test_integration.py] Test gap: recapture nested-checkout test has no positive control
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `test_recapture_and_plain_push_stay_silent_on_nested_checkouts` checks that recapture prints no nested-repository notice, but nothing in its recapture half directly shows that recapture's own scan reached the checkout. The manifest assertions after recapture (frozen entry kept, `new.md` unpublished) may already act as that control if recapture's push re-scans the source; that is unconfirmed.
-- **Hypothesis (untested):** first check whether those manifest assertions would fail if recapture's push skipped the source; if not, add an observation of recapture's own push (for example an ordinary file changed outside the checkout that recapture's push must publish). `mm status` and `mm diag` are not a control here, because they find nested roots with their own scan.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** tests/test_integration.py:13017
-- **Evidence:** Review read only. A reverted-fix copy of the branch printed the notice from this same test, so the scan does reach the checkout today; no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py|src/mind_meld/events_tail.py] Test gap: unsupported-reader advice with a current cache is unpinned for recapture, init and multi-reader push
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** README now states that `mm recapture` and init notices keep the `mm update` advice for an unsupported reader even when the cached release check is current. `tests/test_init_events_backfill.py` pins init's unsupported notice without a cache state, but no test pins either surface with a current cache. No test covers an attended `mm push --verbose` with two unsupported readers, where each reader reads the cached release check separately.
-- **Hypothesis (untested):** add current-cache cases for recapture's and init's unsupported-reader notice, and a two-reader case to the push/status parity test; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py:1181
-- **Evidence:** Review read only (adversarial delta pass); the full suite passed on this branch and no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/ef28cccb` (Track 132A, draft PR not yet opened) at `88cb0b0` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/gcflow.py|src/mind_meld/retention.py] Base issue: mm gc --conflicts reports kept conflict copies as a permissions or locks failure
-- **Base issue:** present at merge base `3b84432`; filed under `blocking=shown`
-- **Description:** The conflict reaper counts every copy it keeps on purpose (a live conflict older than 30 days, a `v0-` sidecar, a name whose age cannot be read) as `skipped`, and `ReapOutcome.needs_remediation` treats any skip as an incomplete cleanup. So `mm gc --conflicts` on a Mac with one unresolved old conflict tells the owner to fix permissions or locks, and its `Run: mm gc -v` fix omits `--conflicts`, so following it never shows the reaper that kept the file. Since Track 133A the warning also replaces the `Gc:` outcome line, so that run no longer reports the orphaned-blob count.
-- **Evidence:** A review probe test (push, then a `doc.sync-conflict-20260101-120000-abcd1234.md` sidecar beside a differing `doc.md`, then `mm gc --conflicts`) printed "Fix permissions or locks" at this branch and at the merge base; at the branch stdout was empty and the warning was the only line.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/gcflow.py:104
-- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/recaptureflow.py|src/mind_meld/cli.py] Base issue: mm recapture still prints the inner push's legacy summary block
-- **Base issue:** present at merge base `3b84432`; filed under `blocking=shown`
-- **Description:** Recapture calls `_push_core` with neither `diagnostics` nor `result_observer`, so the inner push runs with its display on and prints "Building manifest...", the scan count, "Uploading N files...", a bold-green "Push complete.", the add/modify counts, timings and transfer size before recapture's own outcome. A non-verbose `mm recapture` therefore still shows a bold-green completion banner and counts the owner does not act on, which O8 asks to keep behind `-v`.
-- **Evidence:** A review probe test (one new historical commit, `mm recapture 14d` without `-v`) printed the "Push complete." block at this branch, before the new `Recapture:` line, and at the merge base, before the old "Recapture complete." banner.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/recaptureflow.py:264
-- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/diffflow.py|tests/test_integration.py] Test gap: mm diff's newer-format remote manifest refusal is unpinned
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No test drives `mm diff` (own or `--from`) against a newer-format remote manifest, so the refusal line and its `Run: mm update` fix in `diffflow.diff_cmd` are not asserted for this command.
-- **Hypothesis (untested):** add a `preview62` case beside `test_diff_corrupt_remote_warns_in_shared_style` that plants a newer-format manifest and pins the exit code, the stderr error and its final fix line; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/diffflow.py:52
-- **Evidence:** Coverage audit read only (Track 133A review); no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/diffflow.py|tests/test_integration.py] Test gap: mm diff's "No differences" and pull-prediction lines are unpinned
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No `mm diff` test asserts the "No differences." line or the `(pull would: <outcome>)` suffix on a pushed change, so a wording or branch change there would pass the suite.
-- **Hypothesis (untested):** add assertions to an existing `preview62` diff test for both lines; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/diffflow.py:117
-- **Evidence:** Coverage audit read only (Track 133A review); no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/6fd9bd47` (Track 133A, draft PR not yet opened) at `d9180e7` (2026-11-13).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py] Base issue: conflict discovery drops a sidecar it cannot stat and still reports no conflict files
-- **Base issue:** present at merge base `c6a6335`; filed under `blocking=shown`
-- **Description:** `resolveflow._find_conflict_files` lists sidecars with `rglob` and keeps only those where `Path.is_file()` is true. A sidecar in a directory that can be listed but not searched (mode 0444) is dropped with no warning: on Python 3.14 `Path.is_file()` returns False instead of raising, so the "conflict sidecar unreadable (left in place)" branches never run. `mm conflicts` then prints `Conflicts: no conflict files.` and exits 0 while a conflict copy exists, and `mm resolve` and `mm gc --conflicts` share the same discovery. A directory with no read permission is skipped silently on every Python version.
-- **Evidence:** A review probe with a v1 sidecar and its canonical inside a mode-0444 directory under a Claude memory folder printed the empty outcome, exit 0 and empty stderr on this branch at `10178b6`, and printed `No conflict files.` the same way at the merge base `c6a6335`, both on Python 3.14.8.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/resolveflow.py:347
-- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py] Base issue: conflict commands keep two lines outside the shared output style
-- **Base issue:** present at merge base `c6a6335`; filed under `blocking=shown`
-- **Description:** Two lines of the conflict commands still bypass the shared forms. `mm resolve PATH` with an unmatched path ends with `mm: error: No conflict file matching: <path>` and no `Run:` fix line (for example `mm conflicts` to list the real paths). A nonempty `mm conflicts` listing ends with the Rich-markup prose "Run mm resolve to keep local, remote, or both interactively, or delete files manually with rm." and, for pre-v0.9.2 copies, a dim note, instead of the shared `Run:` and `mm: notice:` forms. The empty outcomes now use the shared style, so the command reads differently depending on whether conflicts exist (SPEC O8.1 and O8.6).
-- **Evidence:** Review probes on this branch at `10178b6` and at the merge base `c6a6335` printed the same unmatched-path stderr with no `Run:` line, and the same trailing hint after the conflicts table.
-- **Upstream severity:** CRITICAL (unmatched-path line); INFORMATIONAL (listing hint)
-- **Found in:** src/mind_meld/cli.py:4246 and src/mind_meld/cli.py:3993
-- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14). The new test pins today's unmatched-path stderr exactly, so a fix line updates that assertion.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py|src/mind_meld/consoles.py] Base issue: outcome lines turn emoji codes in peer-controlled file names into emoji
-- **Base issue:** present at merge base `c6a6335`; filed under `blocking=shown`
-- **Description:** The shared outcome print (`console.print(..., markup=False, highlight=False, soft_wrap=True)`) leaves Rich's emoji substitution on, and `safe_terminal_str` keeps colons. A sidecar a peer named `notes:fire:.sync-conflict-…md` is reported as `notes🔥.sync-conflict-…md` by `mm resolve`'s "deleted" and "promoted" outcome lines and by its markup-enabled `Conflict in …` header, which names a file that does not exist on disk. Any other outcome line that interpolates a peer- or user-controlled name has the same exposure. Passing `emoji=False` at those prints, or building the shared consoles with `Console(emoji=False)`, would show names verbatim.
-- **Evidence:** A review probe with an orphan sidecar `notes:fire:.sync-conflict-20260420-120000-v1-devA1234.md` and the answer `d` printed `Resolve: deleted notes🔥.sync-conflict-20260420-120000-v1-devA1234.md.` on this branch at `10178b6` and identically at the merge base `c6a6335`.
-- **Upstream severity:** CRITICAL
-- **Found in:** src/mind_meld/resolveflow.py:613
-- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py|src/mind_meld/resolveflow.py] Decide whether mm resolve may walk every conflict when stdin is not a terminal
-- **Description:** `mm resolve` with no PATH walks every conflict and reads answers from stdin, which need not be a terminal (README and the conflict invariants say it "needs a terminal", but nothing checks `isatty`). A script that runs `mm resolve $F` with an unquoted, empty `$F` drops the argument, so the walk starts and its piped answers apply to whichever conflict sorts first; `r` on a post-inversion conflict renames the sidecar over the canonical, replacing that file's local edits with no recovery copy. Track 134A fixed the quoted form (`mm resolve ""` now fails like an unmatched PATH); the unquoted form is the bare command. Closing it means refusing a walk-all on non-terminal stdin or requiring an explicit flag such as `--all`.
-- **Why it can wait:** pre-existing since resolve gained its PATH argument; needs a script bug plus piped answers; CHANGELOG records piped answers as supported (about line 3996), so a refusal is a behavior change; the CliRunner-driven resolve tests would need a terminal seam; the project's planning rule asks for demonstrated demand before adding a control.
-- **Revisit trigger:** an owner report of a script resolving the wrong conflict, the next Track that changes `mm resolve`'s input handling, or a decision to drop piped-answer support.
-- **Evidence:** Track 134A cycle 2 native adversarial review (finding p2-adv-1); the delta did not widen it.
-- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14) as an auto-chosen deferral open to veto on the PR.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=tests/test_integration.py] Test gap: empty-PATH resolve test has no witness that discovery found the conflict
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `TestInversion5E.test_resolve_empty_path_argument_errors_instead_of_walking[True]` writes a v1 sidecar and asserts the error, exit 1 and unchanged files, but nothing asserts that discovery returned that sidecar. If the fixture's config or discovery scope drifted, the case would quietly become the no-conflict case and still pass.
-- **Hypothesis (untested):** wrap `cli_module.resolveflow._find_conflict_files` in a spy and assert one hit, as the sibling unmatched-PATH test witnesses its legacy rename; re-verify first.
-- **Upstream severity:** CRITICAL
-- **Found in:** tests/test_integration.py:3546
-- **Evidence:** Track 134A cycle 2 native adversarial review (finding p2-adv-4). No failure was reproduced: the red proof at `10178b6` shows the True case reached `list_devices`, so discovery found the sidecar with today's fixture.
-- **Context:** Filed by /review-and-prep on branch `mmm/dc4c6cab` (Track 134A, draft PR not yet opened) at `411ffde` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_usage_presentation.py] Test gap: no-reader coverage note without a proven-old peer is unpinned
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Track 132C reworded the "No agent-log reader contributed on any machine" note so its refresh advice follows a `Refresh usage:` lead. Only the variant with a proven-old peer is pinned as an exact string; the common variant, where no registry version is below the attended floor and the remedy is the bare clause (run `mm push` on the machine), is not asserted, so a later rewording could leave stray punctuation or drop the remedy there without a failing test.
-- **Hypothesis (untested):** pin the whole no-version note beside the old-peer case in `test_no_reader_all_stale_and_legacy_counter_remedies_read_cleanly_for_old_peers`; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:4157
-- **Evidence:** Coverage audit read only (Track 132C review); the full suite passed on this branch and no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/6e947e30` (Track 132C, draft PR not yet opened) at `ca770b2` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: no-original promote whose link succeeds and unlink fails
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `mm resolve`'s `(p)romote` for a conflict copy whose original is missing links the copy to the original's name, then unlinks the copy. No test covers the link succeeding and the unlink then failing, which leaves both names in place and counts a failure. The link failure, an occupied name and a dangling symlink at the name are pinned.
-- **Hypothesis (untested):** add a `TestResolvePromote` case that lets the real `os.link` run and makes `os.unlink` raise `OSError`, then pin the error line, `(0, 1)` and both names on disk. Re-verify first. The single-step rename entry below would remove this state, so the test may belong with that change.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/resolveflow.py:711
-- **Evidence:** Track 132D cycle 2 testing specialist; review read only, no failure reproduced. Cycle 3's maintainability reviewer noted that this state's error line does not say the original now exists.
-- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: keep-both promote warning after a failed outcome print
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Track 132D moved the keep-both `(p)romote` "will not sync until you add it to config" warning out of the success branch, so it runs after the outcome line, which now goes through `_print_outcome`. The output-failure test for that promote pins the count, but nothing pins that the warning still prints when the outcome print raises `OSError`.
-- **Hypothesis (untested):** add a promote case under an `include_files` source to `TestResolveOutputFailureAfterMutation` and assert the warning reaches stderr after an outcome-print `OSError`; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/resolveflow.py:1192
-- **Evidence:** Track 132D coverage audit (audit-only; weak path); review read only, no failure reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py] Make both mm resolve promotes a single no-overwrite rename
-- **Description:** Both `(p)romote` paths in `mm resolve` (the keep-both `_promote_conflict_file` and the promote of a copy whose original is missing) move the conflict copy in two steps: `os.link`, which refuses a taken name, then `os.unlink` of the copy. Three cases fall between the steps. An editor's atomic save of the copy (a temporary file renamed over it) is deleted by the unlink while resolve reports the promote as done. An interruption (crash, kill, power loss) or an unlink that fails after the link leaves two names for one file, and the failed unlink counts a failure although the promoted name now exists. After the promote of a copy whose original is missing, a rerun pairs the copy with the original, and since Track 132D `mm resolve` refuses that same-file pair and says to delete the copy (its rename choice would otherwise rename between two links to one file, which Linux treats as a no-op that resolve still reported and settled). While both names exist, Grok and Muse scans skip the file (`st_nlink > 1`, manifest.py:2509 and manifest.py:2626), so a push refuses if it was published before (`_prove_omitted_paths_absent`, core.py:1019) until the extra name is removed. No bytes are lost. A single rename that refuses a taken name closes all three: `renameat2(..., RENAME_NOREPLACE)` on Linux and `renamex_np(..., RENAME_EXCL)` on macOS, called through ctypes because Python's `os` module exposes neither (CPython 3.14.8 on Linux has no `os.renameat2`), with today's link-then-unlink as the fallback where the call or the filesystem refuses it. A later guard that finishes such a promote by unlinking the copy, instead of refusing, must compare `os.lstat` `(st_dev, st_ino)` rather than use `os.path.samefile`, because unlinking a name that a symlink points to can remove the only real file. The single rename also drops the permission check that Linux `fs.protected_hardlinks` adds to `os.link` and not to `rename` (EPERM for a copy owned by another uid that the user cannot both read and write).
-- **Why it can wait:** the owner chose to keep link-then-unlink for Track 132D (2026-11-14, D2 = A). The windows are microseconds wide: the lost save needs a concurrent writer on the copy, and the two-names state an interruption or a failed unlink between the two calls. The keep-both promote has had the same window since v0.12.8 with no report. The change needs platform calls with a fallback and its own review.
-- **Revisit trigger:** an owner report of a lost save on a conflict copy, or of a promoted file left beside its copy as a second name; the next Track that changes either promote path; or Python's `os` module gaining a no-replace rename.
-- **Evidence:** Track 132D cycle 2 Codex challenge (concurrent replace, Medium) and native adversarial review (interrupted pair); cycle 3 maintainability note (unlink failure), red team (no-op rename between two links) and native adversarial review (protected hard links); the post-review native adversarial pass (Grok and Muse hard-link skip, the samefile caveat, and that `rename` hits the same unmapped-owner EOVERFLOW check as `os.link`). Code read; not reproduced.
-- **Found in:** src/mind_meld/resolveflow.py:461 and src/mind_meld/resolveflow.py:711
-- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14) on the owner's decision.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py] A rerun after a failed promote of a v0- conflict copy shows pre-inversion labels
-- **Description:** When the promote of a pre-v0.9.2 (`v0-`) conflict copy fails because a file has appeared at the original's name, the error says to run `mm resolve` again. The rerun pairs the copy with that new file and dispatches by the `v0-` prefix, whose labels assume the original holds the peer's bytes and the copy holds the owner's: `(l)ocal` renames the copy over the new file and `(r)emote` deletes the copy. A file another writer just created is shown as the remote side, so `(l)ocal` reads as keeping your version while it replaces that file. The same pairing already happens on `main` whenever an original appears beside a `v0-` copy with no original.
-- **Why it can wait:** the owner chose to backlog it for Track 132D (2026-11-14, D2 = A). `v0-` copies come only from pre-v0.9.2 conflicts migrated at discovery, so few if any remain. The mislabel predates this change, and the prompt still shows both files' bytes before the choice.
-- **Revisit trigger:** a `v0-` conflict copy found on any machine (`mm conflicts` marks them pre-v0.9.2), or the next Track that changes the pre-inversion dispatch or its migration.
-- **Evidence:** Track 132D cycle 2 native adversarial review; code read, not reproduced.
-- **Found in:** src/mind_meld/resolveflow.py:787
-- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14) on the owner's decision.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py] mm resolve's replace choices overwrite the original from a read taken before the prompt
-- **Description:** In the walk where both files exist, `mm resolve` reads them, shows the diff and waits. `(r)emote` on a post-inversion copy (or `(l)ocal` on a `v0-` copy) then renames the copy over the original, and `(m)erge` writes bytes merged from the earlier read. An edit made to the original while the prompt waits, by an agent or an editor, is replaced without notice. Re-reading the original before replacing it, and refusing when it changed, would close this, as the missing-original promote now refuses a taken name.
-- **Why it can wait:** it predates Track 132D, needs a concurrent writer during the prompt, and was found as a low-confidence (4/10) appendix item unrelated to the change.
-- **Revisit trigger:** an owner report of an edit lost during `mm resolve`, or the next Track that changes these replace choices.
-- **Evidence:** Track 132D cycle 2 red team (appendix); code read, not reproduced.
-- **Found in:** src/mind_meld/resolveflow.py:1079 and src/mind_meld/resolveflow.py:1104
-- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py|src/mind_meld/conflictmtime.py] Keep-both promote of a symlinked conflict copy gets the wrong sync warning
-- **Description:** Since Track 132D, the keep-both `(p)romote` of a conflict copy that is a symlink creates the new `from-`/`local-` name as the link itself. Symlinks below a source root never sync, but `_promote_target_will_sync` resolves the link and judges its destination: a link to a file inside the sync surface gets no warning although the new name never syncs, and a link pointing outside the source gets the include_files warning, whose "add it to config" remedy cannot help. A symlink check that says the promoted name is a link and will not sync would fix both. Related and older: `_bump_canonical_mtime_post_resolve` calls `os.utime` on the original, which follows a symlinked original and changes only its destination's mtime.
-- **Why it can wait:** a conflict copy is a symlink only when something local replaced mm's regular file with a link; the outcome is a file that stays local, the safe direction; Track 132D's owner-approved change (D1) made the link stay a link instead of syncing its target.
-- **Revisit trigger:** the next Track that changes the promote paths or the sync-surface warning, or an owner report of a promoted file that did not sync without a warning.
-- **Evidence:** Track 132D cycle 3 red team and native adversarial review (independently); code read, not reproduced.
-- **Found in:** src/mind_meld/resolveflow.py:484 and src/mind_meld/conflictmtime.py:121
-- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py] A second copy of the same missing original keeps a stale prompt in one mm resolve walk
-- **Description:** Discovery pairs each conflict copy with its original once. When two copies share one missing original (two peers, or a `v0-` and a newer copy), promoting the first creates the original; the second is still told "No canonical file exists" and offered `(p)romote`, which now fails with "<name> now exists; run mm resolve again", so the walk exits 1 and a rerun is needed to reach the two-file prompt. Before Track 132D the second promote silently renamed over the first. Re-checking the name before each missing-original prompt and switching to the two-file prompt would save the rerun.
-- **Why it can wait:** the refusal is the owner-approved Track 132D behavior and loses nothing; two copies of one missing original are rare.
-- **Revisit trigger:** an owner report of the rerun, or the next Track that changes `mm resolve`'s discovery or the missing-original prompt.
-- **Evidence:** Track 132D cycle 3 native adversarial review; code read, not reproduced.
-- **Found in:** src/mind_meld/resolveflow.py:696
-- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `682cc0e` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: mm resolve's same-file refusal has no hard-link or lstat-pinning tests
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `mm resolve` refuses a conflict copy and original that are one file before the prompt. Tests cover a copy linked to its original, an original linked to its copy and an original linked through its copy; none covers two hard links, the state a promote interrupted between its link and unlink leaves, which takes the `delete <copy>` repair, so a change that detected only symlinks would pass the suite. Nor does any test pin that `_links_through` compares `os.lstat` identities and never the original itself: with `os.stat` in its place the existing tests still pass, while two names symlinked to one target, and two hard links of one symlink inode (an interrupted promote of a symlinked copy), flip from `delete <copy>` to `move <copy> over <original>`. The long-chain test (an original reaching its copy, itself a link to the real file, through relative `../<dir>/` links) fails under plain path equality or a join onto a link's unresolved directory, but nothing pins a hard link of the copy in the chain, which takes `move <copy> over <original>` only while the walk compares inodes. The harmful `os.stat` flip is a copy linked to an original that is itself a link: moving the copy over it leaves the original pointing at itself. No test reaches the walk's unreadable-link fallback, which advises `delete <copy>`: a link that changes during the walk reaches it, and so does a hop whose real directory plus its relative target outgrows the path limit (a directory deep on disk behind a short symlink). A regular copy with a single link is the file's only name and skips the walk, so the fallback reaches only a copy that is a link or has another name: deleting that copy loses no data, though an original whose chain ran through it is left dangling. A copy whose own `os.lstat` fails takes `delete <copy>` before any walk; its own backlog entry covers that case. The walk's 40-hop cap never changes an outcome, because the kernel's own limit stops `os.path.samefile` first. Two later checks are unpinned too: dropping the single-name shortcut's `stat.S_ISREG` test leaves every refusal test green while a copy linked to an original that is itself a link would be told to move, and the unreadable-original test fails only `os.lstat`, so on Python 3.11 and 3.12, whose `Path.is_symlink()` calls `os.stat(..., follow_symlinks=False)`, a revert to the old `path.is_symlink()` shortcut still passes it (CI's 3.13 and 3.14 jobs catch that revert). Nor does any test make `os.path.samefile` itself fail: its error sets `same_file` to False and falls through to the reads, as docs/invariants/conflicts.md states.
-- **Hypothesis (untested):** add `TestResolveInteractiveLoop` cases for `os.link(canonical, conflict)`, for both names symlinked to one target, and for two hard links of one symlink inode; assert `(0, 1)`, the `delete <copy>` repair line and both names kept. Add an original linked to a hard link of the copy, asserting `move <copy> over <original>`, to pin the inode comparison for hard links. Add a copy linked to an original that is itself a link, asserting `delete <copy>` (pins the `S_ISREG` test and the `os.lstat` read of the copy), and make the unreadable-original test also fail `os.stat(<original>, follow_symlinks=False)`. Make `os.path.samefile` raise for a pair and assert that nothing is refused and the reads run. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/resolveflow.py:763 and :587-602, tests/test_conflict_copy.py:1694
-- **Evidence:** Track 132D pass 5 testing specialist and native adversarial review, the pass 6 native adversarial mutation probe, the pass 7 native adversarial probe (a standard-library copy of the walk) and the coverage audit at `e0cb0f1`; review read only, no failure reproduced. Functional QA exercised the hard-link pair and it was refused as specified. The pass 10 and pass 11 native adversarial reviews (standard-library copies of `_links_through`) found the two later gaps, also with no failure in the shipped code, and the coverage audit at `1732932` listed the untested `samefile` error path.
-- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `3ee5fad` (2026-11-14). Extended on https://github.com/kbitz/mind-meld/pull/324 at `e0cb0f1`, `3dc4332` and `1732932`.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/retention.py|tests/test_conflict_copy.py] Test gap: conflict gc's same-file check has no reverse-symlink or hard-link test
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `mm gc --conflicts` treats a sidecar and canonical that are one file as live and reaps neither name. The test covers a canonical symlinked to its old sidecar; none covers a sidecar symlinked to its canonical or a hard-linked pair, which reach the same `os.path.samefile` check.
-- **Hypothesis (untested):** parametrize `TestGcOldConflictFiles::test_canonical_symlinked_to_its_sidecar_is_never_reaped` over the three shapes and assert nothing is reaped. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/retention.py:562
-- **Evidence:** Track 132D pass 5 testing specialist; review read only. Functional QA exercised both shapes and gc kept both names.
-- **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `3ee5fad` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py|src/mind_meld/resolveflow.py] mm resolve PATH misses a conflict copy that is itself a symlink
-- **Description:** `mm resolve <PATH>` resolves PATH with `Path(path).expanduser().resolve()` and keeps only the discovery hits whose copy path equals it. Discovery resolves each source root but keeps a conflict copy's own name, so a copy that is itself a symlink never matches its own name: the command prints `No conflict file matching: <PATH>` and exits 1 with nothing deleted (discovery's `v0-` migration still runs first). For such a copy, the same-file refusal and its repair are reached only by a bare `mm resolve`. Discovery also keeps one hit per followed `stat()` identity, so a copy linked to another conflict copy shares that copy's hit under whichever name it lists first: with the link listed first, neither name can be selected by PATH, so a fix has to account for that dedup as well as the PATH comparison.
-- **Why it can wait:** it predates Track 132D (the PATH match is unchanged from `main`), nothing is deleted, the exit is 1, and a bare `mm resolve` refuses the pair as documented. Filed under the owner's stop rule for pre-existing findings below P0 (2026-11-14).
-- **Revisit trigger:** an owner report of `No conflict file matching` for a copy that `mm conflicts` lists, or the next Track that changes `mm resolve`'s PATH matching or conflict discovery.
-- **Evidence:** Track 132D documentation re-audit and pass 8 native adversarial review (static reads, plus a standard-library probe of discovery's dedup); the PATH match line is identical at merge base `888ada2`; not reproduced through `mm`.
-- **Found in:** src/mind_meld/cli.py:4243 and src/mind_meld/resolveflow.py:320-332
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/324 at `5a758ed` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=docs/invariants/sync.md|docs/invariants/init-devices.md|docs/invariants/README.md|docs/invariants/events-retro.md|SPEC.md|README.md|src/mind_meld/resolveflow.py] Pre-existing doc drift found by Track 132D's documentation audits
-- **Description:** Track 132D's two bounded documentation audits reported these passages as wrong or stale before the branch; none was edited, because the change does not touch them:
-  - `docs/invariants/sync.md` L449-450 says each successful explicit `mm resolve` choice writes the resolution ledger; only `(l)ocal`, `(r)emote` and `(m)erge` settle.
-  - `docs/invariants/init-devices.md` L121 says the sanitized print sites are pinned in `tests/test_safe_str.py`, which pins no `mm resolve` site.
-  - `docs/invariants/README.md` L167 also routes `_is_live_conflict` to events-retro.md, which does not document it (L124 routes it to conflicts.md); L412-413's "which overwrite canonical files" can read as covering the promote links, which refuse a taken name.
-  - `SPEC.md` L80 lists `retention.py` among the shared leaves, though it imports `core` and `resolveflow`. L634's divergence-summary wording matches neither prompt, and conflicts.md calls the code's "unique lines" wording rejected; the owner decides which wins. L678 calls standalone Grok Build sources retired, while docs/SPEC.md and `config.py` define a live grok source.
-  - `README.md` L1602: "Binary content suppresses (m)" leaves out the one-line or empty side. Its Handling conflicts section never shows the missing-original `(p)romote / (d)elete / (s)kip` prompt.
-  - `docs/invariants/events-retro.md` L470-472 says event retention also runs after an interactive `mm push`; only an explicit `mm gc` runs it. L3258-3262 and L3882-3886 point at TODOS entries drained long ago.
-  - The `src/mind_meld/resolveflow.py:1112-1114` comment says a copy left after a merge is reaped by `mm gc --conflicts`; gc keeps a copy whose bytes differ from the original (`retention.py:564`), as conflicts.md states.
-  - This file's stdin walk-all entry: piped answers go to the conflict discovery lists first, not one that "sorts first", and its CHANGELOG line pointer has moved.
-- **Why it can wait:** each predates Track 132D and none is critical. Filed under the owner's stop rule for pre-existing findings below P0 (2026-11-14).
-- **Revisit trigger:** the next Track or documentation audit that edits one of these files, or a reader misled by one of these passages.
-- **Evidence:** documentation audits `2662f690` and `dd5da487` for Track 132D (static reads; their sections are in the PR's evidence directory). The resolveflow comment was confirmed against merge base `888ada2` and `retention.py`; re-verify the rest against current code before editing.
-- **Found in:** docs/invariants/sync.md:449
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/324 at `5a758ed` (2026-11-14).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py] mm resolve's same-file refusal advises deleting a copy whose own lstat fails
-- **Description:** When `mm resolve` refuses a conflict copy and original that `os.path.samefile` reports as one file, `_links_through` reads the copy's own `os.lstat` to pick the repair. If that read fails right after `samefile` read the same file, the outer `except OSError` returns False and the refusal advises `delete <copy>`. When the copy is a regular file with one link and the original is a symlink to it, following that advice deletes the file's only name and leaves the original dangling. mm itself deletes nothing; the advice is printed. A copy that vanished in that window makes the advice moot, so only a transient error other than a missing file matters.
-- **Why it can wait:** decided for Track 132D on 2026-11-15 (D5 = B, under the owner's stop rule; open to the owner's veto). The trigger needs an `lstat` failure on a local regular file microseconds after `samefile`'s `stat` of it succeeded; the review reproduced it only by injecting the error. The documented rule (docs/invariants/conflicts.md, same-file pairs) depends on the copy's own identity, so any repair for an unreadable copy is behavior the docs do not state: decide from the original's own `os.lstat` (a link gets `move <copy> over <original>`, which keeps the bytes), or refuse without naming a repair.
-- **Revisit trigger:** a report of `mm resolve` advising `delete <copy>` for a copy that was the file's only name; mm supporting synced roots or home directories on network or FUSE filesystems, where `lstat` can fail transiently; or the next Track that changes the same-file refusal.
-- **Evidence:** Track 132D pass 11 native adversarial review (a standard-library copy of `_links_through` on Python 3.14 and 3.12, with only the copy's `os.lstat` failing); no failure on a real filesystem.
-- **Found in:** src/mind_meld/resolveflow.py:587 and :601-602
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/324 at `3dc4332` (2026-11-15) on the D5 decision.
-- **Effort:** ? (user triages in /roadmap)
-
 ## Drain records
+
+### Roadmap regeneration follow-up — 2026-11-15
+
+Verified against `c0158f0` (v1.12.48) after PR #324 merged, from the manager's follow-up brief. Track 132D recorded as shipped (PR #324, v1.12.48); Group 132's pin is released and 132B, 132F and 132G keep their IDs in Current Plan. Group 136 now depends only on Group 135. The twelve entries PR #324 filed are drained here.
+
+| Inbox item | Disposition |
+|---|---|
+| Test gap: no-original promote whose link succeeds and unlink fails | defer (no Track touches resolveflow.py) |
+| Test gap: keep-both promote warning after a failed outcome print | defer (no Track touches resolveflow.py) |
+| Make both mm resolve promotes a single no-overwrite rename | defer (the developer's D2 = A; trigger as filed) |
+| A rerun after a failed promote of a v0- conflict copy shows pre-inversion labels | defer (D2 = A; trigger as filed) |
+| mm resolve's replace choices overwrite the original from a read taken before the prompt | defer (concurrent writer only; trigger as filed) |
+| Keep-both promote of a symlinked conflict copy gets the wrong sync warning | kill — unobserved; reversible (the promoted name stays on local disk, only the warning is wrong); reopen if it manifests |
+| A second copy of the same missing original keeps a stale prompt in one mm resolve walk | kill — unobserved; reversible (the promote refuses, nothing is lost, a rerun reaches the two-file prompt); reopen if it manifests |
+| Test gap: mm resolve's same-file refusal has no hard-link or lstat-pinning tests | defer (no Track touches resolveflow.py) |
+| Test gap: conflict gc's same-file check has no reverse-symlink or hard-link test | place (Track 136A) |
+| mm resolve PATH misses a conflict copy that is itself a symlink | kill — unobserved; reversible (exit 1, nothing deleted, a bare `mm resolve` reaches the copy); reopen if it manifests |
+| Pre-existing doc drift found by Track 132D's documentation audits | place the sync.md sentence (Track 132F); defer the remainder |
+| mm resolve's same-file refusal advises deleting a copy whose own lstat fails | defer (D5 = B; trigger as filed) |
+
+12 drained: 2 placed (one in part), 7 deferred plus the doc-drift remainder, 3 killed, 0 discharged. Future grows from 54 to 62 entries. No bump under SPEC documentation-only policy.
+
+### Roadmap regeneration — 2026-11-15
+
+Verified against `888ada2` (v1.12.47), from the approved manager brief. Five merged Tracks recorded independently (132A, 133A, 132E, 134A, 132C); Group 132 stays pinned by active Track 132D (PR #324). Brief bug 1 is Track 132F: the cause is an empty placeholder `.git` directory that mm treats as a nested checkout, not the files' 0600 mode. Brief bug 2 is Track 132G. 132B stays open. The review entries PR #324 adds to this inbox are not on main yet and are left for the next regeneration.
+
+| Inbox item | Disposition |
+|---|---|
+| Base issue: status shows two Antigravity remedies after an automatic push | place (Track 135A) |
+| Test gap: recapture nested-checkout test has no positive control | place (Track 135A) |
+| Test gap: unsupported-reader advice with a current cache is unpinned for recapture, init and multi-reader push | place (Track 135A) |
+| Base issue: mm gc --conflicts reports kept conflict copies as a permissions or locks failure | place (Track 136A) |
+| Base issue: mm recapture still prints the inner push's legacy summary block | place (Track 135A) |
+| Test gap: mm diff's newer-format remote manifest refusal is unpinned | defer |
+| Test gap: mm diff's "No differences" and pull-prediction lines are unpinned | defer |
+| Base issue: conflict discovery drops a sidecar it cannot stat and still reports no conflict files | kill — unobserved; reversible (the copy stays on disk; only a crafted mode-0444 directory reaches it); reopen if it manifests |
+| Base issue: conflict commands keep two lines outside the shared output style | place (Track 136A) |
+| Base issue: outcome lines turn emoji codes in peer-controlled file names into emoji | kill — unobserved; inconsequential (display only, no file touched; needs a peer to name a file with an emoji code); reopen if it manifests |
+| Decide whether mm resolve may walk every conflict when stdin is not a terminal | defer (design decision; trigger as filed) |
+| Test gap: empty-PATH resolve test has no witness that discovery found the conflict | place (Track 136A) |
+| Test gap: no-reader coverage note without a proven-old peer is unpinned | defer |
+
+13 drained: 7 placed, 4 deferred, 2 killed, 0 discharged. Future: 4 inbox deferrals plus one new design deferral (pulled copies of owner-only files land with the umask) added; staying-deferred text preserved. No bump under SPEC documentation-only policy.
 
 ### Roadmap regeneration — 2026-11-13
 
