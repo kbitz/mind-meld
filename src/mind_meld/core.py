@@ -702,8 +702,8 @@ def _filter_excluded_paths(
     path matches any glob in `exclude_map[name]` or — when `include_map[name]`
     is non-empty — matches no allowlist pattern in it, AND any conflict-shaped
     basename, `.extend-root` marker, `.git` segment in any letter case, or `.`
-    or empty segment. That is intentionally stricter than the push-side
-    ``manifest._is_excluded`` gate, whose `.git/` check is case-sensitive. A
+    or empty segment. The push-side ``manifest._is_excluded`` gate matches a
+    `.git` segment in any letter case too, but not `.` or empty segments. A
     peer-chosen ``foo.sync-conflict-19700101-000000-deadbeef.md`` must not
     materialize — after the gc bar reads the filename timestamp, that
     string would drive the reap age directly.

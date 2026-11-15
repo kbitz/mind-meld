@@ -1246,7 +1246,8 @@ submodule) or a `.git` directory in which `lstat` finds `HEAD` as a file or
 symlink strictly below its source root, before enumerating or hashing checkout
 contents. An empty or HEAD-less `.git` directory (a placeholder some sandboxed
 tools leave) is not a checkout: the folder publishes and receives normally, and
-the `.git/` exclusion still keeps anything inside the marker local. The source
+the `.git/` exclusion (any letter case) still keeps anything inside the marker
+local. The source
 root itself remains exempt. Check ancestors of configured
 includes so a direct include inside a checkout cannot bypass the rule.
 `nested_repo_root` probes components in order and stops at the first missing,
@@ -1331,9 +1332,10 @@ display copies reach terminals; exclusion keys keep their original bytes.
 drops any peer path or tombstone with a `.git` segment in any letter case (APFS
 lstat matches `.GIT`), so a peer cannot plant one to switch off sync of a
 subtree. It also drops `.` and empty segments, which `Path` would normalize away
-after literal prefix matching. This is intentionally stricter than push's
-case-sensitive `.git/` exclusion; honest walkers never produce these paths below
-a source root.
+after literal prefix matching. Push's walkers also skip a `.git` segment in any
+letter case (`manifest._is_git_segment`), so the contents of a HEAD-less `.GIT`
+directory, which APFS finds for `.git` but which is not a checkout, never
+publish; honest walkers never produce these paths below a source root.
 
 `_warn_push_growth` uses already-materialized new-file diffs, counts groups by
 source and first two directory components, and names up to three groups exceeding

@@ -364,6 +364,17 @@ EXCLUDED = [
     ANCHOR_NAME,  # per-scan-root generation token; local state
 ]
 
+
+def _is_git_segment(name: str) -> bool:
+    """True for a ``.git`` path segment in any letter case.
+
+    APFS finds ``.GIT`` for a ``.git`` lookup, so a HEAD-less ``.GIT`` directory
+    is no checkout; its contents must still never publish. Pull drops a ``.git``
+    segment in any case too (``core._filter_excluded_paths``).
+    """
+    return name.casefold() == ".git"
+
+
 # Only sync these subdirectories within each project.
 # Everything else (sessions, settings, etc.) is either git-tracked or ephemeral.
 SYNCED_SUBDIRS = ["memory", "todos"]
@@ -1239,9 +1250,10 @@ def _is_excluded(
 ) -> bool:
     """Check if a relative path matches any exclude pattern.
 
-    The hardcoded EXCLUDED list covers universal junk (.git, *.tmp, etc.).
-    Per-source globs in `exclude_patterns` extend the filter for source-
-    specific artifacts (e.g. gstack's per-machine repo-mode.json caches).
+    The hardcoded EXCLUDED list covers universal junk (.git, *.tmp, etc.);
+    a ``.git`` segment matches in any letter case. Per-source globs in
+    `exclude_patterns` extend the filter for source-specific artifacts
+    (e.g. gstack's per-machine repo-mode.json caches).
     Per-source globs are matched against the FULL relative path (so users
     can scope to subtrees like `projects/*/repo-mode.json`), unlike the
     EXCLUDED list which mixes basename (`*.pyc`) and dir-segment (`.git/`)
@@ -1260,7 +1272,7 @@ def _is_excluded(
     if _under_skip_prefix(rel_path, skip_prefixes):
         return True
     excl_dirs, excl_file_re = _compile_excluded_rules(tuple(EXCLUDED))
-    if excl_dirs and any(part in excl_dirs for part in parts):
+    if any(part in excl_dirs or _is_git_segment(part) for part in parts):
         return True
     if excl_file_re is not None and excl_file_re.match(filename) is not None:
         return True
@@ -1675,6 +1687,8 @@ def _dir_is_policy_skipped(rel_dir: str, skip_prefixes: list[str] | None) -> boo
     if _under_skip_prefix(rel_dir, skip_prefixes):
         return True
     parts = rel_dir.split("/")
+    if any(_is_git_segment(part) for part in parts):
+        return True
     for pattern in EXCLUDED:
         if pattern.endswith("/"):
             dir_name = pattern.rstrip("/")

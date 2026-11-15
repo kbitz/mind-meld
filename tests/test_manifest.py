@@ -798,6 +798,25 @@ class TestNestedRepositories:
         assert nested_repo_roots_for_paths(cfg, ["docs/x.md"]) == ["docs"]
         assert list((directory / ".git").iterdir()) == []
 
+    @pytest.mark.parametrize("strict", [False, True])
+    @pytest.mark.parametrize("source_type", ["claude", "generic", "grok", "muse"])
+    @pytest.mark.parametrize("name", [".GIT", ".Git"])
+    def test_case_variant_git_directory_never_publishes_its_contents(
+        self, tmp_path, strict, source_type, name
+    ):
+        # APFS finds a HEAD-less ``.GIT`` for the ``.git`` lookup, so it is no
+        # checkout; its contents must still stay local, as pull drops them.
+        base = tmp_path / "source"
+        parent = {"claude": "projects/app/memory", "muse": "memory"}.get(source_type, "skills")
+        sub = base / parent / "checkout"
+        (sub / name).mkdir(parents=True)
+        (sub / name / "config").write_text("[remote]\n")
+        (sub / "x.md").write_text("sync me")
+        cfg = {"name": "source", "type": source_type, "path": str(base), "include_dirs": ["skills"]}
+        _, files = walk_source(cfg, strict=strict)
+        assert list(files) == [f"{parent}/checkout/x.md"]
+        assert _is_excluded(f"{parent}/checkout/{name}/config")
+
 
 class TestWalkGenericSource:
     def _make_source(self, tmp_path: Path) -> tuple[Path, dict[str, Any]]:
