@@ -101,6 +101,7 @@ def recapture(
 ) -> None:
     """Recover omitted git commits into the fleet retro."""
     final_outcome: str | None = None
+    held_outcome: str | None = None
     should_nudge = False
     with pullhistory.command_scope(attended=True):
         days = _parse_recapture_window(window)
@@ -265,8 +266,9 @@ def recapture(
                         config,
                         passphrase,
                         memory_kb,
-                        verbose=False,
+                        verbose=verbose,
                         dry_run=False,
+                        diagnostics=verbose,
                         report_nested_repositories=False,
                     )
             except SnapshotError as e:
@@ -295,6 +297,14 @@ def recapture(
                     "A recapture file was still changing.",
                     fix="mm push",
                 )
+            if result is not None and result.held:
+                # Only user files remain held here (an mm-internal hold exited
+                # above). The inner push prints its own detail only with -v, so
+                # the count keeps the shared outcome line, printed with the
+                # final outcome lines in both modes; -v adds the paths.
+                held_outcome = core._outcome_line(
+                    "push", core._count(len(result.held), "file held", "files held")
+                )
 
             _notice_recapture_host_usage(config, sources)
             partial = (
@@ -304,6 +314,8 @@ def recapture(
             )
             n_scanned_ok = n_roots - skipped
             if partial:
+                if held_outcome is not None:
+                    console.print(held_outcome, soft_wrap=True, markup=False, highlight=False)
                 narrower = "7d" if days > 7 else "1d"
                 # Cause lines (each with its own remedy) stay on stdout; the
                 # headline and the single final fix are one stderr error.
@@ -426,5 +438,7 @@ def recapture(
 
     if should_nudge:
         upgrade.emit_nudge_if_due(config)
+    if held_outcome is not None:
+        console.print(held_outcome, soft_wrap=True, markup=False, highlight=False)
     if final_outcome is not None:
         console.print(final_outcome, soft_wrap=True, markup=False, highlight=False)

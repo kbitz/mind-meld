@@ -365,6 +365,45 @@ class TestBackfillHostSnapshot:
         )
         assert "events backfill failed" not in err
 
+    def test_incomplete_scan_uses_no_release_notice_when_upgrade_cache_is_current(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mind_meld import upgrade
+
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root, claude_dir=None, hosts=("muse",))
+        self._stub(
+            monkeypatch,
+            muse=_mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
+        )
+        monkeypatch.setattr(
+            upgrade,
+            "cached_upgrade_view",
+            lambda _cfg: upgrade.UpgradeCheckResult(
+                state="current", local="9.0.0", latest="9.0.0", install_cmd=None
+            ),
+        )
+
+        events_tail._run_events_backfill(
+            {"sync": {"sources": sources}},
+            sources,
+            "dev-a",
+        )
+
+        rows = _read_event_rows(sorted((events_root / "events").glob("*.jsonl"))[0])
+        assert [r["type"] for r in rows] == ["git-snapshot"]
+        err = capsys.readouterr().err
+        assert err.count("host-usage snapshot skipped") == 1
+        assert (
+            "mm: notice: host-usage snapshot skipped (muse unsupported) — "
+            "content sync and git/session capture unaffected. "
+            "Muse usage not captured: this mm can't read Muse's current record format, "
+            "and no newer mm can yet. See `mm diag`, or run "
+            "`mm disable-source muse` to stop retrying.\n" in err
+        )
+        assert "mm update" not in err
+        assert "events backfill failed" not in err
+
     def test_absent_mm_events_source_touches_no_host_reader(self, tmp_path, monkeypatch):
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
