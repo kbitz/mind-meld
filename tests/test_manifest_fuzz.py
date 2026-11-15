@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from mind_meld.manifest import (
@@ -28,6 +28,13 @@ from mind_meld.manifest import (
     load_manifest,
     normalize_manifest,
     serialize_manifest,
+)
+
+# Overlapping verification on a loaded host must not fail these correctness
+# properties on wall-clock timing.
+_MANIFEST_FUZZ_SETTINGS = settings(
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
 )
 
 # Strategies ----------------------------------------------------------------
@@ -159,7 +166,7 @@ arbitrary_dict_strategy = st.dictionaries(
 
 
 @given(arbitrary_dict_strategy)
-@settings(max_examples=200)
+@settings(parent=_MANIFEST_FUZZ_SETTINGS, max_examples=200)
 def test_normalize_never_crashes_on_arbitrary_dict(d: dict) -> None:
     out = normalize_manifest(dict(d))
     # Post-condition: sources and tombstones are always present.
@@ -168,7 +175,7 @@ def test_normalize_never_crashes_on_arbitrary_dict(d: dict) -> None:
 
 
 @given(arbitrary_dict_strategy)
-@settings(max_examples=200)
+@settings(parent=_MANIFEST_FUZZ_SETTINGS, max_examples=200)
 def test_normalize_is_idempotent(d: dict) -> None:
     once = normalize_manifest(dict(d))
     once_copy = json.loads(json.dumps(once, default=str))
@@ -180,7 +187,7 @@ def test_normalize_is_idempotent(d: dict) -> None:
 
 
 @given(v2_manifest_strategy)
-@settings(max_examples=100)
+@settings(parent=_MANIFEST_FUZZ_SETTINGS, max_examples=100)
 def test_load_manifest_round_trip_preserves_keys(m: dict) -> None:
     blob = serialize_manifest(m)
     loaded = load_manifest(blob)
@@ -190,7 +197,7 @@ def test_load_manifest_round_trip_preserves_keys(m: dict) -> None:
 
 
 @given(v1_manifest_strategy)
-@settings(max_examples=100)
+@settings(parent=_MANIFEST_FUZZ_SETTINGS, max_examples=100)
 def test_v1_promotion_migrates_bare_tombstone_keys(m: dict) -> None:
     blob = serialize_manifest(m)
     loaded = load_manifest(blob)
@@ -201,7 +208,7 @@ def test_v1_promotion_migrates_bare_tombstone_keys(m: dict) -> None:
 
 
 @given(st.text(min_size=0, max_size=120))
-@settings(max_examples=200)
+@settings(parent=_MANIFEST_FUZZ_SETTINGS, max_examples=200)
 def test_is_conflict_filename_never_crashes(name: str) -> None:
     # Property: returns a bool, doesn't raise.
     result = is_conflict_filename(name)
@@ -209,7 +216,7 @@ def test_is_conflict_filename_never_crashes(name: str) -> None:
 
 
 @given(st.text(min_size=0, max_size=120))
-@settings(max_examples=200)
+@settings(parent=_MANIFEST_FUZZ_SETTINGS, max_examples=200)
 def test_is_conflict_filename_strict_pattern(name: str) -> None:
     # Property: a True result implies the strict format is present.
     if is_conflict_filename(name):
@@ -220,7 +227,7 @@ def test_is_conflict_filename_strict_pattern(name: str) -> None:
 
 
 @given(st.binary(min_size=0, max_size=200))
-@settings(max_examples=100)
+@settings(parent=_MANIFEST_FUZZ_SETTINGS, max_examples=100)
 def test_load_manifest_either_returns_normalized_or_raises(data: bytes) -> None:
     from mind_meld.errors import ManifestError
 
