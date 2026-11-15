@@ -3559,6 +3559,8 @@ def test_agy_unsupported_cached_upgrade_view_exception_keeps_sibling_capture_and
 def test_autopush_breadcrumb_keeps_forensic_detail_when_upgrade_cache_is_current(
     tmp_path, monkeypatch
 ):
+    from mind_meld import attemptlog
+
     iso, upgrade = _setup_agy_unsupported_fixture(tmp_path, monkeypatch)
     _write_upgrade_cache(upgrade.CACHE_PATH, "9.0.0")
 
@@ -3567,9 +3569,175 @@ def test_autopush_breadcrumb_keeps_forensic_detail_when_upgrade_cache_is_current
     assert (r.stdout, r.stderr) == ("", "")
     payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "degraded", payload
-    assert payload["detail"] == (
+    expected_no_release_detail = (
+        "host-usage snapshot skipped (agy unsupported) — "
+        "content sync and git/session capture unaffected. "
+        "Antigravity usage not captured: this mm can't read Antigravity's current record format, "
+        "and no newer mm can yet. See `mm diag`, or run `mm disable-source agy` to stop retrying."
+    )
+    assert payload["detail"] == expected_no_release_detail
+    assert attemptlog.run_details([payload["detail"]]) == (
+        [payload["detail"].replace("git/session", "git and session")],
+        0,
+    )
+
+    no_release_clause = (
+        "Antigravity usage not captured: this mm can't read Antigravity's current record format, "
+        "and no newer mm can yet. See `mm diag`, or run `mm disable-source agy` to stop retrying."
+    )
+    status_cur = runner.invoke(app, ["status"])
+    assert status_cur.exit_code == 0, (status_cur.stdout, status_cur.stderr)
+    status_cur_out = " ".join((status_cur.stdout or "").split())
+    assert f"Usage refresh: {no_release_clause}" in status_cur_out
+    assert f"Antigravity usage capture: enabled — {expected_no_release_detail}" in status_cur_out
+    assert no_release_clause in status_cur_out
+    assert "mm update" not in status_cur_out
+
+    diag_cur = runner.invoke(app, ["diag"])
+    assert diag_cur.exit_code == 0, (diag_cur.stdout, diag_cur.stderr)
+    diag_cur_out = " ".join((diag_cur.stdout or "").split())
+    assert f"detail: {expected_no_release_detail}" in diag_cur_out
+    assert "mm update" not in diag_cur_out
+
+    # When a newer release is available, autopush breadcrumb, status, and diag recommend mm update.
+    memory = tmp_path / "claude" / "projects" / "-Users-user-myapp" / "memory"
+    memory.mkdir(parents=True, exist_ok=True)
+    (memory / "MEMORY.md").write_text("hi v2\n")
+    _write_upgrade_cache(upgrade.CACHE_PATH, "9.1.0")
+    r_up = runner.invoke(app, ["autopush"])
+    assert r_up.exit_code == 0, (r_up.stdout, r_up.stderr)
+    payload_up = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    expected_update_detail = (
         "host-usage snapshot skipped (agy unsupported) — "
         "content sync and git/session capture unaffected. "
         "agy wrote a record this version cannot read. A newer mm may read it: "
         "run `mm update`, or run `mm disable-source agy` to stop retrying."
     )
+    assert payload_up["detail"] == expected_update_detail
+
+    status_up = runner.invoke(app, ["status"])
+    assert status_up.exit_code == 0, (status_up.stdout, status_up.stderr)
+    status_up_out = " ".join((status_up.stdout or "").split())
+    assert "mm update" in status_up_out
+    assert "no newer mm can yet" not in status_up_out
+
+    diag_up = runner.invoke(app, ["diag"])
+    assert diag_up.exit_code == 0, (diag_up.stdout, diag_up.stderr)
+    diag_up_out = " ".join((diag_up.stdout or "").split())
+    assert f"detail: {expected_update_detail}" in diag_up_out
+    assert "mm update" in diag_up_out
+    assert "no newer mm can yet" not in diag_up_out
+
+
+def test_two_unsupported_readers_push_and_status_give_no_release_advice_when_cache_is_current(
+    tmp_path, monkeypatch
+):
+    _iso, upgrade = _setup_agy_unsupported_fixture(tmp_path, monkeypatch)
+    _enable_test_host_source(tmp_path, "muse")
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_muse_usage",
+        lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
+    )
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "muse_usage_diag",
+        lambda **_kw: {
+            "last_reason": "unsupported",
+            "complete_once": False,
+            "usage_less_skipped": 0,
+            "cache_state": "ok",
+        },
+    )
+    cache_path = upgrade.CACHE_PATH
+    _write_upgrade_cache(cache_path, "9.0.0")
+    before_cache = (cache_path.read_bytes(), cache_path.stat().st_mtime_ns)
+
+    pushed = runner.invoke(app, ["push", "--verbose"])
+    assert pushed.exit_code == 0, (pushed.stdout, pushed.stderr)
+    assert (cache_path.read_bytes(), cache_path.stat().st_mtime_ns) == before_cache
+
+    status_res = runner.invoke(app, ["status"])
+    assert status_res.exit_code == 0, (status_res.stdout, status_res.stderr)
+    assert (cache_path.read_bytes(), cache_path.stat().st_mtime_ns) == before_cache
+
+    push_err = " ".join((pushed.stderr or "").split())
+    status_out = " ".join((status_res.stdout or "").split())
+
+    muse_no_release = (
+        "host-usage snapshot skipped (muse unsupported) — "
+        "content sync and git/session capture unaffected. "
+        "Muse usage not captured: this mm can't read Muse's current record format, "
+        "and no newer mm can yet. See `mm diag`, or run `mm disable-source muse` to stop retrying."
+    )
+    agy_no_release = (
+        "host-usage snapshot skipped (agy unsupported) — "
+        "content sync and git/session capture unaffected. "
+        "Antigravity usage not captured: this mm can't read Antigravity's current record format, "
+        "and no newer mm can yet. See `mm diag`, or run `mm disable-source agy` to stop retrying."
+    )
+    plural_no_release = (
+        "Muse and Antigravity usage not captured: this mm can't read their current record formats, "
+        "and no newer mm can yet. See `mm diag`, or run `mm disable-source muse`, "
+        "or run `mm disable-source agy` to stop retrying."
+    )
+
+    assert muse_no_release in push_err
+    assert agy_no_release in push_err
+    assert "mm update" not in push_err
+
+    assert muse_no_release in status_out
+    assert agy_no_release in status_out
+    assert plural_no_release in status_out
+    assert "mm update" not in status_out
+
+
+def test_recapture_tail_notice_uses_cached_upgrade_view(tmp_path, monkeypatch):
+    _iso, upgrade = _setup_agy_unsupported_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *_a, **_kw: _mm_events.GitRootDiscovery([tmp_path / "claude"], [], False),
+    )
+    monkeypatch.setattr(_mm_events, "_walk_one_repo", lambda *_a: (None, None))
+
+    seen = []
+    real_push_core = cli_module._push_core
+
+    def _spy_push_core(*args, **kwargs):
+        res = real_push_core(*args, **kwargs)
+        seen.append(res)
+        return res
+
+    monkeypatch.setattr(cli_module, "_push_core", _spy_push_core)
+
+    _write_upgrade_cache(upgrade.CACHE_PATH, "9.0.0")
+    recap_cur = runner.invoke(app, ["recapture", "1d"])
+    assert recap_cur.exit_code == 0, (recap_cur.stdout, recap_cur.stderr)
+    no_release_phrase = (
+        "host-usage snapshot skipped (agy unsupported) — "
+        "content sync and git/session capture unaffected. "
+        "Antigravity usage not captured: this mm can't read Antigravity's current record format, "
+        "and no newer mm can yet. See `mm diag`, or run `mm disable-source agy` to stop retrying."
+    )
+    cur_err = " ".join((recap_cur.stderr or "").split())
+    assert f"mm: notice: {no_release_phrase}" in cur_err
+    assert "mm update" not in cur_err
+    assert seen and seen[-1].events_degradations == [no_release_phrase]
+
+    memory = tmp_path / "claude" / "projects" / "-Users-user-myapp" / "memory"
+    memory.mkdir(parents=True, exist_ok=True)
+    (memory / "MEMORY.md").write_text("hi v2\n")
+    _write_upgrade_cache(upgrade.CACHE_PATH, "9.1.0")
+    recap_up = runner.invoke(app, ["recapture", "1d"])
+    assert recap_up.exit_code == 0, (recap_up.stdout, recap_up.stderr)
+    update_phrase = (
+        "host-usage snapshot skipped (agy unsupported) — "
+        "content sync and git/session capture unaffected. "
+        "agy wrote a record this version cannot read. A newer mm may read it: "
+        "run `mm update`, or run `mm disable-source agy` to stop retrying."
+    )
+    up_err = " ".join((recap_up.stderr or "").split())
+    assert f"mm: notice: {update_phrase}" in up_err
+    assert "no newer mm can yet" not in up_err
+    assert seen[-1].events_degradations == [update_phrase]

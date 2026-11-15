@@ -386,10 +386,17 @@ def run_details(details: list[str]) -> tuple[list[str], int]:
         for cause in causes
     }
     host_phrases = {
-        events_tail._host_skip_phrase(reader, reason, readiness="ready", attended=attended)
+        events_tail._host_skip_phrase(
+            reader,
+            reason,
+            readiness="ready",
+            no_release_reads=no_release_reads,
+            attended=attended,
+        )
         for reader in (*events.HOST_USAGE_TOKEN_SOURCES, None)
         for reason in (*get_args(host_usage.Reason), "unavailable", None)
         for attended in (False, True)
+        for no_release_reads in ((), (reader,) if reader is not None else ())
     }
     host_names = "|".join(re.escape(name) for name in events.HOST_USAGE_TOKEN_SOURCES)
     retained, omitted = [], 0

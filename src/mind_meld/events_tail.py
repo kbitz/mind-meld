@@ -1227,9 +1227,9 @@ def _host_skip_phrase(
     """Closed-vocabulary reader remedy; callers escape at their display sink.
 
     ``no_release_reads`` names the unsupported readers whose format no release
-    reads yet, decided by status/diag and by ``_capture_skip_phrase`` when
-    attended push supplies ``config``; tail, init and attempt-record callers
-    keep the default and their text.
+    reads yet, decided by status/diag, by ``_capture_skip_phrase`` when its
+    caller supplies ``config`` (attended push and the events tail), and by
+    ``_run_events_backfill`` under the same guarded cached-upgrade-view read.
     """
     phrase = (
         f"host-usage snapshot skipped ({reader} {reason}) — "
@@ -2052,6 +2052,7 @@ def _run_events_tail(
                     dropped_reason,
                     attended=not quiet,
                     evidence=capture.host_capture.deadline_evidence.get(dropped_reader),
+                    config=config,
                 )
                 degradations.append(phrase)
                 _diagnostic(f"mm: notice: {phrase}\n")
@@ -2061,6 +2062,7 @@ def _run_events_tail(
                 capture.host_capture.reason,
                 attended=not quiet,
                 evidence=capture.host_capture.deadline_evidence.get(capture.host_capture.reader),
+                config=config,
             )
             degradations.append(phrase)
             _diagnostic(f"mm: notice: {phrase}\n")
@@ -2197,8 +2199,18 @@ def _run_events_backfill(
                 "mm: notice: git repository discovery hit its time budget: "
                 "initial retro capture may omit repositories. Run mm diag\n"
             )
+
         # Init has no `mm-push` row and no autorun breadcrumb, so the notice is
         # the only surface available — and init IS attended, so it lands.
+        def _init_no_release_reads(reader: str | None, reason: str | None) -> tuple[str, ...]:
+            if reader is not None and reason in _HOST_PERMANENT_REASONS:
+                try:
+                    if upgrade.cached_upgrade_view(config).state == "current":
+                        return (reader,)
+                except Exception:
+                    pass
+            return ()
+
         if capture.host_capture.dropped:
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
                 _diagnostic(
@@ -2208,6 +2220,7 @@ def _run_events_backfill(
                         dropped_reason,
                         verb="init",
                         readiness="ready",
+                        no_release_reads=_init_no_release_reads(dropped_reader, dropped_reason),
                         attended=True,
                     )
                     + "\n"
@@ -2220,6 +2233,9 @@ def _run_events_backfill(
                     capture.host_capture.reason,
                     verb="init",
                     readiness="ready",
+                    no_release_reads=_init_no_release_reads(
+                        capture.host_capture.reader, capture.host_capture.reason
+                    ),
                     attended=True,
                 )
                 + "\n"
