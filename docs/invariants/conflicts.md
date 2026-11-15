@@ -6,7 +6,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/pullflow.py` — `_apply_fast_forward` / `_ledger_verdict` / `_classify_with_ledger` / `_ApplyReporter` / `_tidy_line_indexes` (see "The pull rule" below)
 - `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner`
 - `src/mind_meld/core.py` — `_filter_excluded_paths`
-- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_record_resolution` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
+- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_record_resolution` / `_print_outcome` / `_links_through` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
 - `src/mind_meld/manifest.py` — `_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename` / `grok_memory_path_allowed` / `grok_path_allowed` / `grok_memory_scan_dirs`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `render_capped_diff` / `count_divergent_lines`
@@ -159,6 +159,35 @@ keeps completed settlements. An unidentified peer, flush failure or unavailable
 ledger leaves the chosen bytes intact and warns that a later pull may conflict
 again. The local-choice mtime bump remains a propagation hint.
 
+**Count and settle, then report (Track 132D).** In `_resolve_interactive_loop`,
+the `try` whose failure a choice counts holds only its rename, link, unlink or
+merged write; the stat reads that fall back to 0.0 and the merge's warn-only
+removal of the copy sit in their own `try`s and never count a failure. Once it
+succeeds the choice is counted and, for `(l)ocal`, `(r)emote` and `(m)erge`,
+settled through `_record_resolution`, and only then is its outcome line printed.
+Outcome and summary lines go through `_print_outcome`, which ignores `OSError`, so
+a stdout failure after a committed change is never reported as a failed rename or
+delete and never skips the settlement. Rich's closed-pipe `SystemExit(1)` still
+ends the walk, after counting and settlement. A settlement notice therefore
+prints before its choice's outcome line. Pinned by
+`tests/test_conflict_copy.py::TestResolveOutputFailureAfterMutation`.
+
+**Same-file pairs are refused (Track 132D).** Before the two-file prompt,
+`_resolve_interactive_loop` refuses a conflict copy and original that
+`os.path.samefile` reports as one file: a symlink in either direction, two
+hard links (such as a promote interrupted between its link and unlink), or two
+links to one target. Every choice is unsafe or empty there: the diff is empty,
+renaming a link over its own target leaves a self-referencing link, and
+unlinking the real name leaves a dangling one. The refusal deletes nothing,
+counts as failed (exit 1) and names the repair: move the copy over the original
+when the original's own symlink chain reaches the copy's inode (`_links_through`
+compares each hop's `os.lstat` identity, so a hard link of the copy in the chain
+counts; deleting the copy would usually leave the original dangling), otherwise
+delete the copy. A `samefile`
+error falls through to the reads, whose failure is counted as before. Pinned by
+`tests/test_conflict_copy.py::TestResolveInteractiveLoop` (a copy linked to its
+original, an original linked to its copy, an original linked through its copy).
+
 **Inline keep-local deferral and abort.** At the inline prompt `(l)ocal` calls
 `_ApplyReporter.defer_settle`, which queues the settlement on the ledger; it is
 applied by `ledger.flush_deferred()` right after `_drain_inline_bumps`, inside
@@ -199,8 +228,9 @@ A sidecar carries THREE distinct facts on THREE carriers. Conflating them is how
 * **canonical exists and differs** — the decision is still open. A 30-day destruction deadline on unresolved user data with no countdown is not shippable.
 * **canonical is MISSING** — `_resolve_interactive_loop`'s `canonical is None` branch offers `(p)romote` to make the sidecar canonical, so this is a supported recovery state the resolver actively advertises, not an orphan. The sidecar can be the only copy left on disk: the user deleted their local file, and the peer's blob survives in storage only while the peer's manifest still references that sha. Do NOT "optimize" this back to reapable — it was, and Greptile caught it on PR #161. Note the `v0-` skip immediately above already applied this reasoning; the two branches must agree.
 * **hash failure** — cannot tell, so refuse.
+* **canonical and sidecar are the same file** (a symlink either way, or hard links; `os.path.samefile`) — identical bytes prove nothing, and reaping the sidecar can delete the only real file; `mm resolve` refuses the pair with its repair (Track 132D).
 
-Bare `mm gc --dry-run` previews this reaper; apply still requires `--conflicts`. The consequence is deliberate: a sidecar the user never resolves is never reaped automatically. `mm resolve` is the intended path, and `mm conflicts` tells the user they can `rm` manually. Pinned by `tests/test_conflict_copy.py::TestGcOldConflictFiles` (`test_missing_canonical_is_never_reaped`, `test_live_conflict_is_never_reaped`, and the converged case in `test_reaps_files_older_than_cutoff`).
+Bare `mm gc --dry-run` previews this reaper; apply still requires `--conflicts`. The consequence is deliberate: a sidecar the user never resolves is never reaped automatically. `mm resolve` is the intended path, and `mm conflicts` tells the user they can `rm` manually. Pinned by `tests/test_conflict_copy.py::TestGcOldConflictFiles` (`test_missing_canonical_is_never_reaped`, `test_live_conflict_is_never_reaped`, `test_canonical_symlinked_to_its_sidecar_is_never_reaped`, and the converged case in `test_reaps_files_older_than_cutoff`).
 
 ## Conflict-prompt UX (load-bearing, v0.11.1 BREAKING — interactive prompt)
 
@@ -337,7 +367,7 @@ Three properties this relies on, all deliberate:
 
 Keep it narrow: the suppression is `<= 1` line, NOT "no shared lines." Two multi-line documents with zero overlap still get `(m)erge`, because the markered output is at least editable there, and the never-default-to-`(m)` rule above already covers that footgun. Pinned by `tests/test_conflictdiff.py::TestMergeHasLineStructure` (pure) and `tests/test_conflict_copy.py::TestSuppressMergeWithoutLineStructure` (both prompt sites, plus a `test_multiline_file_still_offers_merge` regression guard against over-broad suppression).
 
-**`(p)romote` on the canonical-exists path.** `_resolve_interactive_loop` already had a `(p)romote` option, but ONLY in the `canonical is None` (no-base) branch, where it renames the sidecar to the canonical name via `_canonical_for_conflict`. v0.12.8 adds `(p)romote` to the canonical-exists dispatch too: it keeps BOTH files by renaming the `.sync-conflict-*` sidecar to its own first-class filename. Outcome string `promoted` (counted in `resolved` / `failed`; NOT written to pullhistory — `mm resolve` is interactive, nothing to audit silently). `render_prompt` gains a `promote_available` kwarg that adds the `(p)romote` line; the resolve-loop site passes `promote_available=True`, the inline site does NOT (see below).
+**`(p)romote` on the canonical-exists path.** `_resolve_interactive_loop` already had a `(p)romote` option, but ONLY in the `canonical is None` (no-base) branch, where it moves the sidecar to the canonical name via `_canonical_for_conflict` without overwriting (since Track 132D: `os.link(..., follow_symlinks=False)` then `os.unlink`, so a symlinked sidecar moves as the link itself). A file that took that name after discovery (another writer, while the prompt waited) makes `os.link` raise `FileExistsError`: the conflict fails with `<name> now exists; run mm resolve again`, or `<name> is a broken symlink; repair or remove it, then run mm resolve again` when the occupant is a dangling link (discovery's `exists()` follows links, so it reported no canonical), and both files stay. v0.12.8 adds `(p)romote` to the canonical-exists dispatch too: it keeps BOTH files by renaming the `.sync-conflict-*` sidecar to its own first-class filename. Outcome string `promoted` (counted in `resolved` / `failed`; NOT written to pullhistory — `mm resolve` is interactive, nothing to audit silently). `render_prompt` gains a `promote_available` kwarg that adds the `(p)romote` line; the resolve-loop site passes `promote_available=True`, the inline site does NOT (see below).
 
 **`(p)romote` is `mm resolve`-only.** It is deliberately NOT offered at the inline pull-time prompt (`_prompt_conflict_choice`). At that site the sidecar is not on disk yet (`_apply_conflict` writes it AFTER the prompt returns), so a promote there would require a new branch in `_apply_incoming_file` — the autopull path Approach A's design contract keeps untouched.
 
@@ -346,11 +376,11 @@ Keep it narrow: the suppression is `<= 1` line, NOT "no shared lines." Two multi
 * pre-inversion (`v0-`) sidecar HOLDS the user's own LOCAL bytes → `<stem>.local-<ts>.<ext>`. Naming a `v0-` promote `from-<peer>` would lie about provenance.
 `<peer-short-id>` falls back to `"unknown"` when `parse_conflict_device_short` returns None. `<ts>` is not collision-proof at same-second granularity; a pre-check appends a `-<4hex>` suffix (same pattern as `conflict_filename`) when the computed path already exists.
 
-**No-clobber rename (`_promote_conflict_file`).** Uses `os.link(cpath, target)` + `os.unlink(cpath)`, NOT `Path.rename()`. `Path.rename()` silently replaces an existing target on POSIX; the promoted file is a first-class user filename, so a clobber is real data loss. `os.link` raises `FileExistsError` atomically if the target exists — on that race, retry once with a fresh `-<4hex>` suffix. Any other `OSError` propagates and the caller counts the conflict as `failed`.
+**No-clobber rename (`_promote_conflict_file`).** Uses `os.link(cpath, target, follow_symlinks=False)` + `os.unlink(cpath)`, NOT `Path.rename()`; since Track 132D a symlinked sidecar moves as the link itself, as a rename would, never as a hard link to its target. `Path.rename()` silently replaces an existing target on POSIX; the promoted file is a first-class user filename, so a clobber is real data loss. `os.link` raises `FileExistsError` atomically if the target exists — on that race, retry once with a fresh `-<4hex>` suffix. Any other `OSError` propagates and the caller counts the conflict as `failed`.
 
 **Sync-surface warning (`_promote_target_will_sync`).** A promoted file is a NEW filename, so it only syncs if it lands inside one of the source's `_synced_scan_dirs` (recursive `include_dirs` surface) and is not excluded by `manifest._is_excluded` (including `exclude_patterns` and generic-source `include_patterns`). Under an `include_files`-only source, or when a generic source's `include_patterns` allowlists an exact filename (`projects/*/learnings.jsonl`), the `from-`/`local-` name will not match → it will not sync. `_resolve_interactive_loop` warns (one `mm: warning:` stderr line) when this is detected; promote still succeeds (it never silently half-fails, and mm does NOT auto-mutate user config). Requires the `sources_by_name` arg threaded from `resolve()`; when that arg is None (unit tests, library callers) the warning is skipped.
 
-Pinned by `tests/test_conflict_copy.py::TestNeverDefaultToMerge` (default `s` at both sites on a clean merge, `(m)erge` still works when typed), `::TestPromoteHelpers` (per-mode naming, none-peer fallback, collision → `-<4hex>`, `os.link` no-clobber, happy path), `::TestResolvePromote` (post-inversion + pre-inversion promote, link `OSError` → failed, `include_files` warning vs `include_dirs` no-warning, no-base promote unchanged), and `tests/test_conflictdiff.py::TestRenderPrompt` (`promote_available` line).
+Pinned by `tests/test_conflict_copy.py::TestNeverDefaultToMerge` (default `s` at both sites on a clean merge, `(m)erge` still works when typed), `::TestPromoteHelpers` (per-mode naming, none-peer fallback, collision → `-<4hex>`, `os.link` no-clobber, happy path), `::TestResolvePromote` (post-inversion + pre-inversion promote, link `OSError` → failed, a symlinked sidecar promotes as a link, `include_files` warning vs `include_dirs` no-warning; the no-base promote still promotes, keeps a canonical created after discovery, reports a broken symlink at the name and moves a symlinked sidecar as a link), and `tests/test_conflictdiff.py::TestRenderPrompt` (`promote_available` line).
 
 **Phase 2 classifier: not built, cancelled.** The LCS-similarity classifier (`classify_divergence`, a `DivergenceClass` enum, a `Class` column on `mm conflicts`, similarity-gated silent merge) is NOT built; the v0.12.51 analysis below cancelled it (see the refusal in `TODOS.md`).
 

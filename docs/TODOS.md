@@ -46,6 +46,27 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap regeneration follow-up — 2026-11-15
+
+Verified against `c0158f0` (v1.12.48) after PR #324 merged, from the manager's follow-up brief. Track 132D recorded as shipped (PR #324, v1.12.48); Group 132's pin is released and 132B, 132F and 132G keep their IDs in Current Plan. Group 136 now depends only on Group 135. The twelve entries PR #324 filed are drained here.
+
+| Inbox item | Disposition |
+|---|---|
+| Test gap: no-original promote whose link succeeds and unlink fails | defer (no Track touches resolveflow.py) |
+| Test gap: keep-both promote warning after a failed outcome print | defer (no Track touches resolveflow.py) |
+| Make both mm resolve promotes a single no-overwrite rename | defer (the developer's D2 = A; trigger as filed) |
+| A rerun after a failed promote of a v0- conflict copy shows pre-inversion labels | defer (D2 = A; trigger as filed) |
+| mm resolve's replace choices overwrite the original from a read taken before the prompt | defer (concurrent writer only; trigger as filed) |
+| Keep-both promote of a symlinked conflict copy gets the wrong sync warning | kill — unobserved; reversible (the promoted name stays on local disk, only the warning is wrong); reopen if it manifests |
+| A second copy of the same missing original keeps a stale prompt in one mm resolve walk | kill — unobserved; reversible (the promote refuses, nothing is lost, a rerun reaches the two-file prompt); reopen if it manifests |
+| Test gap: mm resolve's same-file refusal has no hard-link or lstat-pinning tests | defer (no Track touches resolveflow.py) |
+| Test gap: conflict gc's same-file check has no reverse-symlink or hard-link test | place (Track 136A) |
+| mm resolve PATH misses a conflict copy that is itself a symlink | kill — unobserved; reversible (exit 1, nothing deleted, a bare `mm resolve` reaches the copy); reopen if it manifests |
+| Pre-existing doc drift found by Track 132D's documentation audits | place the sync.md sentence (Track 132F); defer the remainder |
+| mm resolve's same-file refusal advises deleting a copy whose own lstat fails | defer (D5 = B; trigger as filed) |
+
+12 drained: 2 placed (one in part), 7 deferred plus the doc-drift remainder, 3 killed, 0 discharged. Future grows from 54 to 62 entries. No bump under SPEC documentation-only policy.
+
 ### Roadmap regeneration — 2026-11-15
 
 Verified against `888ada2` (v1.12.47), from the approved manager brief. Five merged Tracks recorded independently (132A, 133A, 132E, 134A, 132C); Group 132 stays pinned by active Track 132D (PR #324). Brief bug 1 is Track 132F: the cause is an empty placeholder `.git` directory that mm treats as a nested checkout, not the files' 0600 mode. Brief bug 2 is Track 132G. 132B stays open. The review entries PR #324 adds to this inbox are not on main yet and are left for the next regeneration.

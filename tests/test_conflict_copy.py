@@ -16,6 +16,7 @@ mm conflicts / resolve / gc --conflicts commands.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import sys
@@ -722,6 +723,38 @@ class TestGcOldConflictFiles:
         assert reaped.deleted == 0
         assert sidecar.exists(), "unresolved conflict must survive gc regardless of age"
 
+    def test_canonical_symlinked_to_its_sidecar_is_never_reaped(self, tmp_path: Path) -> None:
+        """A canonical that is a symlink to its own 30-day-old sidecar reads as
+        identical bytes, but the sidecar is the only real file: gc must keep
+        both names and leave the pair to mm resolve's same-file refusal."""
+        src = tmp_path / "src"
+        (src / "memory").mkdir(parents=True)
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        old_ts = (pinned_now - timedelta(days=40)).strftime("%Y%m%d-%H%M%S")
+        sidecar = src / "memory" / f"note.sync-conflict-{old_ts}-v1-devA1234.md"
+        sidecar.write_bytes(b"only copy")
+        canonical = src / "memory" / "note.md"
+        canonical.symlink_to(sidecar.name)
+
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            },
+        }
+        reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False, now=pinned_now)
+        assert reaped.deleted == 0
+        assert sidecar.read_bytes() == b"only copy"
+        assert canonical.is_symlink()
+        assert canonical.read_bytes() == b"only copy"
+
     def test_dry_run_does_not_delete(self, tmp_path: Path) -> None:
         """dry_run=True lists but preserves everything."""
 
@@ -919,6 +952,25 @@ class TestFindConflictFilesGrokType:
             {"sync": {"sources": [{"name": "grok", "path": str(root), "type": "grok"}]}}
         )
         assert hits == []
+
+    def test_skips_nested_symlinked_dir_inside_real_skills_dir(self, tmp_path: Path) -> None:
+        root = tmp_path / ".grok"
+        real_dir = root / "skills" / "real"
+        real_dir.mkdir(parents=True)
+        real_sidecar = real_dir / "real.sync-conflict-20260421-143055-devA1234.md"
+        real_sidecar.write_bytes(b"real")
+        sessions = root / "sessions"
+        sessions.mkdir(parents=True)
+        session_conflict = sessions / "chat.sync-conflict-20260421-143055-devA1234.md"
+        session_conflict.write_bytes(b"private")
+        linked = root / "skills" / "linked"
+        linked.symlink_to(sessions, target_is_directory=True)
+
+        hits = _find_conflict_files(
+            {"sync": {"sources": [{"name": "grok", "path": str(root), "type": "grok"}]}}
+        )
+        assert hits == [("grok", real_sidecar, None)]
+        assert all(not path.is_relative_to(linked) for _name, path, _canonical in hits)
 
 
 class TestFindConflictFilesMuseType:
@@ -1494,6 +1546,180 @@ class TestResolveInteractiveLoop:
         assert c2.read_bytes() == b"b-local"
         assert not conflict2.exists()
 
+    def test_refuses_a_copy_that_is_a_symlink_to_its_original(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A conflict copy linked to its own original is refused before the
+        prompt: (r)emote would rename the link over the original, leaving a
+        self-referencing link where the only copy of its bytes was."""
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"only copy")
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.symlink_to(canonical.name)
+        prompts: list[object] = []
+
+        def answer_remote(*a, **_kw):
+            prompts.append(a)
+            return "r"
+
+        monkeypatch.setattr(typer, "prompt", answer_remote)
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        assert prompts == []
+        assert not canonical.is_symlink()
+        assert canonical.read_bytes() == b"only copy"
+        assert conflict.is_symlink()
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); delete {conflict.name}, then run mm resolve again"
+        ) in capsys.readouterr().err
+
+    def test_refuses_an_original_that_is_a_symlink_to_its_copy(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """An original linked to its own conflict copy is refused before the
+        prompt: (l)ocal would unlink the copy, the only real file, and leave the
+        original dangling. The repair moves the copy over the link."""
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"only copy")
+        canonical = tmp_path / "user.md"
+        canonical.symlink_to(conflict.name)
+        prompts: list[object] = []
+
+        def answer_local(*a, **_kw):
+            prompts.append(a)
+            return "l"
+
+        monkeypatch.setattr(typer, "prompt", answer_local)
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        assert prompts == []
+        assert not conflict.is_symlink()
+        assert conflict.read_bytes() == b"only copy"
+        assert canonical.is_symlink()
+        assert os.readlink(canonical) == conflict.name
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); move {conflict.name} over user.md, then run "
+            "mm resolve again"
+        ) in capsys.readouterr().err
+
+    def test_refuses_an_original_linked_through_its_copy(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """When the original's symlink chain runs through the copy (original ->
+        copy -> real file), deleting the copy would leave the original dangling,
+        so the repair moves the copy over the original instead."""
+        real = tmp_path / "document.md"
+        real.write_bytes(b"real bytes")
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.symlink_to(real.name)
+        canonical = tmp_path / "user.md"
+        canonical.symlink_to(conflict.name)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        assert os.readlink(canonical) == conflict.name
+        assert os.readlink(conflict) == real.name
+        assert real.read_bytes() == b"real bytes"
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); move {conflict.name} over user.md, then run "
+            "mm resolve again"
+        ) in capsys.readouterr().err
+
+    def test_long_relative_chain_from_the_original_still_gets_the_move_repair(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A long chain of relative links through long directory names runs from the
+        original through its copy, itself a link to the real file, within the
+        kernel's limits. Joining each hop onto the previous hop's unresolved path
+        would outgrow the path limit, end the walk early and advise deleting the
+        copy, which would leave the original dangling."""
+        try:
+            path_max = os.pathconf(tmp_path, "PC_PATH_MAX")
+        except (OSError, ValueError):
+            pytest.skip("PC_PATH_MAX is unavailable")
+        mem = tmp_path / "mem"
+        mem.mkdir()
+        real = mem / "document.md"
+        real.write_bytes(b"real bytes")
+        conflict = mem / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.symlink_to(real.name)
+        name_len = 200
+        hops = min(30, path_max // (name_len + 4) + 3)
+        dirs = [tmp_path / "chain" / (f"{i:03d}" + "d" * (name_len - 3)) for i in range(hops)]
+        for d in dirs:
+            d.mkdir(parents=True)
+        for i, d in enumerate(dirs):
+            nxt = dirs[i + 1] / "l" if i + 1 < hops else conflict
+            (d / "l").symlink_to(os.path.relpath(nxt, d))
+        canonical = mem / "user.md"
+        canonical.symlink_to(os.path.relpath(dirs[0] / "l", mem))
+        assert os.path.samefile(canonical, conflict)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        assert os.readlink(conflict) == real.name
+        assert real.read_bytes() == b"real bytes"
+        assert canonical.is_symlink()
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); move {conflict.name} over user.md, then run "
+            "mm resolve again"
+        ) in capsys.readouterr().err
+
+    def test_single_name_copy_gets_the_move_repair_even_when_the_walk_fails(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A regular conflict copy with a single link is the file's only name, so an
+        original that is the same file must reach it through its chain. The repair
+        moves the copy over the original without walking, so a walk that cannot
+        finish (here every readlink overflows) never advises deleting that name."""
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"only copy")
+        canonical = tmp_path / "user.md"
+        canonical.symlink_to(conflict.name)
+
+        def overlong(*_a, **_kw):
+            raise OSError(errno.ENAMETOOLONG, "File name too long")
+
+        monkeypatch.setattr(os, "readlink", overlong)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        assert conflict.read_bytes() == b"only copy"
+        assert canonical.is_symlink()
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); move {conflict.name} over user.md, then run "
+            "mm resolve again"
+        ) in capsys.readouterr().err
+
+    def test_single_name_copy_gets_the_move_repair_when_the_original_cannot_be_read(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Once os.path.samefile has found the pair, an original whose own lstat
+        then fails (a transient error) still names the copy, the file's only name.
+        Treating the failure as "not a link" would advise deleting that name."""
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"only copy")
+        canonical = tmp_path / "user.md"
+        canonical.symlink_to(conflict.name)
+        real_lstat = os.lstat
+
+        def failing_for_original(p, *a, **kw):
+            if os.fspath(p) == os.fspath(canonical):
+                raise OSError(errno.EIO, "Input/output error")
+            return real_lstat(p, *a, **kw)
+
+        monkeypatch.setattr(os, "lstat", failing_for_original)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        monkeypatch.setattr(os, "lstat", real_lstat)
+        assert conflict.read_bytes() == b"only copy"
+        assert canonical.is_symlink()
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); move {conflict.name} over user.md, then run "
+            "mm resolve again"
+        ) in capsys.readouterr().err
+
 
 class TestResolveExitCode:
     """Tests for the (resolved, failed) return shape and resolve()'s exit code.
@@ -1506,17 +1732,17 @@ class TestResolveExitCode:
     """
 
     def test_loop_counts_rename_failure(self, tmp_path: Path, monkeypatch) -> None:
-        """Promote choice + rename raises OSError -> failed += 1, walk continues."""
+        """Promote choice + its no-clobber link raises OSError -> failed += 1, walk continues."""
 
         conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
         conflict.write_bytes(b"conflict")
-        # canonical=None branch -> 'p' choice -> rename
+        # canonical=None branch -> 'p' choice -> os.link (no-clobber promote)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
 
         def boom(*a, **kw):
-            raise OSError("simulated rename failure")
+            raise OSError("simulated link failure")
 
-        monkeypatch.setattr(Path, "rename", boom)
+        monkeypatch.setattr(os, "link", boom)
 
         resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
         assert (resolved, failed) == (0, 1)
@@ -2758,6 +2984,30 @@ class TestResolvePromote:
         assert conflict.exists(), "sidecar left in place on failure"
         assert canonical.exists()
 
+    def test_promote_does_not_follow_a_symlinked_sidecar(self, tmp_path: Path, monkeypatch) -> None:
+        """Keep-both promotes a symlinked sidecar as the link itself, as a rename
+        would move it: it never turns the link's target into a regular file
+        beside the canonical, where it would sync."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "secret.json"
+        target.write_bytes(b"not for sync")
+        work = tmp_path / "work"
+        work.mkdir()
+        canonical = work / "report.md"
+        canonical.write_bytes(b"local report\n")
+        conflict = work / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.symlink_to(target)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (1, 0)
+        promoted = list(work.glob("report.from-*"))
+        assert len(promoted) == 1
+        assert promoted[0].is_symlink()
+        assert os.stat(target).st_nlink == 1
+        assert not os.path.lexists(conflict)
+        assert canonical.read_bytes() == b"local report\n"
+
     def test_promote_include_files_source_warns(self, tmp_path: Path, monkeypatch, capsys) -> None:
         """A promoted file under an include_files-only source falls outside the
         sync surface -- promote succeeds but warns."""
@@ -2858,6 +3108,73 @@ class TestResolvePromote:
         canonical = tmp_path / "report.md"
         assert canonical.read_bytes() == b"orphan bytes"
         assert not conflict.exists()
+
+    def test_no_base_promote_keeps_a_canonical_created_after_discovery(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Another writer (an agent or editor) can create the canonical while the
+        prompt waits. (p)romote must not replace it: the promote fails, both
+        files keep their bytes, and the walk counts the failure."""
+        conflict = tmp_path / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"orphan bytes")
+        canonical = tmp_path / "report.md"
+
+        def prompt_after_another_writer(*_a, **_kw):
+            canonical.write_bytes(b"written after discovery")
+            return "p"
+
+        monkeypatch.setattr(typer, "prompt", prompt_after_another_writer)
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
+        assert (resolved, failed) == (0, 1)
+        assert canonical.read_bytes() == b"written after discovery"
+        assert conflict.read_bytes() == b"orphan bytes"
+        err = capsys.readouterr().err
+        assert (
+            f"mm: error: promote failed: {conflict.name} — report.md now exists; "
+            "run mm resolve again"
+        ) in err
+
+    def test_no_base_promote_reports_a_broken_symlink_at_the_canonical_name(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Discovery treats a dangling symlink as no canonical, but the name is
+        taken. Promote must not replace the link and must not send the owner
+        round a rerun that fails the same way."""
+        conflict = tmp_path / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"orphan bytes")
+        canonical = tmp_path / "report.md"
+        canonical.symlink_to(tmp_path / "missing-target.md")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
+        assert (resolved, failed) == (0, 1)
+        assert canonical.is_symlink()
+        assert conflict.read_bytes() == b"orphan bytes"
+        err = capsys.readouterr().err
+        assert (
+            f"mm: error: promote failed: {conflict.name} — report.md is a broken "
+            "symlink; repair or remove it, then run mm resolve again"
+        ) in err
+
+    def test_no_base_promote_does_not_follow_a_symlinked_sidecar(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A symlinked sidecar is moved as a link, as a rename would move it:
+        promote never turns the link's target into a regular synced file."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "secret.json"
+        target.write_bytes(b"not for sync")
+        work = tmp_path / "work"
+        work.mkdir()
+        conflict = work / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.symlink_to(target)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
+        assert (resolved, failed) == (1, 0)
+        canonical = work / "report.md"
+        assert canonical.is_symlink()
+        assert os.stat(target).st_nlink == 1
+        assert not os.path.lexists(conflict)
 
     def test_promote_post_inversion_bumps_canonical_mtime(
         self, tmp_path: Path, monkeypatch
@@ -4876,6 +5193,9 @@ class TestSharedStyleResolveAndConflictsOutput:
         monkeypatch.setattr(
             Path, "unlink", lambda *a, **kw: (_ for _ in ()).throw(OSError("u-err"))
         )
+        # The no-canonical (p)romote links without overwriting (os.link), so its
+        # failure is injected there rather than through Path.rename.
+        monkeypatch.setattr(os, "link", lambda *a, **kw: (_ for _ in ()).throw(OSError("l-err")))
         monkeypatch.setattr(
             resolveflow.fsutil,
             "atomic_write_bytes",
@@ -4904,7 +5224,7 @@ class TestSharedStyleResolveAndConflictsOutput:
         assert (resolved, failed) == (0, 8)
         err = capsys.readouterr().err
         expected_errors = [
-            f"mm: error: promote failed: {orphan_p.name} \u2014 r-err",
+            f"mm: error: promote failed: {orphan_p.name} \u2014 l-err",
             f"mm: error: delete failed: {orphan_d.name} \u2014 u-err",
             f"mm: error: rename failed: {pre_l_sc.name} \u2014 r-err",
             f"mm: error: delete failed: {pre_r_sc.name} \u2014 u-err",
@@ -4994,3 +5314,311 @@ class TestSharedStyleResolveAndConflictsOutput:
             for line in source.splitlines():
                 if "[red]" in line:
                     assert name == "sourceflow.py" and '"[red]N[/red]"' in line, (name, line)
+
+
+# ── Track 132D: settle resolved conflicts before reporting to stdout ─────
+
+_RESOLVE_OUTPUT_ERRORS = [
+    pytest.param(
+        lambda: BrokenPipeError(errno.EPIPE, "Broken pipe"),
+        id="epipe",
+    ),
+    pytest.param(
+        lambda: OSError(errno.EIO, "Input/output error"),
+        id="eio",
+    ),
+]
+
+
+class TestResolveOutputFailureAfterMutation:
+    @staticmethod
+    def _install_outcome_print_failure(
+        monkeypatch: pytest.MonkeyPatch, exc_factory: object
+    ) -> None:
+        def _fake_print(*args: object, **_kwargs: object) -> None:
+            if args and isinstance(args[0], str) and args[0].startswith("Resolve: "):
+                raise exc_factory()  # type: ignore[operator]
+
+        monkeypatch.setattr(resolveflow.console, "print", _fake_print)
+
+    @staticmethod
+    def _devices_and_sources(tmp_path: Path) -> tuple[list[dict[str, str]], dict[str, dict]]:
+        return (
+            [{"device_id": "devA1234", "device_name": "Peer"}],
+            {"s1": {"name": "s1", "path": str(tmp_path), "type": "generic"}},
+        )
+
+    @pytest.mark.parametrize(
+        ("is_pre_inversion", "choice"),
+        [
+            pytest.param(True, "l", id="pre-l"),
+            pytest.param(False, "l", id="post-l"),
+            pytest.param(True, "r", id="pre-r"),
+            pytest.param(False, "r", id="post-r"),
+        ],
+    )
+    @pytest.mark.parametrize("exc_factory", _RESOLVE_OUTPUT_ERRORS)
+    def test_local_and_remote_choices_stay_counted_and_settled_after_output_oserror(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        is_pre_inversion: bool,
+        choice: str,
+        exc_factory: object,
+    ) -> None:
+        canonical = tmp_path / "note.md"
+        if is_pre_inversion:
+            sidecar = tmp_path / "note.sync-conflict-v0-20260101-100000-devA1234.md"
+            canonical.write_bytes(b"remote bytes\n")
+            sidecar.write_bytes(b"local bytes\n")
+        else:
+            sidecar = tmp_path / "note.sync-conflict-20260421-143055-v1-devA1234.md"
+            canonical.write_bytes(b"local bytes\n")
+            sidecar.write_bytes(b"remote bytes\n")
+
+        self._install_outcome_print_failure(monkeypatch, exc_factory)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", sidecar, canonical)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (1, 0)
+        assert not sidecar.exists()
+        expected_bytes = b"local bytes\n" if choice == "l" else b"remote bytes\n"
+        assert canonical.read_bytes() == expected_bytes
+        assert "mm: error:" not in capsys.readouterr().err
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        remote_sha = hashlib.sha256(b"remote bytes\n").hexdigest()
+        assert ledger.base("devA1234", "s1", "note.md") == remote_sha
+
+        canonical_sha = hashlib.sha256(canonical.read_bytes()).hexdigest()
+        verdict = pullplan.decide(
+            ledger,
+            "devA1234",
+            "s1",
+            "note.md",
+            pullplan.LocalFile(True, canonical_sha),
+            remote_sha,
+            None,
+            [],
+        )
+        assert verdict in ("skip", "matched")
+        assert verdict != "fallback"
+
+    @pytest.mark.parametrize("choice", ["p", "d"])
+    @pytest.mark.parametrize("exc_factory", _RESOLVE_OUTPUT_ERRORS)
+    def test_orphan_promote_and_delete_stay_counted_without_settling(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        choice: str,
+        exc_factory: object,
+    ) -> None:
+        sidecar = tmp_path / "orphan.sync-conflict-20260421-143055-v1-devA1234.md"
+        sidecar.write_bytes(b"orphan bytes\n")
+        target = tmp_path / "orphan.md"
+
+        self._install_outcome_print_failure(monkeypatch, exc_factory)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", sidecar, None)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (1, 0)
+        assert not sidecar.exists()
+        if choice == "p":
+            assert target.read_bytes() == b"orphan bytes\n"
+        else:
+            assert not target.exists()
+        assert "mm: error:" not in capsys.readouterr().err
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        assert ledger.base("devA1234", "s1", "orphan.md") is None
+
+    @pytest.mark.parametrize("exc_factory", _RESOLVE_OUTPUT_ERRORS)
+    def test_merge_and_canonical_promote_stay_counted_and_merge_settled(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        exc_factory: object,
+    ) -> None:
+        m_canon = tmp_path / "merge.md"
+        m_canon.write_bytes(b"line1\nline2\n")
+        m_sidecar = tmp_path / "merge.sync-conflict-20260421-143055-v1-devA1234.md"
+        m_sidecar.write_bytes(b"line1\nline2\nline3\n")
+
+        p_canon = tmp_path / "prom.md"
+        p_canon.write_bytes(b"local\n")
+        p_sidecar = tmp_path / "prom.sync-conflict-20260421-143055-v1-devA1234.md"
+        p_sidecar.write_bytes(b"remote\n")
+
+        self._install_outcome_print_failure(monkeypatch, exc_factory)
+        answers = iter(["m", "p"])
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(answers))
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", m_sidecar, m_canon), ("s1", p_sidecar, p_canon)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (2, 0)
+        assert not m_sidecar.exists()
+        assert m_canon.read_bytes() == b"line1\nline2\nline3\n"
+        assert not p_sidecar.exists()
+        assert p_canon.read_bytes() == b"local\n"
+        promoted = list(tmp_path.glob("prom.from-devA1234-*.md"))
+        assert len(promoted) == 1
+        assert promoted[0].read_bytes() == b"remote\n"
+        assert "mm: error:" not in capsys.readouterr().err
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        remote_sha = hashlib.sha256(b"line1\nline2\nline3\n").hexdigest()
+        assert ledger.base("devA1234", "s1", "merge.md") == remote_sha
+        assert ledger.base("devA1234", "s1", "prom.md") is None
+
+    @pytest.mark.parametrize("choice", ["l", "r"])
+    def test_system_exit_from_outcome_print_preserves_mutation_and_ledger_base(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        choice: str,
+    ) -> None:
+        canonical = tmp_path / "sysexit.md"
+        canonical.write_bytes(b"local bytes\n")
+        sidecar = tmp_path / "sysexit.sync-conflict-20260421-143055-v1-devA1234.md"
+        sidecar.write_bytes(b"remote bytes\n")
+
+        self._install_outcome_print_failure(monkeypatch, lambda: SystemExit(1))
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+
+        with pytest.raises(SystemExit) as exc_info:
+            resolveflow._resolve_interactive_loop(
+                [("s1", sidecar, canonical)],
+                devices=devices,
+                sources_by_name=sources_by_name,
+            )
+
+        assert exc_info.value.code == 1
+        assert not sidecar.exists()
+        expected_bytes = b"local bytes\n" if choice == "l" else b"remote bytes\n"
+        assert canonical.read_bytes() == expected_bytes
+        assert "failed" not in capsys.readouterr().err
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        remote_sha = hashlib.sha256(b"remote bytes\n").hexdigest()
+        assert ledger.base("devA1234", "s1", "sysexit.md") == remote_sha
+
+    @pytest.mark.parametrize(
+        ("choice", "expected_prefix"),
+        [
+            pytest.param("l", "delete failed:", id="post-l-unlink-fail"),
+            pytest.param("r", "rename failed:", id="post-r-rename-fail"),
+        ],
+    )
+    def test_genuine_disk_failure_stays_failed_with_output_fake_installed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        choice: str,
+        expected_prefix: str,
+    ) -> None:
+        canonical = tmp_path / "diskfail.md"
+        canonical.write_bytes(b"local bytes\n")
+        sidecar = tmp_path / "diskfail.sync-conflict-20260421-143055-v1-devA1234.md"
+        sidecar.write_bytes(b"remote bytes\n")
+
+        self._install_outcome_print_failure(
+            monkeypatch, lambda: BrokenPipeError(errno.EPIPE, "Broken pipe")
+        )
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+        if choice == "l":
+            real_unlink = Path.unlink
+
+            def _fail_unlink(self_path: Path, missing_ok: bool = False) -> None:
+                if self_path == sidecar:
+                    raise OSError(errno.EIO, "disk I/O error")
+                real_unlink(self_path, missing_ok=missing_ok)
+
+            monkeypatch.setattr(Path, "unlink", _fail_unlink)
+        else:
+            real_rename = Path.rename
+
+            def _fail_rename(self_path: Path, target: Path) -> Path:
+                if self_path == sidecar:
+                    raise OSError(errno.EIO, "disk I/O error")
+                return real_rename(self_path, target)
+
+            monkeypatch.setattr(Path, "rename", _fail_rename)
+
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", sidecar, canonical)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (0, 1)
+        err = capsys.readouterr().err
+        assert f"mm: error: {expected_prefix} {sidecar.name}" in err
+        assert sidecar.exists()
+        assert canonical.read_bytes() == b"local bytes\n"
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        assert ledger.base("devA1234", "s1", "diskfail.md") is None
+
+    def test_output_failure_does_not_retry_mutation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        canonical = tmp_path / "noretry.md"
+        canonical.write_bytes(b"local bytes\n")
+        sidecar = tmp_path / "noretry.sync-conflict-20260421-143055-v1-devA1234.md"
+        sidecar.write_bytes(b"remote bytes\n")
+
+        self._install_outcome_print_failure(
+            monkeypatch, lambda: BrokenPipeError(errno.EPIPE, "Broken pipe")
+        )
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
+        real_rename = Path.rename
+        rename_calls = 0
+
+        def _counting_rename(self_path: Path, target: Path) -> Path:
+            nonlocal rename_calls
+            if self_path == sidecar:
+                rename_calls += 1
+            return real_rename(self_path, target)
+
+        monkeypatch.setattr(Path, "rename", _counting_rename)
+        devices, sources_by_name = self._devices_and_sources(tmp_path)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", sidecar, canonical)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (1, 0)
+        assert rename_calls == 1

@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.48] - 2026-11-14
+
+`mm resolve` keeps a completed choice counted and recorded when it can no longer write to the terminal or pipe, so the next `mm pull` does not raise the same conflict again.
+
+### Changed
+
+- `mm resolve` keeps a completed choice counted and recorded when it can no longer write to the terminal or pipe, so the next `mm pull` does not raise the same conflict again.
+- README.md and SPEC.md now say that failing to remove the conflict copy after a successful merge only warns.
+
+### Fixed
+
+- `mm resolve` counts and settles each completed choice before printing its outcome line, so a failed outcome print (`OSError`) no longer leaves a choice uncounted or unsettled.
+- `mm resolve`'s missing-original (p)romote refuses instead of overwriting a file that appeared at the original's name, and names a broken symlink there with its repair.
+- Both `mm resolve` promotes move a symlinked conflict copy as the link instead of following it.
+- `mm resolve` refuses a conflict copy that is the same file as its original before the prompt, with a repair that keeps the file's only name.
+- `mm gc --conflicts` keeps a conflict copy that is the same file as its canonical instead of reaping it.
+
 ## [1.12.47] - 2026-11-14
 
 `mm retro-fleet` names peers needing an upgrade and gives separate recovery advice for unidentified rejected usage rows.
