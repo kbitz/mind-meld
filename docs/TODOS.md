@@ -44,598 +44,89 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/manifest.py|tests/test_manifest.py] Test gap: a symlinked .git marker is not a nested checkout
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `_directory_is_git_repo` returns False when `<dir>/.git` is neither a regular file nor a directory, for example a symlink, so the folder publishes. Track 132F kept that branch unchanged, and no test pins it; the nested-checkout tests cover a missing `.git`, a regular `.git` file and `.git` directories with or without `HEAD`.
-- **Hypothesis (untested):** add a `.git` symlink row beside the markers in `TestNestedRepositories.test_empty_or_head_less_git_dir_is_not_a_checkout` and assert the file beside it publishes and no nested root is reported; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/manifest.py:466
-- **Evidence:** Track 132F coverage audit (audit-only; gap); review read only, no failure reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/631b9cf6` (Track 132F, draft PR not yet opened) at `7d8229b` (2026-11-15).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/manifest.py|tests/test_manifest.py] Test gap: a .git/HEAD that is a directory is not a checkout
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Track 132F counts a `.git` directory as a checkout only when `lstat` finds `HEAD` as a regular file or symlink; a `HEAD` directory returns False. The tests cover a missing, regular-file and symlink `HEAD`, but not a `HEAD` directory.
-- **Hypothesis (untested):** add a `HEAD`-directory marker row to `TestNestedRepositories.test_empty_or_head_less_git_dir_is_not_a_checkout` and assert the folder publishes; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/manifest.py:484
-- **Evidence:** Track 132F coverage audit (audit-only; gap); review read only, no failure reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/631b9cf6` (Track 132F, draft PR not yet opened) at `7d8229b` (2026-11-15).
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=necessary,files=src/mind_meld/pullflow.py] Pull apply failures before apply skip `_warn_apply_failure` and are quiet-gated
-- **Description:** Five failure branches in `_download_and_apply` that run before apply (bad blob key ~1741, blob read `MindMeldError` ~1759-1765, a decrypt failure other than `NewerFormatError` ~1780, rejected path escape ~1824, content-check mismatch ~1835) skip `_warn_apply_failure`/`reporter.failed` and append directly to `outcomes["failed"]`. Their cause lines sit behind `if not quiet:`; the blob-read branch prints only under `--verbose`, on stdout, and says "blob missing" for a read error (`StorageNotFound` is handled separately above it). This contradicts docs/invariants/sync.md ("Every apply failure uses `_warn_apply_failure`, on stderr in quiet and interactive modes") and its never-quiet-gate rule for data-at-risk warnings: autopull shows "N failed: <paths>" with no cause for a decrypt or tampered-content failure, and the verbose summary (3502-3506) says "Fix the warning above" when nothing was printed.
-- **Hypothesis (untested):** call `reporter.begin(...)` before these checks and route every branch through `reporter.failed(operation, exc, preserved="local preserved")`, deleting the five per-branch `if not quiet` prints rather than adding another reporting layer — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/pullflow.py:1733-1843
-- **Context:** Pull apply failures bypass the shared failure warning
-- **Evidence:** reviewer finding; the orchestrator re-read the five branches and sync.md's apply exception boundary at `3289de2`.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=necessary] Migration warning bypasses the shared warning form and reaches piped push and pull
-- **Description:** The non-TTY and dry-run branch of `_maybe_prompt_migration` prints `[yellow]warning:[/yellow] ... Run [bold]mm migrate-config[/bold] to update.` through `stderr_console`: no `mm:` prefix and no `Run:` fix line, in the module that defines `_warning(msg, fix=)`. It reaches piped `mm push`, `mm pull`, `mm recapture` and every `--dry-run` with missing excludes (SPEC O8.6).
-- **Hypothesis (untested):** replace it with `_warning("<bits>", fix="mm migrate-config")`; check which tests pin the old text first — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/core.py:3211-3214
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=necessary] gc's malformed-blob summary prints an off-style warning on stdout, including inside attended push
-- **Description:** The malformed-blob summary prints `  [yellow]warning:[/yellow] N blob(s) at unexpected path depth ...` on stdout instead of `mm: warning:` on stderr. `_do_gc` also runs as the post-publication GC inside attended `mm push`, so this line can appear in push output (O8.1/O8.6). Track 133A recorded gc diagnostics as converted.
-- **Hypothesis (untested):** route it through `core._warning(..., fix="mm gc -v")`, or make it verbose-only detail recorded for `mm diag` — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/gcflow.py:262-269
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have,files=src/mind_meld/pullflow.py] Inline `mm pull --conflicts prompt` overwrites the canonical file without rechecking it after the prompt
-- **Description:** In the inline prompt path, keep-remote (~1593) and merge (~1614) overwrite the canonical file after a prompt that can block indefinitely, without rechecking the `before` lstat taken at ~1468 as `_apply_fast_forward` does (1373-1381). An edit made during the prompt (for example an agent appending to MEMORY.md) is replaced with no recovery copy; the merge bytes come from the read at ~524. Same class as the Future entry "mm resolve's replace choices overwrite the original from a read taken before the prompt", which names only resolveflow; this pull-time site is unrecorded.
-- **Hypothesis (untested):** make keep-remote call `_apply_fast_forward(...)` (which already rechecks `before`, publishes and restores mtime) and fall through to keep-both when it returns None; give the merge branch the same stat recheck, removing the duplicated write branch instead of adding a guard — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/pullflow.py:1588-1622
-- **Context:** Pull-path guards that sibling callers already have
-- **Related:** Future entry "mm resolve's replace choices overwrite the original from a read taken before the prompt" (docs/roadmap-future.md); consider placing them together.
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), reviewer; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] gc builds its own newer-format refusal instead of `core._newer_format_message`
-- **Description:** The only newer-format refusal that hand-builds its text ("newer-format manifest is corrupt ... Upgrade with: ..."), dropping the NEWER_STORAGE_URL pointer and the "newer mm" phrase `outputstyle._fix_for` keys on; diffflow.py:52 and cli.py's manifest refusals use the helper.
-- **Hypothesis (untested):** call `core._newer_format_message(fetch.newer_version, "manifest")` and append gc's "Leave it in place" plus `DRY_RUN_REFUSAL` — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/gcflow.py:183-188
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] gc's missing-manifest warning and completeness refusals put the fix mid-sentence
-- **Description:** `_skip_missing` hand-builds `mm: warning:` through `stderr_console.print` with Rich markup and a mid-sentence fix ("then retry 'mm gc'"); the three `_refuse_unless_complete` errors embed "Run 'mm push' ... then retry GC" instead of `fix="mm push"`; `DRY_RUN_REFUSAL` is recomputed inline three times although `gc()` holds `refusal_suffix`.
-- **Hypothesis (untested):** use `core._warning(msg, fix="mm gc")` and `core._error(msg, fix="mm push")`, keeping the wording sync.md pins — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/gcflow.py:173-205
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `update_or_nudge` hand-builds two of its six notices
-- **Description:** `f"mm: notice: updating mm ..."` and `f"mm: notice: updated mm ..."` are literal strings while the same function builds its other four notices with `outputstyle._notice_line` (1931, 1946, 1975, 1982).
-- **Hypothesis (untested):** use `outputstyle._notice_line` for both — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/upgrade.py:1918-1921, 1964-1968
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `_sync_update` hard-codes the automatic-update notice
-- **Description:** `_sync_update` appends the literal `"mm: notice: automatic update did not complete. Run: mm update"`; upgrade.py:1946 builds the same notice with `outputstyle._notice_line(..., fix="mm update")`.
-- **Hypothesis (untested):** build it with `_notice_line(..., fix="mm update")` — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/cli.py:1004
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `mm log`'s state-db-too-new error puts `Run:` on the error line
-- **Description:** The `StateDBTooNew` error returns `mm: error: ... Run: mm update` on one line; the documented error form puts `Run:` on its own last line (only warnings and notices carry an inline fix).
-- **Hypothesis (untested):** return two lines, or confirm the `mm log` renderer needs one string and record that as an exception — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/pullhistory.py:137-138
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `mm update` errors, success lines and interrupt path are outside the shared style
-- **Description:** `mm update` errors embed the remedy mid-text ("Install pipx, then run: <INSTALL_CMD>", "Retry when online, or run: ...", "If mm is now missing, reinstall with: ...") with no `fix=`, so no `Run:` line comes last; success lines are not `Update:` outcome lines; the KeyboardInterrupt path (3689-3693) uses a raw `print`. Track 133A converted only update notices.
-- **Hypothesis (untested):** pass `fix=upgrade.INSTALL_CMD` (or `reinstall_cmd`) to `core._error` and use `_outcome_line("update", ...)` for success — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/cli.py:3639-3711
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] init's cleanup-failure warning prints unescaped exception text through Rich markup
-- **Description:** `stderr_console.print(f"mm: warning: ... {cleanup_exc}")` uses Rich markup with unescaped exception text, outside `core._warning`/`_stderr_lines`; Track 130B moved init diagnostics to the shared forms.
-- **Hypothesis (untested):** use `core._warning(...)`, which also sanitizes through `safe_terminal_str` — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/initflow.py:862-866
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `enable-source --force` unknown-source warning is a raw print
-- **Description:** A raw `print(f"mm: warning: ...", file=sys.stderr)` in a flow module that otherwise uses `core._error` and `core._outcome_line`.
-- **Hypothesis (untested):** use `core._warning(...)` — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/sourceflow.py:136-141
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] The data-at-risk backfill warning is a raw print that skips sanitizing
-- **Description:** The "backfill skipped" warning is `print(f"mm: warning: ... {e}", file=sys.stderr)` in the module that defines `_warning`, and it skips `safe_terminal_str`.
-- **Hypothesis (untested):** call `_warning(f"backfill skipped — {e}")`, which already pauses progress and suppresses output failures — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/core.py:465-466
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Source outcome lines repeat their verb
-- **Description:** Lines such as "Disable: Disabled source 'x' ...", "Enable: Enabled source 'x' ..." and "Disable: Source 'x' is already disabled" repeat the verb; other outcome lines put only the result after it ("Gc: 3 orphaned blobs deleted.").
-- **Hypothesis (untested):** use "Disable: source 'x' disabled on this device." and so on; check the tests that pin these strings — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/sourceflow.py:179-181, 194-196, 271-273, 288
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Outcome-line printing is best-effort in resolveflow and fatal elsewhere
-- **Description:** Warnings, notices and errors each have a printer helper; outcome lines do not. About 17 sites (sourceflow, devicesflow, initflow, gcflow, pullflow, cli) repeat `console.print(core._outcome_line(...), markup=False, highlight=False, soft_wrap=True)`; only resolveflow wraps it in a local `_print_outcome` that tolerates OSError.
-- **Hypothesis (untested):** promote `_print_outcome` to one `core` outcome printer and delete the copies, settling the OSError policy once — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/resolveflow.py:606-619
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Autopull and autopush breadcrumbs name `maintenance_failures` differently
-- **Description:** The same field is recorded as "N follow-up failure(s)" in the autopull breadcrumb and "N post-publication maintenance failure(s)" in the autopush breadcrumb; statusflow.py:933 calls it "follow-up failures".
-- **Hypothesis (untested):** pick one phrase for both breadcrumbs after checking whether any status reader matches the text — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/cli.py:4701-4702, 4813-4816
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] core's output-line builders are pass-throughs to `outputstyle`
-- **Description:** Track 133A's extraction is half finished: `core._error_line`, `_fix_line`, `_outcome_line` and `_fix_for` only forward to `outputstyle`. pullhistory.py and upgrade.py call `outputstyle` directly while about 35 sites go through the `core.` wrappers.
-- **Hypothesis (untested):** point callers at `outputstyle.*` and delete the four wrappers, keeping `_warning`, `_notice` and `_print_error`, which do I/O — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/core.py:156-166, 192-193
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] About 100 hand-built `mm:` prefixes remain in leaf modules
-- **Description:** Literal `mm: notice:` / `mm: warning:` / `mm: error:` prefixes remain across events_tail (~20-25), cli, pullflow, skill_link, host_usage, hosts/codex.py, hosts/grok.py, token_usage, seen_sources, identity, retention, storage/local, lockedjson, devices, events, config and aggregator, although `outputstyle` is a stdlib-only leaf built so non-core modules can share the line builders. This file is in flux under Track 135A; re-read it after that Track lands.
-- **Hypothesis (untested):** decide once whether leaves must use `outputstyle._notice_line` / `_warning_line`; if not, record the literal prefix as the accepted leaf convention instead of migrating every site — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/events_tail.py:580-2228
-- **Context:** Remaining O8 output-style drift in hand-run commands
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor and hygiene (merged); read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `DISCOVERY_ADVANCE` has no reader
-- **Description:** No reader in src, tests or bin; only `DISCOVERY_HOLD` is consulted (events.py:3043, aggregator.py:1643).
-- **Hypothesis (untested):** delete the constant — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/events.py:168
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Orphaned docstring for `MAX_DISCOVERY_REJECT_SAMPLE`
-- **Description:** A bare string describing the reject-sample cap sits after `DISCOVERY_HOLD`'s docstring; the constant it describes moved to line 93.
-- **Hypothesis (untested):** move it under line 93, or delete it — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/events.py:175-180
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `_read_gitconfig_user_email` (singular) is unreferenced
-- **Description:** Every caller uses the plural `_read_gitconfig_user_emails`.
-- **Hypothesis (untested):** delete it — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/events.py:1899-1905
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `last_push_ts` is a test-only wrapper
-- **Description:** A one-line wrapper (`resolve_push_cursor(...).since`) with no production caller; 13 test references and events-retro prose keep it alive.
-- **Hypothesis (untested):** have tests call `resolve_push_cursor(...).since`, delete the wrapper and update the doc mentions — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/events.py:3423-3436
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `parse_aware_ts` rename left the private alias in use
-- **Description:** `parse_aware_ts` was made public but `_parse_aware_ts = parse_aware_ts` is still used at about 30 sites in events.py; only cli.py:2994 uses the public name.
-- **Hypothesis (untested):** replace the alias uses and delete the alias — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/events.py:3488-3500
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `EventScan.cached_hash` is test-only
-- **Description:** Called only from tests; its `path` parameter is unused; production only writes `scan.hashes`.
-- **Hypothesis (untested):** delete the method and check whether `hashes` still has a production reader — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/events.py:3515-3518
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `anchor_pending` is test-only but sync.md says it joins the no-op check
-- **Description:** No production caller (cli.py:2295 inlines `any(row["pending"] for row in observe_anchors(...))`), yet docs/invariants/sync.md:703 says "`anchor_pending` joins the no-op check".
-- **Hypothesis (untested):** delete it, switch test_push_review91.py to `observe_anchors`, and fix sync.md:703 and the README routing rows — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/core.py:1587-1593
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `list_devices_with_drops` has no production caller
-- **Description:** pullflow now calls `inventory_devices`; only test_devices.py and stale boundary entries mention it.
-- **Hypothesis (untested):** delete it with its test and boundary entries — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/devices.py:197-215
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] devices docstrings name a nonexistent cli helper; `_list_devices_impl` is a third wrapper
-- **Description:** Docstrings point at a nonexistent `cli._list_devices_with_warnings` (the caller is `core._list_devices_warn`); `_list_devices_impl` wraps `inventory_devices` alongside `list_devices` and `list_devices_with_drops`.
-- **Hypothesis (untested):** fold the `on_drop` loop into `core._list_devices_warn`, delete `_list_devices_impl`, fix the docstrings — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/devices.py:188-191, 314-325
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Rotatable JSONL spool functions unused since Cursor's removal
-- **Description:** `append_rotatable_jsonl` and `rotate_jsonl` (~90 lines of flock, inode-identity and fsync protocol) have had no production caller since Track 115A removed Cursor; 24 test references and invariant prose keep them.
-- **Hypothesis (untested):** delete both with their tests and routing/doc rows — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/fsutil.py:691-779
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `locked_json_durable_rmw` and `InvalidJsonCache` have no production caller
-- **Description:** Only `__all__` and 12 test references; the C7 reader finding also shows `InvalidJsonCache` caught where it cannot be raised.
-- **Hypothesis (untested):** confirm no Track plans to adopt it, then delete with its tests and doc rows — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/lockedjson.py:61-124
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `_preflight_conflicts` is a test-only wrapper
-- **Description:** `_pull_core` calls `_plan_pull` and `_fail_mode_refusals` directly; ten tests and README routing keep the wrapper.
-- **Hypothesis (untested):** point the tests at `_plan_pull` + `_fail_mode_refusals` and delete it — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/pullflow.py:2833-2843
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `PullResult.total_older` is read only by tests
-- **Description:** Production code uses `len(result.older)`.
-- **Hypothesis (untested):** delete the property — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/pullflow.py:277-279
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `maintain_best_effort` is unused but documented as the writers' recipe
-- **Description:** No production caller, yet docs/invariants/sync.md:1785-1793 presents it as the recipe writers use.
-- **Hypothesis (untested):** delete it and the recipe, or adopt it if a writer needs it — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/pullhistory.py:430-438
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `pullhistory.read_records` is test-only
-- **Description:** Including its legacy-JSONL `path` branch, it is read only by tests (58 references); production uses `query`.
-- **Hypothesis (untested):** move it into a test helper or have tests use `query`, and drop it from src — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/pullhistory.py:522-527
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `Ledger.held_newest_first` is test-only
-- **Description:** `ancestry_newest_first` superseded it.
-- **Hypothesis (untested):** delete it — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/pullplan.py:168-170
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Three 64-hex content-hash predicates
-- **Description:** `pullplan.valid_hash` has the same body as `manifest._is_content_hash` (manifest.py:3607-3610), and storage/keys.py:32 has a third check.
-- **Hypothesis (untested):** keep one predicate and delete the others — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/pullplan.py:51-55
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] store-v2 `ledger`, `own_log` and `displaced` tables have no reader
-- **Description:** The migration creates three provisional, empty tables with no reader, and `expire_displaced` / `DISPLACED_MAX_AGE` have no caller (sync.md:492-495, 1752-1762). They come from the archived store-v2 design, against AGENTS.md's "name a reader for every persisted field". The TODOS.md drain-record kill of "Audit Python 3.14 Path.exists / is_dir / is_file callers for swallowed errors" cites `displaced` as a 30-day safety net that does not operate.
-- **Hypothesis (untested):** delete `expire_displaced` and its constant now and drop the three tables in the next state.db migration (released binaries read only meta and history; verify) — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/statedb.py:24, 107-136, 296-307
-- **Context:** Dead and test-only code kept in src
-- **Note:** dropping the tables needs a state.db migration (developer, 2026-11-15 triage).
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `is_foreign_key` has zero callers
-- **Description:** Only README:135 and sync.md:1806 name it.
-- **Hypothesis (untested):** delete it and its doc mentions — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/storage/local.py:87-89
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `host_usage._utc_day` is an uncalled leftover of the Codex extraction
-- **Description:** Only a write-guard inventory pin references it; it duplicates `hosts/codex.py:_record_day`.
-- **Hypothesis (untested):** delete it and its inventory row — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/host_usage.py:1656-1671
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `SUBSCRIPTION_CAVEAT` is not rendered anywhere
-- **Description:** Referenced only by `__all__`; its docstring says the aggregator renders it, but the string now appears only in a stale fixture.
-- **Hypothesis (untested):** delete the constant and its `__all__` entry — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/token_usage.py:232-234
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] token_usage compatibility wrappers are test-only
-- **Description:** `walk_jsonl_buckets` ("thin shim"), `slice_window` and `gc_cache_entries` ("compatibility wrapper") have no production caller; `__all__` and 43 test references keep them.
-- **Hypothesis (untested):** move the tests to `walk_jsonl_segment` and `reap_cache_entries` and delete all three — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/token_usage.py:1448-1455, 1964-1984, 2377-2383
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] skill_link keeps compatibility marker aliases
-- **Description:** Four module-level aliases (`_SKILL_LINK_SUCCESS_MARKER` and others) exist "so nothing that imported the old module-level names breaks"; only tests read them.
-- **Hypothesis (untested):** have tests pin `AGENT_ROWS` values directly and delete the aliases — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/skill_link.py:122-132
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `skill_targets` claims a role it does not have
-- **Description:** It claims to be the source of truth for `install_skills_cmd`, which uses `AGENT_ROWS`; it is test-only (7 references).
-- **Hypothesis (untested):** delete it, or wire it into a real reader — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/skill_link.py:1389-1401
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `_read_autorun_breadcrumbs` is a test-only one-liner
-- **Description:** A wrapper over `_read_autorun_evidence()["runs"]` reached through the cli re-export. This file is in flux under Track 135A; re-read it after that Track lands.
-- **Hypothesis (untested):** delete it with the cli re-export cleanup — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/statusflow.py:2969-2971
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `HOST_SNAPSHOT_MIN_VERSION` has no code reference
-- **Description:** Only events-retro.md prose names it.
-- **Hypothesis (untested):** delete it and keep the version in the doc, or make a doc-sync test read it — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:166-170
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `_host_counter_ok` is a pass-through whose docstring contradicts it
-- **Description:** It only calls `host_usage._is_valid_counter`, while its docstring says it is local so the aggregator does not use a private reader helper.
-- **Hypothesis (untested):** inline the call, or make the predicate public in host_usage and delete the wrapper — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:2061-2066
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `seen_sources.write()` has no production caller and defeats the in-place lock
-- **Description:** Only `acknowledge` (sourceflow.py:164) and `read` (statusflow.py:1144) are used. Its own docstring calls it race-prone, and its atomic replace swaps the file's inode, defeating the in-place flock read-modify-write `acknowledge`/`_seed_in_place_under_lock` protect; a future caller would bring back the lost-acknowledgment race.
-- **Hypothesis (untested):** delete `write()` and point its tests at `acknowledge()` — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/seen_sources.py:194-224
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), reviewer; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `_default_host_readers` docstring names the moved Codex reader
-- **Description:** It says a test patching `host_usage.read_codex_usage` would not reach it; the reader moved to `hosts/codex.py` (Track 84A) and line 617 uses `codex_host.read_codex_usage`. This file is in flux under Track 135A; re-read it after that Track lands.
-- **Hypothesis (untested):** update the docstring — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/events_tail.py:610-612
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Obsolete `src/mind_meld/skills/.gitkeep`
-- **Description:** A Group 7 placeholder; the package now has `__init__.py` and `retro_fleet/`.
-- **Hypothesis (untested):** delete it and fix the test_wheel docstring — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/skills/.gitkeep:1
-- **Context:** Dead and test-only code kept in src
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Unused `claude_dir_b` fixture
-- **Description:** No test requests it.
-- **Hypothesis (untested):** delete it — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** tests/test_integration.py:133-138
-- **Context:** Dead test helpers and stale test/doc scaffolding
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Unused `wild_tombstone_value_strategy`
-- **Description:** Defined but never used.
-- **Hypothesis (untested):** delete it, or wire it into the normalize fuzz test its comment describes — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** tests/test_manifest_fuzz.py:58
-- **Context:** Dead test helpers and stale test/doc scaffolding
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Unused `_shape_remote` and `OLD_RELS` in test_pullflow
-- **Description:** Neither has a reference.
-- **Hypothesis (untested):** delete both — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** tests/test_pullflow.py:640-647, 1992
-- **Context:** Dead test helpers and stale test/doc scaffolding
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Unused `_health_codes` helper
-- **Description:** No reference.
-- **Hypothesis (untested):** delete it — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** tests/test_retro_fleet_aggregator.py:4120-4121
-- **Context:** Dead test helpers and stale test/doc scaffolding
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Stale `list_devices_with_drops` boundary entries
-- **Description:** Listed as a pullflow-owned import binding, but pullflow no longer imports it.
-- **Hypothesis (untested):** remove the entries with the devices.py deletion — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** tests/test_module_boundaries.py:1186, 1227
-- **Context:** Dead test helpers and stale test/doc scaffolding
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Test files named after Tracks
-- **Description:** `test_track_30a.py` (46 tests) and `test_push_review91.py` (15 tests) are named after a Track or review; the other ~80 are named by module or topic, so grepping for a module's tests misses them.
-- **Hypothesis (untested):** merge them into topic files or rename them when next touched, updating docs routing — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** tests/test_track_30a.py:1
-- **Context:** Dead test helpers and stale test/doc scaffolding
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] 30 blank lines at the top of roadmap-future.md
-- **Description:** Thirty consecutive blank lines sit between the heading and the first bullet, probably left by removed entries.
-- **Hypothesis (untested):** let the next /roadmap pass collapse them — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** docs/roadmap-future.md:6-35
-- **Context:** Dead test helpers and stale test/doc scaffolding
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] cli.py keeps about 66 unused compatibility re-exports
-- **Description:** `noqa: F401` "Compatibility imports": none of the 36 names imported from core or the 30 from statusflow are used in the cli body, and `safe_text` is "re-exported for backwards-compat" and unused. They contradict test_module_boundaries.py:1069 ("never a compatibility re-export") and survive because about 20 test sites reach them through `cli._X`.
-- **Hypothesis (untested):** repoint those tests to the owner modules, then delete the noqa import blocks — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/cli.py:74-110, 157-161, 162-192
-- **Context:** Unused parameters and compatibility re-exports
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `_recover_prior_manifest` accepts a `quiet` it must never honor
-- **Description:** The parameter is passed (cli.py:2053) but never read, deliberately, because recovery warnings are data-at-risk and must always print (sync.md never-quiet-gate rule). A dead `quiet` invites someone to add the forbidden gate back.
-- **Hypothesis (untested):** remove the parameter and its argument at the call site — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/core.py:2334
-- **Context:** Unused parameters and compatibility re-exports
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `_quarantine_corrupt_manifest` ignores its `backend` parameter
-- **Description:** It works on `storage_root` directly.
-- **Hypothesis (untested):** drop the parameter at the definition, the call site (~4163) and test_recover.py — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/cli.py:4008-4011
-- **Context:** Unused parameters and compatibility re-exports
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `_ledger_verdict` ignores `remote_device_id`
-- **Description:** The peer comes from `reporter.peer_id`.
-- **Hypothesis (untested):** drop it at the definition and the call (~1481) — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/pullflow.py:1323-1328
-- **Context:** Unused parameters and compatibility re-exports
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `detect_self_version_transition` ignores `config` and `now`
-- **Description:** Neither is read; the caller at ~902 passes `config` for nothing.
-- **Hypothesis (untested):** drop both parameters — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/upgrade.py:821-825
-- **Context:** Unused parameters and compatibility re-exports
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `_peer_states` ignores `syncthing_state`
-- **Description:** status passes it (~871); the real consumer is `_syncthing_status_lines` (~903). This file is in flux under Track 135A; re-read it after that Track lands.
-- **Hypothesis (untested):** drop the parameter — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/statusflow.py:305-310
-- **Context:** Unused parameters and compatibility re-exports
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `walk_session_metadata` keeps an ignored `since` "for API stability"
-- **Description:** It has one caller (events_tail.py:1537) and no outside API (`noqa: ARG001`).
-- **Hypothesis (untested):** drop the parameter and its argument at the single call site (events_tail is in flux under Track 135A) — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/events.py:2654-2656
-- **Context:** Unused parameters and compatibility re-exports
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] devicesflow imports `ConfigError` through a re-export
-- **Description:** Every other module imports it from `mind_meld.errors`; devicesflow uses the `mind_meld.config` re-export.
-- **Hypothesis (untested):** import it from `mind_meld.errors` — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/devicesflow.py:26
-- **Context:** Unused parameters and compatibility re-exports
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `retro-fleet --no-save` is a hidden no-op kept for stale skill copies
-- **Description:** Kept since v0.12.39 "so a stale skill copy still exits 0"; install-skills now manages the skill copy. The aggregator keeps a matching branch (aggregator.py:5442, 5545-5551).
-- **Hypothesis (untested):** remove the option from both layers, with a README Upgrading note — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/cli.py:3468-3473, 3525-3526
-- **Context:** Unused parameters and compatibility re-exports
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Antigravity reader rewrites its cache on every failed pass
-- **Description:** `read_agy_usage` is the only host reader without the `_skip_failed_cache_write` / `_NoCacheCommit` guard that Codex (hosts/codex.py:203-210), Grok (hosts/grok.py:485-486) and Muse (host_usage.py:1030-1031) use, so it rewrites its cache on every failed autopush. The adapter contract's clause 4 (events-retro.md:4035-4037) lists only the other three.
-- **Hypothesis (untested):** add the shared guard to `read_agy_usage` and drop the carve-out from clause 4, checking whether `last_error_detail` / `error_db_count` count as learned — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/host_usage.py:2344-2372
-- **Context:** Host usage reader family asymmetry
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Antigravity and Grok readers catch exceptions that cannot be raised
-- **Description:** Both catch `(OSError, StorageError, InvalidJsonCache)`, but `locked_json_rmw` never raises `InvalidJsonCache` (it degrades corrupt JSON to the default) and nothing in either path raises `StorageError`; Codex and Muse catch only `OSError`. Grok's site is hosts/grok.py:511.
-- **Hypothesis (untested):** delete the dead exception types so all four readers catch the same set — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/host_usage.py:2382
-- **Context:** Host usage reader family asymmetry
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Grok persists `census_host_version` that nothing reads
-- **Description:** Only line 493 writes it and no code or test reads it; the Antigravity reader gates cache reuse on the same field (host_usage.py:2311), and Muse defines `MUSE_USAGE_CENSUS_HOST_VERSION` (host_usage.py:162) but never persists it. Three behaviors for one concept, and Grok's field breaks AGENTS.md's "name a reader for every persisted field".
-- **Hypothesis (untested):** stop writing it (Grok already invalidates through `_GROK_CACHE_FORMAT`) or gate reuse on it as Antigravity does; pick one census policy for all turn readers — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/hosts/grok.py:493
-- **Context:** Host usage reader family asymmetry
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] The opt-in host source set is spelled four ways
-- **Description:** config.py:1033 tests `type not in ("grok","muse") and name != "agy"`; sourceflow.py:250 and 259 repeat `{"grok","muse","agy"}`; host_registry.py:44 hard-codes `{"muse","agy","grok"}` to decide which diagnostic takes `count_logs`; statusflow.py:816 repeats it. Adding a host means finding every literal.
-- **Hypothesis (untested):** one constant in config, or give `codex_usage_diag` the same `count_logs` keyword so the registry special case goes away — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/config.py:1033
-- **Context:** Host usage reader family asymmetry
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), consistency-auditor; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] The host diagnostic sink is copied three times with different defaults
-- **Description:** The `_DIAGNOSTIC` ContextVar plus `diagnostic_scope` plus `_diagnostic` is copied in host_usage.py, token_usage.py:95-116 and events_tail.py:65-91; events_tail's scope enters all three, and the `degraded` defaults differ (True, True, False). events_tail is in flux under Track 135A.
-- **Hypothesis (untested):** keep a single sink in token_usage, which host_usage and events_tail already import, and delete the two copies — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/host_usage.py:107-128
-- **Context:** Host usage reader family asymmetry
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] `ACTIVE_HOST_READERS` duplicates `HOST_USAGE_TOKEN_SOURCES`
-- **Description:** Byte-identical to `HOST_USAGE_TOKEN_SOURCES` and read only by tests (21 references); its docstring says events_tail invokes readers in this order, but events_tail iterates `HOST_USAGE_TOKEN_SOURCES`. With WARMABLE_HOST_READERS, HOST_READER_SOURCE_GATE and the HOST_READER_DIAGS keys, that is five parallel reader lists pinned equal by tests.
-- **Hypothesis (untested):** delete `ACTIVE_HOST_READERS` and point the contract tests at `HOST_USAGE_TOKEN_SOURCES` — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/events.py:422-434
-- **Context:** Host usage reader family asymmetry
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Retire pre-v0.9.2 conflict-format support in 2.0
-- **Description:** mm still carries the pre-inversion conflict era: the loud rejection of the pre-v0.9.0 `c`/`f` letters (resolveflow.py:979-990), the `v0-` copy migration that runs on every pull, the `INVERSION_MIN_VERSION` fleet gate and the four-shape resolve dispatch (about 165 references; conflicts.md). The project is single-user and 2.0 is a MAJOR, and the per-pull pre-inversion sweep and `_resolve_interactive_loop` (588 lines) would both shrink.
-- **Hypothesis (untested):** remove pre-v0.9.2 conflict handling in the 2.0 line after confirming no machine still holds a `v0-` copy (`mm conflicts` on each), and check `_apply_conflict`'s stale-copy cleanup, which relies on the migration having run — re-investigate before implementing; the reviewer agent did not verify this direction.
-- **Found in:** src/mind_meld/resolveflow.py:979-990
-- **Context:** Unfinished extractions, long functions and duplicated helpers
-- **Decision:** the developer approved retiring it in 2.0 during the 2026-11-15 /full-review triage; the rest of this cluster was rejected (extract code only when a Track changes it, per docs/SPEC.md "Core and extensions").
-- **Evidence:** /full-review on branch `mmm/full-review-20261115` at `3289de2` (2026-11-15), hygiene; read-only review, nothing reproduced.
-- **Effort:** ? (user triages in /roadmap)
-
 ## Drain records
+
+### Roadmap regeneration — 2026-11-15 (second run: full-review drain)
+
+Verified against `f08f10b` (v1.12.50), from the manager's brief. Tracks 132G (PR #326, v1.12.49) and 132F (PR #327, v1.12.50) recorded as shipped; Group 132 is retired and its observation Track 132B is now 135B. Track 135A (branch `mmm/1f4ea780`) stays pinned in Group 135. Track 132D's D5 is folded into Track 136A at the developer's request. Every premise below was re-grepped at `f08f10b`; none had changed since the review at `3289de2`.
+
+| Inbox item | Disposition |
+|---|---|
+| Test gap: a symlinked .git marker is not a nested checkout | defer (no Track touches both manifest.py and tests/test_manifest.py) |
+| Test gap: a .git/HEAD that is a directory is not a checkout | defer (same trigger) |
+| Pull apply failures before apply skip `_warn_apply_failure` and are quiet-gated | place (Track 135C) |
+| Migration warning bypasses the shared warning form and reaches piped push and pull | place (Track 137A) |
+| gc's malformed-blob summary prints an off-style warning on stdout, including inside attended push | place (Track 137A) |
+| Inline `mm pull --conflicts prompt` overwrites the canonical file without rechecking it after the prompt | place (Track 135C) |
+| gc builds its own newer-format refusal instead of `core._newer_format_message` | place (Track 137A) |
+| gc's missing-manifest warning and completeness refusals put the fix mid-sentence | place (Track 137A) |
+| `update_or_nudge` hand-builds two of its six notices | place (Track 138A) |
+| `_sync_update` hard-codes the automatic-update notice | place (Track 138A) |
+| `mm log`'s state-db-too-new error puts `Run:` on the error line | place (Track 138A) |
+| `mm update` errors, success lines and interrupt path are outside the shared style | place (Track 138A) |
+| init's cleanup-failure warning prints unescaped exception text through Rich markup | place (Track 137A) |
+| `enable-source --force` unknown-source warning is a raw print | place (Track 137A) |
+| The data-at-risk backfill warning is a raw print that skips sanitizing | place (Track 137A) |
+| Source outcome lines repeat their verb | place (Track 137A) |
+| Outcome-line printing is best-effort in resolveflow and fatal elsewhere | place (Track 140A; best-effort chosen, open to veto) |
+| Autopull and autopush breadcrumbs name `maintenance_failures` differently | place (Track 138A) |
+| core's output-line builders are pass-throughs to `outputstyle` | place (Track 140A) |
+| About 100 hand-built `mm:` prefixes remain in leaf modules | place (Track 140A records the leaf convention; no site migration; open to veto) |
+| `DISCOVERY_ADVANCE` has no reader | place (Track 141A) |
+| Orphaned docstring for `MAX_DISCOVERY_REJECT_SAMPLE` | place (Track 141A) |
+| `_read_gitconfig_user_email` (singular) is unreferenced | place (Track 141A) |
+| `last_push_ts` is a test-only wrapper | place (Track 141A) |
+| `parse_aware_ts` rename left the private alias in use | place (Track 141A) |
+| `EventScan.cached_hash` is test-only | place (Track 141A) |
+| `anchor_pending` is test-only but sync.md says it joins the no-op check | place (Track 146A) |
+| `list_devices_with_drops` has no production caller | place (Track 141A) |
+| devices docstrings name a nonexistent cli helper; `_list_devices_impl` is a third wrapper | place (Track 141A) |
+| Rotatable JSONL spool functions unused since Cursor's removal | place (Track 143A) |
+| `locked_json_durable_rmw` and `InvalidJsonCache` have no production caller | place (Track 138B) |
+| `_preflight_conflicts` is a test-only wrapper | place (Track 142A) |
+| `PullResult.total_older` is read only by tests | place (Track 142A) |
+| `maintain_best_effort` is unused but documented as the writers' recipe | place (Track 143A) |
+| `pullhistory.read_records` is test-only | place (Track 143A) |
+| `Ledger.held_newest_first` is test-only | place (Track 142A) |
+| Three 64-hex content-hash predicates | place (Track 142A) |
+| store-v2 `ledger`, `own_log` and `displaced` tables have no reader | place (Track 143A, with a state.db migration) |
+| `is_foreign_key` has zero callers | place (Track 141A) |
+| `host_usage._utc_day` is an uncalled leftover of the Codex extraction | place (Track 138B) |
+| `SUBSCRIPTION_CAVEAT` is not rendered anywhere | place (Track 144A) |
+| token_usage compatibility wrappers are test-only | place (Track 144A) |
+| skill_link keeps compatibility marker aliases | place (Track 144A) |
+| `skill_targets` claims a role it does not have | place (Track 144A) |
+| `_read_autorun_breadcrumbs` is a test-only one-liner | place (Track 147A) |
+| `HOST_SNAPSHOT_MIN_VERSION` has no code reference | place (Track 145A) |
+| `_host_counter_ok` is a pass-through whose docstring contradicts it | place (Track 145A) |
+| `seen_sources.write()` has no production caller and defeats the in-place lock | place (Track 145A) |
+| `_default_host_readers` docstring names the moved Codex reader | place (Track 139A) |
+| Obsolete `src/mind_meld/skills/.gitkeep` | place (Track 145A) |
+| Unused `claude_dir_b` fixture | place (Track 145A) |
+| Unused `wild_tombstone_value_strategy` | place (Track 145A) |
+| Unused `_shape_remote` and `OLD_RELS` in test_pullflow | place (Track 142A) |
+| Unused `_health_codes` helper | place (Track 145A) |
+| Stale `list_devices_with_drops` boundary entries | place (Track 141A) |
+| Test files named after Tracks | place (Track 146A) |
+| 30 blank lines at the top of roadmap-future.md | place (collapsed by this regeneration) |
+| cli.py keeps about 66 unused compatibility re-exports | place (Track 147A) |
+| `_recover_prior_manifest` accepts a `quiet` it must never honor | place (Track 146A) |
+| `_quarantine_corrupt_manifest` ignores its `backend` parameter | place (Track 146A) |
+| `_ledger_verdict` ignores `remote_device_id` | place (Track 142A) |
+| `detect_self_version_transition` ignores `config` and `now` | place (Track 146A) |
+| `_peer_states` ignores `syncthing_state` | place (Track 146A) |
+| `walk_session_metadata` keeps an ignored `since` "for API stability" | place (Track 146A) |
+| devicesflow imports `ConfigError` through a re-export | place (Track 141A) |
+| `retro-fleet --no-save` is a hidden no-op kept for stale skill copies | place (Track 145A) |
+| Antigravity reader rewrites its cache on every failed pass | place (Track 138B) |
+| Antigravity and Grok readers catch exceptions that cannot be raised | place (Track 138B) |
+| Grok persists `census_host_version` that nothing reads | place (Track 138B) |
+| The opt-in host source set is spelled four ways | place (Track 139A) |
+| The host diagnostic sink is copied three times with different defaults | place (Track 139A) |
+| `ACTIVE_HOST_READERS` duplicates `HOST_USAGE_TOKEN_SOURCES` | place (Track 139A) |
+| Retire pre-v0.9.2 conflict-format support in 2.0 | defer (2.0 line; the developer's approval recorded) |
+
+73 drained: 70 placed, 3 deferred, 0 killed, 0 discharged. The necessary findings are Tracks 135C and 137A; the nice-to-have clusters C3 to C7 are Tracks 138A to 147A on the developer's triage approval. Eleven Future test gaps whose triggers the new Tracks meet are placed on them and D5 moves into Track 136A; others whose triggers are met stay deferred where a card is at its limit. Future goes from 62 to 53 entries (12 out, 3 in), and its 30 leading blank lines are collapsed. No bump under SPEC documentation-only policy.
 
 ### Roadmap regeneration follow-up — 2026-11-15
 
