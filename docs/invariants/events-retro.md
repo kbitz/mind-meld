@@ -1723,23 +1723,30 @@ reader and the reason class — never a path, transcript, SQL, model id, or
 exception string. Reasons outside `host_usage.Reason` normalize to
 `unavailable`. `unsupported` says the reader wrote a record this mm cannot
 read; a newer mm **may** read it (`mm update`), or the user can
-`mm disable-source <reader>`. A retry alone is not a remedy. Status, plain-text
-diag, and attended push capture (`cli._capture_attended_usage` passes `config`
-so `events_tail._capture_skip_phrase` reads `upgrade.cached_upgrade_view(config)`
-once per permanent skip without network I/O or cache writes), given a cached
+`mm disable-source <reader>`. A retry alone is not a remedy. Given a cached
 upgrade view that is `current` (this mm is the newest release the cached check
-knows; never refreshed from any of those surfaces), replace the `mm update`
-remedy with `_no_release_reads_clause`: "<Reader> usage not captured: this mm
-can't read <Reader>'s current record format, and no newer mm can yet. See
-`mm diag`, or <stop step> to stop retrying." It names only reader display names,
-keeps the `mm diag` pointer on every surface including diag, and the status
-verdict reads `Usage not captured.` followed by it. A missing, malformed, contended or
-skipped view, or a cached newer release, keeps `mm update`, and so does an
-exception reading the cached view on attended push capture and plain-text diag
-(status does not guard that read). Tail (`events_tail._run_events_tail`, which
-captures for autopush and for the push inside `mm recapture`), init and
-attempt-record (`attemptlog.run_details`) callers keep the default and do not
-change persisted `attemptlog.run_details` or autorun breadcrumbs. `partial` takes
+knows; never refreshed from any of these surfaces), every surface that prints
+or stores an `unsupported` phrase replaces the `mm update` remedy with
+`_no_release_reads_clause`: "<Reader> usage not captured: this mm can't read
+<Reader>'s current record format, and no newer mm can yet. See `mm diag`, or
+<stop step> to stop retrying." It names only reader display names, keeps the
+`mm diag` pointer on every surface including diag, and the status verdict reads
+`Usage not captured.` followed by it. Each surface gets the upgrade view as
+follows: `statusflow.status` reads `upgrade.cached_upgrade_view(config)` once per
+command (unguarded) and passes the view's current-state readers to
+`_print_host_usage_status`; plain-text `mm diag` reads `cached_upgrade_view`
+under a `try/except Exception` guard (while `mm diag --json` reads no view);
+attended push capture (`cli._capture_attended_usage`), tail degradations — the
+stored autopush breadcrumb, `mm recapture`'s tail notice, and attended attempt
+details — (`events_tail._run_events_tail`), and the `mm init` backfill notice
+(`events_tail._run_events_backfill`) each pass `config` (or compute
+`no_release_reads` from `cached_upgrade_view(config)` once per permanent skip
+under a `try/except Exception` guard without network I/O or cache writes); and
+`attemptlog.run_details` enumerates both the default (`no_release_reads=()`)
+and current-cache (`no_release_reads=(reader,)`) forms in its closed allowlist
+so neither form is omitted when stored. A missing, malformed, contended or
+skipped view, a cached newer release, or an exception reading the cached view on
+guarded callers keeps `mm update`. `partial` takes
 the generic retry sentence naming `mm push` and `mm diag`.
 `deadline` states that this push/init's read did not finish inside its budget.
 When `left = max(0, files_on_disk - files_cached)` is a positive integer — from
