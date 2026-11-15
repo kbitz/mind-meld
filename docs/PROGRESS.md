@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.51 | 2026-11-15 | `mm recapture` no longer prints its inner push summary unless run with `-v`, a held user file shows as `Push: N files held.` before `Recapture:`, and `mm status`, `mm diag` and `mm recapture` stop suggesting `mm update` when no released mm can read a host reader's record format. |
 | 1.12.50 | 2026-11-15 | An empty or `HEAD`-less `.git` directory no longer freezes a synced folder, and `mm push` no longer publishes a case-variant `.git` directory. |
 | 1.12.49 | 2026-11-15 | Manifest property tests keep passing when the host is under load. |
 | 1.12.48 | 2026-11-14 | `mm resolve` keeps a completed choice counted and recorded when it can no longer write to the terminal or pipe, so the next `mm pull` does not raise the same conflict again. |

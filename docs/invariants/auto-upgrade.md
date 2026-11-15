@@ -9,7 +9,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/cli.py` — `_auto_command_setup` / `push` / `pull` / `autopull` / `autopush` / `recapture` / `update` / `_run_update_with_progress` / `_sync_update` / `_emit_update_lines` / (transition and update/nudge seams)
 - `src/mind_meld/recaptureflow.py` — `recapture` / (nudge seam)
 - `src/mind_meld/statusflow.py` — `status` / `diag` / (cached upgrade surfacing)
-- `src/mind_meld/events_tail.py` — `_capture_skip_phrase` / (cached upgrade surfacing on attended push capture)
+- `src/mind_meld/events_tail.py` — `_capture_skip_phrase` / `_run_events_tail` / `_run_events_backfill` / (cached upgrade surfacing on attended push capture, the tail and the init notice)
 - `src/mind_meld/config.py` — the `[upgrade]` defaults in `_apply_defaults` (`auto_check`, `auto_install`)
 - `src/mind_meld/pullhistory.py` — `append_self_upgrade` and `verb: "self-upgrade"` row class
 - `pyproject.toml` — version source of truth; bumping triggers the next-tag release
@@ -517,13 +517,17 @@ and takes the maximum version. Why tags rather than `pyproject.toml` on `main`:
    install attempt, and a `fix:` line when a failure cause is recorded. Both
    commands use the view for unsupported-reader remedies. Diag guards the read
    and keeps the update remedy if it fails; `diag --json` does not read the view.
-   Attended push capture reads the same view for that remedy:
-   `cli._capture_attended_usage` passes `config` to
-   `events_tail._capture_skip_phrase`, which calls `cached_upgrade_view` once
-   per permanent (`unsupported`) reader skip under the push lock, guarded like
-   diag, and changes only that reader's phrase in the `mm push --verbose`
-   capture warning. Push, pull, autopull, and autopush keep the refreshing
-   `check_for_upgrade` path in their update tails; push's runs after capture.
+   Attended push capture (`cli._capture_attended_usage`), tail degradations — the
+   stored autopush breadcrumb and `mm recapture`'s tail notice —
+   (`events_tail._run_events_tail`), and the `mm init` backfill notice
+   (`events_tail._run_events_backfill`) read the same view for that remedy:
+   `_capture_skip_phrase` (given `config`) and `_run_events_backfill` call
+   `cached_upgrade_view` once per permanent (`unsupported`) reader skip, guarded
+   like diag. `attemptlog.run_details` allowlists both the default and
+   current-cache phrase forms defensively; no current path stores a host-skip
+   phrase in attempt details. Push, pull, autopull, and autopush keep the
+   refreshing `check_for_upgrade` path in their update tails; push's runs after
+   capture.
 
 **Lock-order invariants (load-bearing):** NEVER acquire mm lockfile while holding
 upgrade-state's flock; RELEASE upgrade-state's flock BEFORE appending to

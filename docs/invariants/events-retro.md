@@ -516,7 +516,7 @@ Track 124A's two-repository fixture reproduces the loop as budget aborts despite
 recapture advancing both cursors: each push still pays for `git log` per repository.
 The default cap clears that fixture; the cause on the owner's machines remains unverified.
 
-**`mm recapture [WINDOW]`** explicitly recovers historical intervals beyond automatic retained catch-up and retries persistent failures. Shape: write git-snapshot rows (marked `origin: recapture`, no mm-push) first, then run the ordinary push path. Catch ``SnapshotError`` from that push the same way interactive ``mm push`` does: print that the recapture was written locally but not synced, then the four-part refusal, exit 1, no traceback. A push that succeeds but **holds** an mm-events file because it was still changing (Track 75A, docs/invariants/sync.md "Complete snapshots") also takes the written-locally-but-not-synced exit 1, with the fix `mm push` once the file settles: any held mm-events path blocks, with no intersection refinement, and a held user file does not. Do **not** add a `recapture_requested` disjunct to the substantive-change gate (that re-opens the v0.12.2 phantom-change path). Do **not** route through `_run_events_backfill`. Window is `Nd`, default `30d` (= init backfill), min `1d`, max `90d`. Non-partial runs end with one `Recapture: ... .` outcome line on stdout after the push, history-scope notice and upgrade nudge; `--verbose` / `-v` prints the window, repository, record-count and size breakdown before it, and an `mm: notice: ... Run: mm retro-fleet <N>d` line precedes it when the oldest recovered commit falls outside a 7-day retro window. Partial recovery exits 4: stdout carries one line per cause (failed Git walks with their help link, walk budget aborts, discovery incomplete or in error, each naming its own retry), then stderr carries one `mm: error: Recapture incomplete: captured <N> commit record(s) from <walked> of <found> repositories for <since> → <until>.` line and a single final `Run: <command>` (`mm recapture --dry-run` after walk failures, `mm recapture <narrower window>` after a budget abort or incomplete discovery, otherwise `mm diag`). Neither the headline nor the fix is repeated, and no completion outcome line is printed. Zero roots writes nothing and exits 1. Retros window by the COMMIT's date, not by when mm captured it: `mm recapture 90d` produces zero visible change on a `mm retro-fleet 7d` card. `_coverage_floor_from_files` still uses the event filename date by design.
+**`mm recapture [WINDOW]`** explicitly recovers historical intervals beyond automatic retained catch-up and retries persistent failures. Shape: write git-snapshot rows (marked `origin: recapture`, no mm-push) first, then run the ordinary push path. Catch ``SnapshotError`` from that push the same way interactive ``mm push`` does: print that the recapture was written locally but not synced, then the four-part refusal, exit 1, no traceback. A push that succeeds but **holds** an mm-events file because it was still changing (Track 75A, docs/invariants/sync.md "Complete snapshots") also takes the written-locally-but-not-synced exit 1, with the fix `mm push` once the file settles: any held mm-events path blocks, with no intersection refinement, and a held user file does not: recapture prints the push's `Push: N file(s) held.` outcome line just before its `Recapture:` line in both modes, or ahead of a partial run's cause lines (paths with `-v`), because its inner push prints its own detail only with `-v`. Do **not** add a `recapture_requested` disjunct to the substantive-change gate (that re-opens the v0.12.2 phantom-change path). Do **not** route through `_run_events_backfill`. Window is `Nd`, default `30d` (= init backfill), min `1d`, max `90d`. Non-partial runs end with one `Recapture: ... .` outcome line on stdout after the push, history-scope notice and upgrade nudge; `--verbose` / `-v` prints the inner push's own progress and detail, then the window, repository, record-count and size breakdown, before it, and an `mm: notice: ... Run: mm retro-fleet <N>d` line precedes it when the oldest recovered commit falls outside a 7-day retro window. Partial recovery exits 4: stdout carries one line per cause (failed Git walks with their help link, walk budget aborts, discovery incomplete or in error, each naming its own retry), then stderr carries one `mm: error: Recapture incomplete: captured <N> commit record(s) from <walked> of <found> repositories for <since> → <until>.` line and a single final `Run: <command>` (`mm recapture --dry-run` after walk failures, `mm recapture <narrower window>` after a budget abort or incomplete discovery, otherwise `mm diag`). Neither the headline nor the fix is repeated, and no completion outcome line is printed. Zero roots writes nothing and exits 1. Retros window by the COMMIT's date, not by when mm captured it: `mm recapture 90d` produces zero visible change on a `mm retro-fleet 7d` card. `_coverage_floor_from_files` still uses the event filename date by design.
 
 **Recapture walks Git on its own budget (Track 97A).** `events.RECAPTURE_PER_REPO_TIMEOUT_MS` (30 s) and `events.RECAPTURE_WALK_BUDGET_MS` (120 s) are chosen floors, not measurements at the 90-day window. `_prepare_recapture` passes both, read at call time, for `mm recapture` and its `--dry-run`. `walk_git_projects(per_repo_timeout_ms=...)` hands that value to every repository verbatim: no `PER_REPO_TIMEOUT_FLOOR_MS`, no `PER_REPO_TIMEOUT_CAP_MS`, no division by the repository count (the budget formula falls below 30 s above 32 repositories). Autopush and init pass no override and keep their existing budget selection and the 2 s cap (`PER_REPO_TIMEOUT_CAP_MS`), while partitioned attended push extends its git walk budget and per-repo timeout cap by `E = max(0, attended_capture_cap_ms - capture_budget_ms)` (2 s when `attended_capture_cap_ms == capture_budget_ms`, 27 s under the 30 s default cap), pinned by `test_push_and_autopush_walk_budgets_and_cap_are_unchanged`; the push inside a real recapture is an ordinary attended push. Repository discovery runs on `events.RECAPTURE_DISCOVERY_BUDGET_MS` (30 s, Track 106A, read at call time) for `mm recapture`, its `--dry-run` and `mm refresh-identity`, so one run finishes a cold index that attended pushes spread over several. A dry run does not persist, so on a cold index it may spend up to 30 s and keep nothing. When discovery is still `partial` in the last recorded push, `mm status` words its recovery as `Finish repository discovery and recover this Mac's last N days: mm recapture Nd`. If 30 s runs out, recapture's "Retry a narrower window" advice is wrong, because discovery is not windowed (declined scope, revisit if any run exhausts it). A repository that still outruns the budget is skipped as before: `timeout` when it alone ran past its 30 s, `budget_abort` when the walk ran past 120 s, with `Recapture incomplete` and exit 4 (preview: `Preview incomplete`, exit 0). The mm lock covers the walk and, for a real recapture, the subsequent row writes and ordinary push; `recapture` releases it in its `finally` block. While that lock is held, `mm push` refuses with the lock message and autopush records `lock-held`. Separately, interpreter shutdown joins any running worker after the lock is released: a `git log` started near the 120 s walk deadline can add about 30 s before process exit, plus its post-log work. This is not a 150 s bound on lock duration or total command time. The walk prints nothing while it runs.
 
@@ -1723,23 +1723,43 @@ reader and the reason class — never a path, transcript, SQL, model id, or
 exception string. Reasons outside `host_usage.Reason` normalize to
 `unavailable`. `unsupported` says the reader wrote a record this mm cannot
 read; a newer mm **may** read it (`mm update`), or the user can
-`mm disable-source <reader>`. A retry alone is not a remedy. Status, plain-text
-diag, and attended push capture (`cli._capture_attended_usage` passes `config`
-so `events_tail._capture_skip_phrase` reads `upgrade.cached_upgrade_view(config)`
-once per permanent skip without network I/O or cache writes), given a cached
+`mm disable-source <reader>`. A retry alone is not a remedy. Given a cached
 upgrade view that is `current` (this mm is the newest release the cached check
-knows; never refreshed from any of those surfaces), replace the `mm update`
-remedy with `_no_release_reads_clause`: "<Reader> usage not captured: this mm
-can't read <Reader>'s current record format, and no newer mm can yet. See
-`mm diag`, or <stop step> to stop retrying." It names only reader display names,
-keeps the `mm diag` pointer on every surface including diag, and the status
-verdict reads `Usage not captured.` followed by it. A missing, malformed, contended or
-skipped view, or a cached newer release, keeps `mm update`, and so does an
-exception reading the cached view on attended push capture and plain-text diag
-(status does not guard that read). Tail (`events_tail._run_events_tail`, which
-captures for autopush and for the push inside `mm recapture`), init and
-attempt-record (`attemptlog.run_details`) callers keep the default and do not
-change persisted `attemptlog.run_details` or autorun breadcrumbs. `partial` takes
+knows; never refreshed from any of these surfaces), every surface that prints
+or stores an `unsupported` phrase replaces the `mm update` remedy with
+`_no_release_reads_clause`: "<Reader> usage not captured: this mm can't read
+<Reader>'s current record format, and no newer mm can yet. See `mm diag`, or
+<stop step> to stop retrying." It names only reader display names, keeps the
+`mm diag` pointer on every surface including diag, and the status verdict reads
+`Usage not captured.` followed by it. Each surface gets the upgrade view as
+follows: `statusflow.status` reads `upgrade.cached_upgrade_view(config)` once per
+command (unguarded), and `statusflow._no_release_readers` turns that view into
+the readers given the no-release remedy for both the verdict
+(`_usage_capture_remedy`) and the blocker lines (`_host_usage_blocker`);
+plain-text `mm diag` reads `cached_upgrade_view` under a `try/except Exception`
+guard (while `mm diag --json` reads no view, and its `last_autorun` repeats the
+stored autopush breadcrumb as written, as do status's `Last auto-push` line and
+plain-text diag's breadcrumb `detail:`, so each shows the view read when the
+breadcrumb was stored); attended push capture (`cli._capture_attended_usage`)
+and tail degradations — the stored autopush breadcrumb and `mm recapture`'s
+tail notice — (`events_tail._run_events_tail`) pass `config` to
+`_capture_skip_phrase`, and the `mm init` backfill notice
+(`events_tail._run_events_backfill`) computes `no_release_reads` itself; each
+reads `cached_upgrade_view(config)` once per permanent skip under a
+`try/except Exception` guard without network I/O or cache writes. `attemptlog.run_details` also enumerates both the default
+(`no_release_reads=()`) and current-cache (`no_release_reads=(reader,)`) forms
+in its closed allowlist, defensively: no current path stores a host-skip phrase
+in attempt details. Its callers are `attemptlog.make_run` for attended push and
+pull records and `cli.autopush` for the details its diagnostic sink collected.
+Attended `mm push` suppresses the tail's host capture (the push inside
+`mm recapture` passes no `attended`, so its tail still captures host usage), and
+its capture warnings reach `core._sync_diagnostic` as
+non-degraded, so the record keeps only the closed `usage capture ...` detail;
+the tail emits its host-skip notices as non-degraded, which autopush's sink
+drops, so the breadcrumb takes those phrases from `PushResult.events_degradations`
+instead. A missing, malformed, contended or
+skipped view, a cached newer release, or an exception reading the cached view on
+guarded callers keeps `mm update`. `partial` takes
 the generic retry sentence naming `mm push` and `mm diag`.
 `deadline` states that this push/init's read did not finish inside its budget.
 When `left = max(0, files_on_disk - files_cached)` is a positive integer — from
@@ -4131,13 +4151,13 @@ retired before v1.11.8; its record shapes, census and the reasons for the source
   `usage.json`, the contract needs a re-census.
 - **Validation.** Unknown extra keys at any level are ignored. Required keys are exactly the ones
   read; a missing required key, a non-object row, or `totalTokens != inputTokens + outputTokens`
-  is `unsupported` (a standing blocker with the `mm update` remedy); bad JSON, a non-integer,
+  is `unsupported` (a standing blocker with the `mm update` remedy, or the no-release clause when the cached upgrade view is `current`); bad JSON, a non-integer,
   negative or over-2^53 counter, a naive, unparseable or unrepresentable UTC `endedAt`,
   an empty, invalid-UTF-8 or oversize model id,
   `reasoning > output`, per-model sums that differ from the row, or `cachedRead + cacheCreate >
   input` is `malformed`; a file replaced mid-read is `stale`. Any of these fails this reader
   alone (clause 2): content sync keeps its own exit status, siblings publish, and `mm status` and `mm diag` name
-  the failure and the fixing command (`mm update`, or `mm disable-source grok`).
+  the failure and its remedy (`mm update` or `mm disable-source grok` for `unsupported`, as above).
 - **Consent and the never-open rule.** The reader runs only when
   `config.grok_usage_consented(config)` (the `grok` source, or `[retro] grok_host_usage = true`,
   unless `grok` is in `disabled_sources`) holds. `events_tail._default_host_readers(...,

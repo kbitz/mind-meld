@@ -552,3 +552,99 @@ def test_status_incomplete_discovery_with_zero_pending_has_no_positive_catching_
     assert "Repository discovery is still catching up." in out
     assert "Continue capture on this Mac: mm push" in out
     assert "catching up (" not in out
+
+
+def test_status_and_diag_autorun_breadcrumb_matches_current_upgrade_cache_verdict(
+    inspection, monkeypatch
+):
+    from datetime import datetime, timezone
+
+    from mind_meld import events_tail, host_usage, sidecar, upgrade
+
+    backend, root = inspection
+    agy_dir = root.parent / "agy"
+    agy_dir.mkdir()
+    events_dir = root.parent / "mm-events"
+    (events_dir / "events").mkdir(parents=True)
+
+    cfg = config.load_config()
+    cfg["sync"]["sources"].extend(
+        [
+            {"name": "agy", "type": "generic", "path": str(agy_dir), "include_files": []},
+            {
+                "name": "mm-events",
+                "type": "generic",
+                "path": str(events_dir),
+                "include_dirs": ["events"],
+                "exclude_patterns": [],
+            },
+        ]
+    )
+    config.save_config(cfg)
+    core._init_crypto_session(backend, "contract-passphrase", cfg, read_only=True)
+    snapshot = manifest.build_manifest_v2(
+        cfg["device"]["id"],
+        cfg["device"]["name"],
+        config.get_sources(cfg, bootstrap=False),
+        cfg["sync"]["max_file_size"],
+    )
+    backend.put(
+        manifest_key(cfg["device"]["id"]),
+        crypto.encrypt(manifest.serialize_manifest(snapshot), "contract-passphrase", 1024),
+    )
+
+    monkeypatch.setattr(sidecar, "SIDECAR_DIR", root.parent)
+    monkeypatch.setattr(
+        host_usage,
+        "agy_usage_diag",
+        lambda **_kw: {
+            "last_reason": "unsupported",
+            "complete_once": False,
+            "usage_less_skipped": 0,
+            "cache_state": "ok",
+        },
+    )
+    monkeypatch.setattr(
+        upgrade,
+        "cached_upgrade_view",
+        lambda _cfg: upgrade.UpgradeCheckResult(
+            state="current", local="9.0.0", latest="9.0.0", install_cmd=None
+        ),
+    )
+
+    no_release_clause = (
+        "Antigravity usage not captured: this mm can't read Antigravity's current record format, "
+        "and no newer mm can yet. See `mm diag`, or run `mm disable-source agy` to stop retrying."
+    )
+    status_before = runner.invoke(app, ["status"])
+    assert status_before.exit_code == 0, status_before.output
+    assert status_before.stdout.splitlines()[0] == f"Usage not captured. {no_release_clause}"
+
+    crumb_detail = events_tail._capture_skip_phrase(
+        "agy", "unsupported", attended=False, config=cfg
+    )
+    (root.parent / "last-autorun.json").write_text(
+        json.dumps(
+            {
+                "push": {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "outcome": "degraded",
+                    "detail": crumb_detail,
+                }
+            }
+        )
+    )
+
+    status_after = runner.invoke(app, ["status"])
+    assert status_after.exit_code == 0, status_after.output
+    status_out = " ".join(status_after.stdout.split())
+    assert f"Usage refresh: {no_release_clause}" in status_out
+    assert f"Antigravity usage capture: enabled — {crumb_detail}" in status_out
+    assert crumb_detail in status_out
+    assert "mm update" not in status_out
+
+    diag_after = runner.invoke(app, ["diag"])
+    assert diag_after.exit_code == 0, diag_after.output
+    diag_out = " ".join(diag_after.stdout.split())
+    assert f"detail: {crumb_detail}" in diag_out
+    assert "mm update" not in diag_out

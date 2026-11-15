@@ -6432,7 +6432,7 @@ def test_all_emitters_obey_git_batch_origin_contract(capture61, monkeypatch, emi
         assert git_rows and all("origin" not in row for row in git_rows)
 
 
-def _recapture_with_unstable(capture61, monkeypatch, *, held_name):
+def _recapture_with_unstable(capture61, monkeypatch, *, held_name, verbose=False):
     """Run ``mm recapture 1d`` while scan reads of ``held_name`` never settle."""
     env = capture61
     monkeypatch.setattr(
@@ -6448,7 +6448,7 @@ def _recapture_with_unstable(capture61, monkeypatch, *, held_name):
         return real(path, **kw)
 
     monkeypatch.setattr(cli_module.manifest, "read_file_revision", flaky)
-    return runner.invoke(app, ["recapture", "1d"])
+    return runner.invoke(app, ["recapture", "1d", *(["-v"] if verbose else [])])
 
 
 def test_recapture_with_a_held_day_file_takes_the_not_synced_exit_75a(capture61, monkeypatch):
@@ -6501,13 +6501,19 @@ def test_attended_capture_exit_with_a_held_day_file_carries_held_and_not_publish
     assert core.content_accepted is False
 
 
-def test_recapture_is_unaffected_by_a_held_user_file_75a(capture61, monkeypatch):
+@pytest.mark.parametrize("verbose", [False, True])
+def test_recapture_is_unaffected_by_a_held_user_file_75a(capture61, monkeypatch, verbose):
     env = capture61
     (env["claude"] / "projects/-Users-user-myapp/memory/hot.md").write_text("still being written")
-    result = _recapture_with_unstable(capture61, monkeypatch, held_name="hot.md")
+    result = _recapture_with_unstable(capture61, monkeypatch, held_name="hot.md", verbose=verbose)
     flat = " ".join((result.output + (result.stderr or "")).split())
     assert result.exit_code in (0, 4), result.output
     assert "written locally but not synced" not in flat
+    # The quiet inner push still names the held count; only -v lists the path.
+    # test_recapture_with_a_held_user_file_ends_on_the_same_outcome_lines pins
+    # where the line sits on a complete run.
+    assert "Push: 1 file held." in result.stdout.splitlines(), result.output
+    assert ("hot.md" in result.stdout) is verbose
 
 
 @pytest.mark.parametrize("recovery", ["push", "autopush"])
@@ -11047,6 +11053,145 @@ def test_recapture_outcomes_and_verbose_details(preview62, monkeypatch, case, ve
         )
 
 
+def test_recapture_inner_push_display_is_quiet_unless_verbose(preview62, monkeypatch):
+    env = preview62
+    now = datetime.now(timezone.utc)
+    events_dir = env["events"] / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    repo = env["claude"]
+
+    def _prepared(sha: str) -> events_tail.RecaptureCapture:
+        commit = {
+            "sha": sha,
+            "date": now.isoformat(),
+            "author_email": "user@example.com",
+            "subject": f"feat: {sha}",
+            "files": 1,
+            "add": 1,
+            "del": 0,
+        }
+        return events_tail.RecaptureCapture(
+            git_rows=[
+                {
+                    "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                    "type": "git-snapshot",
+                    "ts": now.isoformat(),
+                    "device": "dev-a",
+                    "origin": _mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+                    "projects": [
+                        {
+                            "remote": "https://github.com/user/mm.git",
+                            "local_path": str(repo),
+                            "commits": [commit],
+                        }
+                    ],
+                    "skipped": [],
+                }
+            ],
+            root_discovery=_mm_events.GitRootDiscovery((repo,), (), False),
+            walk_budget_aborts=0,
+            walk_errors=0,
+            events_dir=events_dir,
+            since=now - timedelta(days=1),
+            until=now,
+        )
+
+    inner_push_tokens = (
+        "Building manifest",
+        "Uploading",
+        "Push complete.",
+        "Completed in",
+        "+ ",
+        "~ ",
+        "- ",
+    )
+
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: _prepared("aaa1111"))
+    quiet_run = runner.invoke(app, ["recapture", "1d"])
+    assert quiet_run.exit_code == 0, (quiet_run.stdout, quiet_run.stderr)
+    for token in inner_push_tokens:
+        assert token not in quiet_run.stdout, (token, quiet_run.stdout)
+    assert quiet_run.stdout.splitlines()[-1].startswith(
+        "Recapture: 1 commit record captured and published across 1 repository"
+    )
+
+    (repo / "projects" / "-Users-user-myapp" / "memory" / "verbose_extra.md").write_text("extra\n")
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: _prepared("bbb2222"))
+    verbose_run = runner.invoke(app, ["recapture", "-v", "1d"])
+    assert verbose_run.exit_code == 0, (verbose_run.stdout, verbose_run.stderr)
+    for token in ("Building manifest", "Uploading", "Push complete.", "Completed in", "+ ", "~ "):
+        assert token in verbose_run.stdout, (token, verbose_run.stdout)
+    assert verbose_run.stdout.splitlines()[-1].startswith(
+        "Recapture: 1 commit record captured and published across 1 repository"
+    )
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_recapture_with_a_held_user_file_ends_on_the_same_outcome_lines(
+    preview62, monkeypatch, verbose
+):
+    """The held count sits just before the Recapture line, with or without -v."""
+    env = preview62
+    now = datetime.now(timezone.utc)
+    events_dir = env["events"] / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    repo = env["claude"]
+    commit = {
+        "sha": "ccc3333",
+        "date": now.isoformat(),
+        "author_email": "user@example.com",
+        "subject": "feat: ccc3333",
+        "files": 1,
+        "add": 1,
+        "del": 0,
+    }
+    prepared = events_tail.RecaptureCapture(
+        git_rows=[
+            {
+                "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                "type": "git-snapshot",
+                "ts": now.isoformat(),
+                "device": "dev-a",
+                "origin": _mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+                "projects": [
+                    {
+                        "remote": "https://github.com/user/mm.git",
+                        "local_path": str(repo),
+                        "commits": [commit],
+                    }
+                ],
+                "skipped": [],
+            }
+        ],
+        root_discovery=_mm_events.GitRootDiscovery((repo,), (), False),
+        walk_budget_aborts=0,
+        walk_errors=0,
+        events_dir=events_dir,
+        since=now - timedelta(days=1),
+        until=now,
+    )
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: prepared)
+    (repo / "projects/-Users-user-myapp/memory/hot.md").write_text("still being written")
+    real = cli_module.manifest.read_file_revision
+
+    def flaky(path, **kw):
+        if Path(path).name == "hot.md":
+            raise cli_module.SnapshotChanged("changed while being read", "changed")
+        return real(path, **kw)
+
+    monkeypatch.setattr(cli_module.manifest, "read_file_revision", flaky)
+    result = runner.invoke(app, ["recapture", "1d", *(["-v"] if verbose else [])])
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    since_day = prepared.since.strftime("%Y-%m-%d")
+    until_day = prepared.until.strftime("%Y-%m-%d")
+    assert result.stdout.splitlines()[-2:] == [
+        "Push: 1 file held.",
+        "Recapture: 1 commit record captured and published across 1 repository "
+        f"({since_day} → {until_day}).",
+    ], result.stdout
+    assert ("hot.md" in result.stdout) is verbose
+
+
 def test_partial_recapture_prints_one_error_with_its_cause_and_one_final_fix(
     preview62, monkeypatch
 ):
@@ -13461,6 +13606,7 @@ def test_recapture_and_plain_push_stay_silent_on_nested_checkouts(capture61, mon
     assert "skipped: nested git repository" not in pushed.stdout
     assert "skipped: nested git repository" not in pushed.stderr
 
+    (root / "projects" / "other" / "after-push.md").write_text("published by recapture")
     monkeypatch.setattr(
         _mm_events,
         "discover_git_roots",
@@ -13479,6 +13625,7 @@ def test_recapture_and_plain_push_stay_silent_on_nested_checkouts(capture61, mon
     key = storage_keys.manifest_key("dev-a")
     accepted = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
     files = accepted["sources"]["gstack"]["files"]
+    assert "projects/other/after-push.md" in files
     assert "projects/literal*/checkout/new.md" not in files
     assert files[rel]["sha256"] == published["sha256"]
 

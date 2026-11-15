@@ -44,6 +44,35 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/events_tail.py|tests/test_init_events_backfill.py] Test gap: init's no-release notice when reading the cached upgrade view fails
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** `_run_events_backfill`'s `_init_no_release_reads` reads `upgrade.cached_upgrade_view(config)` inside `try/except Exception` and keeps the default `mm update` advice when that read raises. No test makes the read raise on the init path: the init test covers only a current cache, and the only raising-view test drives attended `mm push --verbose` through the shared `_capture_skip_phrase` guard, which init does not use.
+- **Hypothesis (untested):** add a case beside `test_incomplete_scan_uses_no_release_notice_when_upgrade_cache_is_current` that monkeypatches `upgrade.cached_upgrade_view` to raise, and assert init still succeeds and its notice keeps `mm update`; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/events_tail.py:2205
+- **Evidence:** Track 135A review (testing checklist, cycle 1) and coverage audit (audit-only; gap); read only, no failure reproduced.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/330 (branch `mmm/1f4ea780`, Track 135A) at `e9b960b` (2026-11-15).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/recaptureflow.py|tests/test_integration.py] Test gap: a partial recapture with a held user file is not pinned
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** On a partial run (exit 4), recapture prints `Push: N files held.` before the cause lines, because that exit skips the final print. Only `test_recapture_is_unaffected_by_a_held_user_file_75a` reaches that branch, and only because its fixture root is not a Git repository, so the walk fails; the test accepts exit 0 or 4 and does not check where the line sits.
+- **Hypothesis (untested):** add a partial case beside `test_recapture_with_a_held_user_file_ends_on_the_same_outcome_lines` with a prepared capture that has `walk_budget_aborts=1`, and assert exit 4, a single held line, and that it comes before the first cause line; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/recaptureflow.py:317
+- **Evidence:** Track 135A review (testing specialist and native adversarial, cycle 3) and coverage audit (audit-only; gap); read only, no failure reproduced.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/330 (branch `mmm/1f4ea780`, Track 135A) at `e9b960b` (2026-11-15).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/recaptureflow.py|src/mind_meld/cli.py] Base issue: recapture never prints its push's left-out outcome
+- **Base issue:** present at merge base `3289de2`; filed under `blocking=shown`
+- **Description:** docs/invariants/sync.md promises a separate `Push: N files left out because <folder> is new; run mm pull to restore them.` outcome line when a push leaves files out, and attended `mm push` prints it. `mm recapture` runs the same push but prints no such line, at the merge base and on this branch: its push has no outcome owner, the legacy push display it used prints the left-out clause only on its no-change path, which recapture's push does not reach because it carries the new mm-events rows, and recapture writes no attempt record or breadcrumb. A recapture after a restored or unreadable scan folder therefore says nothing about the files that push could not see, and because that push publishes without them (recapture appends an event batch first, so its push normally has content to publish), the next `mm push` and `mm status` do not report them either.
+- **Evidence:** read, not run: at head `e9b960b` and merge base `3289de2`, `_push_core`'s publishing-path display for callers without an outcome owner (src/mind_meld/cli.py:2786-2804) has no left-out line (its no-change path prints the clause at src/mind_meld/cli.py:2341-2342), and recaptureflow.py prints nothing from `PushResult.left_out_clause`. The published manifest drops left-out paths unseen (src/mind_meld/cli.py:1567-1571) and the left-out set is never serialized (src/mind_meld/core.py:1576-1584), so later push and status checks against this Mac's published manifest find nothing missing (src/mind_meld/statusflow.py:744-754).
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/recaptureflow.py:265
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/330 (branch `mmm/1f4ea780`, Track 135A) at `e9b960b` (2026-11-15).
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-15 (second run: full-review drain)
