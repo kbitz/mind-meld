@@ -570,12 +570,12 @@ def _record_resolution(
 def _links_through(path: Path, target: Path) -> bool:
     """Whether ``path``'s own symlink chain reaches ``target``'s inode.
 
-    Follows ``path`` one link at a time and compares each hop's ``os.lstat``
-    identity with ``target``'s, never ``path`` itself, so a name that only
-    resolves to the same file does not count, while a hard link of ``target``
-    in the chain does. Picks the repair for a same-file pair: when the
-    original's chain runs through the copy, deleting the copy would usually
-    leave the original dangling. An unreadable link ends the walk with False.
+    Follows ``path`` one link at a time (each hop joined onto its link's real
+    directory) and compares each hop's ``os.lstat`` identity with ``target``'s,
+    never ``path`` itself: a name that only resolves to the same file does not
+    count, a hard link of ``target`` in the chain does. Picks the repair for a
+    same-file pair (when the original's chain runs through the copy, deleting the
+    copy would usually leave it dangling); an unreadable link ends with False.
     """
     try:
         want = os.lstat(target)
@@ -583,7 +583,7 @@ def _links_through(path: Path, target: Path) -> bool:
         for _ in range(40):  # the kernel's own symlink-follow limit
             if not step.is_symlink():
                 return False
-            step = step.parent / os.readlink(step)
+            step = Path(os.path.realpath(step.parent)) / os.readlink(step)
             st = os.lstat(step)
             if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
                 return True

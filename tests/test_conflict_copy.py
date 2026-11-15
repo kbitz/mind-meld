@@ -1625,6 +1625,42 @@ class TestResolveInteractiveLoop:
             "mm resolve again"
         ) in capsys.readouterr().err
 
+    def test_long_relative_chain_from_the_original_still_gets_the_move_repair(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A long chain of relative links through long directory names, from the
+        original to its copy, resolves within the kernel's limits. Joining each hop
+        onto the previous hop's unresolved path would outgrow the path limit, end
+        the walk early and advise deleting the copy, the only real file here."""
+        try:
+            path_max = os.pathconf(tmp_path, "PC_PATH_MAX")
+        except (OSError, ValueError):
+            pytest.skip("PC_PATH_MAX is unavailable")
+        mem = tmp_path / "mem"
+        mem.mkdir()
+        conflict = mem / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"only copy")
+        name_len = 200
+        hops = min(30, path_max // (name_len + 4) + 3)
+        dirs = [tmp_path / "chain" / (f"{i:03d}" + "d" * (name_len - 3)) for i in range(hops)]
+        for d in dirs:
+            d.mkdir(parents=True)
+        for i, d in enumerate(dirs):
+            nxt = dirs[i + 1] / "l" if i + 1 < hops else conflict
+            (d / "l").symlink_to(os.path.relpath(nxt, d))
+        canonical = mem / "user.md"
+        canonical.symlink_to(os.path.relpath(dirs[0] / "l", mem))
+        assert os.path.samefile(canonical, conflict)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        assert conflict.read_bytes() == b"only copy"
+        assert canonical.is_symlink()
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); move {conflict.name} over user.md, then run "
+            "mm resolve again"
+        ) in capsys.readouterr().err
+
 
 class TestResolveExitCode:
     """Tests for the (resolved, failed) return shape and resolve()'s exit code.
