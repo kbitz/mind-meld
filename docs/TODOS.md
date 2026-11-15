@@ -251,6 +251,32 @@ here by hand, use the H3 form.
 - **Context:** Filed by /review-and-prep on branch `mmm/e01a68d2` (Track 132D, draft PR not yet opened) at `3ee5fad` (2026-11-14).
 - **Effort:** ? (user triages in /roadmap)
 
+### [review:files=src/mind_meld/cli.py|src/mind_meld/resolveflow.py] mm resolve PATH misses a conflict copy that is itself a symlink
+- **Description:** `mm resolve <PATH>` resolves PATH with `Path(path).expanduser().resolve()` and keeps only the discovery hits whose copy path equals it. Discovery resolves each source root but keeps a conflict copy's own name, so a copy that is itself a symlink never matches: the command prints `No conflict file matching: <PATH>` and exits 1 without touching anything. The same-file refusal and its repair are reached only by a bare `mm resolve`. By the same comparison, a copy linked to another conflict copy would select that other copy.
+- **Why it can wait:** it predates Track 132D (the PATH match is unchanged from `main`), nothing is deleted, the exit is 1, and a bare `mm resolve` refuses the pair as documented. Filed under the owner's stop rule for pre-existing findings below P0 (2026-11-14).
+- **Revisit trigger:** an owner report of `No conflict file matching` for a copy that `mm conflicts` lists, or the next Track that changes `mm resolve`'s PATH matching or conflict discovery.
+- **Evidence:** Track 132D documentation re-audit (a static read of `cli.py` and `resolveflow.py`); the PATH match line is identical at merge base `888ada2`; not reproduced.
+- **Found in:** src/mind_meld/cli.py:4243 and src/mind_meld/resolveflow.py:331
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/324 at `5a758ed` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=docs/invariants/sync.md|docs/invariants/init-devices.md|docs/invariants/README.md|docs/invariants/events-retro.md|SPEC.md|README.md|src/mind_meld/resolveflow.py] Pre-existing doc drift found by Track 132D's documentation audits
+- **Description:** Track 132D's two bounded documentation audits reported these passages as wrong or stale before the branch; none was edited, because the change does not touch them:
+  - `docs/invariants/sync.md` L449-450 says each successful explicit `mm resolve` choice writes the resolution ledger; only `(l)ocal`, `(r)emote` and `(m)erge` settle.
+  - `docs/invariants/init-devices.md` L121 says the sanitized print sites are pinned in `tests/test_safe_str.py`, which pins no `mm resolve` site.
+  - `docs/invariants/README.md` L167 also routes `_is_live_conflict` to events-retro.md, which does not document it (L124 routes it to conflicts.md); L412-413's "which overwrite canonical files" can read as covering the promote links, which refuse a taken name.
+  - `SPEC.md` L80 lists `retention.py` among the shared leaves, though it imports `core` and `resolveflow`. L634's divergence-summary wording matches neither prompt, and conflicts.md calls the code's "unique lines" wording rejected; the owner decides which wins. L678 calls standalone Grok Build sources retired, while docs/SPEC.md and `config.py` define a live grok source.
+  - `README.md` L1602: "Binary content suppresses (m)" leaves out the one-line or empty side. Its Handling conflicts section never shows the missing-original `(p)romote / (d)elete / (s)kip` prompt.
+  - `docs/invariants/events-retro.md` L470-472 says event retention also runs after an interactive `mm push`; only an explicit `mm gc` runs it. L3258-3262 and L3882-3886 point at TODOS entries drained long ago.
+  - The `src/mind_meld/resolveflow.py:1101-1103` comment says a copy left after a merge is reaped by `mm gc --conflicts`; gc keeps a copy whose bytes differ from the original (`retention.py:564`), as conflicts.md states.
+  - This file's stdin walk-all entry: piped answers go to the conflict discovery lists first, not one that "sorts first", and its CHANGELOG line pointer has moved.
+- **Why it can wait:** each predates Track 132D and none is critical. Filed under the owner's stop rule for pre-existing findings below P0 (2026-11-14).
+- **Revisit trigger:** the next Track or documentation audit that edits one of these files, or a reader misled by one of these passages.
+- **Evidence:** documentation audits `2662f690` and `dd5da487` for Track 132D (static reads; their sections are in the PR's evidence directory). The resolveflow comment was confirmed against merge base `888ada2` and `retention.py`; re-verify the rest against current code before editing.
+- **Found in:** docs/invariants/sync.md:449
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/324 at `5a758ed` (2026-11-14).
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-13
