@@ -44,6 +44,39 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: unreadable-copy inspection advice across chain failures and path spellings
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record` and the developer's Track 136A T5 backlog rule.
+- **Description:** The three refusal shapes pin move, delete and inspection advice, but do not separately pin both names being unreadable, a hop's lstat/readlink error, exhaustion of the 40-hop bound, or an unreadable copy reached through absolute, multi-hop or symlinked-parent paths.
+- **Hypothesis (untested):** extend the existing parametrized refusal tests with those shapes; assert the intended advice, no prompt and unchanged bytes/link names. Re-verify first; this is not a reproduced product defect or live APFS evidence.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/resolveflow.py:571
+- **Evidence:** Track 136A audit-only coverage paths C24-C27; the implemented three shapes pass, and the inspection probe preserves both names. No failure reproduced for these additional shapes.
+- **Revisit trigger:** the next Track changing `_links_through` or its refusal caller, or an owner report of incorrect same-file repair advice. Further unproven T5 cases belong here rather than reopening the approved scope.
+- **Context:** Filed by /review-and-prep on branch `mmm/a5e88aa4` at `a7bfa09` (2026-11-15); developer choice relayed at touchpoint `9cc2bd88-e14d-4d83-b1bb-564f2718c86c`.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/retention.py|tests/test_retention.py] Test gap: dry-run retention summaries explicitly pin kept
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** Apply summaries pin `kept=N`; existing dry-run assertions pin candidates, repairs, skipped and the conflict opt-in note without explicitly checking the new kept field.
+- **Hypothesis (untested):** extend the existing dry-run summary assertion with a deliberate-keep fixture and `kept=N`, retaining the existing no-mutation assertions; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/retention.py:101
+- **Evidence:** Track 136A audit-only coverage path C08; the renderer contains the field and existing preview tests pass, but no new assertion separately protects it.
+- **Revisit trigger:** the next Track changing `_render_reap_outcome` or its dry-run output.
+- **Context:** Filed by /review-and-prep on branch `mmm/a5e88aa4` at `a7bfa09` (2026-11-15).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/gcflow.py|tests/test_gc_events.py|tests/test_retention.py] Test gap: bare gc with a collected manifest and a real retention failure
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** Bare-gc failure output is pinned with a missing manifest, and collected-manifest failure output is pinned with `--conflicts`. The collected-manifest bare-gc combination has no dedicated assertion for both the final blob count and `Run: mm gc -v` warning.
+- **Hypothesis (untested):** extend the existing failure cases with a collected own manifest and no `--conflicts`, preserving bytes and asserting both output streams; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/gcflow.py:105
+- **Evidence:** Track 136A audit-only coverage path C13 and outside structured review; both adjacent cases pass and share the print-then-warn implementation. No regression demonstrated.
+- **Revisit trigger:** the next Track changing gc's collected-manifest detail or retention-warning selector.
+- **Context:** Filed by /review-and-prep on branch `mmm/a5e88aa4` at `a7bfa09` (2026-11-15).
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/events_tail.py|tests/test_init_events_backfill.py] Test gap: init's no-release notice when reading the cached upgrade view fails
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** `_run_events_backfill`'s `_init_no_release_reads` reads `upgrade.cached_upgrade_view(config)` inside `try/except Exception` and keeps the default `mm update` advice when that read raises. No test makes the read raise on the init path: the init test covers only a current cache, and the only raising-view test drives attended `mm push --verbose` through the shared `_capture_skip_phrase` guard, which init does not use.
