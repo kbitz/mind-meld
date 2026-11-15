@@ -571,20 +571,29 @@ def _record_resolution(
 def _links_through(path: Path, target: Path) -> bool:
     """Whether ``path``'s own symlink chain reaches ``target``'s inode.
 
-    For two names of one file. A regular ``target`` with a single link is the
-    file's only name, so ``path`` reaches it exactly when ``path`` is a symlink,
-    checked without walking; True if that check fails, since the two are one file.
-    Otherwise follows ``path`` one link at a time (each hop joined onto its link's
-    real directory) and compares each hop's ``os.lstat`` identity with
-    ``target``'s, never ``path`` itself: a name that only resolves to the same
-    file does not count, a hard link of ``target`` in the chain does. Picks the
-    repair for a same-file pair (when the original's chain runs through the copy,
-    deleting the copy would usually leave it dangling). An unreadable or overlong
-    hop ends the walk with False, so the repair it picks deletes only a copy that
-    is a link or has another name.
+    For two names of one file. An unreadable ``target`` decides from ``path``
+    alone, returning whether ``path`` is a symlink (False if ``path`` cannot be
+    read either), because moving the copy over a symlink original loses no bytes.
+    A regular ``target`` with a single link is the file's only name, so ``path``
+    reaches it exactly when ``path`` is a symlink, checked without walking; True
+    if that check fails, since the two are one file. Otherwise follows ``path``
+    one link at a time (each hop joined onto its link's real directory) and
+    compares each hop's ``os.lstat`` identity with ``target``'s, never ``path``
+    itself: a name that only resolves to the same file does not count, a hard
+    link of ``target`` in the chain does. Picks the repair for a same-file pair
+    (when the original's chain runs through the copy, deleting the copy would
+    usually leave it dangling). An unreadable or overlong hop ends the walk with
+    False, so the repair it picks deletes only a copy that is a link or has
+    another name.
     """
     try:
         want = os.lstat(target)
+    except OSError:
+        try:
+            return stat.S_ISLNK(os.lstat(path).st_mode)
+        except OSError:
+            return False
+    try:
         if stat.S_ISREG(want.st_mode) and want.st_nlink == 1:
             try:
                 return stat.S_ISLNK(os.lstat(path).st_mode)

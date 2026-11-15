@@ -3532,7 +3532,9 @@ class TestInversion5E:
         assert result.exit_code == 1
         assert result.stdout == ""
         assert "no conflict files" not in result.output.lower()
-        assert result.stderr == f"mm: error: No conflict file matching: {missing_path}\n"
+        assert result.stderr == (
+            f"mm: error: No conflict file matching: {missing_path}\nRun: mm conflicts\n"
+        )
         assert len(release_calls) == 1
         if has_other_conflict:
             assert (memory / "role.sync-conflict-v0-20260420-120000-devA1234.md").exists()
@@ -3552,6 +3554,14 @@ class TestInversion5E:
         sidecar = memory / "role.sync-conflict-20260420-120000-v1-devA1234.md"
         if has_conflict:
             sidecar.write_bytes(b"peer content")
+        real_find = cli_module.resolveflow._find_conflict_files
+        found: list[list[str]] = []
+
+        def spy_find(config, *, migrate_pre_inversion: bool = False):
+            hits = real_find(config, migrate_pre_inversion=migrate_pre_inversion)
+            found.append([h[1].name for h in hits])
+            return hits
+
         real_release = cli_module.release_lock
         release_calls = []
 
@@ -3559,18 +3569,46 @@ class TestInversion5E:
             release_calls.append(True)
             real_release()
 
+        monkeypatch.setattr(cli_module.resolveflow, "_find_conflict_files", spy_find)
         monkeypatch.setattr(cli_module, "release_lock", spy_release)
 
         result = runner.invoke(app, ["resolve", ""], input="r\n")
         assert result.exit_code == 1, result.output
         assert result.stdout == ""
-        assert result.stderr == "mm: error: No conflict file matching: \n"
+        assert result.stderr == "mm: error: No conflict file matching: \nRun: mm conflicts\n"
+        assert found == ([[sidecar.name]] if has_conflict else [[]])
         assert len(release_calls) == 1
         assert (memory / "role.md").read_bytes() == b"canonical content"
         if has_conflict:
             assert sidecar.read_bytes() == b"peer content"
         lockfile.acquire_lock()
         lockfile.release_lock()
+
+    @pytest.mark.parametrize("has_pre_inversion", [False, True])
+    def test_conflicts_listing_ends_with_shared_run_line(
+        self, tmp_path, monkeypatch, has_pre_inversion
+    ):
+        memory, _, _ = self._setup_empty_conflicts_env(tmp_path, monkeypatch)
+        v1 = memory / "role.sync-conflict-20260420-120000-v1-devA1234.md"
+        v1.write_bytes(b"peer content")
+        v0 = memory / "role.sync-conflict-v0-20260420-120001-devA1234.md"
+        if has_pre_inversion:
+            v0.write_bytes(b"local content")
+
+        result = runner.invoke(app, ["conflicts"])
+        assert result.exit_code == 0, result.output
+        assert result.stdout.endswith("Run: mm resolve\n")
+        assert "[bold]" not in result.output
+        assert "[dim]" not in result.output
+        assert "delete files manually" not in result.output
+        if has_pre_inversion:
+            assert result.stderr == (
+                "mm: notice: pre-v0.9.2 conflict files are listed; mm resolve renames "
+                "them to the current naming before resolving.\n"
+            )
+            assert v0.exists()
+        else:
+            assert result.stderr == ""
 
 
 class TestShipFixes5E:

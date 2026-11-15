@@ -693,7 +693,8 @@ class TestGcOldConflictFiles:
         }
         reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False, now=pinned_now)
         assert reaped.deleted == 0
-        assert reaped.skipped == 1
+        assert reaped.kept == 1
+        assert reaped.skipped == 0
         assert orphan.exists(), "canonical-missing sidecar must survive gc"
 
     def test_live_conflict_is_never_reaped(self, tmp_path: Path) -> None:
@@ -721,20 +722,42 @@ class TestGcOldConflictFiles:
         }
         reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False, now=pinned_now)
         assert reaped.deleted == 0
+        assert reaped.kept == 1
         assert sidecar.exists(), "unresolved conflict must survive gc regardless of age"
 
-    def test_canonical_symlinked_to_its_sidecar_is_never_reaped(self, tmp_path: Path) -> None:
-        """A canonical that is a symlink to its own 30-day-old sidecar reads as
-        identical bytes, but the sidecar is the only real file: gc must keep
-        both names and leave the pair to mm resolve's same-file refusal."""
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "canonical-links-to-sidecar",
+            "sidecar-links-to-canonical",
+            "hard-linked-pair",
+        ],
+    )
+    def test_canonical_symlinked_to_its_sidecar_is_never_reaped(
+        self, tmp_path: Path, shape: str
+    ) -> None:
+        """A canonical and 30-day-old sidecar that are the same file (a symlink
+        either way, or a hard-linked pair) read as identical bytes, but one name
+        can be the only real file: gc must keep both names and leave the pair to
+        mm resolve's same-file refusal."""
         src = tmp_path / "src"
         (src / "memory").mkdir(parents=True)
         pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
         old_ts = (pinned_now - timedelta(days=40)).strftime("%Y%m%d-%H%M%S")
         sidecar = src / "memory" / f"note.sync-conflict-{old_ts}-v1-devA1234.md"
-        sidecar.write_bytes(b"only copy")
         canonical = src / "memory" / "note.md"
-        canonical.symlink_to(sidecar.name)
+        if shape == "canonical-links-to-sidecar":
+            sidecar.write_bytes(b"only copy")
+            canonical.symlink_to(sidecar.name)
+        elif shape == "sidecar-links-to-canonical":
+            canonical.write_bytes(b"only copy")
+            sidecar.symlink_to(canonical.name)
+        else:
+            sidecar.write_bytes(b"only copy")
+            try:
+                os.link(sidecar, canonical)
+            except OSError as e:
+                pytest.skip(f"hard links unavailable on tmp_path: {e}")
 
         config = {
             "sync": {
@@ -751,9 +774,64 @@ class TestGcOldConflictFiles:
         }
         reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False, now=pinned_now)
         assert reaped.deleted == 0
+        assert reaped.kept == 1
         assert sidecar.read_bytes() == b"only copy"
-        assert canonical.is_symlink()
         assert canonical.read_bytes() == b"only copy"
+        if shape == "canonical-links-to-sidecar":
+            assert canonical.is_symlink()
+            assert os.readlink(canonical) == sidecar.name
+            assert not sidecar.is_symlink()
+        elif shape == "sidecar-links-to-canonical":
+            assert sidecar.is_symlink()
+            assert os.readlink(sidecar) == canonical.name
+            assert not canonical.is_symlink()
+        else:
+            st_sidecar = os.lstat(sidecar)
+            st_canonical = os.lstat(canonical)
+            assert (st_sidecar.st_dev, st_sidecar.st_ino) == (
+                st_canonical.st_dev,
+                st_canonical.st_ino,
+            )
+            assert st_sidecar.st_nlink == 2
+
+    def test_deliberate_keeps_count_as_kept_not_skipped(self, tmp_path: Path, capsys) -> None:
+        src = tmp_path / "src"
+        memory = src / "memory"
+        memory.mkdir(parents=True)
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        old_ts = (pinned_now - timedelta(days=40)).strftime("%Y%m%d-%H%M%S")
+
+        unreadable_age = memory / "notes.sync-conflict-20261345-999999-devA1234.md"
+        unreadable_age.write_bytes(b"unparseable age")
+        pre_inv = memory / f"pre.sync-conflict-v0-{old_ts}-devA1234.md"
+        pre_inv.write_bytes(b"local pre-inversion")
+        live = memory / f"live.sync-conflict-{old_ts}-v1-devA1234.md"
+        live.write_bytes(b"peer version")
+        (memory / "live.md").write_bytes(b"my version")
+
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            },
+        }
+        outcome = _gc_old_conflict_files(config, dry_run=False, verbose=True, now=pinned_now)
+        assert (outcome.deleted, outcome.failed, outcome.skipped, outcome.kept) == (0, 0, 0, 3)
+        assert not outcome.needs_remediation
+        assert unreadable_age.exists()
+        assert pre_inv.exists()
+        assert live.exists()
+        text = " ".join(capsys.readouterr().out.split())
+        assert (
+            "Conflicts: candidates=0 deleted=0 failed=0 skipped=0 kept=3 repairs=0 repair-failed=0"
+        ) in text
 
     def test_dry_run_does_not_delete(self, tmp_path: Path) -> None:
         """dry_run=True lists but preserves everything."""
@@ -1718,6 +1796,52 @@ class TestResolveInteractiveLoop:
             f"mm: error: resolve refused: {conflict.name} — same file as user.md "
             f"(a symlink or hard link); move {conflict.name} over user.md, then run "
             "mm resolve again"
+        ) in capsys.readouterr().err
+
+    @pytest.mark.parametrize("shape", ["original-is-symlink", "original-is-regular"])
+    def test_unreadable_copy_repair_follows_the_original(
+        self, tmp_path: Path, monkeypatch, capsys, shape: str
+    ) -> None:
+        """When the copy's own lstat fails after os.path.samefile detected the pair,
+        _links_through decides from the original alone: moving the copy over a
+        symlink original loses no bytes, whereas deleting a single-name copy leaves
+        the symlink original dangling."""
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        canonical = tmp_path / "user.md"
+        if shape == "original-is-symlink":
+            conflict.write_bytes(b"only copy")
+            canonical.symlink_to(conflict.name)
+            expected_repair = f"move {conflict.name} over user.md"
+        else:
+            canonical.write_bytes(b"only copy")
+            conflict.symlink_to(canonical.name)
+            expected_repair = f"delete {conflict.name}"
+        real_lstat = os.lstat
+
+        def failing_for_copy(p, *a, **kw):
+            if os.fspath(p) == os.fspath(conflict):
+                raise OSError(errno.EIO, "Input/output error")
+            return real_lstat(p, *a, **kw)
+
+        monkeypatch.setattr(os, "lstat", failing_for_copy)
+        monkeypatch.setattr(
+            typer,
+            "prompt",
+            lambda *a, **kw: pytest.fail("same-file refusal must not prompt"),
+        )
+        assert _resolve_interactive_loop([("s1", conflict, canonical)]) == (0, 1)
+        monkeypatch.setattr(os, "lstat", real_lstat)
+        assert conflict.read_bytes() == b"only copy"
+        assert canonical.read_bytes() == b"only copy"
+        if shape == "original-is-symlink":
+            assert canonical.is_symlink()
+            assert not conflict.is_symlink()
+        else:
+            assert conflict.is_symlink()
+            assert not canonical.is_symlink()
+        assert (
+            f"mm: error: resolve refused: {conflict.name} — same file as user.md "
+            f"(a symlink or hard link); {expected_repair}, then run mm resolve again"
         ) in capsys.readouterr().err
 
 
@@ -3547,7 +3671,8 @@ class TestGcFilenameClock:
         )
         assert sidecar.exists()
         assert outcome.deleted == 0
-        assert outcome.skipped >= 1
+        assert outcome.kept == 1
+        assert outcome.skipped == 0
 
     def test_live_conflict_not_reaped_at_day_30(self, tmp_path: Path) -> None:
         src = tmp_path / "src"

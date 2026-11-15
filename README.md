@@ -414,6 +414,17 @@ variable) now fails like any PATH that matches no conflict file
 (`mm: error: No conflict file matching: <path>` on stderr, exit 1) instead of
 being treated as no PATH, which walks every conflict. No migration is needed.
 
+**Conflict gc and conflict-command lines (Track 136A):** `mm gc --conflicts` no
+longer warns about conflict copies it keeps on purpose (unresolved, pre-v0.9.2
+or with an unreadable age), and per-reaper summaries show them as `kept=`.
+`mm gc` always prints its `Gc:` line, and a real retention failure adds the
+warning after it, whose fix after `--conflicts` is `Run: mm gc --conflicts -v`.
+An unmatched `mm resolve PATH` ends with `Run: mm conflicts`. `mm conflicts`
+ends with `Run: mm resolve`, plus a `mm: notice:` line when it lists pre-v0.9.2
+copies. When `mm resolve` cannot read a same-file conflict copy, it names the
+move repair if the original is a symlink. Exit codes and stored data are
+unchanged, and no migration is needed.
+
 
 **Status verdict and local run evidence (Track 77A):** `mm status` now opens
 its report after authentication with a verdict about this device's last push.
@@ -946,7 +957,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm devices approve <device-id>` | On a fleet machine where mm manages Syncthing, approve a joining machine by its pasted device ID: exact match among Syncthing's pending devices, then add it, mark it introducer and share `mind-meld`; a rerun finishes a half-finished approval (a device it already added that does not yet share `mind-meld`); a device that already shares `mind-meld` (a repeat after success, or one another fleet machine introduced) reports already approved (exit 0); any other malformed, non-pending or near-match ID changes nothing (exit 1); never automatic |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
-| `mm gc` | Delete this device's orphaned blobs using its raw manifest and run local retention cleanup (including recovery copies of deleted files older than 30 days), ending with one `Gc: ... .` outcome line (`--verbose` / `-v` shows per-reaper retention summaries). When a retention reaper reports a failed or skipped item (with `--conflicts`, a conflict copy kept on purpose counts as skipped), it ends instead with one `mm: warning: Retention cleanup was incomplete ... Run: mm gc -v` line and no `Gc:` line; a missing own manifest skips blob collection with a warning |
+| `mm gc` | Delete this device's orphaned blobs using its raw manifest and run local retention cleanup (including recovery copies of deleted files older than 30 days), always printing one `Gc: ... .` outcome line (`--verbose` / `-v` shows per-reaper retention summaries). When a retention reaper reports a failed or skipped item, one `mm: warning: Retention cleanup was incomplete ...` line follows as the last line, with `Run: mm gc --conflicts -v` after `--conflicts`, otherwise `Run: mm gc -v` (and a missing-manifest `Gc:` line drops `; local retention complete`); a conflict copy kept on purpose is reported as `kept=` under `-v` and never warns; a missing own manifest skips blob collection with a warning |
 | `mm gc --dry-run` | Preview this device's orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
 | `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or is the same file as the sidecar (a symlink or hard link between them), or cannot be hashed, is preserved |
 | `mm sources` | List configured sync sources |

@@ -183,10 +183,14 @@ counts as failed (exit 1) and names the repair: move the copy over the original
 when the original's own symlink chain reaches the copy's inode (`_links_through`
 compares each hop's `os.lstat` identity, so a hard link of the copy in the chain
 counts; deleting the copy would usually leave the original dangling), otherwise
-delete the copy. A `samefile`
+delete the copy. When the copy's own `os.lstat` fails, the repair follows the
+original alone, so an original that is a symlink gets `move <copy> over
+<original>`, and anything else, including an original that cannot be read
+either, gets `delete <copy>`. A `samefile`
 error falls through to the reads, whose failure is counted as before. Pinned by
 `tests/test_conflict_copy.py::TestResolveInteractiveLoop` (a copy linked to its
-original, an original linked to its copy, an original linked through its copy).
+original, an original linked to its copy, an original linked through its copy,
+and `test_unreadable_copy_repair_follows_the_original`).
 
 **Inline keep-local deferral and abort.** At the inline prompt `(l)ocal` calls
 `_ApplyReporter.defer_settle`, which queues the settlement on the ledger; it is
@@ -230,7 +234,7 @@ A sidecar carries THREE distinct facts on THREE carriers. Conflating them is how
 * **hash failure** — cannot tell, so refuse.
 * **canonical and sidecar are the same file** (a symlink either way, or hard links; `os.path.samefile`) — identical bytes prove nothing, and reaping the sidecar can delete the only real file; `mm resolve` refuses the pair with its repair (Track 132D).
 
-Bare `mm gc --dry-run` previews this reaper; apply still requires `--conflicts`. The consequence is deliberate: a sidecar the user never resolves is never reaped automatically. `mm resolve` is the intended path, and `mm conflicts` tells the user they can `rm` manually. Pinned by `tests/test_conflict_copy.py::TestGcOldConflictFiles` (`test_missing_canonical_is_never_reaped`, `test_live_conflict_is_never_reaped`, `test_canonical_symlinked_to_its_sidecar_is_never_reaped`, and the converged case in `test_reaps_files_older_than_cutoff`).
+Bare `mm gc --dry-run` previews this reaper; apply still requires `--conflicts`. The reaper counts every keep it makes on purpose (live, canonical missing, hash failure, same file, `v0-` sidecar, unreadable filename age) as `kept`, which never warns; only a discovery failure counts as `skipped`. The consequence is deliberate: a sidecar the user never resolves is never reaped automatically. `mm resolve` is the intended path, and `mm conflicts` ends with `Run: mm resolve`. Pinned by `tests/test_conflict_copy.py::TestGcOldConflictFiles` (`test_missing_canonical_is_never_reaped`, `test_live_conflict_is_never_reaped`, `test_canonical_symlinked_to_its_sidecar_is_never_reaped`, `test_deliberate_keeps_count_as_kept_not_skipped`, and the converged case in `test_reaps_files_older_than_cutoff`).
 
 ## Conflict-prompt UX (load-bearing, v0.11.1 BREAKING — interactive prompt)
 

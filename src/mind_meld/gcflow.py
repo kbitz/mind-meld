@@ -101,31 +101,28 @@ def gc(
         )
         if dry_run:
             console.print(core.DRY_RUN_COMPLETE)
-        elif any(o.needs_remediation for o in outcomes):
-            core._warning(
-                "Retention cleanup was incomplete. Fix permissions or locks; "
-                "use -v for paths and details.",
-                fix="mm gc -v",
-            )
-        elif not blob_res.collected:
-            console.print(
-                core._outcome_line(
-                    "gc", "blob collection skipped (own manifest missing); local retention complete"
-                ),
-                soft_wrap=True,
-                markup=False,
-                highlight=False,
-            )
         else:
+            incomplete = any(o.needs_remediation for o in outcomes)
+            if not blob_res.collected:
+                detail = "blob collection skipped (own manifest missing)"
+                if not incomplete:
+                    detail += "; local retention complete"
+            else:
+                detail = (
+                    f"{core._count(blob_res.deleted, 'orphaned blob', 'orphaned blobs')} deleted"
+                )
             console.print(
-                core._outcome_line(
-                    "gc",
-                    f"{core._count(blob_res.deleted, 'orphaned blob', 'orphaned blobs')} deleted",
-                ),
+                core._outcome_line("gc", detail),
                 soft_wrap=True,
                 markup=False,
                 highlight=False,
             )
+            if incomplete:
+                core._warning(
+                    "Retention cleanup was incomplete. Fix permissions or locks; "
+                    "use -v for paths and details.",
+                    fix="mm gc --conflicts -v" if prune_conflicts else "mm gc -v",
+                )
     except MindMeldError as e:
         if dry_run:
             core._error(str(e) + refusal_suffix)
