@@ -11047,6 +11047,79 @@ def test_recapture_outcomes_and_verbose_details(preview62, monkeypatch, case, ve
         )
 
 
+def test_recapture_inner_push_display_is_quiet_unless_verbose(preview62, monkeypatch):
+    env = preview62
+    now = datetime.now(timezone.utc)
+    events_dir = env["events"] / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    repo = env["claude"]
+
+    def _prepared(sha: str) -> events_tail.RecaptureCapture:
+        commit = {
+            "sha": sha,
+            "date": now.isoformat(),
+            "author_email": "user@example.com",
+            "subject": f"feat: {sha}",
+            "files": 1,
+            "add": 1,
+            "del": 0,
+        }
+        return events_tail.RecaptureCapture(
+            git_rows=[
+                {
+                    "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                    "type": "git-snapshot",
+                    "ts": now.isoformat(),
+                    "device": "dev-a",
+                    "origin": _mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+                    "projects": [
+                        {
+                            "remote": "https://github.com/user/mm.git",
+                            "local_path": str(repo),
+                            "commits": [commit],
+                        }
+                    ],
+                    "skipped": [],
+                }
+            ],
+            root_discovery=_mm_events.GitRootDiscovery((repo,), (), False),
+            walk_budget_aborts=0,
+            walk_errors=0,
+            events_dir=events_dir,
+            since=now - timedelta(days=1),
+            until=now,
+        )
+
+    inner_push_tokens = (
+        "Building manifest",
+        "Uploading",
+        "Push complete.",
+        "Completed in",
+        "+ ",
+        "~ ",
+        "- ",
+    )
+
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: _prepared("aaa1111"))
+    quiet_run = runner.invoke(app, ["recapture", "1d"])
+    assert quiet_run.exit_code == 0, (quiet_run.stdout, quiet_run.stderr)
+    for token in inner_push_tokens:
+        assert token not in quiet_run.stdout, (token, quiet_run.stdout)
+    assert quiet_run.stdout.splitlines()[-1].startswith(
+        "Recapture: 1 commit record captured and published across 1 repository"
+    )
+
+    (repo / "projects" / "-Users-user-myapp" / "memory" / "verbose_extra.md").write_text("extra\n")
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: _prepared("bbb2222"))
+    verbose_run = runner.invoke(app, ["recapture", "-v", "1d"])
+    assert verbose_run.exit_code == 0, (verbose_run.stdout, verbose_run.stderr)
+    for token in ("Building manifest", "Uploading", "Push complete.", "Completed in", "+ ", "~ "):
+        assert token in verbose_run.stdout, (token, verbose_run.stdout)
+    assert verbose_run.stdout.splitlines()[-1].startswith(
+        "Recapture: 1 commit record captured and published across 1 repository"
+    )
+
+
 def test_partial_recapture_prints_one_error_with_its_cause_and_one_final_fix(
     preview62, monkeypatch
 ):
@@ -13461,6 +13534,7 @@ def test_recapture_and_plain_push_stay_silent_on_nested_checkouts(capture61, mon
     assert "skipped: nested git repository" not in pushed.stdout
     assert "skipped: nested git repository" not in pushed.stderr
 
+    (root / "projects" / "other" / "after-push.md").write_text("published by recapture")
     monkeypatch.setattr(
         _mm_events,
         "discover_git_roots",
@@ -13479,6 +13553,7 @@ def test_recapture_and_plain_push_stay_silent_on_nested_checkouts(capture61, mon
     key = storage_keys.manifest_key("dev-a")
     accepted = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
     files = accepted["sources"]["gstack"]["files"]
+    assert "projects/other/after-push.md" in files
     assert "projects/literal*/checkout/new.md" not in files
     assert files[rel]["sha256"] == published["sha256"]
 

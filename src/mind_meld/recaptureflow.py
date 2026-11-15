@@ -265,8 +265,9 @@ def recapture(
                         config,
                         passphrase,
                         memory_kb,
-                        verbose=False,
+                        verbose=verbose,
                         dry_run=False,
+                        diagnostics=verbose,
                         report_nested_repositories=False,
                     )
             except SnapshotError as e:
