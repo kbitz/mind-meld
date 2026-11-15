@@ -186,9 +186,12 @@ counts; deleting the copy would usually leave the original dangling), otherwise
 delete the copy. When the copy's own `os.lstat` fails, the repair follows the
 original's symlink chain and compares each hop's pathname with the copy's own
 name, resolving parent directories without following the final entry. It names
-`move <copy> over <original>` only when that chain reaches the copy; otherwise,
-including when the original cannot be read either, it names `delete <copy>`.
-A copy that links back to a symlink original therefore gets the delete repair,
+`move <copy> over <original>` only when that chain reaches the copy. A regular
+original gets `delete <copy>`. For an uncertain symlink chain, or when the
+original cannot be read either, `_links_through` returns `None` and the refusal
+names `inspect both <copy> and <original>` instead of suggesting deletion:
+exact pathname comparison cannot rule out case or Unicode aliases on macOS.
+A copy that links back to a symlink original therefore gets inspection advice,
 avoiding a move that would turn the original into a self-referencing link. A `samefile`
 error falls through to the reads, whose failure is counted as before. Pinned by
 `tests/test_conflict_copy.py::TestResolveInteractiveLoop` (a copy linked to its

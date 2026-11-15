@@ -422,8 +422,9 @@ warning after it, whose fix after `--conflicts` is `Run: mm gc --conflicts -v`.
 An unmatched `mm resolve PATH` ends with `Run: mm conflicts`. `mm conflicts`
 ends with `Run: mm resolve`, plus a `mm: notice:` line when it lists pre-v0.9.2
 copies. When `mm resolve` cannot read a same-file conflict copy, it names the
-move repair only if the original's symlink chain reaches the copy. Exit codes and stored data are
-unchanged, and no migration is needed.
+move repair only if the original's symlink chain reaches the copy. An uncertain
+symlink chain gets advice to inspect both names instead of deleting the copy.
+Exit codes and stored data are unchanged, and no migration is needed.
 
 
 **Status verdict and local run evidence (Track 77A):** `mm status` now opens

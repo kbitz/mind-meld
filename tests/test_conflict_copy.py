@@ -1823,7 +1823,7 @@ class TestResolveInteractiveLoop:
             outside.write_bytes(b"only copy")
             canonical.symlink_to(outside.name)
             conflict.symlink_to(canonical.name)
-            expected_repair = f"delete {conflict.name}"
+            expected_repair = f"inspect both {conflict.name} and user.md"
         real_lstat = os.lstat
 
         def failing_for_copy(p, *a, **kw):
