@@ -184,9 +184,12 @@ when the original's own symlink chain reaches the copy's inode (`_links_through`
 compares each hop's `os.lstat` identity, so a hard link of the copy in the chain
 counts; deleting the copy would usually leave the original dangling), otherwise
 delete the copy. When the copy's own `os.lstat` fails, the repair follows the
-original alone, so an original that is a symlink gets `move <copy> over
-<original>`, and anything else, including an original that cannot be read
-either, gets `delete <copy>`. A `samefile`
+original's symlink chain and compares each hop's pathname with the copy's own
+name, resolving parent directories without following the final entry. It names
+`move <copy> over <original>` only when that chain reaches the copy; otherwise,
+including when the original cannot be read either, it names `delete <copy>`.
+A copy that links back to a symlink original therefore gets the delete repair,
+avoiding a move that would turn the original into a self-referencing link. A `samefile`
 error falls through to the reads, whose failure is counted as before. Pinned by
 `tests/test_conflict_copy.py::TestResolveInteractiveLoop` (a copy linked to its
 original, an original linked to its copy, an original linked through its copy,

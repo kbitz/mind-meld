@@ -571,9 +571,10 @@ def _record_resolution(
 def _links_through(path: Path, target: Path) -> bool:
     """Whether ``path``'s own symlink chain reaches ``target``'s inode.
 
-    For two names of one file. An unreadable ``target`` decides from ``path``
-    alone, returning whether ``path`` is a symlink (False if ``path`` cannot be
-    read either), because moving the copy over a symlink original loses no bytes.
+    For two names of one file. An unreadable ``target`` compares the names in
+    ``path``'s symlink chain with ``target``'s own name, without following it.
+    A symlink original alone does not justify moving the copy over it: the copy
+    might link back to the original, making that move create a self-loop.
     A regular ``target`` with a single link is the file's only name, so ``path``
     reaches it exactly when ``path`` is a symlink, checked without walking; True
     if that check fails, since the two are one file. Otherwise follows ``path``
@@ -589,24 +590,26 @@ def _links_through(path: Path, target: Path) -> bool:
     try:
         want = os.lstat(target)
     except OSError:
-        try:
-            return stat.S_ISLNK(os.lstat(path).st_mode)
-        except OSError:
-            return False
+        want = None
     try:
-        if stat.S_ISREG(want.st_mode) and want.st_nlink == 1:
+        if want is not None and stat.S_ISREG(want.st_mode) and want.st_nlink == 1:
             try:
                 return stat.S_ISLNK(os.lstat(path).st_mode)
             except OSError:
                 return True
+        target_entry = Path(os.path.realpath(target.parent)) / target.name if want is None else None
         step = path
         for _ in range(40):  # the kernel's own symlink-follow limit
-            if not step.is_symlink():
+            if not stat.S_ISLNK(os.lstat(step).st_mode):
                 return False
             step = Path(os.path.realpath(step.parent)) / os.readlink(step)
-            st = os.lstat(step)
-            if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
-                return True
+            if want is None:
+                if Path(os.path.realpath(step.parent)) / step.name == target_entry:
+                    return True
+            else:
+                st = os.lstat(step)
+                if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
+                    return True
     except OSError:
         return False
     return False

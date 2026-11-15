@@ -1798,22 +1798,30 @@ class TestResolveInteractiveLoop:
             "mm resolve again"
         ) in capsys.readouterr().err
 
-    @pytest.mark.parametrize("shape", ["original-is-symlink", "original-is-regular"])
+    @pytest.mark.parametrize(
+        "shape",
+        ["original-is-symlink", "original-is-regular", "copy-links-to-symlink-original"],
+    )
     def test_unreadable_copy_repair_follows_the_original(
         self, tmp_path: Path, monkeypatch, capsys, shape: str
     ) -> None:
         """When the copy's own lstat fails after os.path.samefile detected the pair,
-        _links_through decides from the original alone: moving the copy over a
-        symlink original loses no bytes, whereas deleting a single-name copy leaves
-        the symlink original dangling."""
+        _links_through follows the original's chain, so moving a copy that links
+        back to a symlink original cannot turn that original into a self-loop."""
         conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
         canonical = tmp_path / "user.md"
         if shape == "original-is-symlink":
             conflict.write_bytes(b"only copy")
             canonical.symlink_to(conflict.name)
             expected_repair = f"move {conflict.name} over user.md"
-        else:
+        elif shape == "original-is-regular":
             canonical.write_bytes(b"only copy")
+            conflict.symlink_to(canonical.name)
+            expected_repair = f"delete {conflict.name}"
+        else:
+            outside = tmp_path / "outside.md"
+            outside.write_bytes(b"only copy")
+            canonical.symlink_to(outside.name)
             conflict.symlink_to(canonical.name)
             expected_repair = f"delete {conflict.name}"
         real_lstat = os.lstat
@@ -1836,9 +1844,15 @@ class TestResolveInteractiveLoop:
         if shape == "original-is-symlink":
             assert canonical.is_symlink()
             assert not conflict.is_symlink()
-        else:
+        elif shape == "original-is-regular":
             assert conflict.is_symlink()
             assert not canonical.is_symlink()
+        else:
+            assert conflict.is_symlink()
+            assert canonical.is_symlink()
+            assert os.readlink(conflict) == canonical.name
+            assert os.readlink(canonical) == outside.name
+            assert outside.read_bytes() == b"only copy"
         assert (
             f"mm: error: resolve refused: {conflict.name} — same file as user.md "
             f"(a symlink or hard link); {expected_repair}, then run mm resolve again"
