@@ -2637,7 +2637,7 @@ with `~/.grok/sessions` would see the healthy-tail control pin in
 
 1. **Push counts stay honest.** An init-counted-as-push would inflate the per-window mm-push count in every fresh-install retro by exactly 1. A "1 more than expected" lie everywhere is worse than the trade-off below.
 
-2. **Cursor stays at "no prior mm-push".** The first real push's `resolve_push_cursor` returns `now - 30 days` again and re-walks the same 30-day window. Aggregator dedups via `(canonical_remote_url, sha)` so retro output is identical; cost is one extra ~500ms `git log` walk on the first real push, paid once per machine.
+2. **Cursor stays at "no prior mm-push".** The first real push's `resolve_push_cursor(...).since` is `now - 30 days` again, so the push re-walks the same 30-day window. Aggregator dedups via `(canonical_remote_url, sha)` so retro output is identical; cost is one extra ~500ms `git log` walk on the first real push, paid once per machine.
 
 **Idempotent at the aggregator layer.** Commits dedup by `(canonical_remote_url, sha)`; sessions latest-wins per `(device, source_root, claude_dir)`. Re-running init (or invoking the backfill twice for any other reason) produces the same retro output, only slightly larger events files.
 
