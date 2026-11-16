@@ -3922,12 +3922,13 @@ def log_cmd(
             source=source, action=action, verb=verb, since=since_dt, limit=limit
         )
     except statedb.StateDBError as exc:
-        for line in pullhistory.explain(exc).split("\n"):
+        message = pullhistory.explain(exc)
+        lines = message.rsplit("\n", 1) if isinstance(exc, statedb.StateDBTooNew) else [message]
+        for line in lines:
             typer.echo(safety.safe_terminal_str(line), err=True)
         raise typer.Exit(1) from None
     for notice in rows.notices:
-        for line in pullhistory.explain(notice).split("\n"):
-            typer.echo(safety.safe_terminal_str(line), err=True)
+        typer.echo(safety.safe_terminal_str(pullhistory.explain(notice)), err=True)
 
     if not rows:
         if fmt_lower == "jsonl":

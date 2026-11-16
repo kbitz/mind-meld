@@ -14465,6 +14465,46 @@ def test_log_errors_plain_empty_stdout73(kind, tmp_path, monkeypatch):
         assert "move state.db" not in result.stderr
 
 
+@pytest.mark.parametrize("kind", ["error", "too-new", "notice", "unrecorded", "unrecorded-new"])
+def test_log_dynamic_newlines_do_not_create_output_lines(kind, tmp_path, monkeypatch):
+    from mind_meld import pullhistory, statedb
+
+    path = tmp_path / "history\nembedded" / "state.db"
+    cause = (
+        statedb.StateDBTooNew(2, path)
+        if kind in ("too-new", "unrecorded-new")
+        else statedb.StateDBError("SQLITE\nDETAIL", path)
+    )
+    if kind in ("error", "too-new"):
+
+        def query(**kwargs):
+            raise cause
+
+    else:
+        notice = (
+            pullhistory.LegacyHistoryPending(path, "EACCES\nDETAIL")
+            if kind == "notice"
+            else pullhistory.HistoryNotRecorded(cause)
+        )
+
+        def query(**kwargs):
+            return pullhistory.QueryRows([], origin="state.db", notices=[notice])
+
+    monkeypatch.setattr(pullhistory, "query", query)
+    result = runner.invoke(app, ["log", "--format", "jsonl"])
+    assert result.exit_code == (1 if kind in ("error", "too-new") else 0), result.exception
+    assert result.stdout == ""
+    lines = result.stderr.splitlines()
+    assert len(lines) == (2 if kind == "too-new" else 1)
+    assert r"history\nembedded" in lines[0]
+    if kind == "too-new":
+        assert lines[-1] == "Run: mm update"
+    elif kind == "unrecorded-new":
+        assert lines[0].endswith(" Run: mm update")
+    else:
+        assert r"\nDETAIL" in lines[0]
+
+
 def test_log_no_sqlite_no_database_and_version73(monkeypatch):
     monkeypatch.setitem(sys.modules, "sqlite3", None)
     assert runner.invoke(app, ["log", "--format", "jsonl"]).exit_code == 0
