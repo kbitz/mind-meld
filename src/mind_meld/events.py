@@ -91,8 +91,15 @@ MAX_GIT_WORKERS = 8
 PER_REPO_TIMEOUT_FLOOR_MS = 200
 PER_REPO_TIMEOUT_CAP_MS = 2000
 MAX_DISCOVERY_REJECT_SAMPLE = 64
+"""Cap on (reason, path) reject records retained on GitRootDiscovery.
+
+Diag --json exposes this sample; the text renderer uses reject_counts, which
+are not capped. 52 dead Claude project cwds was the live corpus on the
+machine that motivated Track 29A; 64 leaves a small margin without letting
+an unbounded ~/.claude/projects tree enlarge the frozen result."""
+
 CURSOR_SCAN_DAYS = 90
-"""How far ``last_push_ts`` walks daily files looking for a complete mm-push.
+"""How far ``resolve_push_cursor`` walks daily files looking for a complete mm-push.
 
 Equal to ``retention.EVENTS_RETENTION_DAYS``. events does not import
 retention (that would pull resolveflow onto the capture path). Pinned
@@ -165,19 +172,12 @@ value that is a FACT about the machine, not a loss: there is no history to
 have missed, so a consumer must not turn it into a "recapture the missing
 window" prompt. The zero-repo push note already covers that machine."""
 
-DISCOVERY_ADVANCE = frozenset({"complete", "not-run"})
 DISCOVERY_HOLD = frozenset({"partial", DISCOVERY_EMPTY})
 """Cursor policy allowlist for ``git_capture.discovery``.
 
 Walk failures NEVER affect the cursor. A denylist would default every
 future value to HOLD, which is the wedge direction (same argument as
 ``BROKEN_SKILL_STATUSES``)."""
-"""Cap on (reason, path) reject records retained on GitRootDiscovery.
-
-Diag --json exposes this sample; the text renderer uses reject_counts, which
-are not capped. 52 dead Claude project cwds was the live corpus on the
-machine that motivated Track 29A; 64 leaves a small margin without letting
-an unbounded ~/.claude/projects tree enlarge the frozen result."""
 
 EVENTS_SCHEMA_VERSION = 2
 """Bumped from 1 → 2 for Group 8 (v0.11.0).
@@ -612,7 +612,7 @@ def _normalize_git_capture_cache(cache: dict) -> None:
     cache["repo_cursors"] = {
         root: ts
         for root, ts in cache["repo_cursors"].items()
-        if isinstance(root, str) and _parse_aware_ts(ts) is not None
+        if isinstance(root, str) and parse_aware_ts(ts) is not None
     }
     stores = cache.get("repo_cursor_stores")
     cache["repo_cursor_stores"] = {
@@ -636,7 +636,7 @@ def _normalize_git_capture_cache(cache: dict) -> None:
         if isinstance(resume_map, dict)
         else {}
     )
-    if _parse_aware_ts(cache.get("pending_refresh_since")) is None:
+    if parse_aware_ts(cache.get("pending_refresh_since")) is None:
         cache["pending_refresh_since"] = None
     if type(cache.get("incomplete_streak")) is not int or cache["incomplete_streak"] < 0:
         cache["incomplete_streak"] = 0
@@ -917,10 +917,10 @@ def discover_git_roots(
                 continue
             common_dir = _known_common_dir(Path(key), stores, key)
             elected = active_by_common_dir.get(common_dir) if common_dir is not None else None
-            parsed = _parse_aware_ts(ts)
+            parsed = parse_aware_ts(ts)
             if elected is None or parsed is None:
                 continue
-            current = _parse_aware_ts(retained.get(elected))
+            current = parse_aware_ts(retained.get(elected))
             if current is None or parsed < current:
                 retained[elected] = ts
             if elected not in stores:
@@ -1720,14 +1720,13 @@ def _dedup_discovered_roots(
             member_ts = [
                 ts
                 for _, _, m in items
-                if isinstance((ts := cursors.get(str(m))), str) and _parse_aware_ts(ts) is not None
+                if isinstance((ts := cursors.get(str(m))), str) and parse_aware_ts(ts) is not None
             ]
             if member_ts:
                 cursors[str(elected_root)] = min(
                     member_ts,
                     key=lambda s: (
-                        _parse_aware_ts(s)
-                        or datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+                        parse_aware_ts(s) or datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
                     ),
                 )
             for _, _, m in items:
@@ -1889,15 +1888,6 @@ def _read_gitconfig_user_emails(
                 include_path = config_path.parent / include_path
             emails.extend(_read_gitconfig_user_emails(include_path, _depth + 1, _seen))
     return emails
-
-
-def _read_gitconfig_user_email(config_path: Path) -> str | None:
-    """Read ``[user] email`` from one gitconfig file without spawning git.
-
-    Last value wins, matching git.
-    """
-    emails = _read_gitconfig_user_emails(config_path)
-    return emails[-1] if emails else None
 
 
 def _read_repo_config_emails(path: Path) -> list[str]:
@@ -2157,7 +2147,7 @@ def walk_git_projects(
         for key, raw_ts in root_cursors.items():
             if not isinstance(key, str):
                 continue
-            ts = _parse_aware_ts(raw_ts)
+            ts = parse_aware_ts(raw_ts)
             if ts is None:
                 continue
             common_dir = _known_common_dir(Path(key), stores, key)
@@ -3138,11 +3128,11 @@ def effective_capture_since(roots: Sequence[Path | str], since: datetime) -> dat
             common = _known_common_dir(Path(key), stores, key)
             if key not in wanted and (common is None or common not in common_dirs):
                 continue
-            ts = _parse_aware_ts(raw)
+            ts = parse_aware_ts(raw)
             if ts is not None:
                 timestamps.append(ts)
         return min([since, *timestamps])
-    parsed = [ts for raw in cursors.values() if (ts := _parse_aware_ts(raw)) is not None]
+    parsed = [ts for raw in cursors.values() if (ts := parse_aware_ts(raw)) is not None]
     return min([since, *parsed])
 
 
@@ -3166,7 +3156,7 @@ def _count_pending_in(
     for key, raw in cursors.items():
         if not isinstance(key, str):
             continue
-        ts = _parse_aware_ts(raw)
+        ts = parse_aware_ts(raw)
         if ts is None:
             continue
         common = _known_common_dir(Path(key), stores, key)
@@ -3180,7 +3170,7 @@ def _count_pending_in(
             present = [
                 ts
                 for member in members
-                if (ts := _parse_aware_ts(cursors.get(str(member)))) is not None
+                if (ts := parse_aware_ts(cursors.get(str(member)))) is not None
             ]
         if not present or min(present) < since:
             pending += 1
@@ -3249,7 +3239,7 @@ def _apply_repo_cursors_to_cache(
     reconciling: bool = False,
     prune_invalid_roots: bool = True,
 ) -> bool:
-    previous = _parse_aware_ts(cache.get("last_committed_push_ts"))
+    previous = parse_aware_ts(cache.get("last_committed_push_ts"))
     if recorded is not None and previous is not None and recorded <= previous:
         return False
     stamp = max(cursor_ts, recorded) if recorded is not None else cursor_ts
@@ -3283,7 +3273,7 @@ def _apply_repo_cursors_to_cache(
         group_olds = [
             ts
             for key in [root, *sibling_keys]
-            if (ts := _parse_aware_ts(cursors.get(key))) is not None
+            if (ts := parse_aware_ts(cursors.get(key))) is not None
         ]
         old = min(group_olds) if group_olds else None
         if recorded is None and old is not None and since > old:
@@ -3302,7 +3292,7 @@ def _apply_repo_cursors_to_cache(
             stores.pop(sibling, None)
     if recorded is not None:
         for root in failed:
-            old = _parse_aware_ts(cursors.get(root))
+            old = parse_aware_ts(cursors.get(root))
             if old is None or (reconciling and since < old):
                 cursors[root] = since.isoformat()
     if prune_invalid_roots:
@@ -3332,7 +3322,7 @@ def commit_repo_cursors(
     acquire the capture's old interval before the global event cursor advances.
     A completed empty repository is progress just like a successful git log.
     """
-    recorded = recorded_ts if isinstance(recorded_ts, datetime) else _parse_aware_ts(recorded_ts)
+    recorded = recorded_ts if isinstance(recorded_ts, datetime) else parse_aware_ts(recorded_ts)
     try:
         with lockedjson.locked_json_rmw(mm_config.GIT_CAPTURE_CACHE_PATH) as state:
             cache = state.data
@@ -3358,7 +3348,7 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
     interval when several appends succeeded while the cache was unwritable.
     Only git snapshots preceding a terminal mm-push belong to its batch.
     """
-    marker = _parse_aware_ts(read_git_capture_cache().get("last_committed_push_ts"))
+    marker = parse_aware_ts(read_git_capture_cache().get("last_committed_push_ts"))
     marker_day = marker.astimezone(timezone.utc).date() if marker is not None else None
     now = datetime.now(timezone.utc)
     batches: list[tuple[datetime, dict, list[dict]]] = []
@@ -3376,7 +3366,7 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
                 ):
                     pending.append(row)
                 continue
-            ts = _parse_aware_ts(row.get("ts"))
+            ts = parse_aware_ts(row.get("ts"))
             if ts is not None and ts <= now and (marker is None or ts > marker):
                 batches.append((ts, row, pending))
             pending = []
@@ -3390,7 +3380,7 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
             mutated = False
             for ts, row, git_rows in ordered:
                 cap = row.get("git_capture")
-                since = _parse_aware_ts(cap.get("since")) if isinstance(cap, dict) else None
+                since = parse_aware_ts(cap.get("since")) if isinstance(cap, dict) else None
                 if since is None:
                     continue
                 aborts, errors = walk_skip_counts(
@@ -3413,21 +3403,6 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
                 state.write_on_exit = False
     except OSError:
         pass
-
-
-def last_push_ts(events_dir: Path, device_id: str) -> datetime:
-    """Return the git-walk cursor for this device.
-
-    Reverse-scans up to ``CURSOR_SCAN_DAYS`` daily files. Incomplete
-    captures (``git_capture.discovery`` in ``DISCOVERY_HOLD``) do not
-    advance the cursor; walk failures never do. On first run / events
-    absent / no usable mm-push found, returns
-    ``now - INITIAL_CURSOR_LOOKBACK_DAYS``.
-
-    The mm-events log owns the global cursor (state.db history is forensic
-    only). The local capture cache separately preserves unfinished per-repo
-    intervals; it never replaces this event cursor."""
-    return resolve_push_cursor(events_dir, device_id).since
 
 
 def resolve_push_cursor(
@@ -3456,7 +3431,7 @@ def resolve_push_cursor(
         if not path.is_file():
             continue
         for obj in reversed(list(_iter_mm_push_objs(path))):
-            ts = _parse_aware_ts(obj.get("ts"))
+            ts = parse_aware_ts(obj.get("ts"))
             if ts is None or ts > now:
                 # Future / timezone-naive / malformed ts cannot move the
                 # cursor forward.
@@ -3466,7 +3441,7 @@ def resolve_push_cursor(
                 return CursorResolution(since=ts, held=seen_hold)
             seen_hold = True
             if isinstance(cap, dict) and held_since is None:
-                parsed_since = _parse_aware_ts(cap.get("since"))
+                parsed_since = parse_aware_ts(cap.get("since"))
                 if parsed_since is not None and parsed_since <= now and parsed_since <= ts:
                     held_since = parsed_since
     if held_since is not None:
@@ -3492,9 +3467,6 @@ def parse_aware_ts(value: object) -> datetime | None:
     return ts
 
 
-_parse_aware_ts = parse_aware_ts
-
-
 @dataclass
 class EventScan:
     """One filename-scoped scan, including uncertainty and file revisions."""
@@ -3504,13 +3476,7 @@ class EventScan:
     files: dict[str, tuple[str, str | None]] = field(default_factory=dict)
     file_reasons: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
-    hashes: dict[tuple[int, int], tuple[tuple, str]] = field(default_factory=dict)
     uncertain_types: set[str] = field(default_factory=set)
-
-    def cached_hash(self, path: Path, stat: os.stat_result) -> str | None:
-        """Reuse a diagnostic read only while the file identity is unchanged."""
-        cached = self.hashes.get((stat.st_dev, stat.st_ino))
-        return cached[1] if cached and cached[0] == _event_file_identity(stat) else None
 
 
 def _event_file_identity(stat: os.stat_result) -> tuple:
@@ -3548,10 +3514,6 @@ def _iter_typed_objs(path: Path, row_types: set[str], scan: EventScan, revision:
                 and size == before.st_size == after.st_size
             ):
                 revision["sha256"] = digest.hexdigest()
-                scan.hashes[(after.st_dev, after.st_ino)] = (
-                    _event_file_identity(after),
-                    digest.hexdigest(),
-                )
             else:
                 revision["reason"] = (
                     "changed"
@@ -3618,7 +3580,7 @@ def latest_event_rows(
             if kind not in keys or kind in winners:
                 scan.uncertain_types.add(kind)
             elif kind in day_margins:
-                ts = _parse_aware_ts(scan.rows[kind].get("ts"))
+                ts = parse_aware_ts(scan.rows[kind].get("ts"))
                 try:
                     floor = (ts.astimezone(timezone.utc) - day_margins[kind]).date() if ts else None
                 except OverflowError:
@@ -3653,7 +3615,7 @@ def latest_event_rows(
         err_before = len(scan.errors)
         for index, row in enumerate(_iter_typed_objs(path, row_types, scan, revision)):
             kind = row["type"]
-            row_ts = _parse_aware_ts(row.get("ts"))
+            row_ts = parse_aware_ts(row.get("ts"))
             if kind == "mm-push":
                 order = (-delta, index)
                 if row_ts is not None and row_ts <= now:
@@ -3663,7 +3625,7 @@ def latest_event_rows(
                             cursor_complete = (order, row_ts)
                     else:
                         cursor_hold = max(cursor_hold, order) if cursor_hold else order
-                        held_since = _parse_aware_ts(cap.get("since"))
+                        held_since = parse_aware_ts(cap.get("since"))
                         if held_since is not None and held_since <= row_ts:
                             if cursor_hold_since is None or order > cursor_hold_since[0]:
                                 cursor_hold_since = (order, held_since)
@@ -3818,7 +3780,7 @@ def project_host_publication(
     }
     if not isinstance(row, dict):
         return out
-    ts = _parse_aware_ts(row.get("ts"))
+    ts = parse_aware_ts(row.get("ts"))
     if ts is None:
         return out
     outcomes = host_reader_outcomes(row, readers)
@@ -3972,7 +3934,7 @@ def write_push_event(
     # A clock rollback between capture and append cannot put a row in a file
     # dated before its own timestamp. Diagnostics rely on this bound.
     for row in events:
-        ts = _parse_aware_ts(row.get("ts"))
+        ts = parse_aware_ts(row.get("ts"))
         if ts is not None:
             try:
                 today = max(today, ts.astimezone(timezone.utc).date())

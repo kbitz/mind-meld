@@ -11,7 +11,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
-- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `configured_author_emails` / `identity_inputs_digest` / `_configured_author_spellings` / `resolve_walk_author_emails` / `is_checkpoint_commit` / `CHECKPOINT_AUTHOR_EMAIL` / `CHECKPOINT_SUBJECT_PREFIX` / `_parse_git_log_numstat` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
+- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `configured_author_emails` / `identity_inputs_digest` / `_configured_author_spellings` / `resolve_walk_author_emails` / `is_checkpoint_commit` / `CHECKPOINT_AUTHOR_EMAIL` / `CHECKPOINT_SUBJECT_PREFIX` / `_parse_git_log_numstat` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `resolve_push_cursor` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_validated_settled_days` / `_validated_settled_memo` / `_validated_settled_entry` / `_slim_entry` / `_unclosed_settled_records` / `_record_memo` / `_reduce_with_settled_memos` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
 - `src/mind_meld/hosts/grok.py` — `read_grok_usage` / `grok_usage_diag` / `GROK_SESSIONS_PATH` / `CACHE_PATH` / `_scan_grok_root` / `_parse_usage`
 - `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
@@ -386,7 +386,7 @@ That stderr line is the *interactive* signal only. `_run_events_tail` runs from 
   `iter_bounded_lines` is public since v0.12.16 precisely because it grew consumers outside `token_usage`. Its `label` kwarg names a call site in the oversize notice, so do not hardcode "token walker" back into it — but note the notice is deduped by PATH ONLY, so when two sites read the same file the label shown is whichever reached it first.
 
 - **One-shot readers MUST pass `yield_final_partial=True`.** `iter_bounded_lines` defaults to discarding a trailing chunk with no newline, because for `walk_jsonl_segment` that is a partial write to re-read on the next push. A one-shot reader has no next push: the default silently drops a complete-but-unterminated final record. Caught by Codex adversarial review during `/review`, after the first fix had already landed — porting the cwd reader without the flag made it return `None` for a session whose only line was not newline-terminated yet, where the old text-mode reader returned the cwd. Pinned by `test_unterminated_final_line_is_still_read`.
-- **`resolve_push_cursor` reaching `CursorResolution.used_floor=True` despite a usable row is NOT a benign fallback.** Losing that row rewinds the cursor to `now - INITIAL_CURSOR_LOOKBACK_DAYS` and re-walks 30 days of git history on every subsequent push, forever. Its pins exercise the bounded `_iter_mm_push_objs` reader through `last_push_ts` and assert the timestamp comes back, not merely that nothing raised.
+- **`resolve_push_cursor` reaching `CursorResolution.used_floor=True` despite a usable row is NOT a benign fallback.** Losing that row rewinds the cursor to `now - INITIAL_CURSOR_LOOKBACK_DAYS` and re-walks 30 days of git history on every subsequent push, forever. Its pins exercise the bounded `_iter_mm_push_objs` reader through `resolve_push_cursor` and assert the timestamp comes back, not merely that nothing raised.
 
 (`conflictlog.read_records` used to be listed here as a deliberate exclusion. `conflictlog.py` was removed in Track 16A; the exclusion is moot.)
 
@@ -404,7 +404,7 @@ That stderr line is the *interactive* signal only. `_run_events_tail` runs from 
 
 **Retention dry-runs are plan-only (Track 17D).** Every retention reaper selects candidates before applying I/O. `mm gc --dry-run` uses that same selection but must not unlink a file, write a cache, or change metadata, and it prints one stable result line for every reaper it executes. The token-cache plan reads under `lockedjson`'s shared read-only snapshot; apply re-plans under the exclusive R/M/W lock so a preview never leaks a stale plan into a write. Bare GC preview labels its conflict-reaper line “deletion requires --conflicts”; passing the flag removes that label. Failed deletes count as failures, not cleanup, and one best-effort failure never prevents the other reapers or orphan-blob GC from continuing.
 
-**Initial cursor lookback (Codex C9).** `last_push_ts(events_dir, device_id)` returns `now - INITIAL_CURSOR_LOOKBACK_DAYS` (30) when no prior `mm-push` event exists. New fleet members joining mid-quarter scan back 30 days of git history; older context is recovered with `mm recapture`. Document the bound in skill output: "First-run window: last 30 days of activity. Older history is outside the automatic window — `mm recapture 90d` on the Mac that owns the repositories."
+**Initial cursor lookback (Codex C9).** `resolve_push_cursor(events_dir, device_id).since` returns `now - INITIAL_CURSOR_LOOKBACK_DAYS` (30) when no prior `mm-push` event exists. New fleet members joining mid-quarter scan back 30 days of git history; older context is recovered with `mm recapture`. Document the bound in skill output: "First-run window: last 30 days of activity. Older history is outside the automatic window — `mm recapture 90d` on the Mac that owns the repositories."
 
 ## Git subprocess environment (load-bearing, Track 55A)
 
@@ -495,7 +495,7 @@ Do **not** use a single `complete` boolean: discovery and walk fail independentl
 | git walk, 30-day cursor, 250 ms autopush budget | **251.3 ms**, 5 projects, **1 `budget_abort`** |
 | git walk, 30-day cursor, 500 ms interactive budget | **335.1 ms**, 6 projects, **0 aborts** |
 | git walk, 30-day cursor, **zero** roots | **0.007 ms** |
-| `last_push_ts` at the shipped 31-day bound | 0.30 ms |
+| Push cursor scan at the shipped 31-day bound | 0.30 ms |
 | parsing all 34 retained daily files for the busiest device | 19.7 ms |
 
 Git-walk cost is *monotone in cursor age*. Discovery cost and a zero-root walk are *flat* in cursor age. Holding the cursor on a walk failure creates a positive feedback loop (held cursor → longer walk → more aborts → held further back) that permanently wedges unattended autopush. Holding on discovery failure or zero-roots cannot.
@@ -506,7 +506,7 @@ Git-walk cost is *monotone in cursor age*. Discovery cost and a zero-root walk a
 
 **Budget escalation is required, not optional.** When the resolved cursor is older than `WALK_BUDGET_ESCALATE_AFTER` (1 day), escalate the git walk from 250 ms to 500 ms. Without this, the recovery push that HOLD exists to enable drops a repo (251.3 ms / 1 abort) and then advances past it.
 
-**Retention-bounded latest-row lookup.** `last_push_ts` scans `CURSOR_SCAN_DAYS` (90, equal to `EVENTS_RETENTION_DAYS`) and records `git_capture.since` so a gap older than retention is still explicit. Neither alone is sufficient. Fresh install (no rows at all) returning the 30-day floor is the documented first-run state, **not** a degradation — fire the hold/coverage phrases only when an older complete row existed and was chosen over a newer incomplete one. Future / timezone-naive / malformed `ts` cannot move the cursor forward.
+**Retention-bounded latest-row lookup.** `resolve_push_cursor` scans `CURSOR_SCAN_DAYS` (90, equal to `EVENTS_RETENTION_DAYS`) and records `git_capture.since` so a gap older than retention is still explicit. Neither alone is sufficient. Fresh install (no rows at all) returning the 30-day floor is the documented first-run state, **not** a degradation — fire the hold/coverage phrases only when an older complete row existed and was chosen over a newer incomplete one. Future / timezone-naive / malformed `ts` cannot move the cursor forward.
 
 **Git-walk repository loss is visible.** `walk_git_projects` drops repositories into `skipped` with typed reasons (`budget_abort` / `timeout` / `no_commits` / `git_error` / `raised`). Never interpolate a skip reason into a degradation phrase: git stderr carries branch names and absolute paths onto a synced row. `no_commits` (`rc=128` + "does not have any commits yet") is benign — an empty `git init` directory returns it on every push forever. The session-walk budget flag is named `session_walk_exceeded_budget` so it cannot be mistaken for git-walk loss.
 
@@ -2200,8 +2200,7 @@ and go through `safe_str`.
 **Local capture evidence (61A).** Status and diag share one filename-scoped,
 bounded binary day-file pass for mm-push and host rows. Status uses strict manifest hashing (77A; see sync.md), so it may reread
 event bytes but never adds another EventScan parsing pass. Completeness takes
-precedence over diagnostic-hash reuse; the I/O cost is unmeasured. The cache uses `(st_dev, st_ino)`, verified against
-device/inode/size/mtime/ctime; it never resolves paths. The cursor keeps its digest.
+precedence over diagnostic-hash reuse; the I/O cost is unmeasured. The cursor keeps its digest.
 Names use
 `_safe_device_filename`; row `device` never selects a local file. Cursor
 fail-open physical ordering remains unchanged. The CLI injects the aggregator's
@@ -2638,7 +2637,7 @@ with `~/.grok/sessions` would see the healthy-tail control pin in
 
 1. **Push counts stay honest.** An init-counted-as-push would inflate the per-window mm-push count in every fresh-install retro by exactly 1. A "1 more than expected" lie everywhere is worse than the trade-off below.
 
-2. **Cursor stays at "no prior mm-push".** The first real push's `last_push_ts` returns `now - 30 days` again and re-walks the same 30-day window. Aggregator dedups via `(canonical_remote_url, sha)` so retro output is identical; cost is one extra ~500ms `git log` walk on the first real push, paid once per machine.
+2. **Cursor stays at "no prior mm-push".** The first real push's `resolve_push_cursor` returns `now - 30 days` again and re-walks the same 30-day window. Aggregator dedups via `(canonical_remote_url, sha)` so retro output is identical; cost is one extra ~500ms `git log` walk on the first real push, paid once per machine.
 
 **Idempotent at the aggregator layer.** Commits dedup by `(canonical_remote_url, sha)`; sessions latest-wins per `(device, source_root, claude_dir)`. Re-running init (or invoking the backfill twice for any other reason) produces the same retro output, only slightly larger events files.
 

@@ -282,14 +282,15 @@ class TestFinalOutputSinks:
 
     def test_dropped_device_warning_renders_peer_fields_as_literal(self, monkeypatch, capsys):
         from mind_meld import cli
+        from mind_meld import devices as devices_mod
 
         evil = "peer\x1b]52;c;ZXZpbA==\x07[red]name[/red]"
 
-        def fake_list_devices_impl(_backend, *, on_drop):
-            on_drop(evil, evil)
-            return []
-
-        monkeypatch.setattr(cli.core, "_list_devices_impl", fake_list_devices_impl)
+        monkeypatch.setattr(
+            devices_mod,
+            "inventory_devices",
+            lambda _backend: devices_mod.DeviceInventory(dropped=[(evil, evil)]),
+        )
         assert cli._list_devices_warn(object()) == []
 
         out = capsys.readouterr().err

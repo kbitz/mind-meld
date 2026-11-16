@@ -236,7 +236,7 @@ class TestResolvePushCursor:
             ts = now - timedelta(minutes=40 - i)
             discovery = "complete" if i % 2 == 0 else "partial"
             _write_push(events_dir, "dev-a", ts=ts, discovery=discovery)
-            cursors.append(events.last_push_ts(events_dir, "dev-a"))
+            cursors.append(events.resolve_push_cursor(events_dir, "dev-a").since)
         for earlier, later in zip(cursors, cursors[1:]):
             assert later >= earlier
         assert all(c >= floor - timedelta(seconds=5) for c in cursors)

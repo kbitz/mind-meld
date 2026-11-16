@@ -380,25 +380,6 @@ def test_host_scan_reads_the_next_day_a_rolled_back_clock_would_write(tmp_path, 
     assert scan.rows["host-usage-snapshot"]["ts"] == row["ts"]
 
 
-def test_diagnostic_hash_cache_uses_inode_and_never_resolves_paths(tmp_path, monkeypatch):
-    import os
-
-    path = tmp_path / f"local-{TODAY}.jsonl"
-    alias = tmp_path / "alias.jsonl"
-    path.write_text(json.dumps(host_row()) + "\n")
-    os.link(path, alias)
-    monkeypatch.setattr(Path, "resolve", lambda *a, **kw: pytest.fail("resolved cache path"))
-    scan = events.latest_event_rows(tmp_path, "local", {"host-usage-snapshot"}, now=NOW)
-    stat = path.stat()
-    assert set(scan.hashes) == {(stat.st_dev, stat.st_ino)}
-    assert scan.cached_hash(alias, alias.stat()) == hashlib.sha256(path.read_bytes()).hexdigest()
-    other = tmp_path / "not-events.md"
-    other.write_text("other")
-    assert scan.cached_hash(other, other.stat()) is None
-    path.write_text("changed")
-    assert scan.cached_hash(alias, alias.stat()) is None
-
-
 @pytest.mark.parametrize("example", ["healthy", "mixed-empty", "failed-refresh", "unverified"])
 def test_readme_host_usage_recipe_matches_fixed_width_console(tmp_path, monkeypatch, example):
     import io

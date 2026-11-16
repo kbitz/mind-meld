@@ -38,6 +38,7 @@ from mind_meld import (
     upgrade,
 )
 from mind_meld import config as _config_module
+from mind_meld import devices as _devices_module
 from mind_meld import manifest as _manifest_module
 from mind_meld.config import (
     MM_INTERNAL_SOURCE_NAMES,
@@ -61,9 +62,6 @@ from mind_meld.crypto import (
     root_salt_fingerprint,
     set_crypto_session,
     verify_passphrase,
-)
-from mind_meld.devices import (
-    _list_devices_impl,
 )
 from mind_meld.errors import (
     KEY_HEADER_COPIES_URL,
@@ -224,11 +222,10 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     `devices.list_devices` — that variant is intentionally silent so
     programmatic consumers don't spam stderr.
     """
-
-    def _warn(key: str, reason: str) -> None:
+    inventory = _devices_module.inventory_devices(backend)
+    for key, reason in inventory.dropped:
         _warning(f"dropped device entry {key} — {reason}")
-
-    return _list_devices_impl(backend, on_drop=_warn)
+    return inventory.valid
 
 
 def _get_config(*, read_only: bool) -> dict:

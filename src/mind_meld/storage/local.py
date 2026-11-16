@@ -84,11 +84,6 @@ def is_foreign_name(name: str) -> bool:
     return name.startswith(_FOREIGN_PREFIXES)
 
 
-def is_foreign_key(key: str) -> bool:
-    """True when any component of `key` is a foreign name."""
-    return any(is_foreign_name(part) for part in key.split("/") if part)
-
-
 def is_conflict_name(name: str) -> bool:
     """True when `name` has the shape of an iCloud, Dropbox or Syncthing conflict
     copy of some file, whichever one. Used where the original is not known (a
