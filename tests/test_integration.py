@@ -14456,7 +14456,11 @@ def test_log_errors_plain_empty_stdout73(kind, tmp_path, monkeypatch):
     assert result.exit_code == 1, result.exception
     assert result.stdout == ""
     assert result.stderr == pullhistory.explain(expected) + "\n"
-    assert len(result.stderr.splitlines()) == 1
+    if kind == "too-new":
+        assert result.stderr.splitlines()[-1] == "Run: mm update"
+        assert len(result.stderr.splitlines()) == 2
+    else:
+        assert len(result.stderr.splitlines()) == 1
     if kind != "corrupt":
         assert "move state.db" not in result.stderr
 

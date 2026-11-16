@@ -79,7 +79,7 @@ def explain(exc) -> str:
     """Single message table for plain errors and all history notices."""
     is_notice = False
     if isinstance(exc, HistoryNotRecorded):
-        cause = explain(exc.cause).removeprefix("mm: error: ")
+        cause = " ".join(explain(exc.cause).removeprefix("mm: error: ").split("\n"))
         return outputstyle._notice_line(
             "history not recorded (these rows are dropped and not replayed; "
             "fast-forward and deletions pause too while state.db is unavailable): " + cause
@@ -135,7 +135,7 @@ def explain(exc) -> str:
     if is_notice:
         return outputstyle._notice_line(body)
     if isinstance(exc, statedb.StateDBTooNew):
-        return f"{outputstyle._error_line(body)} {outputstyle._fix_line('mm update')}"
+        return f"{outputstyle._error_line(body)}\n{outputstyle._fix_line('mm update')}"
     return outputstyle._error_line(body)
 
 

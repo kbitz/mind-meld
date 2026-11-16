@@ -42,6 +42,7 @@ from mind_meld import (
     identity,
     initflow,
     manifest,
+    outputstyle,
     projectid,
     pullflow,
     pullhistory,
@@ -1001,9 +1002,11 @@ def _sync_update(config: dict, *, verbose: bool) -> None:
             upgrade.update_or_nudge(config, attended=True, diagnostics=verbose)
     except (Exception, KeyboardInterrupt):
         if display is not None:
-            display.problems.append("mm: notice: automatic update did not complete. Run: mm update")
+            display.problems.append(
+                outputstyle._notice_line("automatic update did not complete.", fix="mm update")
+            )
         else:
-            core._notice("automatic update did not complete. Run: mm update")
+            core._notice("automatic update did not complete.", fix="mm update")
 
 
 def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) -> list[str]:
@@ -3575,28 +3578,38 @@ def recapture(
 # ── update ────────────────────────────────────────────────────────────
 
 
-def _update_refusal(install: upgrade.InstallInfo) -> str | None:
+def _update_refusal(install: upgrade.InstallInfo) -> tuple[str, str | None] | None:
     """Why `mm update` leaves this install alone, or None when it can act."""
     if install.kind == "dev":
-        return "This mm is a source-tree build, not an installed release. Update it with git."
+        return "This mm is a source-tree build, not an installed release. Update it with git.", None
     if install.kind == "not-pipx":
         return (
-            f"This mm ({sys.prefix}) was not installed by pipx, so it cannot update itself. "
-            f"Install the released build with: {upgrade.INSTALL_CMD}"
+            f"This mm ({sys.prefix}) was not installed by pipx, so it cannot update itself.",
+            upgrade.INSTALL_CMD,
         )
     if install.kind == "pipx-pinned":
-        return f"This mm is held by pipx pin. Run pipx unpin {install.venv_name}, then mm update."
+        return (
+            "This mm is held by pipx pin; unpin it and then rerun mm update.",
+            f"pipx unpin {install.venv_name}",
+        )
     if install.kind == "foreign":
         source = f"from {install.spec}" if install.spec else "from a source mm cannot read"
         return (
             f"This mm was installed {source}, not from the release branch, so mm update "
-            f"leaves it alone. To switch to released builds run: {upgrade.INSTALL_CMD}"
+            "leaves it alone.",
+            upgrade.INSTALL_CMD,
         )
     return None
 
 
 def _print_update_current(install: upgrade.InstallInfo) -> None:
-    console.print(f"mm {safe_str(install.version)} is up to date.")
+    console.print(
+        core._outcome_line(
+            "update", safety.safe_terminal_str(f"mm {install.version} is up to date")
+        ),
+        markup=False,
+        highlight=False,
+    )
     if install.kind == "pinned":
         console.print(
             f"  This install was made from {safe_str(install.spec)}, so mm will not "
@@ -3639,10 +3652,14 @@ def update() -> None:
     install = upgrade.detect_install()
     refusal = _update_refusal(install)
     if refusal is not None:
-        core._error(refusal)
+        message, fix = refusal
+        core._error(message, fix=fix)
     pipx = upgrade.find_pipx()
     if pipx is None:
-        core._error(f"pipx was not found. Install pipx, then run: {upgrade.INSTALL_CMD}")
+        core._error(
+            "pipx was not found. Install pipx, then run the install command.",
+            fix=upgrade.INSTALL_CMD,
+        )
     assert pipx is not None
 
     # The user asked: the 24h throttle, auto_check and --no-check-version do
@@ -3658,11 +3675,19 @@ def update() -> None:
         # still let pipx decide; the forced reinstall a pinned install needs
         # deletes the venv if it fails, so it never runs on a guess.
         if check.check_failure not in (None, "network"):
-            what, fix = upgrade.problem_text(check.check_failure)
-            core._error(f"{what}, and this install is pinned to {install.spec}. {fix}")
+            what, raw_fix = upgrade.problem_text(check.check_failure)
+            step, sep, fix = raw_fix.partition(", then run: ")
+            if not sep:
+                step, fix = "", raw_fix.removeprefix("Run: ")
+            extra = f" {step}." if step else ""
+            core._error(
+                f"{what}, and this install is pinned to {install.spec}.{extra}",
+                fix=fix,
+            )
         core._error(
             "Could not reach GitHub to check for a newer release, and this install is pinned "
-            f"to {install.spec}. Retry when online, or run: {upgrade.INSTALL_CMD}"
+            f"to {install.spec}. Retry when online, or run the install command.",
+            fix=upgrade.INSTALL_CMD,
         )
 
     try:
@@ -3675,21 +3700,31 @@ def update() -> None:
         install = upgrade.detect_install()
         refusal = _update_refusal(install)
         if refusal is not None:
-            core._error(refusal)
+            message, fix = refusal
+            core._error(message, fix=fix)
         if latest is not None and Version(install.version or "") >= Version(latest):
             _print_update_current(install)
             return
         if install.kind == "pinned" and latest is None:
             if check.check_failure not in (None, "network"):
-                what, fix = upgrade.problem_text(check.check_failure)
-                core._error(f"The install is now pinned, and {what}. {fix}")
-            core._error("The install is now pinned; retry mm update when GitHub is reachable.")
+                what, raw_fix = upgrade.problem_text(check.check_failure)
+                step, sep, fix = raw_fix.partition(", then run: ")
+                if not sep:
+                    step, fix = "", raw_fix.removeprefix("Run: ")
+                extra = f" {step}." if step else ""
+                core._error(
+                    f"The install is now pinned, and {what}.{extra}",
+                    fix=fix,
+                )
+            core._error(
+                "The install is now pinned; retry when GitHub is reachable.",
+                fix="mm update",
+            )
         outcome = _run_update_with_progress(install, pipx, latest=latest)
     except KeyboardInterrupt:
-        print(
-            "Update cancelled. If mm is now missing, reinstall with: "
-            f"{upgrade.reinstall_cmd(install)}",
-            file=sys.stderr,
+        core._print_error(
+            "Update cancelled. If mm is now missing, reinstall with the command below.",
+            fix=upgrade.reinstall_cmd(install),
         )
         raise
     finally:
@@ -3702,32 +3737,44 @@ def update() -> None:
             print(strip_terminal_escapes(outcome.output.rstrip()), file=sys.stderr)
         # pipx removes the venv when a forced reinstall fails; say so rather
         # than leave the user with `mm: command not found` and no command.
-        lost = f" If mm is now missing, reinstall with: {upgrade.reinstall_cmd(install)}"
-        core._error(f"Update did not complete: {outcome.detail}.{lost}")
+        core._error(
+            f"Update did not complete: {outcome.detail}. "
+            "If mm is now missing, reinstall with the command below.",
+            fix=upgrade.reinstall_cmd(install),
+        )
     if outcome.status == "unchanged":
         if latest is not None and Version(outcome.new or "") < Version(latest):
             core._error(
                 f"pipx found no build newer than {outcome.old}, but {latest} is tagged. "
-                f"Retry in a minute, or run: {upgrade.INSTALL_CMD}"
+                "Retry in a minute.",
+                fix=upgrade.INSTALL_CMD,
             )
         console.print(
-            f"mm {safety.safe_terminal_str(outcome.old)} "
-            "is already the latest release pipx can see.",
+            core._outcome_line(
+                "update",
+                safety.safe_terminal_str(
+                    f"mm {outcome.old} is already the latest release pipx can see"
+                ),
+            ),
             markup=False,
             highlight=False,
         )
         return
     if outcome.new != outcome.old:
-        base = upgrade.updated_line(outcome.old, outcome.new)
-        line = (
-            f"{base[:-1]}; this install now tracks the release branch."
-            if outcome.now_tracking
-            else base
+        detail = f"mm {outcome.old} → {outcome.new}"
+        if outcome.now_tracking:
+            detail += "; this install now tracks the release branch"
+        console.print(
+            core._outcome_line("update", safety.safe_terminal_str(detail)),
+            markup=False,
+            highlight=False,
         )
-        console.print(line, markup=False, highlight=False)
     elif outcome.now_tracking:
         console.print(
-            f"mm {safety.safe_terminal_str(outcome.old)} now tracks the release branch.",
+            core._outcome_line(
+                "update",
+                safety.safe_terminal_str(f"mm {outcome.old} now tracks the release branch"),
+            ),
             markup=False,
             highlight=False,
         )
@@ -3875,10 +3922,12 @@ def log_cmd(
             source=source, action=action, verb=verb, since=since_dt, limit=limit
         )
     except statedb.StateDBError as exc:
-        typer.echo(safety.safe_terminal_str(pullhistory.explain(exc)), err=True)
+        for line in pullhistory.explain(exc).split("\n"):
+            typer.echo(safety.safe_terminal_str(line), err=True)
         raise typer.Exit(1) from None
     for notice in rows.notices:
-        typer.echo(safety.safe_terminal_str(pullhistory.explain(notice)), err=True)
+        for line in pullhistory.explain(notice).split("\n"):
+            typer.echo(safety.safe_terminal_str(line), err=True)
 
     if not rows:
         if fmt_lower == "jsonl":
@@ -4695,7 +4744,7 @@ def autopull() -> None:
             if result.durability_fsync_failures:
                 degradations.append(f"fsync failed on {result.durability_fsync_failures} path(s)")
             if result.maintenance_failures:
-                degradations.append(f"{result.maintenance_failures} follow-up failure(s)")
+                degradations.append(f"{result.maintenance_failures} maintenance failure(s)")
             if result.corrupt_peer_count:
                 degradations.append(f"{result.corrupt_peer_count} corrupt peer manifest(s)")
             if result.total_skipped_unknown_source:
@@ -4807,9 +4856,7 @@ def autopush() -> None:
                     f"{events_degradations.omitted} diagnostic details omitted (run mm diag)"
                 )
             if result and result.maintenance_failures:
-                details.append(
-                    f"{result.maintenance_failures} post-publication maintenance failure(s)"
-                )
+                details.append(f"{result.maintenance_failures} maintenance failure(s)")
             # Track 91A: a pull ledger that could not be written, scan roots whose
             # token could not be written (their deletions will not propagate) and
             # files a gone or new scan root hid are all at-risk facts for `mm status`.

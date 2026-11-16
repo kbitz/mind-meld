@@ -930,7 +930,7 @@ def status(
                     "corrupt_peer_count": "corrupt peers",
                     "total_skipped_unknown_source": "unknown source pairs",
                     "durability_fsync_failures": "parent flush failures",
-                    "maintenance_failures": "follow-up failures",
+                    "maintenance_failures": "maintenance failures",
                 }
                 summary = [
                     f"{run['counts'][key]} {label}"

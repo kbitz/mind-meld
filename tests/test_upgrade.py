@@ -677,6 +677,23 @@ class TestFetchTagsGitAdapter124B:
         res = upgrade.check_for_upgrade(force=True)
         assert res.check_failure == "network"
 
+    def test_git_disappears_after_discovery_classifies_as_git_missing(self, monkeypatch):
+        _set_version(monkeypatch, "1.0.0")
+        monkeypatch.setattr(upgrade, "find_git", lambda: "/usr/bin/git")
+
+        def _missing_on_ls_remote(argv, *, env, timeout):
+            if "config" in argv:
+                return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"")
+            raise FileNotFoundError(2, "No such file or directory", "/usr/bin/git")
+
+        monkeypatch.setattr(upgrade, "_run_git", _missing_on_ls_remote)
+        res = upgrade.check_for_upgrade(force=True)
+        assert res.state == "unknown"
+        assert res.check_failure == "git-missing"
+        saved = json.loads(upgrade.CACHE_PATH.read_text())
+        assert saved["check_failure_cause"] == "git-missing"
+        assert saved["check_failure_at"] is not None
+
     def test_fake_git_script_records_argv_cwd_env_closed_stdin_and_new_session(
         self, monkeypatch, tmp_path
     ):
