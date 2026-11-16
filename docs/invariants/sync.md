@@ -931,8 +931,9 @@ that raise StorageError") owns repair.
 `_apply_conflict`, both writes in `_apply_incoming_file`,
 `resolveflow.py:_resolve_interactive_loop`, `seen_sources.py:write` and
 `synclog.py:write_sync_log`. Omitted/default-False calls are the two sentinel
-writes in `skill_link.py:_prepare_store_dir` and payload/metadata writes in
-`_publish_skill_store`. `cli.py:_upload_changed_blobs` selects `data/`, so
+writes in `skill_link.py:_prepare_store_dir`, payload/metadata writes in
+`_publish_skill_store`, `manifest.py:write_anchor` and `initflow.py:_write_stignore`.
+`cli.py:_upload_changed_blobs` selects `data/`, so
 `LocalBackend.put` is non-durable there (and for unknown prefixes).
 `LocalBackend.put_exclusive` uses its own create-only link protocol, outside this
 helper's replacement contract and weaker than its durable prefixes: one
