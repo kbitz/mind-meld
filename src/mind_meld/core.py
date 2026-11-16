@@ -24,7 +24,6 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from mind_meld import (
     __version__,
-    consoles,
     crypto,
     fsutil,
     manifest,
@@ -158,18 +157,11 @@ def _print_outcome(line: str) -> None:
     """Print a shared outcome line to stdout, ignoring OSError.
 
     A stdout failure after a committed mutation is not a command failure.
-    Looks up module-global ``console`` at call time so test rebindings apply,
-    falling back to a caller module's rebound ``console`` when ``core.console``
-    is still the shared singleton; lets ``SystemExit`` propagate so Rich's
-    closed-pipe exit still ends walks.
+    Looks up module-global ``console`` at call time; lets ``SystemExit``
+    propagate so Rich's closed-pipe exit still ends walks.
     """
-    target = console
-    if target is consoles.console:
-        caller_console = sys._getframe(1).f_globals.get("console")
-        if caller_console is not None:
-            target = caller_console
     try:
-        target.print(
+        console.print(
             line,
             markup=False,
             highlight=False,

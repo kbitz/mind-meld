@@ -130,6 +130,24 @@ def test_print_outcome_swallows_oserror_and_propagates_system_exit(monkeypatch, 
     assert excinfo.value.code == 1
 
 
+def test_print_outcome_keeps_its_owner_console_through_a_wrapper(monkeypatch):
+    # Value: protects=the printer owns its output destination; fails_when=caller
+    # globals redirect output; why_new=existing pins rebind core; seam=none.
+    owned_lines = []
+    other_output = io.StringIO()
+    monkeypatch.setattr(core.console, "print", lambda line, **kwargs: owned_lines.append(line))
+    monkeypatch.setitem(globals(), "console", Console(file=other_output))
+
+    def wrapped(line):
+        core._print_outcome(line)
+
+    core._print_outcome("Resolve: direct.")
+    wrapped("Resolve: wrapped.")
+
+    assert owned_lines == ["Resolve: direct.", "Resolve: wrapped."]
+    assert other_output.getvalue() == ""
+
+
 def test_migrated_outcome_site_keeps_result_when_print_raises_oserror(monkeypatch):
     class _BrokenConsole:
         def print(self, *args: object, **kwargs: object) -> None:

@@ -11305,6 +11305,7 @@ def test_recapture_outcome_stays_plain_on_a_terminal(preview62, monkeypatch):
         "console",
         Console(file=buf, force_terminal=True, color_system="standard", width=200),
     )
+    monkeypatch.setattr(core, "console", cli_module.recaptureflow.console)
     result = runner.invoke(app, ["recapture", "14d"])
     assert result.exit_code == 0, (result.stdout, result.stderr)
     outcome = [line for line in buf.getvalue().splitlines() if line.startswith("Recapture:")]
