@@ -273,7 +273,7 @@ def test_status_codex_silence_for_disabled_unreadable_or_healthy_cache(
     cache.write_text("{broken" if state == "unreadable" else json.dumps(data))
     if state == "disabled":
         monkeypatch.setattr(
-            _mm_codex_host, "codex_usage_diag", lambda: pytest.fail("disabled probe")
+            _mm_codex_host, "codex_usage_diag", lambda **_kw: pytest.fail("disabled probe")
         )
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output

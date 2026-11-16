@@ -43,6 +43,10 @@ MM_INTERNAL_SOURCE_NAMES: frozenset[str] = frozenset({"mm-events"})
 
 RETIRED_SOURCE_NAMES: frozenset[str] = frozenset({"opencode"})
 
+# Only `mm enable-source`, or explicit inclusion at `mm init` or
+# `mm reconfigure-sources`, activates these sources.
+OPT_IN_SOURCE_NAMES: frozenset[str] = frozenset({"grok", "muse", "agy"})
+
 UsageCaptureReadiness = Literal["ready", "disabled", "unavailable", "no-reader", "unknown"]
 
 
@@ -1030,7 +1034,7 @@ def _configured_sources(
         sources = [
             s
             for s in sources
-            if (s.get("type") not in ("grok", "muse") and s["name"] != "agy")
+            if (s.get("type") not in OPT_IN_SOURCE_NAMES and s["name"] not in OPT_IN_SOURCE_NAMES)
             or s["name"] in disabled
         ]
 

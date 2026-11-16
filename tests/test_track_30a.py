@@ -423,7 +423,7 @@ def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch, 
         monkeypatch.setattr(
             codex_host,
             "codex_usage_diag",
-            lambda: {
+            lambda **_kw: {
                 "state": "ready" if host_state == "blocked" else host_state,
                 "last_reason": "unsupported" if host_state == "blocked" else None,
             },

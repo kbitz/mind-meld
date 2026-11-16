@@ -105,8 +105,8 @@ def diagnostic_scope(sink):
         _DIAGNOSTIC.reset(token)
 
 
-def _diagnostic(message: str, degraded: bool = True) -> None:
-    # degraded=False when the caller's returned result already records the loss.
+def _diagnostic(message: str, degraded: bool = False) -> None:
+    # degraded=False by default; pass True when no returned result already records the loss.
     sink = _DIAGNOSTIC.get()
     try:
         if sink is None:
@@ -1605,7 +1605,8 @@ def iter_bounded_lines(
             # files than before — the scan used to die on the first
             # ledger-less rollout. Dedup still keys on the raw path.
             _diagnostic(
-                f"mm: notice: {label} skipping oversize line in {safe_terminal_str(path_str)}\n"
+                f"mm: notice: {label} skipping oversize line in {safe_terminal_str(path_str)}\n",
+                True,
             )
             _WARNED_OVERSIZE_PATHS.add(path_str)
         drained = _drain_to_newline(fp)
@@ -2022,7 +2023,10 @@ def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, f
                 # peer-controlled jsonls. A planted model like "x\x1b[2J" would
                 # otherwise clear the user's terminal on stderr emit. Dedup
                 # and resolve_prices still use the original model id.
-                _diagnostic(f"mm: notice: unknown model in pricing: {safe_terminal_str(model)}\n")
+                _diagnostic(
+                    f"mm: notice: unknown model in pricing: {safe_terminal_str(model)}\n",
+                    True,
+                )
                 _WARNED_UNKNOWN_MODELS.add(model)
             continue
         cost = _cost_under(prices, usage)

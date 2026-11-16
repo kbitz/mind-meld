@@ -41,9 +41,7 @@ def reader_usage_diag(reader: str, *, count_logs: bool = False) -> dict[str, Any
     # when holding consent; status and recapture use their cache-only view.
     descriptor = HOST_READER_DIAGS[reader]
     fn = getattr(descriptor.owner, descriptor.function)
-    if reader in {"muse", "agy", "grok"}:
-        return fn(count_logs=count_logs)
-    return fn()
+    return fn(count_logs=count_logs)
 
 
 def reader_cache_cold(reader: str, state: dict[str, Any]) -> bool:

@@ -231,7 +231,7 @@ def test_unsupported_reader_makes_all_ready_remedies_consistent(tmp_path, monkey
     monkeypatch.setattr(
         codex_host,
         "codex_usage_diag",
-        lambda: {
+        lambda **_kw: {
             "last_reason": "deadline" if other == "deadline" else None,
             "state": "migrating" if other == "warming" else "ready",
             "files_pre_track": int(other == "rebuild"),
@@ -279,7 +279,7 @@ def test_unsupported_remedy_follows_cached_newest_release(tmp_path, monkeypatch,
     monkeypatch.setattr(
         codex_host,
         "codex_usage_diag",
-        lambda: {
+        lambda **_kw: {
             "last_reason": "deadline",
             "state": "ready",
             "files_pre_track": 0,
@@ -558,7 +558,7 @@ def test_newest_release_remedy_reaches_pending_reader_hints(tmp_path, monkeypatc
     monkeypatch.setattr(
         codex_host,
         "codex_usage_diag",
-        lambda: {
+        lambda **_kw: {
             "state": "migrating" if other == "warming" else "ready",
             "files_pre_track": int(other == "rebuild"),
         },
@@ -2051,7 +2051,7 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     _enable_capture_sources(tmp_path, readers=(reader,))
     cfg = load_config()
-    assert tuple(host_registry.HOST_READER_DIAGS) == events.ACTIVE_HOST_READERS
+    assert tuple(host_registry.HOST_READER_DIAGS) == events.HOST_USAGE_TOKEN_SOURCES
     for name, spec in host_registry.HOST_READER_DIAGS.items():
         monkeypatch.setattr(
             spec.owner,

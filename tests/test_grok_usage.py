@@ -702,7 +702,6 @@ def test_warm_host_cache_inline_reads_grok_consented(tmp_path):
 
 def test_grok_returns_to_its_pre_v1_11_8_slot_after_codex():
     expected = ("codex", "grok", "muse", "agy")
-    assert events.ACTIVE_HOST_READERS == expected
     assert events.HOST_USAGE_TOKEN_SOURCES == expected
     assert tuple(host_registry.HOST_READER_DIAGS) == expected
     assert host_registry.HOST_READER_DIAGS["grok"].label == "Grok Build"

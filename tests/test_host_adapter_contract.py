@@ -535,14 +535,16 @@ def test_failure_isolation_keeps_sibling_reader_publishing(row: str, failure_mod
 @pytest.mark.parametrize("row", _ROWS)
 def test_registry_and_diag_completeness(row: str):
     """Registry tables, diag keys, coldness predicate, and unknown-reader error."""
-    assert tuple(host_registry.HOST_READER_DIAGS) == events.ACTIVE_HOST_READERS, _clause_msg(
-        row, "registry", "HOST_READER_DIAGS matches ACTIVE_HOST_READERS in order"
+    assert tuple(host_registry.HOST_READER_DIAGS) == events.HOST_USAGE_TOKEN_SOURCES, _clause_msg(
+        row, "registry", "HOST_READER_DIAGS matches HOST_USAGE_TOKEN_SOURCES in order"
     )
-    assert set(events_tail.WARMABLE_HOST_READERS) <= set(events.ACTIVE_HOST_READERS), _clause_msg(
-        row, "registry", "WARMABLE_HOST_READERS is a subset of ACTIVE_HOST_READERS"
+    assert set(events_tail.WARMABLE_HOST_READERS) <= set(events.HOST_USAGE_TOKEN_SOURCES), (
+        _clause_msg(
+            row, "registry", "WARMABLE_HOST_READERS is a subset of HOST_USAGE_TOKEN_SOURCES"
+        )
     )
-    assert set(events_tail.HOST_READER_SOURCE_GATE) == set(events.ACTIVE_HOST_READERS), _clause_msg(
-        row, "registry", "HOST_READER_SOURCE_GATE covers active readers"
+    assert set(events_tail.HOST_READER_SOURCE_GATE) == set(events.HOST_USAGE_TOKEN_SOURCES), (
+        _clause_msg(row, "registry", "HOST_READER_SOURCE_GATE covers HOST_USAGE_TOKEN_SOURCES")
     )
     spec = host_registry.HOST_READER_DIAGS[row]
     assert callable(getattr(spec.owner, spec.function)), _clause_msg(

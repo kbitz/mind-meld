@@ -377,7 +377,7 @@ def test_track_125a_status_codex_deadline_shows_catching_up_and_errors_stay_fail
     )
     config.save_config(cfg)
 
-    def fake_codex_diag():
+    def fake_codex_diag(*, count_logs: bool = False):
         on_disk = 14
         cached = 10
         return {

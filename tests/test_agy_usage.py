@@ -29,7 +29,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from mind_meld import host_usage as hu
-from mind_meld import lockedjson
+from mind_meld import lockedjson, token_usage
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "host_sessions" / "agy" / "CONTRACT.md"
 
@@ -520,7 +520,9 @@ def test_agy_usage_diag_views(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_cache_contention_is_locked_with_scoped_and_direct_diagnostics(tmp_path, capsys):
     notices = []
     with lockedjson.locked_json_rmw(hu.AGY_CACHE_PATH):
-        with hu.diagnostic_scope(lambda message, degraded: notices.append((message, degraded))):
+        with token_usage.diagnostic_scope(
+            lambda message, degraded: notices.append((message, degraded))
+        ):
             result = hu.read_agy_usage(tmp_path, consented=True)
         assert not result.complete and result.reason == "locked"
         assert capsys.readouterr().err == ""

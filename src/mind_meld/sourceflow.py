@@ -244,7 +244,7 @@ def enable_source(name: str, *, force: bool = False) -> None:
     # claude_dir/default fallback; writing only the new host here would make the
     # existing sources disappear and eventually produce their deletion
     # tombstones.
-    if name in {"grok", "muse", "agy"} and not has_explicit_sources:
+    if name in _config_module.OPT_IN_SOURCE_NAMES and not has_explicit_sources:
         explicit_sources = get_sources(config)
         explicit_names = [s["name"] for s in explicit_sources]
         updates["sources"] = explicit_sources
@@ -253,7 +253,8 @@ def enable_source(name: str, *, force: bool = False) -> None:
     # but it IS in DEFAULT_SOURCES, append the default so enable actually
     # has effect (auto-detect doesn't fire when explicit sources are set).
     needs_explicit_append = name not in explicit_names and (
-        name in {"grok", "muse", "agy"} or (has_explicit_sources and name in default_names)
+        name in _config_module.OPT_IN_SOURCE_NAMES
+        or (has_explicit_sources and name in default_names)
     )
     if needs_explicit_append:
         default = get_default_source(name)

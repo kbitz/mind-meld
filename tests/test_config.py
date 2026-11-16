@@ -17,6 +17,7 @@ from mind_meld.config import (
     HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS,
     HOST_USAGE_BUDGET_MAX_MS,
     HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS,
+    OPT_IN_SOURCE_NAMES,
     RETIRED_DEFAULT_INCLUDE_PATTERNS,
     RETIRED_SOURCE_NAMES,
     _apply_defaults,
@@ -838,6 +839,25 @@ class TestDefaultSources:
 
     def test_retired_source_names_pins_opencode_only(self):
         assert RETIRED_SOURCE_NAMES == frozenset({"opencode"})
+
+    def test_opt_in_source_names_and_legacy_non_explicit_filter(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for src in DEFAULT_SOURCES:
+            Path(src["path"].replace("~", str(tmp_path), 1)).mkdir(parents=True, exist_ok=True)
+        assert OPT_IN_SOURCE_NAMES == frozenset({"grok", "muse", "agy"})
+        cfg = {
+            "device": {"id": "abc123", "name": "review"},
+            "storage": {"path": str(tmp_path / "store")},
+            "sync": {"disabled_sources": ["muse"]},
+        }
+        configured, explicit = _configured_sources(cfg, strict=False)
+        assert explicit is False
+        configured_names = {s["name"] for s in configured}
+        assert configured_names & OPT_IN_SOURCE_NAMES == {"muse"}
+        resolved_names = {s["name"] for s in get_sources(cfg)}
+        assert resolved_names.isdisjoint(OPT_IN_SOURCE_NAMES)
+        assert "claude" in resolved_names
 
 
 class TestExcludePatternsValidation:

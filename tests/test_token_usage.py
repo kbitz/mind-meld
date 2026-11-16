@@ -2704,8 +2704,6 @@ def test_grok_47_effort_fast_and_build_cards_and_aliases109b(model, family, base
 
 
 def test_grok_47_variants_and_build_emit_no_unknown_model_notice109b(capsys):
-    from mind_meld import events_tail
-
     models = tuple(sorted(tu.GROK_47_MODEL_IDS))
     usage = {"input": 100_000, "cache_create": 0, "cache_read": 50_000, "output": 10_000}
     by_model = {m: dict(usage) for m in models}
@@ -2721,7 +2719,7 @@ def test_grok_47_variants_and_build_emit_no_unknown_model_notice109b(capsys):
     notices = []
     for m in models:
         tu._WARNED_UNKNOWN_MODELS.discard(m)
-    with events_tail.diagnostic_scope(lambda msg, deg: notices.append((msg, deg))):
+    with tu.diagnostic_scope(lambda msg, deg: notices.append((msg, deg))):
         scoped_total, scoped_per_model = tu.estimate_cost(by_model)
     assert notices == []
     assert capsys.readouterr().err == ""
@@ -2754,8 +2752,6 @@ def test_sync78_pricing_and_oversize_notices_follow_diagnostic_scope(monkeypatch
     # fails_when=the scope is ignored, degraded is cleared, or an escape remains;
     # why_new=existing notices are asserted only with no diagnostic scope;
     # seam=none; no_claim=autopush breadcrumb wording
-    from mind_meld import events_tail
-
     usage = {"input": 1, "cache_create": 0, "cache_read": 0, "output": 0}
     model = "claude-sync78-unpriced\x1b[2J"
     path = "sync78\x1b[2J.jsonl"
@@ -2767,7 +2763,7 @@ def test_sync78_pricing_and_oversize_notices_follow_diagnostic_scope(monkeypatch
     def sink(message, degraded):
         notices.append((message, degraded))
 
-    with events_tail.diagnostic_scope(sink):
+    with tu.diagnostic_scope(sink):
         total, per_model = tu.estimate_cost({model: usage})
         lines = list(tu.iter_bounded_lines(io.BytesIO(b"x" * 64 + b"\n"), path, 0))
     assert total == 0 and per_model == {}

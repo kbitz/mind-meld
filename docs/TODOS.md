@@ -44,6 +44,40 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/hosts/grok.py|tests/test_grok_usage.py] Test gap: Grok lock contention with a scoped diagnostic sink
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** The real generic flock test includes Grok and protects locked/cache semantics, but no existing test installs a sink and asserts its single non-degraded notice/no stderr for Grok.
+- **Hypothesis (untested):** Extend a scoped contention table with a consented Grok reader; assert locked, exactly one sink notice, degraded=False and quiet stderr; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/hosts/grok.py:441
+- **Evidence:** Track 139A completed audit-only coverage fallback (G1); full changed-file reads and existing tests mapped. The 9,443-test portable run passed; no regression was reproduced. The plan requires the behavior, not this additional isolated test.
+- **Revisit trigger:** the next Track whose `_touches:` cover these files, or an owner report of incorrect diagnostic/capture behavior.
+- **Context:** Filed by /review-and-prep on branch `mmm/038ab664` at `e93f151` (2026-11-16).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/statusflow.py|src/mind_meld/hosts/codex.py|tests/test_statusflow.py] Test gap: Codex status retry after an unknown deadline inventory
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** The Codex deadline test always returns a known disk count. Grok pins False/True recount calls, but no Codex case separately pins the approved retry after a failed first count.
+- **Hypothesis (untested):** Extend the existing Codex deadline case with files_on_disk=None first, then a known or still-unknown count; assert one False/True retry and truthful output; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/statusflow.py:816
+- **Evidence:** Track 139A completed audit-only coverage fallback (G2); full changed-file reads and existing tests mapped. The 9,443-test portable run passed; no regression was reproduced. The plan requires the behavior, not this additional isolated test.
+- **Revisit trigger:** the next Track whose `_touches:` cover these files, or an owner report of incorrect diagnostic/capture behavior.
+- **Context:** Filed by /review-and-prep on branch `mmm/038ab664` at `e93f151` (2026-11-16).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/events_tail.py|tests/test_identity.py] Test gap: Identity refresh uses the shared scoped diagnostic sink
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** Identity refresh tests cover digest/cache behavior and broken callbacks, but the tail spy accepts diagnostic without asserting the active scope sink is forwarded. No failure was demonstrated.
+- **Hypothesis (untested):** Extend the existing tail identity fixture with a scoped sink and a refreshing gather callback; assert identity notices use that sink without stderr; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/events_tail.py:1881
+- **Evidence:** Track 139A completed audit-only coverage fallback (G3); full changed-file reads and existing tests mapped. The 9,443-test portable run passed; no regression was reproduced. The plan requires the behavior, not this additional isolated test.
+- **Revisit trigger:** the next Track whose `_touches:` cover these files, or an owner report of incorrect diagnostic/capture behavior.
+- **Context:** Filed by /review-and-prep on branch `mmm/038ab664` at `e93f151` (2026-11-16).
+- **Effort:** ? (user triages in /roadmap)
+
+
 ### [review:files=src/mind_meld/cli.py|tests/test_self_update.py] Test gap: current-version update outcome with metadata controls
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
 - **Description:** Updated and unchanged outcomes have hostile metadata coverage, but the already-current `_print_update_current` outcome is tested with clean version text only.
