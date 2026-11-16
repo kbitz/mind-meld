@@ -181,7 +181,7 @@ class TestRunEventsBackfill:
 
         The session walker currently keeps ``since`` for API stability, but
         passing it remains part of the backfill's legible semantic contract.
-        This must not silently drift to ``last_push_ts`` while the git path
+        This must not silently drift to ``resolve_push_cursor`` while the git path
         stays correct.
         """
         events_root = tmp_path / "events_root"

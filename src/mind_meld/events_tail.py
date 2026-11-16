@@ -2074,7 +2074,7 @@ def _run_events_backfill(
     * Push-count semantics stay honest: an init-counted-as-push would
       inflate the per-window mm-push count in the retro by 1 on every
       fresh-install machine.
-    * The cursor (``last_push_ts``) stays at "no prior mm-push" so the
+    * The cursor (``resolve_push_cursor``) stays at "no prior mm-push" so the
       first real push walks the same 30-day range. Aggregator dedups via
       ``(canonical_remote_url, sha)`` so retro output is unchanged; cost
       is one extra ~500ms ``git log`` walk on the first push, paid once
@@ -2091,7 +2091,7 @@ def _run_events_backfill(
         budget_ms = events.WALK_TIME_BUDGET_INTERACTIVE_MS
         events_dir = Path(mm_events_src["path"]).expanduser() / "events"
 
-        # Explicit 30-day window. last_push_ts() returns the same value
+        # Explicit 30-day window. resolve_push_cursor() returns the same value
         # on first run, but stating intent at the call site makes the
         # backfill semantics legible without chasing a default.
         since = datetime.now(timezone.utc) - timedelta(days=events.INITIAL_CURSOR_LOOKBACK_DAYS)

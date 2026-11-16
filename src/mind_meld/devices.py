@@ -187,32 +187,11 @@ def list_devices(backend: LocalBackend) -> list[dict[str, Any]]:
     guard.
 
     Dropped entries emit a per-entry warning via `stderr_console` at the
-    call site — see `_list_devices_with_warnings` in cli.py. Direct callers
+    call site — see `core._list_devices_warn`. Direct callers
     that import this function get silent drops (unchanged default) so
     library-mode consumers can read `devices` without side-effect output.
     """
-    return _list_devices_impl(backend, on_drop=None)
-
-
-def list_devices_with_drops(
-    backend: LocalBackend,
-) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
-    """List valid devices AND collect dropped (key, reason) pairs.
-
-    Variant of `list_devices` for Track 5E's strict pull-start fleet-version
-    refusal: a corrupt/shape-invalid peer device.json must REFUSE the pull
-    (not silently skip), because we can't read its `last_seen_version` and
-    so can't tell if its conflict files are pre- or post-inversion. The
-    refusal gate names the storage key.
-
-    Returns `(valid_devices, dropped_entries)` where each dropped entry is
-    `(storage_key, reason_string)`. Reason strings come from `_list_devices_impl`'s
-    on_drop callback verbatim (e.g. "unreadable (StorageError)", "not a
-    JSON object", "missing or invalid device_id", "missing or invalid
-    device_name").
-    """
-    inventory = inventory_devices(backend)
-    return inventory.valid, inventory.dropped
+    return inventory_devices(backend).valid
 
 
 # Process-local set of device-short prefixes for which we've already emitted
@@ -309,20 +288,6 @@ def lookup_device_by_short_id(
             "this prefix until you rename one of the devices\n"
         )
     return (None, count)
-
-
-def _list_devices_impl(
-    backend: LocalBackend,
-    on_drop: "Any | None" = None,
-) -> list[dict[str, Any]]:
-    """Shared implementation. `on_drop`, if provided, is called with
-    (key, reason) for each dropped entry — cli.py uses this to emit warnings.
-    """
-    inventory = inventory_devices(backend)
-    if on_drop is not None:
-        for key, reason in inventory.dropped:
-            on_drop(key, reason)
-    return inventory.valid
 
 
 def inventory_devices(backend: LocalBackend) -> DeviceInventory:

@@ -4,7 +4,7 @@ docs/designs/track-7a-revised-plan.md).
 Coverage buckets:
   T0 — design's original 6 cases (URL canon table, append+parse, flock
        under autopush, conductor-pattern, empty/merge commits, schema)
-  T1 — new surface from review decisions (discover_git_roots, last_push_ts,
+  T1 — new surface from review decisions (discover_git_roots, resolve_push_cursor,
        fsutil helper retrofit regression already covered in
        tests/test_pullhistory.py)
   T2 — correctness pins (timeout formula, budget abort, write-order)
@@ -1617,11 +1617,11 @@ class TestWalkSessionMetadata85A:
 
 
 # ---------------------------------------------------------------------------
-# T1 — last_push_ts (cursor derivation)
+# T1 — resolve_push_cursor (cursor derivation)
 # ---------------------------------------------------------------------------
 
 
-class TestLastPushTs:
+class TestResolvePushCursor:
     def test_bad_utf8_preserves_the_cursor(self, tmp_path):
         """v0.12.16 T3: a bad byte must cost its line, NOT the cursor.
 
@@ -1643,7 +1643,7 @@ class TestLastPushTs:
             + json.dumps({"type": "mm-push", "ts": "2026-08-14T12:00:00+00:00"}).encode()
             + b"\n"
         )
-        ts = events.last_push_ts(events_dir, "dev-a")
+        ts = events.resolve_push_cursor(events_dir, "dev-a").since
         assert ts == datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc), (
             "bad byte rewound the cursor instead of skipping one line"
         )
@@ -1668,7 +1668,7 @@ class TestLastPushTs:
         (events_dir / f"dev-a-{day}.jsonl").write_bytes(
             json.dumps({"type": "mm-push", "ts": "2026-08-14T12:00:00+00:00"}).encode()
         )  # no trailing newline
-        assert events.last_push_ts(events_dir, "dev-a") == datetime(
+        assert events.resolve_push_cursor(events_dir, "dev-a").since == datetime(
             2026, 8, 14, 12, 0, tzinfo=timezone.utc
         ), "unterminated final record dropped; cursor silently rewound 30 days"
 
@@ -1700,7 +1700,7 @@ class TestLastPushTs:
             + json.dumps({"type": "mm-push", "ts": "2026-08-14T12:00:00+00:00"}).encode()
             + b"\n"
         )
-        assert events.last_push_ts(events_dir, "dev-a") == datetime(
+        assert events.resolve_push_cursor(events_dir, "dev-a").since == datetime(
             2026, 8, 14, 12, 0, tzinfo=timezone.utc
         )
         err = capsys.readouterr().err
@@ -1708,7 +1708,7 @@ class TestLastPushTs:
         assert "events cursor reader" in err
 
     def test_first_run_returns_now_minus_30d(self, tmp_path):
-        ts = events.last_push_ts(tmp_path / "events", "dev-a")
+        ts = events.resolve_push_cursor(tmp_path / "events", "dev-a").since
         now = datetime.now(timezone.utc)
         delta = (now - ts).total_seconds()
         # Within a few seconds of now-30d
@@ -1730,7 +1730,7 @@ class TestLastPushTs:
             + json.dumps({"v": 1, "type": "mm-push", "ts": later, "device": "dev-a"})
             + "\n"
         )
-        ts = events.last_push_ts(events_dir, "dev-a")
+        ts = events.resolve_push_cursor(events_dir, "dev-a").since
         assert ts.isoformat() == later
 
     def test_walks_backward_when_today_empty(self, tmp_path):
@@ -1742,7 +1742,7 @@ class TestLastPushTs:
         path.write_text(
             json.dumps({"v": 1, "type": "mm-push", "ts": ts_iso, "device": "dev-a"}) + "\n"
         )
-        ts = events.last_push_ts(events_dir, "dev-a")
+        ts = events.resolve_push_cursor(events_dir, "dev-a").since
         assert ts.isoformat() == ts_iso
 
     def test_other_devices_files_ignored(self, tmp_path):
@@ -1762,7 +1762,7 @@ class TestLastPushTs:
             )
             + "\n"
         )
-        ts = events.last_push_ts(events_dir, "dev-a")
+        ts = events.resolve_push_cursor(events_dir, "dev-a").since
         # No mm-push for dev-a → default
         delta = (datetime.now(timezone.utc) - ts).total_seconds()
         assert abs(delta - 30 * 86400) < 10
@@ -1780,12 +1780,11 @@ class TestLocalCaptureSelection61:
         row = events.make_mm_push_event(device="local", mm_version="1")
         events.write_push_event(tmp_path / "events", "local", [row])
         now = datetime.now(timezone.utc)
-        scan = self._scan(tmp_path / "events", "local", now)
+        self._scan(tmp_path / "events", "local", now)
         path = next((tmp_path / "events").glob("*.jsonl"))
-        old = scan.cached_hash(path, path.stat())
+        old = manifest.hash_file(path)
         assert old
         path.write_text(path.read_text() + "{}\n")
-        assert scan.cached_hash(path, path.stat()) is None
         source = {
             "name": "mm-events",
             "type": "generic",
@@ -2850,7 +2849,7 @@ class TestWriteOrderTransactionalPin:
         writing git-snapshot and mm-push, cursor stays at the prior value
         and the next push re-walks (deduped at retro render via (remote,
         sha)). We pin this by writing only the git-snapshot row and
-        verifying last_push_ts returns the default (now-30d), NOT a
+        verifying resolve_push_cursor returns the default (now-30d), NOT a
         cursor advancement."""
         events_dir = tmp_path / "events"
         real_write = os.write
@@ -2875,7 +2874,7 @@ class TestWriteOrderTransactionalPin:
                 events.make_mm_push_event(device="dev-a", mm_version="test"),
             ],
         )
-        ts = events.last_push_ts(events_dir, "dev-a")
+        ts = events.resolve_push_cursor(events_dir, "dev-a").since
         # Cursor stayed at default (now-30d) — partial git-snapshot doesn't move it
         delta = (datetime.now(timezone.utc) - ts).total_seconds()
         assert abs(delta - 30 * 86400) < 10

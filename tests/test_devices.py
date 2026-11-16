@@ -21,7 +21,6 @@ import pytest
 from mind_meld.devices import (
     inventory_devices,
     list_devices,
-    list_devices_with_drops,
     register_device,
     update_last_seen,
 )
@@ -433,10 +432,13 @@ class TestDeviceCountsOnlyUnderItsOwnKey:
         backend.put("devices/bad.json", b"not-json{")
         backend.put("devices/shape.json", json.dumps({"device_name": "no id"}).encode())
 
-        valid, dropped = list_devices_with_drops(backend)
+        inventory = inventory_devices(backend)
 
-        assert [d["device_id"] for d in valid] == ["good"]
-        assert sorted(key for key, _ in dropped) == ["devices/bad.json", "devices/shape.json"]
+        assert [d["device_id"] for d in inventory.valid] == ["good"]
+        assert sorted(key for key, _ in inventory.dropped) == [
+            "devices/bad.json",
+            "devices/shape.json",
+        ]
 
     def test_fleet_gate_ignores_a_stale_conflict_copy_but_not_a_stale_device(
         self, backend: LocalBackend

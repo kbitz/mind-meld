@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.59] - 2026-11-16
+
+Invariant docs now spell out which timestamp cursor resolution returns.
+
+### Changed
+
+- Events, sync, and retro invariant docs now state which timestamp cursor resolution returns.
+
 ## [1.12.58] - 2026-11-16
 
 `mm` keeps a command's result when stdout fails after the work is done, and long `mm update` outcomes wrap with the terminal.

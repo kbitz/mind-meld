@@ -1179,7 +1179,6 @@ REMOVED_PULL_IMPORT_BINDINGS = frozenset(
     hash_file
     is_conflict_filename
     lcs_merge
-    list_devices_with_drops
     lookup_device_by_short_id
     merge_file
     mtime_from_path
@@ -1220,7 +1219,6 @@ PULL_IMPORTED_BINDING_OWNERS = {
     "hash_file": ("pullflow",),
     "is_conflict_filename": ("pullflow",),
     "lcs_merge": ("pullflow",),
-    "list_devices_with_drops": ("pullflow",),
     "lookup_device_by_short_id": ("pullflow",),
     "merge_file": ("pullflow",),
     "mtime_from_path": ("pullflow",),

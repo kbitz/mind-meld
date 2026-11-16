@@ -466,9 +466,9 @@ class TestSelectDevices:
     def _mock_backend_with(self, devices_data: list[dict]):
         """Backend that returns the given device entries via list_devices_warn."""
         backend = MagicMock()
-        # _list_devices_warn calls _list_devices_impl(backend, on_drop=...)
-        # via mind_meld.devices.list_devices-ish. The simpler path: patch
-        # _list_devices_warn at the cli module level in each test.
+        # core._list_devices_warn calls devices.inventory_devices(backend).
+        # The simpler path: patch _list_devices_warn at the core module level
+        # in each test.
         return backend
 
     def test_from_device_matches(self, monkeypatch) -> None:

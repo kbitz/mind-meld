@@ -23,8 +23,8 @@ from rich.table import Table
 
 from mind_meld import config as _config_module
 from mind_meld import core, outputstyle, syncthing
-from mind_meld.config import ConfigError
 from mind_meld.consoles import console
+from mind_meld.errors import ConfigError
 from mind_meld.safety import safe_str, safe_terminal_str
 from mind_meld.storage import get_backend
 

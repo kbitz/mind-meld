@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.59 | 2026-11-16 | Invariant docs now spell out which timestamp cursor resolution returns. |
 | 1.12.58 | 2026-11-16 | `mm` keeps a command's result when stdout fails after the work is done, and long `mm update` outcomes wrap with the terminal. |
 | 1.12.57 | 2026-11-16 | `mm status` can retry a failed Codex log count once when reporting catch-up progress. |
 | 1.12.56 | 2026-11-16 | `mm update` success is now an `Update:` line, and `mm update`, `mm log`, automatic sync, and `mm status` share consistent `Run:` remedies and maintenance failure wording. |
