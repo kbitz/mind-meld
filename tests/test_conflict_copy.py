@@ -4744,8 +4744,8 @@ class TestFastForward91A:
         ledger = _ledger_with((rel, b'{"base":1}\n'))
         real_verdict = pullflow._ledger_verdict
 
-        def verdict_then_write(*args, **kwargs):
-            word = real_verdict(*args, **kwargs)
+        def verdict_then_write(local_path, local_hash, remote_info, reporter):
+            word = real_verdict(local_path, local_hash, remote_info, reporter)
             local.write_bytes(b'{"typed":1}\n')  # the owner saves while the pull decides
             return word
 
@@ -4770,8 +4770,8 @@ class TestFastForward91A:
         ledger = _ledger_with((rel, b"base!\n"))
         real_verdict = pullflow._ledger_verdict
 
-        def change(*args, **kwargs):
-            word = real_verdict(*args, **kwargs)
+        def change(local_path, local_hash, remote_info, reporter):
+            word = real_verdict(local_path, local_hash, remote_info, reporter)
             if how == "size":
                 local.write_bytes(b"base!! longer\n")
                 _set_mtime(local, LOCAL_T)

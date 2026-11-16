@@ -102,7 +102,7 @@ from mind_meld.manifest import (
     _is_excluded as _manifest_is_excluded,
 )
 from mind_meld.safety import safe_str
-from mind_meld.storage.keys import manifest_key
+from mind_meld.storage.keys import is_content_hash, manifest_key
 from mind_meld.storage.local import LocalBackend
 
 FetchStatus = Literal["ok", "missing", "corrupt"]
@@ -1496,7 +1496,7 @@ def compute_mint_guard(
     known_hashes: dict[tuple[str, str, str], set[str]] = {}
     if ledger is not None and ledger.readable:
         for (_peer, name, rel), sha in ledger.bases.items():
-            if pullplan.valid_hash(sha):
+            if is_content_hash(sha):
                 known_hashes.setdefault((name, rel, sha[:16]), set()).add(sha)
     for cfg in sources:
         name = cfg.get("name")
@@ -1530,10 +1530,10 @@ def compute_mint_guard(
                 prior_sha = entry["files"][rel].get("sha256")
                 held = ledger.newest_held(name, rel) if ledger is not None else None
                 if held is None:
-                    candidates = {prior_sha} if pullplan.valid_hash(prior_sha) else set()
+                    candidates = {prior_sha} if is_content_hash(prior_sha) else set()
                 else:
                     candidates = set(known_hashes.get((name, rel, held), ()))
-                    if pullplan.valid_hash(prior_sha) and prior_sha[:16] == held:
+                    if is_content_hash(prior_sha) and prior_sha[:16] == held:
                         candidates.add(prior_sha)
                 # Never substitute the last-published version for a newer held
                 # version whose complete digest is unknown or ambiguous.

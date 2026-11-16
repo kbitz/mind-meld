@@ -30,6 +30,7 @@ import pytest
 from mind_meld import core, pullplan
 from mind_meld.manifest import mtime_from_manifest
 from mind_meld.merge import merge_file, should_merge
+from mind_meld.storage.keys import is_content_hash
 
 SRC = "notes"
 REL = "note.md"  # not mergeable
@@ -124,15 +125,16 @@ def test_prefix_is_sixteen_lowercase_hex_or_nothing():
     assert pullplan.prefix(1234567890123456) is None
 
 
-def test_valid_hash_is_sixty_four_lowercase_hex():
-    assert pullplan.valid_hash(V0)
-    assert not pullplan.valid_hash(V0[:63])
-    assert not pullplan.valid_hash(V0 + "a")
-    assert not pullplan.valid_hash(V0.upper())
-    assert not pullplan.valid_hash("g" * 64)
-    assert not pullplan.valid_hash(None)
-    assert not pullplan.valid_hash(b"a" * 64)
-    assert not pullplan.valid_hash(["a" * 64])
+def test_is_content_hash_is_sixty_four_lowercase_hex():
+    assert is_content_hash(V0)
+    assert not is_content_hash(V0[:63])
+    assert not is_content_hash(V0 + "a")
+    assert not is_content_hash(V0 + "\n")
+    assert not is_content_hash(V0.upper())
+    assert not is_content_hash("g" * 64)
+    assert not is_content_hash(None)
+    assert not is_content_hash(b"a" * 64)
+    assert not is_content_hash(["a" * 64])
 
 
 @pytest.mark.parametrize(
@@ -186,7 +188,7 @@ def test_hold_is_a_no_op_for_the_newest_held_version_and_times_only_grow():
     # Holding an older version again makes it the newest again (a revert).
     ledger.hold(SRC, REL, V0)
     assert ledger.newest_held(SRC, REL) == P0
-    assert ledger.held_newest_first(SRC, REL) == [P0, P2, P1]
+    assert ledger.ancestry_newest_first(SRC, REL) == [P0, P2, P1]
 
 
 def test_times_are_strictly_increasing_per_path_even_with_a_frozen_clock():
@@ -1220,7 +1222,7 @@ def test_learning_ancestry_on_a_match_keeps_the_held_baseline_before_the_cap():
     chain = pullplan.parse_from(outgoing["sources"][SRC]["files"][REL])
     assert chain == [P0, *ancestors[:15]]
     assert ledger.newest_held(SRC, REL) == P0
-    assert ledger.held_newest_first(SRC, REL) == [P0]
+    assert [sha for sha, e in ledger.entries(SRC, REL).items() if e.kind == pullplan.HELD] == [P0]
 
 
 def test_a_union_holds_both_sides():

@@ -597,10 +597,10 @@ class TestPrefetchManifests:
         assert corrupt == []  # missing is not corrupt
 
 
-# ── _preflight_conflicts ─────────────────────────────────────────────
+# ── _plan_pull + _fail_mode_refusals ─────────────────────────────────
 
 
-class TestPreflightConflicts:
+class TestFailModeRefusals:
     def test_no_conflicts_empty_list(self, tmp_path: Path) -> None:
         # No local files, remote wants to write fresh — no conflict.
         pull_targets = [{"device_id": "peerA", "device_name": "A"}]
@@ -615,13 +615,14 @@ class TestPreflightConflicts:
             },
         }
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
-        predicted = pullflow._preflight_conflicts(
+        planner, _ = pullflow._plan_pull(
             pull_targets,
             manifest_cache,
             local_sources,
             source_filter=None,
             all_tombstones={},
         )
+        predicted = pullflow._fail_mode_refusals(planner.predictions)
         assert predicted == []
 
     def test_conflict_predicted(self, tmp_path: Path) -> None:
@@ -646,13 +647,14 @@ class TestPreflightConflicts:
             },
         }
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
-        predicted = pullflow._preflight_conflicts(
+        planner, _ = pullflow._plan_pull(
             pull_targets,
             manifest_cache,
             local_sources,
             source_filter=None,
             all_tombstones={},
         )
+        predicted = pullflow._fail_mode_refusals(planner.predictions)
         assert len(predicted) == 1
         assert predicted[0].rel_path == "a.md"
         assert predicted[0].device_name == "A"
@@ -679,13 +681,14 @@ class TestPreflightConflicts:
             },
         }
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
-        predicted = pullflow._preflight_conflicts(
+        planner, _ = pullflow._plan_pull(
             pull_targets,
             manifest_cache,
             local_sources,
             source_filter=None,
             all_tombstones={},
         )
+        predicted = pullflow._fail_mode_refusals(planner.predictions)
         # B conflicts with A's overlay.
         assert len(predicted) == 1
         assert predicted[0].device_name == "B"
@@ -702,13 +705,14 @@ class TestPreflightConflicts:
         }
         # no gstack mapping — only claude source configured locally
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
-        predicted = pullflow._preflight_conflicts(
+        planner, _ = pullflow._plan_pull(
             pull_targets,
             manifest_cache,
             local_sources,
             source_filter=None,
             all_tombstones={},
         )
+        predicted = pullflow._fail_mode_refusals(planner.predictions)
         assert predicted == []
 
     def test_unreadable_local_is_may_fail(self, tmp_path: Path) -> None:
@@ -716,7 +720,7 @@ class TestPreflightConflicts:
         blocked.write_bytes(b"local")
         blocked.chmod(0)
         try:
-            predicted = pullflow._preflight_conflicts(
+            planner, _ = pullflow._plan_pull(
                 [{"device_id": "peerA", "device_name": "A"}],
                 {
                     "peerA": {
@@ -730,6 +734,7 @@ class TestPreflightConflicts:
                 None,
                 {},
             )
+            predicted = pullflow._fail_mode_refusals(planner.predictions)
             assert [p.outcome for p in predicted] == ["may fail"]
             assert predicted[0].reason == "local file unreadable"
         finally:
@@ -738,7 +743,7 @@ class TestPreflightConflicts:
     def test_fifo_is_may_fail_without_hanging(self, tmp_path: Path) -> None:
         fifo = tmp_path / "pipe.md"
         os.mkfifo(fifo)
-        predicted = pullflow._preflight_conflicts(
+        planner, _ = pullflow._plan_pull(
             [{"device_id": "peerA", "device_name": "A"}],
             {
                 "peerA": {
@@ -752,12 +757,13 @@ class TestPreflightConflicts:
             None,
             {},
         )
+        predicted = pullflow._fail_mode_refusals(planner.predictions)
         assert [p.outcome for p in predicted] == ["may fail"]
         assert predicted[0].reason == "local file unreadable"
 
     def test_directory_collision_is_may_fail(self, tmp_path: Path) -> None:
         (tmp_path / "as-dir").mkdir()
-        predicted = pullflow._preflight_conflicts(
+        planner, _ = pullflow._plan_pull(
             [{"device_id": "peerA", "device_name": "A"}],
             {
                 "peerA": {
@@ -771,6 +777,7 @@ class TestPreflightConflicts:
             None,
             {},
         )
+        predicted = pullflow._fail_mode_refusals(planner.predictions)
         assert [p.outcome for p in predicted] == ["may fail"]
         assert predicted[0].reason == "file/directory collision"
 

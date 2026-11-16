@@ -32,6 +32,11 @@ CRYPTO_INIT_KEY = "mm-crypto-init"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
+def is_content_hash(value: object) -> bool:
+    """A content or tombstone hash is a 64-character lowercase hex string."""
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
 def _validate_hex_sha(value: str) -> None:
     """Reject a sha component that isn't exactly 64 lowercase hex chars.
 
@@ -47,7 +52,7 @@ def _validate_hex_sha(value: str) -> None:
     isinstance guard, fullmatch() would raise TypeError on non-strings and
     escape per-file error handling in _download_and_apply().
     """
-    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+    if not is_content_hash(value):
         raise ValueError(f"storage key: sha must be 64 lowercase hex chars, got {value!r}")
 
 
@@ -130,6 +135,6 @@ def parse_blob_key(key: str) -> tuple[str, str] | None:
     if not device_id:
         return None
     sha = leaf[: -len(".enc")]
-    if not _SHA256_RE.fullmatch(sha):
+    if not is_content_hash(sha):
         return None
     return device_id, sha

@@ -47,6 +47,7 @@ from mind_meld.errors import (
     os_error_cause,
     snapshot_refusal,
 )
+from mind_meld.storage.keys import is_content_hash
 
 # Syncthing-style local conflict copies: <stem>.sync-conflict-<YYYYmmdd-HHMMSS>-<device>[.<ext>]
 # Pattern pinned to the exact timestamp shape `conflict_filename()` emits
@@ -3604,12 +3605,6 @@ def _is_active_tombstone(info: dict[str, Any], cutoff: datetime) -> bool:
     return ts > cutoff
 
 
-def _is_content_hash(value: object) -> bool:
-    return (
-        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
-    )
-
-
 def generate_tombstones(
     local_manifest: dict[str, Any],
     remote_manifest: dict[str, Any] | None,
@@ -3702,7 +3697,7 @@ def generate_tombstones(
                     record = {"deleted_at": now_iso, "device_id": device_id}
                     prior_sha = (remote_files.get(path) or {}).get("sha256")
                     deleted_sha = (deleted_hashes or {}).get((src_name, path), prior_sha)
-                    if _is_content_hash(deleted_sha):
+                    if is_content_hash(deleted_sha):
                         record["sha256"] = deleted_sha
                     tombstones[key] = record
 

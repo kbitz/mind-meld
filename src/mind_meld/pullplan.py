@@ -48,13 +48,6 @@ def prefix(sha: str | None) -> str | None:
     return None
 
 
-def valid_hash(value: object) -> bool:
-    """A tombstone/content hash is a 64-char lowercase hex string; all else is no hash."""
-    return (
-        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
-    )
-
-
 def parse_from(info: dict | None) -> list[str]:
     """A peer-controlled ``from`` list: valid prefixes only; any bad shape reads as absent."""
     raw = (info or {}).get("from")
@@ -164,10 +157,6 @@ class Ledger:
     def newest_held(self, source: str, path: str) -> str | None:
         held = [(e.time, sha) for sha, e in self.entries(source, path).items() if e.kind == HELD]
         return max(held)[1] if held else None
-
-    def held_newest_first(self, source: str, path: str) -> list[str]:
-        held = [(e.time, sha) for sha, e in self.entries(source, path).items() if e.kind == HELD]
-        return [sha for _, sha in sorted(held, reverse=True)]
 
     def ancestry_newest_first(self, source: str, path: str) -> list[str]:
         """Publish held versions and their inherited ancestry, never conflict-only observations."""

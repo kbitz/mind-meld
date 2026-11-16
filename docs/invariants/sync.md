@@ -13,7 +13,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/fsutil.py` — `atomic_write_bytes` / `_fsync_fd` / `fsync_dir` / (see "Atomic write publication failures" below)
 - `src/mind_meld/storage/local.py` — `LocalBackend.put` / `_needs_fsync`
 - `src/mind_meld/lockedjson.py` — `locked_json_rmw` / `locked_json_snapshot` / (see "Shared JSON locking")
-- `src/mind_meld/storage/keys.py` — `manifest_key` / `blob_key` / `data_prefix` / `device_key` / `parse_blob_key` / (see "Validated storage keys")
+- `src/mind_meld/storage/keys.py` — `manifest_key` / `blob_key` / `data_prefix` / `device_key` / `parse_blob_key` / `is_content_hash` / (see "Validated storage keys")
 - `src/mind_meld/projectid.py` / `src/mind_meld/manifest.py` — `manifest_to_wire` / `manifest_from_wire` (see "Project identity on the wire (Track 90A)")
 - `src/mind_meld/gcflow.py` — `gc` / `_do_gc` / (see "Own-device blob collection (Track 71A)"; also read init-devices.md)
 - `src/mind_meld/cli.py` — `autopull` / `autopush` / `_auto_command_setup` / (see "Visible failures in automatic commands")
@@ -757,7 +757,7 @@ mints nothing.
 
 ## Validated storage keys
 
-Storage keys are constructed via helpers in `storage/keys.py` (`manifest_key`, `blob_key`, `data_prefix`, `device_key`, `parse_blob_key`), which validate components at construction time, so a corrupt or malicious peer manifest cannot smuggle a `sha256: "../../../etc/passwd"` through `backend.get`. `data_prefix(device_id)` validates the owner and includes the trailing slash, preventing prefix-sharing identities from entering an own-device listing. Do NOT build storage keys with raw f-strings at new call sites.
+Storage keys are constructed via helpers in `storage/keys.py` (`manifest_key`, `blob_key`, `data_prefix`, `device_key`, `parse_blob_key`, `is_content_hash`), which validate components at construction time, so a corrupt or malicious peer manifest cannot smuggle a `sha256: "../../../etc/passwd"` through `backend.get`. `data_prefix(device_id)` validates the owner and includes the trailing slash, preventing prefix-sharing identities from entering an own-device listing. Do NOT build storage keys with raw f-strings at new call sites.
 
 ## Own-device blob collection (Track 71A)
 

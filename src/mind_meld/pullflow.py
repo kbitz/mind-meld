@@ -108,7 +108,7 @@ from mind_meld.merge import (
 )
 from mind_meld.safety import safe_str
 from mind_meld.storage import get_backend
-from mind_meld.storage.keys import blob_key
+from mind_meld.storage.keys import blob_key, is_content_hash
 from mind_meld.storage.local import LocalBackend
 from mind_meld.synclog import write_sync_log
 
@@ -273,10 +273,6 @@ class PullResult:
     def total_applied(self) -> int:
         """Files actually changed on disk (written + merged + conflicted)."""
         return self.total_written + self.total_merged + self.total_conflicted
-
-    @property
-    def total_older(self) -> int:
-        return len(self.older)
 
 
 PULL_NOT_PREVIEWED = (
@@ -1334,7 +1330,6 @@ def _ledger_verdict(
     local_path: Path,
     local_hash: str,
     remote_info: dict,
-    remote_device_id: str,
     reporter: _ApplyReporter,
 ) -> str:
     """The pull rule's verdict for one existing local file; "fallback" without a ledger."""
@@ -1494,7 +1489,7 @@ def _apply_incoming_file(
 
     # Track 91A: the pull rule. Without a readable ledger (direct callers, a
     # missing or unreadable database) the verdict is "fallback": today's rule.
-    verdict = _ledger_verdict(local_path, local_hash, remote_info, remote_device_id, reporter)
+    verdict = _ledger_verdict(local_path, local_hash, remote_info, reporter)
     if verdict in ("skip", "stale", "held", "matched"):
         reporter.agree = verdict == "matched"
         return "unchanged"
@@ -2055,7 +2050,7 @@ def _deletion_candidates(
             if info.get("device_id") != did:
                 keep("the record names another machine")
                 continue
-            if not pullplan.valid_hash(sha):
+            if not is_content_hash(sha):
                 keep("the record has no content hash (written by an older release)")
                 continue
             if ledger.base(did, src_name, rel_path) != sha:
@@ -2814,19 +2809,6 @@ def _fail_mode_refusals(
     predictions: list[pullplan.PullPrediction],
 ) -> list[pullplan.PullPrediction]:
     return [p for p in predictions if p.outcome in _FAIL_MODE_REFUSALS]
-
-
-def _preflight_conflicts(
-    pull_targets: list[dict],
-    manifest_cache: dict,
-    local_sources_map: dict,
-    source_filter: str | None,
-    all_tombstones: dict,
-) -> list[pullplan.PullPrediction]:
-    planner, _ = _plan_pull(
-        pull_targets, manifest_cache, local_sources_map, source_filter, all_tombstones
-    )
-    return _fail_mode_refusals(planner.predictions)
 
 
 _UNAPPLIED = frozenset({"unchanged", "waiting", "kept"})
