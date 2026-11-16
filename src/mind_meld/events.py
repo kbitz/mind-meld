@@ -419,29 +419,24 @@ class MmPushEvent(TypedDict, total=False):
     git_capture: GitCaptureState
 
 
-ACTIVE_HOST_READERS: tuple[str, ...] = ("codex", "grok", "muse", "agy")
-"""The live host readers, in the fixed order ``events_tail`` invokes them.
+HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "muse", "agy")
+"""Live host-reader names, in the fixed order ``events_tail._default_host_readers`` invokes them.
 
-This is the reader universe. Adding a reader means appending here AND to
-``HOST_USAGE_TOKEN_SOURCES``; retiring a reader means removing it from this
-tuple (the writer) and from the gate. Do not serialize this constant into a
-row; see ``make_host_usage_snapshot``.
+This is both the live reader universe and the writer tuple. Adding a reader
+means appending here and to the consent gate; retiring a reader means removing
+it from this tuple and from the gate. A row's ``token_sources`` is the per-push
+SUBSET that actually contributed, which is what lets a consumer tell "this host
+reported nothing" apart from "this host was never consulted". Do not serialize
+this constant into a row; see ``make_host_usage_snapshot``. Completed empty
+readers remain listed; an empty list means all readers were absent. Local
+publication diagnostics intersect this allowlist after fleet
+acceptance/ordering.
 
 ``grok`` (Grok Build, Track 110A) stays at index 1, right after ``codex``:
 retained rows from mm 1.11.7 and earlier list ``grok`` before ``muse``.
 Retired reader names are kept on retained rows as unknown names and do not
 advance the known-name position for them
-(``aggregator._token_sources_subsequence``)."""
-
-HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "muse", "agy")
-"""Live host-reader names, in the same order ``events_tail`` invokes them.
-
-A row's ``token_sources`` is the per-push SUBSET that actually contributed,
-which is what lets a consumer tell "this host reported nothing" apart from
-"this host was never consulted". Do not serialize this constant into a row;
-see ``make_host_usage_snapshot``. Completed empty readers remain listed; an
-empty list means all readers were absent. Local publication diagnostics
-intersect this allowlist after fleet acceptance/ordering.
+(``aggregator._token_sources_subsequence``).
 
 The tuple is append-only in the sense that **reordering it is a breaking
 change**: a reorder flips 3 of 7 accepted wire shapes (worse than a deletion,

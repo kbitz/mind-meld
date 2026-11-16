@@ -114,10 +114,10 @@ class TestReaderOrchestration:
         assert [
             name
             for name, _ in events_tail._default_host_readers(
-                self._enabled(*_mm_events.ACTIVE_HOST_READERS),
+                self._enabled(*_mm_events.HOST_USAGE_TOKEN_SOURCES),
                 grok_consented=True,
             )
-        ] == list(_mm_events.ACTIVE_HOST_READERS)
+        ] == list(_mm_events.HOST_USAGE_TOKEN_SOURCES)
 
     def test_readers_are_gated_on_the_user_enabling_that_source(self):
         """A host's local store is only read when the user enabled that host as
@@ -174,7 +174,7 @@ class TestReaderOrchestration:
         no consent check at all. Strict equality against the live reader set
         is the consent guarantee. Relaxing this to a subset would let a
         future reader run with no gate entry."""
-        assert set(events_tail.HOST_READER_SOURCE_GATE) == set(_mm_events.ACTIVE_HOST_READERS)
+        assert set(events_tail.HOST_READER_SOURCE_GATE) == set(_mm_events.HOST_USAGE_TOKEN_SOURCES)
         invoked = [
             name
             for name, _ in events_tail._default_host_readers(
@@ -195,13 +195,10 @@ class TestReaderOrchestration:
     def test_active_readers_are_a_subset_of_the_wire_vocabulary(self):
         """Live readers must be named on the writer tuple. 36B dropped
         retired names from the tuple; unknown inbound names are retained
-        by the aggregator, not listed here. Relaxing GATE == ACTIVE to
+        by the aggregator, not listed here. Relaxing GATE == HOST_USAGE_TOKEN_SOURCES to
         <= would retire the consent pin this file exists to keep."""
-        assert set(_mm_events.ACTIVE_HOST_READERS) <= set(_mm_events.HOST_USAGE_TOKEN_SOURCES)
         assert "opencode" not in _mm_events.HOST_USAGE_TOKEN_SOURCES
-        assert "opencode" not in _mm_events.ACTIVE_HOST_READERS
         # Track 110A: grok is live again, at its pre-v1.11.8 slot right after codex.
-        assert _mm_events.ACTIVE_HOST_READERS.index("grok") == 1
         assert _mm_events.HOST_USAGE_TOKEN_SOURCES.index("grok") == 1
 
     def test_default_readers_resolve_at_call_time(self, monkeypatch):
@@ -213,7 +210,7 @@ class TestReaderOrchestration:
 
         capture = events_tail._capture_host_usage(
             events_tail._default_host_readers(
-                self._enabled(*_mm_events.ACTIVE_HOST_READERS),
+                self._enabled(*_mm_events.HOST_USAGE_TOKEN_SOURCES),
             ),
             deadline=1_000.0,
             now=lambda: 0.0,
@@ -374,17 +371,17 @@ class TestReaderOrchestration:
         assert _mm_host_usage.PERMANENT_REASONS == frozenset({"unsupported"})
 
     def test_built_in_constant_matches_the_full_reader_set(self):
-        """`events.ACTIVE_HOST_READERS` documents the live reader universe
+        """`events.HOST_USAGE_TOKEN_SOURCES` documents the live reader universe
         and their order. `events` cannot import `events_tail` (cycle), so
         nothing but this pin holds the two together — a fourth reader added on
         one side only would go undocumented on the other."""
         assert [
             name
             for name, _ in events_tail._default_host_readers(
-                self._enabled(*_mm_events.ACTIVE_HOST_READERS),
+                self._enabled(*_mm_events.HOST_USAGE_TOKEN_SOURCES),
                 grok_consented=True,
             )
-        ] == list(_mm_events.ACTIVE_HOST_READERS)
+        ] == list(_mm_events.HOST_USAGE_TOKEN_SOURCES)
 
     def test_warmable_readers_are_a_subset_of_active_readers(self):
         """A name that is not a live reader cannot be warmed.
@@ -393,7 +390,7 @@ class TestReaderOrchestration:
         reader is warmable. After its deletion both survivors happen to be
         warmable, but the useful pin is the subset, not the coincidence.
         """
-        assert events_tail.WARMABLE_HOST_READERS <= set(_mm_events.ACTIVE_HOST_READERS)
+        assert events_tail.WARMABLE_HOST_READERS <= set(_mm_events.HOST_USAGE_TOKEN_SOURCES)
         assert events_tail.WARMABLE_HOST_READERS
 
     def test_empty_reader_set_publishes_a_completed_empty_row(self):
@@ -809,7 +806,7 @@ class TestHostDeadline:
             host_budget_ms=250,
             prepare_token_cache=lambda: None,
             host_readers=events_tail._default_host_readers(
-                [{"name": n, "type": "generic"} for n in _mm_events.ACTIVE_HOST_READERS],
+                [{"name": n, "type": "generic"} for n in _mm_events.HOST_USAGE_TOKEN_SOURCES],
             ),
         )
         after = _time.monotonic()
@@ -2574,11 +2571,10 @@ def test_cursor_is_absent_from_host_reader_gate_and_default_readers():
     source = [{"name": "cursor", "path": "/unused", "type": "generic"}]
     assert "cursor" not in events_tail.HOST_READER_SOURCE_GATE
     assert "cursor" not in _mm_host_registry.HOST_READER_DIAGS
-    assert "cursor" not in _mm_events.ACTIVE_HOST_READERS
     assert "cursor" not in _mm_events.HOST_USAGE_TOKEN_SOURCES
     assert "cursor" not in events_tail.WARMABLE_HOST_READERS
     assert "cursor" not in events_tail._HOST_DISPLAY_NAMES
-    assert set(events_tail._HOST_DISPLAY_NAMES) == set(_mm_events.ACTIVE_HOST_READERS)
+    assert set(events_tail._HOST_DISPLAY_NAMES) == set(_mm_events.HOST_USAGE_TOKEN_SOURCES)
     assert [n for n in dir(_mm_host_usage) if "cursor" in n.lower()] == []
     assert [n for n in dir(errors) if "cursor" in n.lower()] == []
     assert events_tail._default_host_readers(source) == ()
@@ -2626,18 +2622,25 @@ def test_legacy_cursor_consent_selects_no_reader_in_capture_callers(tmp_path, mo
         assert "cursor" not in row.get("empty_sources", [])
 
 
-def test_leaf_diagnostic_scopes_restore_default_after_failure(capsys):
+def test_diagnostic_scope_restores_default_after_failure_and_pins_single_sink(capsys):
     from mind_meld import events_tail, host_usage, token_usage
+
+    assert not hasattr(host_usage, "_DIAGNOSTIC")
+    assert not hasattr(host_usage, "diagnostic_scope")
+    assert not hasattr(events_tail, "_DIAGNOSTIC")
+    assert not hasattr(events_tail, "diagnostic_scope")
 
     notices = []
     with (
         pytest.raises(RuntimeError),
-        events_tail.diagnostic_scope(lambda message, degraded: notices.append((message, degraded))),
+        token_usage.diagnostic_scope(lambda message, degraded: notices.append((message, degraded))),
     ):
         host_usage._notice_cache_write_failure(OSError(5, "private"))
         token_usage._diagnostic("mm: notice: synthetic cache detail\n")
         raise RuntimeError("leave scope")
     assert len(notices) == 2
+    assert notices[0][1] is True
+    assert notices[1][1] is False
     assert capsys.readouterr().err == ""
     host_usage._notice_cache_write_failure(OSError(5, "private"))
     assert "host token cache write failed: EIO" in capsys.readouterr().err
@@ -2649,7 +2652,7 @@ def test_sync78_host_and_token_contention_keep_skip_and_default_policy(tmp_path,
 
     notices = []
     with lockedjson.locked_json_rmw(codex_host.CACHE_PATH):
-        with events_tail.diagnostic_scope(
+        with token_usage.diagnostic_scope(
             lambda message, degraded: notices.append((message, degraded))
         ):
             result = codex_host.read_codex_usage(root=tmp_path / "no-sessions")
@@ -2661,7 +2664,7 @@ def test_sync78_host_and_token_contention_keep_skip_and_default_policy(tmp_path,
     # The returned "locked" result already records the loss; the notice is not counted again.
     assert notices and not any(degraded for _, degraded in notices)
     with lockedjson.locked_json_rmw(token_usage.CACHE_PATH):
-        with events_tail.diagnostic_scope(
+        with token_usage.diagnostic_scope(
             lambda message, degraded: notices.append((message, degraded))
         ):
             with token_usage.lock_and_get_files("warn") as files:
@@ -2677,7 +2680,7 @@ def test_sync78_adapter_readers_keep_locked_skip_under_diagnostic_scope(tmp_path
     # fails_when=either reader leaks stderr, raises, or sets degraded;
     # why_new=the contention test locks only the codex host cache;
     # seam=none; no_claim=what a scan returns after the lock is free
-    from mind_meld import host_usage, lockedjson
+    from mind_meld import host_usage, lockedjson, token_usage
 
     notices = []
 
@@ -2693,7 +2696,7 @@ def test_sync78_adapter_readers_keep_locked_skip_under_diagnostic_scope(tmp_path
     for cache, read in readers:
         notices.clear()
         with lockedjson.locked_json_rmw(cache):
-            with events_tail.diagnostic_scope(sink):
+            with token_usage.diagnostic_scope(sink):
                 scoped = read()
             assert scoped.complete is False and scoped.reason == "locked"
             assert capsys.readouterr().err == ""

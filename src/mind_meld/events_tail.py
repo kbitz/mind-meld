@@ -30,7 +30,6 @@ Each reader stays all-or-nothing internally.
 from __future__ import annotations
 
 import inspect
-import sys
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -65,30 +64,6 @@ CacheLockMode = Literal["warn", "block"] | None
 HostReader = Callable[..., host_usage.HostUsageResult]
 
 
-_DIAGNOSTIC = ContextVar("events_diagnostic", default=None)
-
-
-@contextmanager
-def diagnostic_scope(sink):
-    token = _DIAGNOSTIC.set(sink)
-    try:
-        with token_usage.diagnostic_scope(sink), host_usage.diagnostic_scope(sink):
-            yield
-    finally:
-        _DIAGNOSTIC.reset(token)
-
-
-def _diagnostic(message: str, degraded: bool = False) -> None:
-    sink = _DIAGNOSTIC.get()
-    try:
-        if sink is None:
-            sys.stderr.write(message)
-        else:
-            sink(message, degraded)
-    except (Exception, SystemExit):
-        pass
-
-
 _PROGRESS: ContextVar[Callable[[str, int, int, str], None] | None] = ContextVar(
     "events_progress", default=None
 )
@@ -118,7 +93,7 @@ def _exception_detail(error: Exception) -> str:
     # into a sync invocation's newly scoped diagnostic surface.
     return (
         f"{type(error).__name__}: {safe_str(error)}"
-        if _DIAGNOSTIC.get() is None
+        if token_usage._DIAGNOSTIC.get() is None
         else type(error).__name__
     )
 
@@ -577,10 +552,10 @@ def _decide_token_walk_policy(
     if quiet and transition is None:
         # The tail records the corresponding token-walk omission below; this
         # explanatory notice must not count the same skipped work a second time.
-        _diagnostic("mm: notice: token cache not warm; run 'mm push' to populate\n")
+        token_usage._diagnostic("mm: notice: token cache not warm; run 'mm push' to populate\n")
         return False
     if not quiet:
-        _diagnostic("mm: warming token cache (one-time, ~3s)...\n")
+        token_usage._diagnostic("mm: warming token cache (one-time, ~3s)...\n")
     try:
         warm_kwargs = (
             _accepted_kwargs(token_usage.warm_token_cache_inline, deadline_s=warm_deadline_s)
@@ -589,7 +564,7 @@ def _decide_token_walk_policy(
         )
         token_usage.warm_token_cache_inline(claude_paths, **warm_kwargs)
     except Exception as e:
-        _diagnostic(f"mm: notice: token cache warm failed: {_exception_detail(e)}\n")
+        token_usage._diagnostic(f"mm: notice: token cache warm failed: {_exception_detail(e)}\n")
         return False
     return True
 
@@ -609,7 +584,7 @@ def _default_host_readers(
 
     Module-qualified lookups on purpose (docs/invariants/README.md's
     dead-alias rule in reverse): a from-import would bind this module's own global, so a test
-    patching ``host_usage.read_codex_usage`` would never reach it.
+    patching ``hosts/codex.py`` would never reach it.
     """
     enabled = {s.get("name") for s in sources if isinstance(s.get("name"), str)}
     chosen: list[tuple[str, HostReader]] = []
@@ -703,7 +678,9 @@ def _capture_host_usage(
             # it a `TypeError` regression inside a reader is indistinguishable
             # from a benign transient and can crash-loop on every push while
             # the breadcrumb calmly promises a retry.
-            _diagnostic(f"mm: notice: host reader {name} raised: {_exception_detail(e)}\n")
+            token_usage._diagnostic(
+                f"mm: notice: host reader {name} raised: {_exception_detail(e)}\n"
+            )
             dropped.append((name, _HOST_UNKNOWN_REASON))
             _progress("Capturing host usage", index + 1, total_readers, "readers")
             continue
@@ -844,7 +821,7 @@ def _merge_warm_retry_capture(
 
 def _warm_host_cache_with_notice(reader: str = "codex") -> None:
     """Attended notice only; the capture core contains and publishes the read."""
-    _diagnostic(f"mm: reading {reader} usage (bounded by the capture budget)...\n")
+    token_usage._diagnostic(f"mm: reading {reader} usage (bounded by the capture budget)...\n")
 
 
 @dataclass(frozen=True)
@@ -1657,7 +1634,9 @@ def _capture_git_rows(
     roots, _discovery_errors = root_discovery
     if use_repo_cursors:
         since = events.effective_capture_since(roots, since)
-    walk_kwargs = {} if _DIAGNOSTIC.get() is None else {"diagnostic": _diagnostic}
+    walk_kwargs = (
+        {} if token_usage._DIAGNOSTIC.get() is None else {"diagnostic": token_usage._diagnostic}
+    )
     if _PROGRESS.get() is not None:
         walk_kwargs.update(_accepted_kwargs(events.walk_git_projects, progress=_progress))
     if use_repo_cursors and roots:
@@ -1900,7 +1879,11 @@ def _run_events_tail(
         gathered = identity.gather_local_identities(
             allow_refresh=True,
             root_discovery=capture.root_discovery,
-            **({"diagnostic": _DIAGNOSTIC.get()} if _DIAGNOSTIC.get() is not None else {}),
+            **(
+                {"diagnostic": token_usage._DIAGNOSTIC.get()}
+                if token_usage._DIAGNOSTIC.get() is not None
+                else {}
+            ),
             **_accepted_kwargs(
                 identity.gather_local_identities,
                 inputs_digest=_identity_inputs_digest_for_push(
@@ -1989,19 +1972,19 @@ def _run_events_tail(
 
         if cursor.held:
             degradations.append(_CURSOR_HOLD_DEGRADATION)
-            _diagnostic(f"mm: notice: {_CURSOR_HOLD_DEGRADATION}\n")
+            token_usage._diagnostic(f"mm: notice: {_CURSOR_HOLD_DEGRADATION}\n")
         elif cursor.floored_after_incomplete:
             degradations.append(_CURSOR_COVERAGE_DEGRADATION)
-            _diagnostic(f"mm: notice: {_CURSOR_COVERAGE_DEGRADATION}\n")
+            token_usage._diagnostic(f"mm: notice: {_CURSOR_COVERAGE_DEGRADATION}\n")
         if capture.root_discovery.exceeded:
             degradations.append(_ROOT_DISCOVERY_DEGRADATION)
-            _diagnostic(f"mm: notice: {_ROOT_DISCOVERY_DEGRADATION}\n")
+            token_usage._diagnostic(f"mm: notice: {_ROOT_DISCOVERY_DEGRADATION}\n")
         elif capture.root_discovery.errors:
             degradations.append(_ROOT_DISCOVERY_ERROR_DEGRADATION)
-            _diagnostic(f"mm: notice: {_ROOT_DISCOVERY_ERROR_DEGRADATION}\n")
+            token_usage._diagnostic(f"mm: notice: {_ROOT_DISCOVERY_ERROR_DEGRADATION}\n")
         elif not capture.root_discovery.roots and capture.root_discovery.probers_ran:
             degradations.append(_ROOT_DISCOVERY_EMPTY_DEGRADATION)
-            _diagnostic(f"mm: notice: {_ROOT_DISCOVERY_EMPTY_DEGRADATION}\n")
+            token_usage._diagnostic(f"mm: notice: {_ROOT_DISCOVERY_EMPTY_DEGRADATION}\n")
         pending_left = None
         if not quiet and capture.walk_budget_aborts > 0 and capture.walk_errors == 0:
             pending_since = datetime.fromisoformat(mm_event["ts"]) if cursors_committed else since
@@ -2020,10 +2003,10 @@ def _run_events_tail(
         )
         if walk_phrase is not None:
             degradations.append(walk_phrase)
-            _diagnostic(f"mm: notice: {walk_phrase}\n")
+            token_usage._diagnostic(f"mm: notice: {walk_phrase}\n")
         if capture.session_walk_exceeded_budget:
             degradations.append(f"events walk exceeded its {budget_ms}ms budget")
-            _diagnostic("mm: notice: events tail budget exceeded\n")
+            token_usage._diagnostic("mm: notice: events tail budget exceeded\n")
         if capture.warn_lock_unavailable:
             degradations.append("token cache was locked, so tokens and skills are missing")
         # `claude_paths` gate is load-bearing: `_decide_token_walk_policy`
@@ -2055,7 +2038,7 @@ def _run_events_tail(
                     config=config,
                 )
                 degradations.append(phrase)
-                _diagnostic(f"mm: notice: {phrase}\n")
+                token_usage._diagnostic(f"mm: notice: {phrase}\n")
         elif not capture.host_capture.complete:
             phrase = _capture_skip_phrase(
                 capture.host_capture.reader,
@@ -2065,11 +2048,11 @@ def _run_events_tail(
                 config=config,
             )
             degradations.append(phrase)
-            _diagnostic(f"mm: notice: {phrase}\n")
+            token_usage._diagnostic(f"mm: notice: {phrase}\n")
     except Exception as e:
         _attended_host_elapsed_s = None
         degradations.append(f"events tail failed ({type(e).__name__})")
-        _diagnostic(f"mm: notice: events tail failed: {_exception_detail(e)}\n")
+        token_usage._diagnostic(f"mm: notice: events tail failed: {_exception_detail(e)}\n")
     return degradations
 
 
@@ -2125,7 +2108,7 @@ def _run_events_backfill(
             try:
                 token_usage.warm_token_cache_inline(claude_paths)
             except Exception as e:
-                _diagnostic(
+                token_usage._diagnostic(
                     f"mm: notice: token cache warm at init failed: {_exception_detail(e)}\n"
                 )
             return "block"
@@ -2190,12 +2173,14 @@ def _run_events_backfill(
                 ),
             )
         except Exception as e:
-            _diagnostic(f"mm: notice: identity cache warm at init failed: {_exception_detail(e)}\n")
+            token_usage._diagnostic(
+                f"mm: notice: identity cache warm at init failed: {_exception_detail(e)}\n"
+            )
 
         if capture.session_walk_exceeded_budget:
-            _diagnostic("mm: notice: events backfill budget exceeded\n")
+            token_usage._diagnostic("mm: notice: events backfill budget exceeded\n")
         if capture.root_discovery.exceeded:
-            _diagnostic(
+            token_usage._diagnostic(
                 "mm: notice: git repository discovery hit its time budget: "
                 "initial retro capture may omit repositories. Run mm diag\n"
             )
@@ -2213,7 +2198,7 @@ def _run_events_backfill(
 
         if capture.host_capture.dropped:
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
-                _diagnostic(
+                token_usage._diagnostic(
                     "mm: notice: "
                     + _host_skip_phrase(
                         dropped_reader,
@@ -2226,7 +2211,7 @@ def _run_events_backfill(
                     + "\n"
                 )
         elif not capture.host_capture.complete:
-            _diagnostic(
+            token_usage._diagnostic(
                 "mm: notice: "
                 + _host_skip_phrase(
                     capture.host_capture.reader,
@@ -2241,7 +2226,7 @@ def _run_events_backfill(
                 + "\n"
             )
     except Exception as e:
-        _diagnostic(f"mm: notice: events backfill failed: {_exception_detail(e)}\n")
+        token_usage._diagnostic(f"mm: notice: events backfill failed: {_exception_detail(e)}\n")
 
 
 def _commit_recorded_git_rows(

@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from mind_meld import host_usage
+from mind_meld import host_usage, token_usage
 from mind_meld.lockedjson import (
     LockContended,
     locked_json_rmw,
@@ -438,7 +438,7 @@ def read_grok_usage(
             compact=True,
             default_factory=_empty_cache,
             retry_intervals=(),
-            on_contention="raise" if host_usage._DIAGNOSTIC.get() is not None else "warn",
+            on_contention="raise" if token_usage._DIAGNOSTIC.get() is not None else "warn",
             contention_warning="host token adapter cache was locked; skipping host usage scan",
         ) as locked:
             if not locked.is_locked:
@@ -499,7 +499,7 @@ def read_grok_usage(
         host_usage._notice_cache_write_failure(locked.write_error)
         return result
     except LockContended:
-        host_usage._diagnostic(
+        token_usage._diagnostic(
             "mm: notice: host token adapter cache was locked; skipping host usage scan\n", False
         )
         return host_usage._incomplete("locked")

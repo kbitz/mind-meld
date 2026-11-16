@@ -17,7 +17,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 
-from mind_meld import host_usage
+from mind_meld import host_usage, token_usage
 from mind_meld.lockedjson import LockContended, locked_json_rmw, locked_json_snapshot
 from mind_meld.token_usage import TOKEN_FIELDS, iter_bounded_lines
 
@@ -160,7 +160,7 @@ def read_codex_usage(
             compact=True,
             default_factory=_empty_cache,
             retry_intervals=(),
-            on_contention="raise" if host_usage._DIAGNOSTIC.get() is not None else "warn",
+            on_contention="raise" if token_usage._DIAGNOSTIC.get() is not None else "warn",
             contention_warning="host token cache was locked; skipping host usage scan",
         ) as locked:
             if not locked.is_locked:
@@ -243,7 +243,7 @@ def read_codex_usage(
         host_usage._notice_cache_write_failure(locked.write_error)
         return result
     except LockContended:
-        host_usage._diagnostic(
+        token_usage._diagnostic(
             "mm: notice: host token cache was locked; skipping host usage scan\n", False
         )
         return host_usage._incomplete("locked")
@@ -253,8 +253,11 @@ def read_codex_usage(
         return host_usage._incomplete("io_error")
 
 
-def codex_usage_diag() -> dict[str, Any]:
+def codex_usage_diag(*, count_logs: bool = False) -> dict[str, Any]:
     """On-disk Codex usage-reader state. Does not open the host store.
+
+    ``count_logs`` is accepted for uniform ``reader_usage_diag`` dispatch;
+    Codex rollout counting is not consent-gated today and runs on every call.
 
     Exists because the per-turn migration is otherwise undiagnosable. It forces
     one full re-walk of every rollout (absence of ``states`` is the version

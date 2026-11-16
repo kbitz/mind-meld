@@ -813,7 +813,7 @@ def status(
             name: host_registry.reader_usage_diag(name) for name in publication["readers"]
         }
         for name, state in reader_states.items():
-            if name in {"muse", "agy", "grok"} and state.get("last_reason") == "deadline":
+            if state.get("last_reason") == "deadline" and state.get("files_on_disk") is None:
                 # Only deadline progress uses on-disk counts. Healthy status
                 # stays cache-only instead of walking the host's full history.
                 reader_states[name] = host_registry.reader_usage_diag(name, count_logs=True)

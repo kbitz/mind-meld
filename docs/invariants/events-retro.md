@@ -11,7 +11,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
-- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `configured_author_emails` / `identity_inputs_digest` / `_configured_author_spellings` / `resolve_walk_author_emails` / `is_checkpoint_commit` / `CHECKPOINT_AUTHOR_EMAIL` / `CHECKPOINT_SUBJECT_PREFIX` / `_parse_git_log_numstat` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
+- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `configured_author_emails` / `identity_inputs_digest` / `_configured_author_spellings` / `resolve_walk_author_emails` / `is_checkpoint_commit` / `CHECKPOINT_AUTHOR_EMAIL` / `CHECKPOINT_SUBJECT_PREFIX` / `_parse_git_log_numstat` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_validated_settled_days` / `_validated_settled_memo` / `_validated_settled_entry` / `_slim_entry` / `_unclosed_settled_records` / `_record_memo` / `_reduce_with_settled_memos` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
 - `src/mind_meld/hosts/grok.py` — `read_grok_usage` / `grok_usage_diag` / `GROK_SESSIONS_PATH` / `CACHE_PATH` / `_scan_grok_root` / `_parse_usage`
 - `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
@@ -916,8 +916,7 @@ is not an I/O error (`FileNotFoundError` / `NotADirectoryError` → skip;
 other `OSError` still `io_error`).
 
 **`token_sources` is therefore per-push, not the constant.**
-`events.ACTIVE_HOST_READERS` is the live reader universe;
-`events.HOST_USAGE_TOKEN_SOURCES` is the live writer tuple. Unknown inbound
+`events.HOST_USAGE_TOKEN_SOURCES` is the live reader universe and writer tuple. Unknown inbound
 names are retained by the aggregator. A row carries the subset that
 actually contributed. That is what lets a consumer tell "this host
 reported nothing" from "this host was never consulted". A machine with no host
@@ -4017,7 +4016,7 @@ Antigravity remains in place until its own adapter work. Grok Build's
 adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-reader-track-110a)).
 
 1. **Consent gate and closed default (`events_tail.HOST_READER_SOURCE_GATE`, `_default_host_readers`).**
-   Every live reader in `events.ACTIVE_HOST_READERS` has an entry in
+   Every live reader in `events.HOST_USAGE_TOKEN_SOURCES` has an entry in
    `events_tail.HOST_READER_SOURCE_GATE`. For source-gated
    readers, an absent gating source in resolved sources makes
    `_default_host_readers(sources)` omit the reader. Grok Build is selected only
@@ -4075,8 +4074,8 @@ adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-rea
    `tests/test_muse_usage.py:test_fixture_totals_are_disjoint_and_attribution_is_not_counted`
    (Muse fixture totals), rather than a new row in the adapter contract suite.
 7. **Registry and diagnostic completeness (`host_registry.HOST_READER_DIAGS`, `reader_usage_diag`, `reader_cache_cold`, `warm_host_cache_inline`).**
-   `tuple(HOST_READER_DIAGS)` equals `events.ACTIVE_HOST_READERS` in order;
-   `events_tail.WARMABLE_HOST_READERS` is a subset of `ACTIVE_HOST_READERS`.
+   `tuple(HOST_READER_DIAGS)` equals `events.HOST_USAGE_TOKEN_SOURCES` in order;
+   `events_tail.WARMABLE_HOST_READERS` is a subset of `HOST_USAGE_TOKEN_SOURCES`.
    Each `HostReaderDiag` names its `owner` module, `function`, `ready_key`,
    `ready_value`, and `label`. Every `<reader>_usage_diag()` returns at least
    `cache_state`, `last_reason`, `last_reason_since`, `model_count`, `models`,
@@ -4179,7 +4178,7 @@ retired before v1.11.8; its record shapes, census and the reasons for the source
   session ids or cost. A complete scan replaces and prunes the file map; an incomplete one
   (deadline) merges staged sessions over cached ones, so progress resumes without re-reading.
   Autopush never warms; the attended push warms a Grok `deadline` like the other warmable readers.
-- **Wire slot.** `grok` occupies its pre-v1.11.8 slot: `ACTIVE_HOST_READERS`,
+- **Wire slot.** `grok` occupies its pre-v1.11.8 slot:
   `HOST_USAGE_TOKEN_SOURCES` and `HOST_READER_DIAGS` read `("codex", "grok", "muse",
   "agy")`, because retained rows from mm 1.11.7 and earlier list `grok` before `muse` and
   `aggregator._token_sources_subsequence` rejects a known name out of order. Peers that predate

@@ -77,15 +77,14 @@ import os
 import pwd
 import re
 import stat
-import sys
 import time
 from contextlib import closing, contextmanager, suppress
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Literal, get_args
 
+from mind_meld import token_usage
 from mind_meld.lockedjson import (
     LockContended,
     locked_json_rmw,
@@ -100,31 +99,6 @@ from mind_meld.token_usage import (
     zero_day_bucket,
     zero_model_bucket,
 )
-
-_DIAGNOSTIC = ContextVar("host_usage_diagnostic", default=None)
-
-
-@contextmanager
-def diagnostic_scope(sink):
-    """Invocation-local rendering only; direct callers retain stderr notices."""
-    token = _DIAGNOSTIC.set(sink)
-    try:
-        yield
-    finally:
-        _DIAGNOSTIC.reset(token)
-
-
-def _diagnostic(message: str, degraded: bool = True) -> None:
-    # degraded=False when the caller's returned result already records the loss.
-    sink = _DIAGNOSTIC.get()
-    try:
-        if sink is None:
-            sys.stderr.write(message)
-        else:
-            sink(message, degraded)
-    except (Exception, SystemExit):
-        pass
-
 
 MUSE_SESSIONS_PATH = Path.home() / ".local" / "share" / "muse" / "sessions"
 MUSE_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "muse-host-tokens.json"
@@ -607,7 +581,7 @@ def _carry_reason(
 def _notice_cache_write_failure(error: OSError | None) -> None:
     if error is not None:
         name = errno.errorcode.get(error.errno, "OSError")
-        _diagnostic(f"mm: notice: host token cache write failed: {name}\n")
+        token_usage._diagnostic(f"mm: notice: host token cache write failed: {name}\n", True)
 
 
 def _turn_resumable_entry(
@@ -985,7 +959,7 @@ def read_muse_usage(
             compact=True,
             default_factory=_empty_turn_cache,
             retry_intervals=(),
-            on_contention="raise" if _DIAGNOSTIC.get() is not None else "warn",
+            on_contention="raise" if token_usage._DIAGNOSTIC.get() is not None else "warn",
             contention_warning="host token adapter cache was locked; skipping host usage scan",
         ) as locked:
             if not locked.is_locked:
@@ -1047,7 +1021,7 @@ def read_muse_usage(
         _notice_cache_write_failure(locked.write_error)
         return result
     except LockContended:
-        _diagnostic(
+        token_usage._diagnostic(
             "mm: notice: host token adapter cache was locked; skipping host usage scan\n", False
         )
         return _incomplete("locked")
@@ -2277,7 +2251,7 @@ def read_agy_usage(
             compact=True,
             default_factory=_empty_turn_cache,
             retry_intervals=(),
-            on_contention="raise" if _DIAGNOSTIC.get() is not None else "warn",
+            on_contention="raise" if token_usage._DIAGNOSTIC.get() is not None else "warn",
             contention_warning="host token adapter cache was locked; skipping host usage scan",
         ) as locked:
             if not locked.is_locked:
@@ -2362,7 +2336,7 @@ def read_agy_usage(
         _notice_cache_write_failure(locked.write_error)
         return result
     except LockContended:
-        _diagnostic(
+        token_usage._diagnostic(
             "mm: notice: host token adapter cache was locked; skipping host usage scan\n", False
         )
         return _incomplete("locked")

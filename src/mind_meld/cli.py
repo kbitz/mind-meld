@@ -55,6 +55,7 @@ from mind_meld import (
     statedb,
     statusflow,
     syncdiag,
+    token_usage,
     upgrade,
 )
 from mind_meld import config as _config_module
@@ -1244,7 +1245,7 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     error = None
     try:
         with (
-            events_tail.diagnostic_scope(core._sync_diagnostic),
+            token_usage.diagnostic_scope(core._sync_diagnostic),
             events_tail.progress_scope(
                 lambda phase, completed, total, unit: (
                     core._sync_progress_start_batch(phase, total, unit)
@@ -4682,7 +4683,7 @@ def autopull() -> None:
     config, crypto init failure, unexpected bug inside `_pull_core`.
     """
     with (
-        events_tail.diagnostic_scope(lambda message, degraded=False: None),
+        token_usage.diagnostic_scope(lambda message, degraded=False: None),
         pullhistory.command_scope(attended=False),
     ):
         with _auto_command_scope("pull", typer_exit_outcome="fleet-refused") as setup:
@@ -4800,7 +4801,7 @@ def autopush() -> None:
             diagnostics.append(message.removeprefix("mm: notice: ").strip())
 
     with (
-        events_tail.diagnostic_scope(notice),
+        token_usage.diagnostic_scope(notice),
         pullhistory.command_scope(attended=False),
     ):
         with _auto_command_scope("push", typer_exit_outcome="refused") as setup:
