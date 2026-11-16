@@ -12,7 +12,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/pullflow.py` — `_drop_case_collisions_from_manifests`
 - `src/mind_meld/fsutil.py` — `atomic_write_bytes` / `_fsync_fd` / `fsync_dir` / (see "Atomic write publication failures" below)
 - `src/mind_meld/storage/local.py` — `LocalBackend.put` / `_needs_fsync`
-- `src/mind_meld/lockedjson.py` — `locked_json_durable_rmw` / (see "Atomic write publication failures") / `locked_json_rmw` / `locked_json_snapshot` / (see "Shared JSON locking")
+- `src/mind_meld/lockedjson.py` — `locked_json_rmw` / `locked_json_snapshot` / (see "Shared JSON locking")
 - `src/mind_meld/storage/keys.py` — `manifest_key` / `blob_key` / `data_prefix` / `device_key` / `parse_blob_key` / (see "Validated storage keys")
 - `src/mind_meld/projectid.py` / `src/mind_meld/manifest.py` — `manifest_to_wire` / `manifest_from_wire` (see "Project identity on the wire (Track 90A)")
 - `src/mind_meld/gcflow.py` — `gc` / `_do_gc` / (see "Own-device blob collection (Track 71A)"; also read init-devices.md)
@@ -871,21 +871,21 @@ source trees, which the manifest walker's `*.tmp` exclusion keeps out of sync).
 
 **Point-in-time inventory.** Re-enumerated on 2026-10-04 at HEAD
 `e9e56dbe804dd2a109ebb0dc5c5ddc66cc53f583`: search `src/` with
-`rg -n 'atomic_write_bytes|locked_json_durable_rmw' src`, resolve imports/aliases
+`rg -n 'atomic_write_bytes' src`, resolve imports/aliases
 and every call's omitted/literal/conditional `fsync`, then search `backend.put`,
 `save_config` and `patch_config_on_disk` and follow their consumers, handlers and
 next readers. An ad hoc AST call listing cross-checked the source trace: 19 helper
 calls, six literal True, one conditional, eight False, four omitted (default
-False). The seven durable writer families below (the six True calls plus the
+False). The six durable writer families below (five True calls plus the
 conditional `LocalBackend.put`, which splits by key prefix into the crypto,
-manifest and device rows, so nine rows) cover all currently found durable calls;
-seven is an observed count, not an allowlist or an automated inventory gate.
+manifest and device rows, plus `pullflow.py:_tidy_line_indexes`, so nine rows)
+cover all currently found durable calls; six is an observed count, not an
+allowlist or an automated inventory gate.
 Re-enumerate when changing a writer or wrapper. Verdicts qualify the inspected
 policy, not physical crash survival or every CLI retry.
 
 | Durable writer and consumers | Error policy and next reader | Evidence verdict |
 |---|---|---|
-| `lockedjson.py:locked_json_durable_rmw` (available primitive; no production caller since Track 115A) | The sibling lock spans read and atomic replacement; errors propagate through context exit/finally unlocking, and callers needing coherent read-only views use `locked_json_snapshot`. | **No demonstrated defect:** `tests/test_lockedjson.py:TestDurableJson67A` pins exclusion/coherent snapshots. |
 | `storage/local.py:LocalBackend.put_exclusive` → `crypto.py:bootstrap_crypto_init` (the key header, `mm-crypto-init`) | Its only caller is `initflow._bootstrap_new_fleet`. A write or fsync failure attempts to remove `put_exclusive`'s own temp file and raises; a lost race (`EEXIST`, or a header already present) refuses and names `mm init`; any other failure exits 1 saying no key header was created. `crypto.py:apply_crypto_init_repair` no longer writes: it only unlinks conflict copies byte-identical to canonical. Next `fetch_crypto_init` reads actual canonical/copies and creates a fresh plan. | **No demonstrated defect:** the exclusive create is atomic locally; two fleets minted at once on unsynced machines remain possible and are caught afterwards by the fingerprint refusal, which deletes nothing. See init-devices.md. |
 | Same `LocalBackend.put` → `cli.py:_push_core` (`manifests/`) | Put failure stops before `content_accepted`, sidecar, last_seen and conflict cleanup. `push` catches `OSError` / `MindMeldError`; `_auto_command_scope` records failure for autopush. Push's finally then records any attended capture attempt as `push-failed` via `Attempt.stopped()`, and `_host_publication` judges publication from the unrefreshed sidecar. Next push/pull uses `_fetch_remote_manifest` and `_recover_prior_manifest` on actual storage; a following no-op push returns before `sidecar.write`, so the sidecar can stay one generation behind a visible manifest and later corrupt-manifest recovery would use it as prior state. | **Unknown:** no stale content retry was found, but after a late error that follows visible replacement, `push` says content was not pushed, the attempt record says `push-failed`, and `mm status` reports publication `unknown` for a manifest peers can read. Owner: CLI/sync maintainer; prove pre/post-failure receipt, warning, attempt/status and next-push sidecar behavior with isolated manifest-parent faults before proposing a repair. |
 | Same `LocalBackend.put` → `devices.py:update_last_seen` (`devices/`) | Put errors propagate after the read inside `_devices_write_lock`, which yields without the lock once its retries are exhausted (its warning says the update is skipped; it is not). `_push_core` warns/continues for attended maintenance; unattended errors reach `_auto_command_scope`. Next `update_last_seen` re-GETs; `list_devices` / `list_devices_with_drops` read current registry bytes. Registration itself uses the excluded create-only writer below. | **No demonstrated defect** in publication-failure handling: current last_seen/version fields are recomputed from a fresh read, with no cached-state retry. Under lock contention the read-modify-write can run unlocked. `tests/test_storage_local.py:TestFsyncRouting` pins the conditional prefixes and mode, not every failure handler. |

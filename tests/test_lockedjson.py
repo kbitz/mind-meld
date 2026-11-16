@@ -283,60 +283,10 @@ class TestLockedJsonReturnType:
             assert hasattr(ljson, "is_locked")
 
 
-class TestDurableJson67A:
-    def test_oversized_valid_prefix_cannot_replace_history(self, tmp_path, monkeypatch):
-        path = tmp_path / "history.json"
-        original = b'{"old":1}' + b" " * 20 + b'{"unread":2}'
-        path.write_bytes(original)
-        monkeypatch.setattr(lockedjson, "_MAX_JSON_BYTES", 10)
-        with pytest.raises(lockedjson.InvalidJsonCache):
-            with lockedjson.locked_json_durable_rmw(path):
-                pytest.fail("partial parse must not yield writable history")
-        assert path.read_bytes() == original
-
-    def test_write_cannot_exceed_next_reads_limit(self, tmp_path, monkeypatch):
-        path = tmp_path / "history.json"
-        path.write_bytes(b'{"old":1}')
-        monkeypatch.setattr(lockedjson, "_MAX_JSON_BYTES", 10)
-        with pytest.raises(lockedjson.InvalidJsonCache):
-            with lockedjson.locked_json_durable_rmw(path) as locked:
-                locked.data["extra"] = "too large"
-        assert path.read_bytes() == b'{"old":1}'
-
-    def test_atomic_replacement_keeps_exclusion_and_coherent_snapshots(self, tmp_path):
-        path = tmp_path / "history.json"
-        with lockedjson.locked_json_durable_rmw(path) as locked:
-            locked.data["count"] = 1
-        old_inode = path.stat().st_ino
-        with lockedjson.locked_json_durable_rmw(path) as locked:
-            locked.data["count"] = 2
-            with pytest.raises(LockContended):
-                with lockedjson.locked_json_durable_rmw(path):
-                    pytest.fail("concurrent writer acquired the sibling lock")
-            with locked_json_snapshot(path) as snap:
-                assert snap.data == {"count": 1}
-        assert path.stat().st_ino != old_inode
-        with lockedjson.locked_json_durable_rmw(path) as locked:
-            assert locked.data == {"count": 2}
-            locked.data["count"] += 1
-        assert json.loads(path.read_text()) == {"count": 3}
-
-    def test_exception_preserves_authoritative_bytes(self, tmp_path):
-        path = tmp_path / "history.json"
-        path.write_text('{"count":1}')
-        before = path.read_bytes()
-        with pytest.raises(RuntimeError):
-            with lockedjson.locked_json_durable_rmw(path) as locked:
-                locked.data["count"] = 2
-                raise RuntimeError("interrupted")
-        assert path.read_bytes() == before
-
-
 class TestRealStateWriteGuard:
-    @pytest.mark.parametrize("protocol", ["ordinary", "durable"])
     @pytest.mark.parametrize("exists", [False, True])
     def test_rmw_refuses_before_parent_open_mode_or_context_entry(
-        self, protocol, exists, writer_state_root, forbid_fs_mutations
+        self, exists, writer_state_root, forbid_fs_mutations
     ):
         path = writer_state_root / "parent" / "state.json"
         if exists:
@@ -344,10 +294,9 @@ class TestRealStateWriteGuard:
             path.write_bytes(b'{"keep":1}')
             path.chmod(0o640)
         before = path.stat() if exists else None
-        helper = locked_json_rmw if protocol == "ordinary" else lockedjson.locked_json_durable_rmw
         calls = forbid_fs_mutations()
         with pytest.raises(fsutil.PytestRealStateWriteError):
-            with helper(path) as locked:
+            with locked_json_rmw(path) as locked:
                 locked.write_on_exit = False
                 pytest.fail("a would-be read-only RMW must refuse before entering its context")
         assert calls == []
@@ -357,43 +306,17 @@ class TestRealStateWriteGuard:
             assert not path.exists() and not path.parent.exists()
         assert not path.with_name(path.name + ".lock").exists()
 
-    @pytest.mark.parametrize("protocol", ["ordinary", "durable"])
     def test_rmw_dot_dot_out_of_missing_root_refuses_before_mkdir(
-        self, protocol, synthetic_state_root, forbid_fs_mutations
+        self, synthetic_state_root, forbid_fs_mutations
     ):
         """Recursive mkdir creates `<root>/missing` although `..` normalizes it away."""
         synthetic_state_root.parent.mkdir(parents=True, exist_ok=True)
         path = synthetic_state_root / "missing" / ".." / ".." / "escape" / "state.json"
-        helper = locked_json_rmw if protocol == "ordinary" else lockedjson.locked_json_durable_rmw
         calls = forbid_fs_mutations()
         with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
-            with helper(path):
+            with locked_json_rmw(path):
                 pytest.fail("traversal out of a protected root must refuse before mkdir")
         assert "protected account-state path under" in str(caught.value)
         assert caught.value.__cause__ is None
         assert calls == [] and not synthetic_state_root.exists()
         assert not (synthetic_state_root.parent / "escape").exists()
-
-    def test_durable_rmw_checks_dangling_sibling_lock_alias(
-        self, synthetic_state_root, tmp_path, forbid_fs_mutations
-    ):
-        path = tmp_path / "allowed" / "history.json"
-        path.parent.mkdir(mode=0o750)
-        target = synthetic_state_root / "missing" / "lock-target"
-        lock = path.with_name(path.name + ".lock")
-        lock.symlink_to(target)
-
-        # Linux relatime may bump a symlink's atime when the guard follows it.
-        def identity(info):
-            return (info.st_dev, info.st_ino, info.st_mode, info.st_mtime_ns, info.st_ctime_ns)
-
-        before = (identity(path.parent.stat()), identity(lock.lstat()))
-        calls = forbid_fs_mutations()
-        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
-            with lockedjson.locked_json_durable_rmw(path):
-                pytest.fail("the sibling lock alias must refuse before context entry")
-        assert str(lock) in str(caught.value) and caught.value.__cause__ is None
-        assert "protected account-state path or alias under" in str(caught.value)
-        assert calls == [] and (identity(path.parent.stat()), identity(lock.lstat())) == before
-        assert not path.exists() and not target.exists() and not target.parent.exists()
-        assert lock.is_symlink() and lock.readlink() == target

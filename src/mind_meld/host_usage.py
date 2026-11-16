@@ -86,9 +86,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Literal, get_args
 
-from mind_meld.errors import StorageError
 from mind_meld.lockedjson import (
-    InvalidJsonCache,
     LockContended,
     locked_json_rmw,
     locked_json_snapshot,
@@ -1653,24 +1651,6 @@ def _muse_recorded_day(value: Any) -> str:
     return when.date().isoformat()
 
 
-def _utc_day(value: Any) -> str:
-    if isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise _ReadFailure("unsupported") from exc
-        if parsed.tzinfo is None:
-            raise _ReadFailure("unsupported")
-        return parsed.astimezone(timezone.utc).date().isoformat()
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
-        raise _ReadFailure("unsupported")
-    seconds = value / 1000 if value >= 100_000_000_000 else value
-    try:
-        return datetime.fromtimestamp(seconds, tz=timezone.utc).date().isoformat()
-    except (OverflowError, OSError, ValueError) as exc:
-        raise _ReadFailure("unsupported") from exc
-
-
 # --- Antigravity reader -----------------------------------------------------
 # Google Antigravity (agy) session logs are SQLite databases stored under
 # ``~/.gemini/antigravity-cli/conversations/<cid>.db``. Model metadata is
@@ -2304,7 +2284,8 @@ def read_agy_usage(
                 return _incomplete("locked")
             prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
             prior_detail = _agy_reason_detail(locked.data)
-            prior_error_count = locked.data.get("error_db_count", 0)
+            raw_error_count = locked.data.get("error_db_count", 0)
+            prior_error_count = raw_error_count if _is_nonnegative_int(raw_error_count) else None
             current_format = (
                 locked.data.get("version") == CACHE_VERSION
                 and locked.data.get("agy_format") == _AGY_CACHE_FORMAT
@@ -2341,10 +2322,6 @@ def read_agy_usage(
                 now,
                 over_budget=over_budget,
             )
-            files = staged_files if result.complete else {**cached_files, **staged_files}
-            complete_once = (locked.data.get("complete_once") is True) or result.complete
-            total_skipped = sum(entry.get("usage_less_skipped", 0) for entry in files.values())
-
             if result.complete:
                 final_detail = None
                 final_error_count = 0
@@ -2355,7 +2332,17 @@ def read_agy_usage(
                 final_error_count = error_db_count
             else:
                 final_detail = prior_detail
-                final_error_count = prior_error_count
+                final_error_count = prior_error_count or 0
+            learned = (
+                not current_format
+                or any(cached_files.get(name) != entry for name, entry in staged_files.items())
+                or (final_detail, final_error_count) != (prior_detail, prior_error_count)
+            )
+            if _skip_failed_cache_write(learned, result, prior, carried, locked.data, timing):
+                raise _NoCacheCommit(result)
+            files = staged_files if result.complete else {**cached_files, **staged_files}
+            complete_once = (locked.data.get("complete_once") is True) or result.complete
+            total_skipped = sum(entry.get("usage_less_skipped", 0) for entry in files.values())
 
             locked.data = {
                 "version": CACHE_VERSION,
@@ -2379,7 +2366,9 @@ def read_agy_usage(
             "mm: notice: host token adapter cache was locked; skipping host usage scan\n", False
         )
         return _incomplete("locked")
-    except (OSError, StorageError, InvalidJsonCache):
+    except _NoCacheCommit as aborted:
+        return aborted.result
+    except OSError:
         return _incomplete("io_error")
 
 

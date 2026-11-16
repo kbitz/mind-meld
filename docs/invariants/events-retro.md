@@ -4052,9 +4052,11 @@ adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-rea
    `_incomplete("locked")` without mutating the cache. For Codex, Grok, Muse and
    Antigravity, a cache write `OSError`
    is routed through `_notice_cache_write_failure` (notice + diagnostic capture)
-   and preserves the scan's in-memory `HostUsageResult`. Codex, Grok and Muse's unchanged
-   failed sweeps do not rewrite the cache when neither the standing `(last_reason, last_reason_since)`
-   pair, the deadline allotment, nor any learned file entry changed.
+   and preserves the scan's in-memory `HostUsageResult`. Codex, Grok, Muse and Antigravity's
+   unchanged failed sweeps do not rewrite the cache when neither the standing
+   `(last_reason, last_reason_since)` pair, the deadline allotment, nor any learned file entry
+   changed (for Antigravity, `learned` also covers a changed validated `last_error_detail` or
+   `error_db_count`).
    See [durable-writer error policies](sync.md#atomic-write-publication-failures).
 5. **GC pause restoration (`_pause_gc`).**
    Full reader passes run inside `with host_usage._pause_gc():`, disabling
@@ -4169,7 +4171,10 @@ retired before v1.11.8; its record shapes, census and the reasons for the source
   without inspecting the Grok sessions directory.
 - **Cache.** `~/.config/mind-meld/grok-host-tokens.json` at 0600, compact, through
   `locked_json_rmw`, with `grok_format` 2: a cache written by the retired reader lacks it and is
-  discarded on the first write. Keys are `host_usage._cache_key` digests of the session
+  discarded on the first write. A turn reader persists a `census_host_version` pin only when cache
+  reuse gates on it (Antigravity); other readers invalidate through their format marker and persist
+  no census field (`GROK_USAGE_CENSUS_HOST_VERSION`, like `MUSE_USAGE_CENSUS_HOST_VERSION`, is a
+  contract pin only). Keys are `host_usage._cache_key` digests of the session
   directory; entries hold identity, turn keys, day, model and disjoint counters, never paths,
   session ids or cost. A complete scan replaces and prunes the file map; an incomplete one
   (deadline) merges staged sessions over cached ones, so progress resumes without re-reading.
