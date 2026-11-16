@@ -869,18 +869,19 @@ it. `retention.py:_sweep_local_tmp_files` covers only this device's storage
 crypto-init, config, caches, markers, the skill store, or pull/resolve temps in
 source trees, which the manifest walker's `*.tmp` exclusion keeps out of sync).
 
-**Point-in-time inventory.** Re-enumerated on 2026-10-04 at HEAD
-`e9e56dbe804dd2a109ebb0dc5c5ddc66cc53f583`: search `src/` with
+**Point-in-time inventory.** Re-enumerated on 2026-11-16 at HEAD
+`a47ce60a4bb6c84b14e1da05e683feb9ea6bfaf4`: search `src/` with
 `rg -n 'atomic_write_bytes' src`, resolve imports/aliases
 and every call's omitted/literal/conditional `fsync`, then search `backend.put`,
 `save_config` and `patch_config_on_disk` and follow their consumers, handlers and
-next readers. An ad hoc AST call listing cross-checked the source trace: 19 helper
-calls, six literal True, one conditional, eight False, four omitted (default
-False). The six durable writer families below (five True calls plus the
-conditional `LocalBackend.put`, which splits by key prefix into the crypto,
-manifest and device rows, plus `pullflow.py:_tidy_line_indexes`, so nine rows)
-cover all currently found durable calls; six is an observed count, not an
-allowlist or an automated inventory gate.
+next readers. An ad hoc AST call listing cross-checked the source trace: 21 helper
+calls, six literal True, one conditional, eight False, six omitted (default
+False). The six literal-True calls include `pullflow.py:_tidy_line_indexes`.
+Those six families plus conditional `LocalBackend.put` cover the durable
+atomic-write calls. The table has nine rows: the six literal-True families,
+the manifest and device consumers of `LocalBackend.put`, and the separate
+create-only `LocalBackend.put_exclusive` protocol used for the crypto header.
+These are observed counts, not an allowlist or an automated inventory gate.
 Re-enumerate when changing a writer or wrapper. Verdicts qualify the inspected
 policy, not physical crash survival or every CLI retry.
 

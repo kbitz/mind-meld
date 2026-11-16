@@ -1041,6 +1041,35 @@ def test_failed_pass_with_changed_error_detail_writes_cache_once(
     assert hu.agy_usage_diag()["last_error_detail"] == {"cause": "hot_journal"}
 
 
+@pytest.mark.parametrize("prior_count", [0, 2, None, -1, True, "invalid"])
+def test_failed_pass_with_changed_error_count_writes_once_then_skips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prior_count: object
+):
+    root = tmp_path / "conversations"
+    _create_agy_db(root / "z.db", {1318: "gemini-3.8-flash"}, [])
+    (root / "z.db-journal").write_bytes(b"hot journal")
+    first = hu.read_agy_usage(root, consented=True)
+    assert not first.complete and first.reason == "stale"
+    cached = json.loads(hu.AGY_CACHE_PATH.read_text(encoding="utf-8"))
+    assert cached["last_error_detail"] == {"cause": "hot_journal"}
+    cached["error_db_count"] = prior_count
+    hu.AGY_CACHE_PATH.write_text(json.dumps(cached), encoding="utf-8")
+
+    writer = Mock(wraps=lockedjson._write_json)
+    monkeypatch.setattr(lockedjson, "_write_json", writer)
+    second = hu.read_agy_usage(root, consented=True)
+    assert not second.complete and second.reason == "stale"
+    writer.assert_called_once()
+    repaired = hu.AGY_CACHE_PATH.read_bytes()
+    assert json.loads(repaired)["error_db_count"] == 1
+    assert hu.agy_usage_diag()["error_db_count"] == 1
+
+    third = hu.read_agy_usage(root, consented=True)
+    assert not third.complete and third.reason == "stale"
+    writer.assert_called_once()
+    assert hu.AGY_CACHE_PATH.read_bytes() == repaired
+
+
 @pytest.mark.parametrize(
     ("cause", "code", "expected"),
     [
