@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.55] - 2026-11-15
+
+Antigravity skips unchanged failed-read cache rewrites while keeping changed diagnostics current.
+
+### Changed
+
+- Antigravity skips unchanged failed-read cache rewrites while keeping changed diagnostics current.
+
 ## [1.12.54] - 2026-11-15
 
 Migration, `mm gc`, init and source-toggle warnings now use the shared `mm: warning:` and `mm: error:` forms with the fix command last, `mm gc` and attended pushes send malformed-blob summaries to stderr with `Run: mm gc -v`, and source enable and disable outcomes state the action once.
