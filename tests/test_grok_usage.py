@@ -589,6 +589,7 @@ def test_pre_v1_11_8_cache_at_the_path_is_discarded(tmp_path):
     assert _read(root).complete
     data = _cache()
     assert data["grok_format"] == grok_host._GROK_CACHE_FORMAT
+    assert "census_host_version" not in data
     assert "old" not in data["files"] and data["last_reason"] is None
 
 
@@ -618,6 +619,7 @@ def test_retired_cache_metadata_is_discarded_even_when_first_scan_hits_deadline(
     assert _read(root).reason == "deadline"
     data = _cache()
     assert data["grok_format"] == grok_host._GROK_CACHE_FORMAT
+    assert "census_host_version" not in data
     assert data["files"] == {} and not data["complete_once"]
     after = grok_host.grok_usage_diag()
     assert after["last_reason"] == "deadline" and after["last_complete_ms"] is None

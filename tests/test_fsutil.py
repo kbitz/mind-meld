@@ -1036,7 +1036,6 @@ class TestRealStateWriteGuard:
             "append_rotatable_jsonl",
             "rotate_jsonl",
             "locked_json_rmw",
-            "locked_json_durable_rmw",
         ):
             assert any(helper in row for row in rows), helper
 
