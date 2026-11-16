@@ -29,7 +29,7 @@ import typer
 from rich.table import Table
 
 from mind_meld import config as _config_module
-from mind_meld import core, seen_sources
+from mind_meld import core, outputstyle, seen_sources
 from mind_meld.config import (
     DEFAULT_SOURCES,
     get_default_source,
@@ -172,13 +172,10 @@ def disable_source(name: str, *, force: bool = False) -> None:
     sync = dict(config.get("sync", {}) or {})
     disabled = list(sync.get("disabled_sources", []) or [])
     if name in disabled:
-        console.print(
-            core._outcome_line(
+        core._print_outcome(
+            outputstyle._outcome_line(
                 "disable", f"source '{safe_terminal_str(name)}' is already disabled"
-            ),
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
+            )
         )
         return
 
@@ -187,16 +184,13 @@ def disable_source(name: str, *, force: bool = False) -> None:
     patch_config_on_disk(updates)
     _record_seen([name])
 
-    console.print(
-        core._outcome_line(
+    core._print_outcome(
+        outputstyle._outcome_line(
             "disable", f"source '{safe_terminal_str(name)}' disabled on this device"
-        ),
-        markup=False,
-        highlight=False,
-        soft_wrap=True,
+        )
     )
     console.print(
-        core._fix_line(f"mm enable-source {safe_terminal_str(name)}"),
+        outputstyle._fix_line(f"mm enable-source {safe_terminal_str(name)}"),
         markup=False,
         highlight=False,
         soft_wrap=True,
@@ -265,13 +259,10 @@ def enable_source(name: str, *, force: bool = False) -> None:
     if not updates:
         # Already enabled and configured — no-op message.
         if name in explicit_names or (not has_explicit_sources and name in default_names):
-            console.print(
-                core._outcome_line(
+            core._print_outcome(
+                outputstyle._outcome_line(
                     "enable", f"source '{safe_terminal_str(name)}' is already enabled"
-                ),
-                markup=False,
-                highlight=False,
-                soft_wrap=True,
+                )
             )
             if name == "grok":
                 _print_grok_enable_notes()
@@ -282,16 +273,15 @@ def enable_source(name: str, *, force: bool = False) -> None:
         patch_config_on_disk(config_updates)
 
     _record_seen([name])
-    console.print(
-        core._outcome_line("enable", f"source '{safe_terminal_str(name)}' enabled on this device"),
-        markup=False,
-        highlight=False,
-        soft_wrap=True,
+    core._print_outcome(
+        outputstyle._outcome_line(
+            "enable", f"source '{safe_terminal_str(name)}' enabled on this device"
+        )
     )
     if name == "grok":
         _print_grok_enable_notes()
         console.print(
-            core._fix_line("mm disable-source grok"),
+            outputstyle._fix_line("mm disable-source grok"),
             markup=False,
             highlight=False,
             soft_wrap=True,
@@ -306,7 +296,7 @@ def enable_source(name: str, *, force: bool = False) -> None:
             "Session files are not synced. Prompts never leave the Mac.[/dim]"
         )
         console.print(
-            core._fix_line("mm disable-source muse"),
+            outputstyle._fix_line("mm disable-source muse"),
             markup=False,
             highlight=False,
             soft_wrap=True,
@@ -321,7 +311,7 @@ def enable_source(name: str, *, force: bool = False) -> None:
             "session databases. Prompts never leave this device.[/dim]"
         )
         console.print(
-            core._fix_line("mm disable-source agy"),
+            outputstyle._fix_line("mm disable-source agy"),
             markup=False,
             highlight=False,
             soft_wrap=True,
@@ -356,11 +346,8 @@ def reconfigure_sources() -> None:
             ordered.append(s)
 
     if not ordered:
-        console.print(
-            core._outcome_line("reconfigure", "no sources configured to reconfigure"),
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
+        core._print_outcome(
+            outputstyle._outcome_line("reconfigure", "no sources configured to reconfigure")
         )
         return
 
@@ -432,9 +419,4 @@ def reconfigure_sources() -> None:
     # "new" hints next run.
     _record_seen([item["name"] for item in ordered])
 
-    console.print(
-        core._outcome_line("reconfigure", "source configuration updated"),
-        markup=False,
-        highlight=False,
-        soft_wrap=True,
-    )
+    core._print_outcome(outputstyle._outcome_line("reconfigure", "source configuration updated"))

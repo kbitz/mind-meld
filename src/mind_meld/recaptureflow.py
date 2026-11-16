@@ -11,7 +11,7 @@ from typing import Any
 import typer
 
 from mind_meld import config as _config_module
-from mind_meld import core, events, events_tail, pullhistory, statedb, upgrade
+from mind_meld import core, events, events_tail, outputstyle, pullhistory, statedb, upgrade
 from mind_meld.config import MM_INTERNAL_SOURCE_NAMES, resolve_sources
 from mind_meld.consoles import console, stderr_console
 from mind_meld.errors import GIT_WALK_FAILURES_URL, LockError, MindMeldError, SnapshotError
@@ -302,7 +302,7 @@ def recapture(
                 # above). The inner push prints its own detail only with -v, so
                 # the count keeps the shared outcome line, printed with the
                 # final outcome lines in both modes; -v adds the paths.
-                held_outcome = core._outcome_line(
+                held_outcome = outputstyle._outcome_line(
                     "push", core._count(len(result.held), "file held", "files held")
                 )
 
@@ -315,7 +315,7 @@ def recapture(
             n_scanned_ok = n_roots - skipped
             if partial:
                 if held_outcome is not None:
-                    console.print(held_outcome, soft_wrap=True, markup=False, highlight=False)
+                    core._print_outcome(held_outcome)
                 narrower = "7d" if days > 7 else "1d"
                 # Cause lines (each with its own remedy) stay on stdout; the
                 # headline and the single final fix are one stderr error.
@@ -365,7 +365,7 @@ def recapture(
                     console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
                     console.print("  Commit records:   0 captured")
                 repo_count = core._count(n_roots, "repository", "repositories")
-                final_outcome = core._outcome_line(
+                final_outcome = outputstyle._outcome_line(
                     "recapture",
                     f"0 commit records found across {repo_count} ({since_day} → {until_day})",
                 )
@@ -380,7 +380,7 @@ def recapture(
                         "(mm diag, then [retro] repo_roots)."
                     )
                 rec_count = core._count(len(records), "commit record", "commit records")
-                final_outcome = core._outcome_line(
+                final_outcome = outputstyle._outcome_line(
                     "recapture",
                     f"0 new commit records ({rec_count} already recorded "
                     f"for {since_day} → {until_day})",
@@ -427,7 +427,7 @@ def recapture(
                         f"{new_count} captured and published "
                         f"({len(records)} total across {repo_count}, {since_day} → {until_day})"
                     )
-                final_outcome = core._outcome_line("recapture", summary)
+                final_outcome = outputstyle._outcome_line("recapture", summary)
                 should_nudge = True
         except MindMeldError as e:
             if dry_run:
@@ -439,6 +439,6 @@ def recapture(
     if should_nudge:
         upgrade.emit_nudge_if_due(config)
     if held_outcome is not None:
-        console.print(held_outcome, soft_wrap=True, markup=False, highlight=False)
+        core._print_outcome(held_outcome)
     if final_outcome is not None:
-        console.print(final_outcome, soft_wrap=True, markup=False, highlight=False)
+        core._print_outcome(final_outcome)

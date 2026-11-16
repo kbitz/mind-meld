@@ -40,6 +40,7 @@ from mind_meld import (
     core,
     events_tail,
     fsutil,
+    outputstyle,
     skill_link,
     syncthing,
     upgrade,
@@ -1121,39 +1122,30 @@ def init(new_fleet: bool = False) -> str | None:
     if new_fleet:
         if setup.record is not None:
             local_id = safe_terminal_str(setup.local_id or setup.record.device_id)
-            console.print(
-                core._outcome_line(
+            core._print_outcome(
+                outputstyle._outcome_line(
                     "init",
                     "Mind Meld initialized. This machine's Syncthing device ID is "
                     f"{local_id}. Run 'mm push' here, then run 'mm init' on each "
                     "other machine and paste this ID when it asks",
-                ),
-                markup=False,
-                highlight=False,
-                soft_wrap=True,
+                )
             )
         else:
-            console.print(
-                core._outcome_line(
+            core._print_outcome(
+                outputstyle._outcome_line(
                     "init",
                     f"Mind Meld initialized. Share {safe_terminal_str(full_path)} as the "
                     "root of a Syncthing folder, run 'mm init' on the other machines, "
                     "and run 'mm push'",
-                ),
-                markup=False,
-                highlight=False,
-                soft_wrap=True,
+                )
             )
         return None
-    console.print(
-        core._outcome_line(
+    core._print_outcome(
+        outputstyle._outcome_line(
             "init",
             "Mind Meld initialized. Pulling now; if the folder is still syncing, "
             "run 'mm pull' again when delivery finishes",
-        ),
-        markup=False,
-        highlight=False,
-        soft_wrap=True,
+        )
     )
     return passphrase
 

@@ -40,7 +40,7 @@ from typing import Any, Literal
 
 import typer
 
-from mind_meld import core, fsutil, manifest, pullplan, sidecar
+from mind_meld import core, fsutil, manifest, outputstyle, pullplan, sidecar
 from mind_meld.config import get_sources
 from mind_meld.conflictdiff import (
     count_divergent_lines,
@@ -619,23 +619,6 @@ def _links_through(path: Path, target: Path) -> bool | None:
     return None if want is None else False
 
 
-def _print_outcome(text: str) -> None:
-    """Print a resolve outcome line to stdout, ignoring OSError.
-
-    A stdout failure after a committed disk mutation is not a resolve failure.
-    Looks up module-global ``console`` at call time so test rebindings apply.
-    """
-    try:
-        console.print(
-            core._outcome_line("resolve", text),
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
-        )
-    except OSError:
-        return
-
-
 def _resolve_interactive_loop(
     hits: list[tuple[str, Path, Path | None]],
     devices: list[dict[str, Any]] | None = None,
@@ -747,9 +730,12 @@ def _resolve_interactive_loop(
                         failed += 1
                     else:
                         resolved += 1
-                        _print_outcome(
-                            f"promoted {safe_terminal_str(cpath.name)} -> "
-                            f"{safe_terminal_str(target_canonical.name)}"
+                        core._print_outcome(
+                            outputstyle._outcome_line(
+                                "resolve",
+                                f"promoted {safe_terminal_str(cpath.name)} -> "
+                                f"{safe_terminal_str(target_canonical.name)}",
+                            )
                         )
             elif choice in ("d", "delete"):
                 try:
@@ -762,7 +748,11 @@ def _resolve_interactive_loop(
                     failed += 1
                 else:
                     resolved += 1
-                    _print_outcome(f"deleted {safe_terminal_str(cpath.name)}")
+                    core._print_outcome(
+                        outputstyle._outcome_line(
+                            "resolve", f"deleted {safe_terminal_str(cpath.name)}"
+                        )
+                    )
             # else: skip (default)
             continue
 
@@ -1207,7 +1197,7 @@ def _resolve_interactive_loop(
                 choice,
             )
         if outcome is not None:
-            _print_outcome(outcome)
+            core._print_outcome(outputstyle._outcome_line("resolve", outcome))
         if promoted_target is not None:
             # Warn if the promoted file landed outside the source's sync
             # surface (an include_files source matches only exact configured
@@ -1225,7 +1215,9 @@ def _resolve_interactive_loop(
             fix="mm resolve",
         )
     else:
-        _print_outcome(f"resolved {resolved} of {len(hits)}")
+        core._print_outcome(
+            outputstyle._outcome_line("resolve", f"resolved {resolved} of {len(hits)}")
+        )
     return resolved, failed
 
 

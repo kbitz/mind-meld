@@ -24,6 +24,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from mind_meld import (
     __version__,
+    consoles,
     crypto,
     fsutil,
     manifest,
@@ -153,16 +154,29 @@ class ManifestFetch:
         return self.status == "ok"
 
 
-def _error_line(message: str) -> str:
-    return outputstyle._error_line(message)
+def _print_outcome(line: str) -> None:
+    """Print a shared outcome line to stdout, ignoring OSError.
 
-
-def _fix_line(command: str) -> str:
-    return outputstyle._fix_line(command)
-
-
-def _outcome_line(verb: str, text: str) -> str:
-    return outputstyle._outcome_line(verb, text)
+    A stdout failure after a committed mutation is not a command failure.
+    Looks up module-global ``console`` at call time so test rebindings apply,
+    falling back to a caller module's rebound ``console`` when ``core.console``
+    is still the shared singleton; lets ``SystemExit`` propagate so Rich's
+    closed-pipe exit still ends walks.
+    """
+    target = console
+    if target is consoles.console:
+        caller_console = sys._getframe(1).f_globals.get("console")
+        if caller_console is not None:
+            target = caller_console
+    try:
+        target.print(
+            line,
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+    except OSError:
+        return
 
 
 def _stderr_lines(lines: Iterable[str]) -> None:
@@ -183,14 +197,10 @@ def _notice(message: str, *, fix: str | None = None) -> None:
 
 def _print_error(message: str, *, fix: str | None = None) -> None:
     raw_lines = message.split("\n")
-    lines = [_error_line(raw_lines[0]), *raw_lines[1:]]
+    lines = [outputstyle._error_line(raw_lines[0]), *raw_lines[1:]]
     if fix is not None:
-        lines.append(_fix_line(fix))
+        lines.append(outputstyle._fix_line(fix))
     _stderr_lines(lines)
-
-
-def _fix_for(message: str, fallback: str | None = None) -> tuple[str, str | None]:
-    return outputstyle._fix_for(message, fallback)
 
 
 def _error(msg: str, *, fix: str | None = None) -> None:
@@ -233,7 +243,7 @@ def _get_config(*, read_only: bool) -> dict:
     try:
         config = load_config()
     except MindMeldError as e:
-        problem, fix = _fix_for(str(e), None)
+        problem, fix = outputstyle._fix_for(str(e), None)
         _error(problem, fix=fix)
         raise  # unreachable, but keeps type checker happy
     # Seam 1 — transition detection. Idempotent within a process; safe to
