@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.54] - 2026-11-15
+
+Migration, `mm gc`, init and source-toggle warnings now use the shared `mm: warning:` and `mm: error:` forms with the fix command last, `mm gc` and attended pushes send malformed-blob summaries to stderr with `Run: mm gc -v`, and source enable and disable outcomes state the action once.
+
+### Changed
+
+- Migration, `mm gc`, init and source-toggle warnings now use the shared `mm: warning:` and `mm: error:` forms with the fix command last.
+- Migration, backfill, init cleanup and forced-source warnings use the shared `mm: warning:` form.
+- `mm gc` and attended pushes send malformed-blob summaries to stderr with `Run: mm gc -v`.
+- `mm gc` refusals print the next fix command last.
+- Source enable and disable outcomes state the action once.
+
+### Upgrade notes
+
+- Scripts that match the old warning wording or read `mm gc`'s malformed-blob summary from stdout must be updated because that summary now goes to stderr.
+
 ## [1.12.53] - 2026-11-15
 
 `mm gc --conflicts` stops warning about conflict copies it keeps on purpose and always prints its `Gc:` line, an unmatched `mm resolve` path ends with `Run: mm conflicts`, `mm conflicts` ends with `Run: mm resolve`, and `mm resolve` names a safe repair when it cannot read a same-file conflict copy.
