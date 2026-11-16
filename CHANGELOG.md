@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.58] - 2026-11-16
+
+`mm` keeps a command's result when stdout fails after the work is done, and long `mm update` outcomes wrap with the terminal.
+
+### Changed
+
+- Long `mm update` outcomes use the terminal's natural wrapping.
+
+### Fixed
+
+- If stdout fails after a command has done its work (for example a closed pipe), `mm` now keeps the command's result instead of reporting the print failure as the outcome.
+- Outcome printing tolerates `OSError` after work completes.
+
 ## [1.12.57] - 2026-11-16
 
 `mm status` can retry a failed Codex log count once when reporting catch-up progress.

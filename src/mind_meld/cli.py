@@ -1046,7 +1046,7 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
             parts.append(core._count(len(result.held), "file held", "files held"))
         if result.left_out_clause:
             parts.append(result.left_out_clause.rstrip("."))
-        return [core._outcome_line(verb, part) for part in parts]
+        return [outputstyle._outcome_line(verb, part) for part in parts]
     assert isinstance(result, pullflow.PullResult)
     deleted = pullflow.deleted_clause(result)
     lead = (
@@ -1072,7 +1072,7 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
         parts.append(clause)
     if clause := pullflow.old_form_clause(result):
         parts.append(clause)
-    return [core._outcome_line(verb, part) for part in parts]
+    return [outputstyle._outcome_line(verb, part) for part in parts]
 
 
 def _compact_sync_trace(exc: BaseException) -> str:
@@ -1147,7 +1147,7 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> list[s
         # Keep the curated text intact (it may name an alternative remedy such
         # as mm disable-source); only drop a trailing step that repeats Run:.
         fallback = state.get("fix") or ("mm push" if cause == "snapshot-refused" else "mm diag")
-        reason, selected = core._fix_for(message.split(" See https:")[0].strip(), fallback)
+        reason, selected = outputstyle._fix_for(message.split(" See https:")[0].strip(), fallback)
         assert selected is not None
         command = selected
     elif isinstance(error, MindMeldError) and str(error):
@@ -1198,8 +1198,8 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> list[s
     # One logical line; bound peer/config text without treating display as identity.
     reason = safety.safe_terminal_str(reason)[:384].rstrip(". ")
     return [
-        core._error_line(f"{verb.title()} {kind} [{cause}]: {reason}; {effects}."),
-        core._fix_line(command),
+        outputstyle._error_line(f"{verb.title()} {kind} [{cause}]: {reason}; {effects}."),
+        outputstyle._fix_line(command),
     ]
 
 
@@ -3604,12 +3604,10 @@ def _update_refusal(install: upgrade.InstallInfo) -> tuple[str, str | None] | No
 
 
 def _print_update_current(install: upgrade.InstallInfo) -> None:
-    console.print(
-        core._outcome_line(
+    core._print_outcome(
+        outputstyle._outcome_line(
             "update", safety.safe_terminal_str(f"mm {install.version} is up to date")
-        ),
-        markup=False,
-        highlight=False,
+        )
     )
     if install.kind == "pinned":
         console.print(
@@ -3750,34 +3748,26 @@ def update() -> None:
                 "Retry in a minute.",
                 fix=upgrade.INSTALL_CMD,
             )
-        console.print(
-            core._outcome_line(
+        core._print_outcome(
+            outputstyle._outcome_line(
                 "update",
                 safety.safe_terminal_str(
                     f"mm {outcome.old} is already the latest release pipx can see"
                 ),
-            ),
-            markup=False,
-            highlight=False,
+            )
         )
         return
     if outcome.new != outcome.old:
         detail = f"mm {outcome.old} → {outcome.new}"
         if outcome.now_tracking:
             detail += "; this install now tracks the release branch"
-        console.print(
-            core._outcome_line("update", safety.safe_terminal_str(detail)),
-            markup=False,
-            highlight=False,
-        )
+        core._print_outcome(outputstyle._outcome_line("update", safety.safe_terminal_str(detail)))
     elif outcome.now_tracking:
-        console.print(
-            core._outcome_line(
+        core._print_outcome(
+            outputstyle._outcome_line(
                 "update",
                 safety.safe_terminal_str(f"mm {outcome.old} now tracks the release branch"),
-            ),
-            markup=False,
-            highlight=False,
+            )
         )
 
 
@@ -3999,12 +3989,7 @@ def conflicts() -> None:
     config = core._get_config(read_only=True)
     hits = resolveflow._find_conflict_files(config)
     if not hits:
-        console.print(
-            core._outcome_line("conflicts", "no conflict files"),
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
-        )
+        core._print_outcome(outputstyle._outcome_line("conflicts", "no conflict files"))
         return
 
     table = Table(title=f"Conflict files ({len(hits)})")
@@ -4046,7 +4031,9 @@ def conflicts() -> None:
             "pre-v0.9.2 conflict files are listed; mm resolve renames them to the "
             "current naming before resolving."
         )
-    console.print(core._fix_line("mm resolve"), markup=False, highlight=False, soft_wrap=True)
+    console.print(
+        outputstyle._fix_line("mm resolve"), markup=False, highlight=False, soft_wrap=True
+    )
 
 
 # ── recover ───────────────────────────────────────────────────────────
@@ -4293,12 +4280,7 @@ def resolve(
                 core._error(f"No conflict file matching: {path}", fix="mm conflicts")
 
         if not hits:
-            console.print(
-                core._outcome_line("resolve", "no conflict files"),
-                markup=False,
-                highlight=False,
-                soft_wrap=True,
-            )
+            core._print_outcome(outputstyle._outcome_line("resolve", "no conflict files"))
             return
         # Cache the device list ONCE -- N-conflict walks would otherwise hit
         # storage N times to attribute the REMOTE side, and iCloud cold-cache

@@ -44,6 +44,30 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+
+### [review:files=tests/test_module_boundaries.py|src/mind_meld/core.py] Test gap: Shared printer ownership guard
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** The historical `CORE_DEFINITIONS` extraction inventory intentionally excludes the new `_print_outcome` helper, as Track 140A specifies. Current tests do not separately reject a future duplicate printer definition or an unqualified import of that helper.
+- **Hypothesis (untested):** Add a focused shared-printer ownership guard without treating the historical extraction inventory as exhaustive. Re-verify the current architecture contract first.
+- **Upstream severity:** P2.
+- **Found in:** tests/test_module_boundaries.py:1572.
+- **Evidence:** Greptile's single review on PR #337; the source census shows all 28 current callers are qualified and no duplicate printer exists. No runtime failure reproduced.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/337 at `050041a` (2026-11-16).
+- **Effort:** ? (user triages in /roadmap)
+- **Revisit:** Next Track touching the named files.
+
+
+### [review:files=tests/test_output_style.py|src/mind_meld/devicesflow.py|src/mind_meld/recaptureflow.py] Test gap: Shared outcome printer guard shapes
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** The output-style AST census rejects a direct `_outcome_line(...)` call passed to `console.print`, but not the concatenated approval outcome or the prebuilt recapture outcome variables. Current callers all use the shared printer.
+- **Hypothesis (untested):** Extend the routing guard to reject concatenated approval lines and direct prints of the recapture outcome variables. Re-verify the current shapes first.
+- **Upstream severity:** P3.
+- **Found in:** tests/test_output_style.py:72.
+- **Evidence:** Track 140A outside review and coverage audit; no runtime failure reproduced. Existing printer and command-output tests pass.
+- **Context:** Filed by /review-and-prep on branch `mmm/f217399b` at `1f7aaff` (2026-11-16), before draft PR creation.
+- **Effort:** ? (user triages in /roadmap)
+- **Revisit:** Next Track touching the named files.
+
 ### [review:files=src/mind_meld/hosts/grok.py|tests/test_grok_usage.py] Test gap: Grok lock contention with a scoped diagnostic sink
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
 - **Description:** The real generic flock test includes Grok and protects locked/cache semantics, but no existing test installs a sink and asserts its single non-degraded notice/no stderr for Grok.

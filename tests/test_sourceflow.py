@@ -16,7 +16,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from mind_meld import config, seen_sources, sourceflow
+from mind_meld import config, core, seen_sources, sourceflow
 
 app = typer.Typer()
 app.command("sources")(sourceflow.sources)
@@ -359,6 +359,7 @@ def test_sourceflow_outcomes_emit_no_ansi_and_preserve_brackets_under_forced_ter
         "console",
         Console(file=buf, force_terminal=True, color_system="standard", width=240),
     )
+    monkeypatch.setattr(core, "console", sourceflow.console)
     sourceflow.disable_source(name="custom[tag]", force=True)
     sourceflow.enable_source(name="custom[tag]", force=True)
 

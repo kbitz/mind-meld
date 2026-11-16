@@ -44,6 +44,7 @@ from mind_meld import (
     core,
     fsutil,
     manifest,
+    outputstyle,
     projectid,
     pullhistory,
     pullplan,
@@ -2432,14 +2433,11 @@ def _run_deletions(
                 result.touched_parents.add(d.local_path.parent)
                 touched_parents.add(d.local_path.parent)
                 if verbose and not quiet:
-                    console.print(
-                        core._outcome_line(
+                    core._print_outcome(
+                        outputstyle._outcome_line(
                             "pull",
                             f"deleted {safety.safe_terminal_str(d.rel_path)} (a peer deleted it)",
-                        ),
-                        markup=False,
-                        highlight=False,
-                        soft_wrap=True,
+                        )
                     )
             else:
                 if outcome == "restored":

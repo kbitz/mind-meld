@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mind_meld import core, retention, safety
+from mind_meld import core, outputstyle, retention, safety
 from mind_meld.consoles import console
 from mind_meld.consoles import stderr_console as stderr_console
 from mind_meld.errors import LockError, MindMeldError
@@ -112,12 +112,7 @@ def gc(
                 detail = (
                     f"{core._count(blob_res.deleted, 'orphaned blob', 'orphaned blobs')} deleted"
                 )
-            console.print(
-                core._outcome_line("gc", detail),
-                soft_wrap=True,
-                markup=False,
-                highlight=False,
-            )
+            core._print_outcome(outputstyle._outcome_line("gc", detail))
             if incomplete:
                 core._warning(
                     "Retention cleanup was incomplete. Fix permissions or locks; "

@@ -53,9 +53,9 @@ Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (o
 
 For non-preview push/pull, the outer `_sync_outcome` owns the final plain-text
 outcome lines (Track 129B): on success, `_sync_success` returns `list[str]` with
-one `core._outcome_line(verb, part)` (`<Verb>: <part>.`) on stdout per thing
+one `outputstyle._outcome_line(verb, part)` (`<Verb>: <part>.`) on stdout per thing
 that happened; on failed/incomplete/interrupted/refused, `_sync_failure` returns
-two lines on stderr (`core._error_line(...)` followed by `core._fix_line(...)`,
+two lines on stderr (`outputstyle._error_line(...)` followed by `outputstyle._fix_line(...)`,
 i.e., `mm: error: <Verb> <state> [<cause>]: ...` and `Run: <command>` on its own
 last line). Default and verbose share its grammar.
 Flush stdout and stderr before that write, then flush its stream. Delivery to
@@ -108,7 +108,7 @@ or applied effects remain visible. Unknown effects direct read-only diagnosis
 before retry; no blind retry advice or repair guarantee is added.
 
 `_sync_failure` delegates remedy selection and trailing-repeat stripping to
-`core._fix_for(msg, fallback=command)`. It keeps curated refusal text intact,
+`outputstyle._fix_for(msg, fallback=command)`. It keeps curated refusal text intact,
 including any alternative remedy it names (such as `mm disable-source <name>`),
 and drops only a trailing `then run/retry <cmd>` or `. Run/— run <cmd> first` step that repeats the selected `Run:`
 command: `mm update` (newer/unsupported format), `mm migrate-config`, `mm init`,

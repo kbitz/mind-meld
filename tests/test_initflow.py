@@ -1805,6 +1805,7 @@ def test_init_skill_link_notice_and_forced_terminal_outcome(env, monkeypatch):
         "console",
         Console(file=out_buf, force_terminal=True, color_system="standard", width=240),
     )
+    monkeypatch.setattr(core, "console", initflow.console)
 
     result, _text = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
 

@@ -28,6 +28,7 @@ from mind_meld import (
     host_registry,
     initflow,
     manifest,
+    outputstyle,
     projectid,
     resolveflow,
     safety,
@@ -666,7 +667,7 @@ def status(
                 backend, passphrase, config, read_only=True, pending=pending
             )
         except MindMeldError as e:
-            report["failure"] = core._error_line(safety.safe_terminal_str(str(e)))
+            report["failure"] = outputstyle._error_line(safety.safe_terminal_str(str(e)))
             raise typer.Exit(1) from e
         for note in pending:
             console.print(safe_str(note))
@@ -1341,7 +1342,7 @@ def status(
         elif names_ready:
             console.print(
                 "\n  [yellow]Project memory ready to publish under shared names.[/yellow] "
-                f"{core._fix_line('mm push')}"
+                f"{outputstyle._fix_line('mm push')}"
             )
         elif metadata_pending:
             # Symmetric with _push_core's mtime-only republish gate (v0.12.6).
@@ -1352,7 +1353,7 @@ def status(
             # surface metadata-pending hints from sources Y, Z.
             console.print(
                 "\n  [yellow]Metadata-only changes pending (updated mtimes).[/yellow] "
-                f"{core._fix_line('mm push')}"
+                f"{outputstyle._fix_line('mm push')}"
             )
         elif not source and not names_held:
             console.print("\n  Local content matches this device's last push.")

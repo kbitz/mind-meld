@@ -25,35 +25,23 @@ SRC_DIR = Path(core.__file__).resolve().parent
 
 
 def test_output_style_helpers_pin_exact_forms(capsys):
-    assert outputstyle._error_line("x") == core._error_line("x") == "mm: error: x"
-    assert outputstyle._fix_line("mm diag") == core._fix_line("mm diag") == "Run: mm diag"
+    assert outputstyle._error_line("x") == "mm: error: x"
+    assert outputstyle._fix_line("mm diag") == "Run: mm diag"
     assert outputstyle._warning_line("x") == "mm: warning: x"
     assert outputstyle._warning_line("x", fix="mm diag") == "mm: warning: x Run: mm diag"
     assert outputstyle._notice_line("x") == "mm: notice: x"
     assert outputstyle._notice_line("x", fix="mm update") == "mm: notice: x Run: mm update"
-    assert (
-        outputstyle._outcome_line("push", "no content changes")
-        == core._outcome_line("push", "no content changes")
-        == "Push: no content changes."
-    )
-    assert (
-        outputstyle._outcome_line("pull", "no changes")
-        == core._outcome_line("pull", "no changes")
-        == "Pull: no changes."
-    )
+    assert outputstyle._outcome_line("push", "no content changes") == "Push: no content changes."
+    assert outputstyle._outcome_line("pull", "no changes") == "Pull: no changes."
     assert (
         outputstyle._outcome_line("gc", "0 orphaned blobs deleted")
-        == core._outcome_line("gc", "0 orphaned blobs deleted")
         == "Gc: 0 orphaned blobs deleted."
     )
     assert (
         outputstyle._outcome_line("recapture", "0 commit records found")
-        == core._outcome_line("recapture", "0 commit records found")
         == "Recapture: 0 commit records found."
     )
-    assert outputstyle._fix_for("No config — run 'mm init'") == core._fix_for(
-        "No config — run 'mm init'"
-    )
+    assert outputstyle._fix_for("No config — run 'mm init'") == ("No config", "mm init")
 
     core._print_error("x", fix="mm init")
     captured = capsys.readouterr()
@@ -81,6 +69,124 @@ def test_output_style_helpers_pin_exact_forms(capsys):
     assert captured.err == "mm: notice: x Run: mm update\n"
 
 
+def test_core_defines_no_outputstyle_builder_passthroughs_and_src_calls_outputstyle():
+    deleted_names = ("_error_line", "_fix_line", "_outcome_line", "_fix_for")
+    for name in deleted_names:
+        assert not hasattr(core, name), f"core still defines {name}"
+
+    for py_path in sorted(SRC_DIR.rglob("*.py")):
+        rel = py_path.relative_to(SRC_DIR)
+        tree = ast.parse(py_path.read_text(), filename=str(rel))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "core"
+                and node.attr in deleted_names
+            ):
+                raise AssertionError(f"{rel}:{node.lineno} still references core.{node.attr}")
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "print"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "console"
+                and node.args
+                and isinstance(node.args[0], ast.Call)
+                and isinstance(node.args[0].func, ast.Attribute)
+                and node.args[0].func.attr == "_outcome_line"
+            ):
+                raise AssertionError(
+                    f"{rel}:{node.lineno} calls console.print(..._outcome_line(...)) directly"
+                )
+
+
+@pytest.mark.parametrize("exc", [BrokenPipeError("broken pipe"), OSError("stdout failed")])
+def test_print_outcome_swallows_oserror_and_propagates_system_exit(monkeypatch, exc):
+    class _StubConsole:
+        def __init__(self, to_raise: BaseException) -> None:
+            self.to_raise = to_raise
+            self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def print(self, *args: object, **kwargs: object) -> None:
+            self.calls.append((args, kwargs))
+            raise self.to_raise
+
+    stub = _StubConsole(exc)
+    monkeypatch.setattr(core, "console", stub)
+
+    assert core._print_outcome(outputstyle._outcome_line("gc", "0 orphaned blobs deleted")) is None
+    assert stub.calls == [
+        (
+            ("Gc: 0 orphaned blobs deleted.",),
+            {"markup": False, "highlight": False, "soft_wrap": True},
+        )
+    ]
+
+    exit_stub = _StubConsole(SystemExit(1))
+    monkeypatch.setattr(core, "console", exit_stub)
+    with pytest.raises(SystemExit) as excinfo:
+        core._print_outcome(outputstyle._outcome_line("resolve", "resolved 1 of 1"))
+    assert excinfo.value.code == 1
+
+
+def test_print_outcome_keeps_its_owner_console_through_a_wrapper(monkeypatch):
+    # Value: protects=the printer owns its output destination; fails_when=caller
+    # globals redirect output; why_new=existing pins rebind core; seam=none.
+    owned_lines = []
+    other_output = io.StringIO()
+    monkeypatch.setattr(core.console, "print", lambda line, **kwargs: owned_lines.append(line))
+    monkeypatch.setitem(globals(), "console", Console(file=other_output))
+
+    def wrapped(line):
+        core._print_outcome(line)
+
+    core._print_outcome("Resolve: direct.")
+    wrapped("Resolve: wrapped.")
+
+    assert owned_lines == ["Resolve: direct.", "Resolve: wrapped."]
+    assert other_output.getvalue() == ""
+
+
+def test_migrated_outcome_site_keeps_result_when_print_raises_oserror(monkeypatch):
+    class _BrokenConsole:
+        def print(self, *args: object, **kwargs: object) -> None:
+            raise OSError("closed stdout")
+
+    monkeypatch.setattr(core, "console", _BrokenConsole())
+    install = cli_module.upgrade.InstallInfo(
+        kind="tracking",
+        version="1.2.3",
+        spec=cli_module.upgrade.INSTALL_SPEC,
+        venv_name="mind-meld",
+    )
+
+    assert cli_module._print_update_current(install) is None
+
+
+@pytest.mark.parametrize("fail_mode", ["write", "flush"])
+def test_warning_and_notice_swallow_stderr_stream_failures(monkeypatch, capsys, fail_mode):
+    class _BrokenStream:
+        def write(self, _s: str) -> int:
+            if fail_mode == "write":
+                raise OSError("stderr write failed")
+            return len(_s)
+
+        def flush(self) -> None:
+            if fail_mode == "flush":
+                raise OSError("stderr flush failed")
+
+    class _FakeStderrConsole:
+        file = _BrokenStream()
+
+    monkeypatch.setattr(core, "stderr_console", _FakeStderrConsole())
+
+    assert core._warning("x") is None
+    assert core._notice("x") is None
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
 def test_print_error_writes_plain_text_even_when_stderr_forces_terminal(monkeypatch):
     buf = io.StringIO()
     forced_tty = Console(file=buf, force_terminal=True, color_system="truecolor")
@@ -98,22 +204,25 @@ def test_fix_for_extracts_remedy_and_preserves_unmatched_text():
     missing = (
         "init: config not found at /Users/user/.config/mind-meld/config.toml — run 'mm init' first."
     )
-    assert core._fix_for(missing, None) == (
+    assert outputstyle._fix_for(missing, None) == (
         "init: config not found at /Users/user/.config/mind-meld/config.toml",
         "mm init",
     )
-    assert core._fix_for("Not initialized. Run mm init first", None) == (
+    assert outputstyle._fix_for("Not initialized. Run mm init first", None) == (
         "Not initialized",
         "mm init",
     )
-    assert core._fix_for(
+    assert outputstyle._fix_for(
         "Config is missing recommended excludes, then run mm migrate-config.", None
     ) == (
         "Config is missing recommended excludes",
         "mm migrate-config",
     )
-    assert core._fix_for("Unrelated failure.", "mm diag") == ("Unrelated failure.", "mm diag")
-    assert core._fix_for("Unrelated failure.", None) == ("Unrelated failure.", None)
+    assert outputstyle._fix_for("Unrelated failure.", "mm diag") == (
+        "Unrelated failure.",
+        "mm diag",
+    )
+    assert outputstyle._fix_for("Unrelated failure.", None) == ("Unrelated failure.", None)
 
 
 @pytest.mark.parametrize(

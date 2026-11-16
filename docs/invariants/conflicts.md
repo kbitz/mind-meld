@@ -5,8 +5,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/pullflow.py` — `_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `conflict_filename`
 - `src/mind_meld/pullflow.py` — `_apply_fast_forward` / `_ledger_verdict` / `_classify_with_ledger` / `_ApplyReporter` / `_tidy_line_indexes` (see "The pull rule" below)
 - `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner`
-- `src/mind_meld/core.py` — `_filter_excluded_paths`
-- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_record_resolution` / `_print_outcome` / `_links_through` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
+- `src/mind_meld/core.py` — `_filter_excluded_paths` / `_print_outcome`
+- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_record_resolution` / `_links_through` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
 - `src/mind_meld/manifest.py` — `_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename` / `grok_memory_path_allowed` / `grok_path_allowed` / `grok_memory_scan_dirs`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `render_capped_diff` / `count_divergent_lines`
@@ -165,7 +165,7 @@ merged write; the stat reads that fall back to 0.0 and the merge's warn-only
 removal of the copy sit in their own `try`s and never count a failure. Once it
 succeeds the choice is counted and, for `(l)ocal`, `(r)emote` and `(m)erge`,
 settled through `_record_resolution`, and only then is its outcome line printed.
-Outcome and summary lines go through `_print_outcome`, which ignores `OSError`, so
+Outcome and summary lines go through `core._print_outcome`, which ignores `OSError`, so
 a stdout failure after a committed change is never reported as a failed rename or
 delete and never skips the settlement. Rich's closed-pipe `SystemExit(1)` still
 ends the walk, after counting and settlement. A settlement notice therefore

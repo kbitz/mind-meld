@@ -873,6 +873,7 @@ def test_approve_outcome_lines_emit_no_ansi_under_forced_terminal(
         "console",
         Console(file=buf, force_terminal=True, color_system="standard", width=240),
     )
+    monkeypatch.setattr(core, "console", devicesflow.console)
 
     devicesflow.approve(joining_id)
     devicesflow.approve(joining_id)
