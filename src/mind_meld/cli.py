@@ -3990,16 +3990,12 @@ def conflicts() -> None:
             remote_display = safe_str(cpath)
         table.add_row(src_name, mode, local_display, remote_display, conflict_age, peer_age)
     console.print(table)
-    console.print(
-        "\nRun [bold]mm resolve[/bold] to keep local, remote, or both "
-        "interactively, or delete files manually with [bold]rm[/bold]."
-    )
     if pre_inversion_seen:
-        console.print(
-            "\n[dim]Pre-v0.9.2 conflict files are listed in the table — "
-            "run [bold]mm resolve[/bold] to migrate them to the new "
-            "filename convention before resolving.[/dim]"
+        core._notice(
+            "pre-v0.9.2 conflict files are listed; mm resolve renames them to the "
+            "current naming before resolving."
         )
+    console.print(core._fix_line("mm resolve"), markup=False, highlight=False, soft_wrap=True)
 
 
 # ── recover ───────────────────────────────────────────────────────────
@@ -4243,7 +4239,7 @@ def resolve(
             target = Path(path).expanduser().resolve()
             hits = [h for h in hits if h[1] == target]
             if not hits:
-                core._error(f"No conflict file matching: {path}")
+                core._error(f"No conflict file matching: {path}", fix="mm conflicts")
 
         if not hits:
             console.print(

@@ -568,39 +568,55 @@ def _record_resolution(
         notice(core.ledger_cause(error) or "unreadable")
 
 
-def _links_through(path: Path, target: Path) -> bool:
+def _links_through(path: Path, target: Path) -> bool | None:
     """Whether ``path``'s own symlink chain reaches ``target``'s inode.
 
-    For two names of one file. A regular ``target`` with a single link is the
-    file's only name, so ``path`` reaches it exactly when ``path`` is a symlink,
-    checked without walking; True if that check fails, since the two are one file.
-    Otherwise follows ``path`` one link at a time (each hop joined onto its link's
-    real directory) and compares each hop's ``os.lstat`` identity with
-    ``target``'s, never ``path`` itself: a name that only resolves to the same
-    file does not count, a hard link of ``target`` in the chain does. Picks the
-    repair for a same-file pair (when the original's chain runs through the copy,
-    deleting the copy would usually leave it dangling). An unreadable or overlong
-    hop ends the walk with False, so the repair it picks deletes only a copy that
-    is a link or has another name.
+    For two names of one file. An unreadable ``target`` compares the names in
+    ``path``'s symlink chain with ``target``'s own name, without following it.
+    A symlink original alone does not justify moving the copy over it: the copy
+    might link back to the original, making that move create a self-loop.
+    If that unreadable-copy walk cannot establish a match, return None rather
+    than recommend deleting a possible case/Unicode alias of the copy. A regular
+    original still returns False, since deleting its other name is safe.
+    A regular ``target`` with a single link is the file's only name, so ``path``
+    reaches it exactly when ``path`` is a symlink, checked without walking; True
+    if that check fails, since the two are one file. Otherwise follows ``path``
+    one link at a time (each hop joined onto its link's real directory) and
+    compares each hop's ``os.lstat`` identity with ``target``'s, never ``path``
+    itself: a name that only resolves to the same file does not count, a hard
+    link of ``target`` in the chain does. Picks the repair for a same-file pair
+    (when the original's chain runs through the copy, deleting the copy would
+    usually leave it dangling). With a readable target, an unreadable or
+    overlong hop keeps the existing False fallback.
     """
     try:
         want = os.lstat(target)
-        if stat.S_ISREG(want.st_mode) and want.st_nlink == 1:
+    except OSError:
+        want = None
+    try:
+        if want is None and not stat.S_ISLNK(os.lstat(path).st_mode):
+            return False
+        if want is not None and stat.S_ISREG(want.st_mode) and want.st_nlink == 1:
             try:
                 return stat.S_ISLNK(os.lstat(path).st_mode)
             except OSError:
                 return True
+        target_entry = Path(os.path.realpath(target.parent)) / target.name if want is None else None
         step = path
         for _ in range(40):  # the kernel's own symlink-follow limit
-            if not step.is_symlink():
-                return False
+            if not stat.S_ISLNK(os.lstat(step).st_mode):
+                return None if want is None else False
             step = Path(os.path.realpath(step.parent)) / os.readlink(step)
-            st = os.lstat(step)
-            if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
-                return True
+            if want is None:
+                if Path(os.path.realpath(step.parent)) / step.name == target_entry:
+                    return True
+            else:
+                st = os.lstat(step)
+                if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
+                    return True
     except OSError:
-        return False
-    return False
+        return None if want is None else False
+    return None if want is None else False
 
 
 def _print_outcome(text: str) -> None:
@@ -762,7 +778,10 @@ def _resolve_interactive_loop(
             same_file = False
         if same_file:
             copy_name = safe_terminal_str(cpath.name)
-            if _links_through(canonical, cpath):
+            links_through = _links_through(canonical, cpath)
+            if links_through is None:
+                repair = f"inspect both {copy_name} and {safe_terminal_str(canonical.name)}"
+            elif links_through:
                 # The original's chain reaches the copy's inode, so the copy takes
                 # its place; deleting the copy would usually leave it dangling.
                 repair = f"move {copy_name} over {safe_terminal_str(canonical.name)}"

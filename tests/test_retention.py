@@ -520,11 +520,13 @@ class TestMmGcAndRecoveryCopies:
         assert result.exit_code == 0, result.output
         assert (old / "notes" / "doc.md").exists()
         assert "could not delete" in result.output
-        assert (
+        assert result.stdout.strip().splitlines()[-1] == (
+            "Gc: blob collection skipped (own manifest missing)."
+        )
+        assert result.stderr.strip().splitlines()[-1] == (
             "mm: warning: Retention cleanup was incomplete. Fix permissions or locks; "
             "use -v for paths and details. Run: mm gc -v"
-        ) in result.output
-        assert "Gc:" not in result.output
+        )
 
 
 def _folder_now(suffix: str) -> Path:

@@ -78,11 +78,13 @@ class ReapOutcome:
     deleted: int = 0
     failed: int = 0
     skipped: int = 0
+    kept: int = 0
     repairs: int = 0
     repair_failed: int = 0
 
     @property
     def needs_remediation(self) -> bool:
+        # kept counts items left in place on purpose and is never remediation.
         return bool(self.failed or self.skipped or self.repair_failed)
 
 
@@ -99,7 +101,7 @@ def _render_reap_outcome(
     if dry_run:
         console.print(
             f"[bold]{label}[/bold] dry-run: candidates={outcome.candidates} "
-            f"repairs={outcome.repairs} skipped={outcome.skipped}{note}"
+            f"repairs={outcome.repairs} skipped={outcome.skipped} kept={outcome.kept}{note}"
         )
         return
 
@@ -107,7 +109,7 @@ def _render_reap_outcome(
         console.print(
             f"[bold]{label}[/bold]: candidates={outcome.candidates} "
             f"deleted={outcome.deleted} failed={outcome.failed} "
-            f"skipped={outcome.skipped} repairs={outcome.repairs} "
+            f"skipped={outcome.skipped} kept={outcome.kept} repairs={outcome.repairs} "
             f"repair-failed={outcome.repair_failed}"
         )
     if emit_remediation and outcome.needs_remediation:
@@ -481,11 +483,11 @@ def _gc_old_conflict_files(
     candidates = 0
     deleted = 0
     failed = 0
-    skipped = 0
+    kept = 0
     for _src_name, cpath, canonical in hits:
         created = parse_conflict_created_at(cpath.name)
         if created is None:
-            skipped += 1
+            kept += 1
             if verbose:
                 console.print(
                     f"  [yellow]conflict age unreadable, not reaping:[/yellow] {safe_str(cpath)}"
@@ -495,14 +497,14 @@ def _gc_old_conflict_files(
             # v0- sidecar holds the user's local bytes and may be the
             # only remaining copy. Canonical-missing is the promote-later
             # case, not an orphan.
-            skipped += 1
+            kept += 1
             if verbose:
                 console.print(f"  [dim]pre-inversion sidecar, not reaping:[/dim] {safe_str(cpath)}")
             continue
         if created >= cutoff:
             continue
         if _is_live_conflict(cpath, canonical):
-            skipped += 1
+            kept += 1
             if verbose:
                 console.print(f"  [dim]live conflict, not reaping:[/dim] {safe_str(cpath)}")
             continue
@@ -519,7 +521,7 @@ def _gc_old_conflict_files(
             continue
         deleted += 1
         console.print(f"  [dim]deleted (age {age_days}d):[/dim] {safe_str(cpath)}")
-    outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
+    outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, kept=kept)
     _render_reap_outcome(
         "Conflicts",
         outcome,

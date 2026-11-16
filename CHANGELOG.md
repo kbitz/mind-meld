@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.53] - 2026-11-15
+
+`mm gc --conflicts` stops warning about conflict copies it keeps on purpose and always prints its `Gc:` line, an unmatched `mm resolve` path ends with `Run: mm conflicts`, `mm conflicts` ends with `Run: mm resolve`, and `mm resolve` names a safe repair when it cannot read a same-file conflict copy.
+
+### Changed
+
+- `mm gc --conflicts` stops warning about conflict copies it keeps on purpose and always prints its `Gc:` line, an unmatched `mm resolve` path ends with `Run: mm conflicts`, `mm conflicts` ends with `Run: mm resolve`, and `mm resolve` names a safe repair when it cannot read a same-file conflict copy.
+- Retention summaries use `kept=` for deliberate keeps, which no longer trigger cleanup warnings.
+- `mm gc` prints its outcome before retention warnings, with fix commands matching the invocation.
+- `mm conflicts` uses a shared legacy notice and ends with `Run: mm resolve`.
+- Unmatched `mm resolve PATH` errors end with `Run: mm conflicts`.
+- `mm resolve` advises inspecting both names when repair guidance for an unreadable same-file conflict copy is uncertain.
+
+### Upgrade notes
+
+- After this release, scripts that match the exact text of `mm gc`, `mm conflicts` or an unmatched `mm resolve` will see the new lines, while exit codes stay the same.
+
 ## [1.12.52] - 2026-11-15
 
 `mm pull` and `mm autopull` now print one `mm: warning:` line with the cause for every file they cannot apply, including unreadable, undecryptable or mismatched peer data, and a file you edit while `mm pull --conflict-mode prompt` waits for your answer is kept, with the peer's version saved beside it as a conflict copy.

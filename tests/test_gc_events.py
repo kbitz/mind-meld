@@ -395,6 +395,76 @@ class TestGcDryRunRetentionReport:
         assert verbose.stdout.strip().splitlines()[-1] == "Gc: 0 orphaned blobs deleted."
 
 
+class TestGcConflictReaperOutput:
+    def _setup_pushed_store(self, tmp_path, monkeypatch):
+        storage_dir = tmp_path / "storage"
+        events_root = tmp_path / "events_root"
+        events_dir = events_root / "events"
+        events_dir.mkdir(parents=True)
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+
+        config_path = tmp_path / "config.toml"
+        cfg = _config_with_events(tmp_path, events_root)
+        cfg["storage"] = {"path": str(storage_dir)}
+        save_config(cfg, config_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        _make_events_file(events_dir, "dev-a", datetime.now(timezone.utc))
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        return events_dir
+
+    def test_gc_conflicts_keeps_old_live_conflict_without_warning_and_prints_outcome(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        events_dir = self._setup_pushed_store(tmp_path, monkeypatch)
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).strftime("%Y%m%d-%H%M%S")
+        canonical = events_dir / "notes.jsonl"
+        canonical.write_bytes(b'{"local": 1}\n')
+        sidecar = events_dir / f"notes.sync-conflict-{old_ts}-v1-peer0001.jsonl"
+        sidecar.write_bytes(b'{"remote": 2}\n')
+
+        result = runner.invoke(app, ["gc", "--conflicts"])
+
+        assert result.exit_code == 0, result.output
+        assert "Retention cleanup was incomplete" not in result.output
+        assert "Fix permissions or locks" not in result.output
+        assert result.stderr == ""
+        assert result.stdout.strip().splitlines()[-1] == "Gc: 0 orphaned blobs deleted."
+        assert sidecar.exists()
+
+    def test_gc_conflicts_real_reap_failure_warns_last_with_conflicts_fix(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        events_dir = self._setup_pushed_store(tmp_path, monkeypatch)
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).strftime("%Y%m%d-%H%M%S")
+        canonical = events_dir / "notes.jsonl"
+        canonical.write_bytes(b'{"converged": 1}\n')
+        sidecar = events_dir / f"notes.sync-conflict-{old_ts}-v1-peer0001.jsonl"
+        sidecar.write_bytes(b'{"converged": 1}\n')
+
+        real_unlink = Path.unlink
+
+        def fail_sidecar(self: Path, missing_ok: bool = False) -> None:
+            if self == sidecar:
+                raise PermissionError("Permission denied")
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", fail_sidecar)
+
+        result = runner.invoke(app, ["gc", "--conflicts"])
+
+        assert result.exit_code == 0, result.output
+        assert result.stdout.strip().splitlines()[-1].startswith("Gc: ")
+        assert result.stderr.strip().splitlines()[-1] == (
+            "mm: warning: Retention cleanup was incomplete. Fix permissions or locks; "
+            "use -v for paths and details. Run: mm gc --conflicts -v"
+        )
+        assert sidecar.exists()
+
+
 class TestGcEventsOfflinePeerSuppression:
     """An offline peer that comes back online sees the tombstone
     (propagated above), so it neither re-downloads the file nor has its own

@@ -772,14 +772,16 @@ authorize nor veto collection; no peer namespace is collected.
 A missing own manifest returns `GcBlobResult(deleted=0, collected=False)` without listing or deleting blob candidates,
 with a visible warning naming this device, skipped collection and no blobs
 deleted. Wait for sync, inspect with `mm diag`, then retry GC; inspection does not
-repair missing metadata. Explicit `mm gc` ends with
+repair missing metadata. Explicit `mm gc` always prints its `Gc:` outcome line:
 `Gc: blob collection skipped (own manifest missing); local retention complete.`
-instead of a deleted-blob count, while normal `mm gc` ends with
+(or `Gc: blob collection skipped (own manifest missing).` when local retention
+was incomplete) instead of a deleted-blob count, while normal `mm gc` prints
 `Gc: <N> orphaned blob(s) deleted.` (per-reaper retention summaries print under
-`-v` / `--dry-run`). When any retention reaper reports a failure or a skip, the
-run ends instead with one shared
-`mm: warning: Retention cleanup was incomplete ... Run: mm gc -v` line and prints no
-`Gc:` line.
+`-v` / `--dry-run`). When any retention reaper reports a failure or a skip, one
+shared `mm: warning: Retention cleanup was incomplete ...` line follows the
+`Gc:` line as the last line, ending with `Run: mm gc --conflicts -v` after
+`--conflicts` or `Run: mm gc -v` otherwise; deliberate keeps (`ReapOutcome.kept`)
+never warn.
 A valid empty manifest is distinct and can collect own orphans. Own corrupt or
 newer-format metadata refuses in apply and preview. So does an own manifest held
 only by conflict copies (iCloud, Dropbox or Syncthing) because the canonical is absent or unreadable
