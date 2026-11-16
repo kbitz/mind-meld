@@ -112,7 +112,7 @@ def test_default_source_disable_enable_round_trip(cfg):
     result = runner.invoke(app, ["disable-source", "gstack"])
     assert result.exit_code == 0, result.output
     assert _lines(result.stdout) == [
-        "Disable: Disabled source 'gstack' on this device.",
+        "Disable: source 'gstack' disabled on this device.",
         "Run: mm enable-source gstack",
     ]
     assert _disabled(cfg) == ["gstack"]
@@ -120,17 +120,17 @@ def test_default_source_disable_enable_round_trip(cfg):
     before = cfg.read_bytes()
     again = runner.invoke(app, ["disable-source", "gstack"])
     assert again.exit_code == 0, again.output
-    assert _lines(again.stdout) == ["Disable: Source 'gstack' is already disabled."]
+    assert _lines(again.stdout) == ["Disable: source 'gstack' is already disabled."]
     assert cfg.read_bytes() == before
 
     result = runner.invoke(app, ["enable-source", "gstack"])
     assert result.exit_code == 0, result.output
-    assert _lines(result.stdout) == ["Enable: Enabled source 'gstack' on this device."]
+    assert _lines(result.stdout) == ["Enable: source 'gstack' enabled on this device."]
     assert _disabled(cfg) == []
 
     again = runner.invoke(app, ["enable-source", "gstack"])
     assert again.exit_code == 0, again.output
-    assert _lines(again.stdout) == ["Enable: Source 'gstack' is already enabled."]
+    assert _lines(again.stdout) == ["Enable: source 'gstack' is already enabled."]
 
 
 # ── opt-in sources (grok, muse, agy) ──────────────────────────────────
@@ -141,7 +141,7 @@ def test_opt_in_source_enable_then_disable(cfg, name):
     result = runner.invoke(app, ["enable-source", name])
     assert result.exit_code == 0, result.output
     assert _lines(result.stdout) == [
-        f"Enable: Enabled source '{name}' on this device.",
+        f"Enable: source '{name}' enabled on this device.",
         *DETAIL_LINES[name],
     ]
     added = next(s for s in _on_disk(cfg)["sync"]["sources"] if s["name"] == name)
@@ -150,7 +150,7 @@ def test_opt_in_source_enable_then_disable(cfg, name):
 
     again = runner.invoke(app, ["enable-source", name])
     assert again.exit_code == 0, again.output
-    expected_again = [f"Enable: Source '{name}' is already enabled."]
+    expected_again = [f"Enable: source '{name}' is already enabled."]
     if name == "grok":
         expected_again.extend(DETAIL_LINES["grok"][:2])
     assert _lines(again.stdout) == expected_again
@@ -158,7 +158,7 @@ def test_opt_in_source_enable_then_disable(cfg, name):
     off = runner.invoke(app, ["disable-source", name])
     assert off.exit_code == 0, off.output
     assert _lines(off.stdout) == [
-        f"Disable: Disabled source '{name}' on this device.",
+        f"Disable: source '{name}' disabled on this device.",
         f"Run: mm enable-source {name}",
     ]
     on_disk = _on_disk(cfg)
@@ -208,10 +208,14 @@ def test_unknown_source_name_exits_1_and_writes_nothing(cfg, command):
 
 @pytest.mark.parametrize("command", ["enable-source", "disable-source"])
 def test_unknown_source_name_with_force_is_accepted(cfg, command):
+    valid = ", ".join(sourceflow._known_source_names(config.load_config(cfg)))
     result = runner.invoke(app, [command, "definitely-unknown", "--force"])
     assert result.exit_code == 0, result.output
-    assert "accepting via --force" in result.stderr
-    assert "mm: warning: 'definitely-unknown' is not a known source" in result.stderr
+    assert result.stderr == (
+        f"mm: warning: 'definitely-unknown' is not a known source "
+        f"(valid: {valid}); accepting via --force.\n"
+    )
+    assert "is not a known source" not in result.stdout
 
 
 @pytest.mark.parametrize("force", [False, True])
@@ -360,9 +364,9 @@ def test_sourceflow_outcomes_emit_no_ansi_and_preserve_brackets_under_forced_ter
 
     lines = buf.getvalue().splitlines()
     assert lines == [
-        "Disable: Disabled source 'custom[tag]' on this device.",
+        "Disable: source 'custom[tag]' disabled on this device.",
         "Run: mm enable-source custom[tag]",
-        "Enable: Enabled source 'custom[tag]' on this device.",
+        "Enable: source 'custom[tag]' enabled on this device.",
     ]
     assert "\x1b" not in buf.getvalue()
 

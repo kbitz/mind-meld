@@ -238,3 +238,131 @@ def test_usage_errors_emit_shared_error_and_fix_without_panel(argv, expected_pre
     lines = result.stderr.splitlines()
     assert lines[0].startswith(expected_prefix)
     assert lines[-1] == expected_fix
+
+
+@pytest.mark.parametrize("argv", [["push"], ["push", "--dry-run"]])
+def test_piped_push_and_dry_run_with_missing_excludes_warn_once_on_stderr(
+    tmp_path, monkeypatch, argv
+):
+    storage_dir = tmp_path / "storage"
+    storage_dir.mkdir()
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    cfg_path = cfg_dir / "config.toml"
+    gstack_dir = tmp_path / "gstack"
+    gstack_dir.mkdir()
+
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", cfg_dir)
+    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_path)
+    _redirect_lock(monkeypatch, tmp_path)
+    _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli_module.upgrade, "run_transition_hook", lambda *a, **k: None)
+    monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", lambda *a, **k: None)
+
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-a", "mac-a")
+
+    save_config(
+        {
+            "device": {"id": "dev-a", "name": "mac-a"},
+            "storage": {"backend": "local", "path": str(storage_dir)},
+            "sync": {
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(gstack_dir),
+                        "type": "generic",
+                        "include_dirs": ["."],
+                        "exclude_patterns": [],
+                    }
+                ],
+                "disabled_sources": ["mm-events"],
+                "max_file_size": 10 * 1024 * 1024,
+                "scheduling": False,
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        },
+        cfg_path,
+    )
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 0, result.output
+    assert "config missing recommended excludes" not in result.stdout
+    assert result.stderr.splitlines() == [
+        "mm: warning: config missing recommended excludes for source(s) gstack. "
+        "Run: mm migrate-config"
+    ]
+
+
+def test_backfill_config_error_warns_through_shared_helper_without_markup(
+    tmp_path, monkeypatch, capsys
+):
+    from mind_meld.errors import ConfigError
+
+    storage_dir = tmp_path / "storage"
+    storage_dir.mkdir()
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+
+    cfg = {
+        "device": {"id": "dev-a", "name": "mac-a"},
+        "storage": {"backend": "local", "path": str(storage_dir)},
+        "sync": {"sources": [], "max_file_size": 10 * 1024 * 1024},
+        "crypto": {"argon2_memory_kb": MEMORY_KB},
+    }
+
+    def bad_patch(_updates, path=None):
+        raise ConfigError("[red]bad[/red] [\x1b[31mboom\nnext")
+
+    monkeypatch.setattr(core, "patch_config_on_disk", bad_patch)
+
+    returned_kb = core._init_crypto_session(backend, PASSPHRASE, cfg, read_only=False)
+
+    captured = capsys.readouterr()
+    assert returned_kb == MEMORY_KB
+    assert cfg["crypto"].get("root_salt_fp")
+    assert captured.out == ""
+    assert "\x1b" not in captured.err
+    assert captured.err.splitlines() == [
+        "mm: warning: backfill skipped — [red]bad[/red] [boom\\nnext"
+    ]
+
+
+def test_init_cleanup_failure_warns_through_shared_helper_without_markup(
+    tmp_path, monkeypatch, capsys
+):
+    from unittest.mock import MagicMock
+
+    from mind_meld import initflow
+    from mind_meld.errors import StorageError
+
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(initflow, "register_device", lambda *a, **kw: None)
+
+    def boom_save(_c, path=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(initflow, "save_config", boom_save)
+    backend = MagicMock()
+    backend.delete.side_effect = StorageError("[red]boom[/red] [\x1b[31m")
+
+    config = {
+        "device": {"id": "d1", "name": "mac-a"},
+        "storage": {"path": str(tmp_path)},
+    }
+    with pytest.raises(OSError, match="disk full"):
+        initflow._register_and_save(
+            config, backend=backend, device_id="d1", device_name="mac-a", passphrase="pw"
+        )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "\x1b" not in captured.err
+    assert captured.err.splitlines() == [
+        "mm: warning: cleanup of devices/d1.json after save_config failure failed "
+        "(StorageError): [red]boom[/red] ["
+    ]

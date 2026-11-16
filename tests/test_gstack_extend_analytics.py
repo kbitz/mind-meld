@@ -153,6 +153,39 @@ class TestGstackExtendMigration113A:
         assert migrated["include_dirs"] == ["projects", "mine"]
         assert migrated["include_patterns"] == default_entry["include_patterns"]
 
+    @pytest.mark.parametrize(
+        "dirs_shape",
+        ["absent", "projects", ["projects", 1]],
+        ids=["absent", "scalar", "mixed"],
+    )
+    def test_unrecognized_include_dirs_shapes_get_allowlist_without_rewriting_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dirs_shape
+    ):
+        entry = self._old_default_entry(tmp_path / ".gstack-extend")
+        if dirs_shape == "absent":
+            entry.pop("include_dirs")
+        else:
+            entry["include_dirs"] = dirs_shape
+        config_path = self._write_explicit_config(tmp_path, entry)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+
+        dry = runner.invoke(app, ["migrate-config", "--dry-run"])
+        assert dry.exit_code == 0, dry.output
+        assert "+ include_dirs:" not in dry.output
+
+        applied = runner.invoke(app, ["migrate-config", "--yes"])
+        assert applied.exit_code == 0, applied.output
+        default_entry = get_default_source("gstack-extend")
+        assert default_entry is not None
+        loaded = load_config(config_path)
+        migrated = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack-extend")
+        assert migrated["include_patterns"] == default_entry["include_patterns"]
+        if dirs_shape == "absent":
+            assert "include_dirs" not in migrated
+        else:
+            assert migrated["include_dirs"] == dirs_shape
+
     def test_present_include_patterns_left_alone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

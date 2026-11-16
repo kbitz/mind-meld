@@ -139,7 +139,7 @@ class TestDisableSource:
     def test_disables_known_source(self, cfg, isolated_seen_sources):
         result = runner.invoke(app, ["disable-source", "gstack"])
         assert result.exit_code == 0, result.output
-        assert "Disabled source 'gstack'" in result.output
+        assert "source 'gstack' disabled" in result.output
 
         import tomllib
 
@@ -170,7 +170,7 @@ class TestDisableSource:
         """Forward-compat: pre-disable codex before it ships."""
         result = runner.invoke(app, ["disable-source", "codex", "--force"])
         assert result.exit_code == 0
-        assert "Disabled" in result.output
+        assert "source 'codex' disabled" in result.output
         # stderr breadcrumb in CliRunner: combined output has the warning.
         # We assert the field landed.
         import tomllib
@@ -194,7 +194,7 @@ class TestEnableSource:
         runner.invoke(app, ["disable-source", "gstack"])
         result = runner.invoke(app, ["enable-source", "gstack"])
         assert result.exit_code == 0, result.output
-        assert "Enabled source 'gstack'" in result.output
+        assert "source 'gstack' enabled" in result.output
 
         import tomllib
 
@@ -214,7 +214,7 @@ class TestEnableSource:
         first = runner.invoke(app, ["enable-source", "grok"])
         assert first.exit_code == 0, first.output
         first_norm = " ".join(first.output.split())
-        assert "Enabled source 'grok' on this device." in first_norm
+        assert "source 'grok' enabled on this device." in first_norm
         assert "Observations, sessions, SQLite indexes, MEMORY.md" in first_norm
         assert "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics." in first_norm
         assert (
@@ -225,7 +225,7 @@ class TestEnableSource:
         repeat = runner.invoke(app, ["enable-source", "grok"])
         assert repeat.exit_code == 0, repeat.output
         repeat_norm = " ".join(repeat.output.split())
-        assert "Source 'grok' is already enabled." in repeat_norm
+        assert "source 'grok' is already enabled." in repeat_norm
         assert "Observations, sessions, SQLite indexes, MEMORY.md" in repeat_norm
         assert "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics." in repeat_norm
         assert (
@@ -418,7 +418,7 @@ class TestGrokSourceToggle:
 
         result = runner.invoke(app, ["enable-source", "grok"])
         assert result.exit_code == 0, result.output
-        assert "Enabled source 'grok'" in result.output
+        assert "source 'grok' enabled" in result.output
         assert "skills/, commands/, rules/, and memory-v2/" in result.output
         assert "mm disable-source grok" in result.output
 
@@ -445,7 +445,7 @@ class TestMuseSourceToggle:
 
         result = runner.invoke(app, ["enable-source", "muse"])
         assert result.exit_code == 0, result.output
-        assert "Enabled source 'muse'" in result.output
+        assert "source 'muse' enabled" in result.output
         assert "memory/" in result.output
         assert "not synced" in result.output
         assert "model-step" in result.output
@@ -492,7 +492,7 @@ class TestMuseSourceToggle:
 
         result = runner.invoke(app, ["enable-source", name])
         assert result.exit_code == 0, result.output
-        assert f"Enabled source '{name}'" in result.output
+        assert f"source '{name}' enabled" in result.output
         if name == "agy":
             assert "skills/" in result.output
             assert "rules/" in result.output

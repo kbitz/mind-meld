@@ -462,8 +462,7 @@ def _init_crypto_session(
             # load_config and this call (concurrent editor crash, disk issue).
             # Per the v0.8.1 visible-failure contract (docs/invariants/sync.md): data-at-risk
             # signals reach stderr even in quiet mode.
-            with _pause_sync_progress():
-                print(f"mm: warning: backfill skipped — {e}", file=sys.stderr)
+            _warning(f"backfill skipped — {e}")
 
     return fetch.argon2_memory_kb
 
@@ -3208,10 +3207,7 @@ def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
         if retired_sources:
             joined_retired = ", ".join(retired_sources)
             bits.append(f"config still has retired [[sync.sources]] block(s): {joined_retired}")
-        stderr_console.print(
-            f"[yellow]warning:[/yellow] {'; '.join(bits)}. Run "
-            f"[bold]mm migrate-config[/bold] to update."
-        )
+        _warning("; ".join(bits) + ".", fix="mm migrate-config")
         if read_only and is_tty:
             stderr_console.print(
                 "This preview uses your current config. Without --dry-run, this command "
