@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.56] - 2026-11-16
+
+`mm update` success is now an `Update:` line, and `mm update`, `mm log`, automatic sync, and `mm status` share consistent `Run:` remedies and maintenance failure wording.
+
+### Changed
+
+- `mm update` success is now an `Update:` line, and `mm update` and `mm log` errors end with the fix command on its own `Run:` line.
+- `mm update` uses shared `Update:` outcomes and final `Run:` remedies.
+- `mm log` puts the recovery command for newer history schemas on a separate line.
+- Automatic sync and `mm status` use consistent maintenance failure wording.
+
+### Upgrade notes
+
+- Scripts or monitors matching the old `mm update` wording or the old autorun breadcrumb phrases must match the new shared wording instead.
+
 ## [1.12.55] - 2026-11-15
 
 Antigravity skips unchanged failed-read cache rewrites while keeping changed diagnostics current.

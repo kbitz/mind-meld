@@ -686,7 +686,7 @@ class TestLedgerCauseInTheAutopullBreadcrumb:
         result = pullflow.PullResult(maintenance_failures=2, elapsed=0.1)
         _, crumb = self._crumb(tmp_path, monkeypatch, result)
         assert crumb["outcome"] == "degraded"
-        assert crumb["detail"] == "2 follow-up failure(s)"
+        assert crumb["detail"] == "2 maintenance failure(s)"
 
     def test_a_healthy_ledger_adds_nothing(self, tmp_path, monkeypatch):
         _, crumb = self._crumb(tmp_path, monkeypatch, pullflow.PullResult(elapsed=0.1))

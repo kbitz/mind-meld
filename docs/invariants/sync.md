@@ -1733,7 +1733,10 @@ read transaction, then the connection closes before decoding/printing.
 `--limit 0` memory grows with retained rows; no paging or partial stdout on
 read errors. Table titles name state.db or legacy pull-history.jsonl. Cells use
 safe_str; jsonl keeps raw sorted-key legacy objects. Errors are one plain,
-sanitized stderr line, exit 1, empty stdout. `pullhistory.explain` owns pinned
+sanitized stderr line (except a too-new database, which prints `Run: mm update`
+on a second line), exit 1, empty stdout. Only the curated fix separator creates
+a line break; newlines in paths or error details keep their visible `\n`
+notation, including inside history notices. `pullhistory.explain` owns pinned
 error/notice strings and errors.STATEDB_HELP_URL.
 
 **Move-aside remedy boundary:** the corrupt-database move-aside advice in README is

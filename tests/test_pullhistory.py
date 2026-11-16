@@ -616,13 +616,16 @@ def test_exact_message_table(kind, body):
         "stale": pullhistory.LegacyHistoryDiverged("2026-01-01"),
     }
     suffix = ". See https://github.com/kbitz/mind-meld#history-database-statedb"
-    tail = f"{suffix} Run: mm update" if kind == "new" else suffix
+    tail = f"{suffix}\nRun: mm update" if kind == "new" else suffix
     prefix = "mm: notice: " if kind in ("pending", "stale") else "mm: error: "
     assert pullhistory.explain(exceptions[kind]) == prefix + body + tail
     if kind not in ("pending", "stale"):
+        notice_tail = f"{suffix} Run: mm update" if kind == "new" else suffix
         expected = (
             "mm: notice: history not recorded (these rows are dropped and not replayed; "
-            "fast-forward and deletions pause too while state.db is unavailable): " + body + tail
+            "fast-forward and deletions pause too while state.db is unavailable): "
+            + body
+            + notice_tail
         )
         assert pullhistory.explain(pullhistory.HistoryNotRecorded(exceptions[kind])) == expected
 

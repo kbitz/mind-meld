@@ -39,8 +39,8 @@ output piped or `--verbose`, `display` is `None`: `--verbose` prints
 stay silent, and piped/`--verbose` failure, nudge and cancellation notices still
 precede the final outcome lines (`diagnostics=` defaults preserve direct
 callers). Standalone `mm update` shares `core._installer_progress`, clearing its
-transient spinner before printing `Updated mm <old> → <new>.` or the
-already-current line (with output piped, no spinner and the same outcome line).
+transient spinner before printing `Update: mm <old> → <new>.` or the
+already-current `Update:` line (with output piped, no spinner and the same outcome line).
 A foreground update can delay the final outcome; no latency improvement is
 claimed. Ctrl-C keeps the existing `mm: notice: automatic update cancelled; sync
 outcome is reported separately. If mm is now missing, reinstall with: …` notice,

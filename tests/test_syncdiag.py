@@ -201,5 +201,5 @@ def test_autopull_observation_failure_does_not_claim_recovery_cleanup_failed(
     assert (fleet.local / "note.md").read_bytes() == b"peer content\n"
     breadcrumb = json.loads((local_state / "last-autorun.json").read_text())["pull"]
     assert breadcrumb["outcome"] == "degraded"
-    assert breadcrumb["detail"] == "1 follow-up failure(s)"
+    assert breadcrumb["detail"] == "1 maintenance failure(s)"
     assert "recovery cleanup" not in breadcrumb["detail"]

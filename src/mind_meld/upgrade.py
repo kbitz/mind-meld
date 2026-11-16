@@ -1917,7 +1917,9 @@ def _auto_install(
             shown = " ".join(["pipx", *argv[1:]])
             if diagnostics:
                 print(
-                    f"mm: notice: updating mm {result.local} → {result.latest} ({shown})…",
+                    outputstyle._notice_line(
+                        f"updating mm {result.local} → {result.latest} ({shown})…"
+                    ),
                     file=sys.stderr,
                 )
             outcome = run_update(install, pipx, latest=result.latest)
@@ -1963,8 +1965,9 @@ def _auto_install(
             display.outcomes.append(updated_line(outcome.old, outcome.new))
         elif diagnostics:
             print(
-                f"mm: notice: updated mm {outcome.old} → {outcome.new}; "
-                "the next mm command runs it",
+                outputstyle._notice_line(
+                    f"updated mm {outcome.old} → {outcome.new}; the next mm command runs it"
+                ),
                 file=sys.stderr,
             )
         return True, False

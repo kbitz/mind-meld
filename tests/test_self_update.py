@@ -2465,7 +2465,7 @@ class TestUpdateCommand:
                 ticker.join(timeout=5)
         assert (result.exit_code == 0) == (scenario == "updated"), result.output
         output = terminal_output
-        assert ("Updated mm" in output) == (scenario == "updated")
+        assert ("Update: mm 1.2.0 → 1.3.0." in output) == (scenario == "updated")
         assert result.stdout == ""
         assert "━" not in output  # Spinner + step text; there is no bar.
         assert "PRIVATE_INSTALLER_DETAIL" not in output
@@ -2485,7 +2485,7 @@ class TestUpdateCommand:
             assert output.rindex("\x1b[2K") > output.rindex("Verifying")
             assert any(f"{frame} Verifying" in output for frame in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
         if scenario == "updated":
-            assert output.rindex("Updated mm 1.2.0 → 1.3.0.") > output.rindex("\x1b[2K")
+            assert output.rindex("Update: mm 1.2.0 → 1.3.0.") > output.rindex("\x1b[2K")
         assert "\x1b[?25h" in output
         lockfile.acquire_lock()
         lockfile.release_lock()
@@ -2536,7 +2536,7 @@ class TestUpdateCommand:
         ):
             assert phase in output
         assert output.index("Fetching source") < output.index("Building wheel")
-        assert output.rindex("Updated mm 1.2.0 → 1.3.0.") > output.rindex("\x1b[2K")
+        assert output.rindex("Update: mm 1.2.0 → 1.3.0.") > output.rindex("\x1b[2K")
 
     def test_spinner_animates_while_installer_is_silent(self, pipx_install, monkeypatch):
         # The spinner must advance on its own timer, not only when the
@@ -2622,7 +2622,7 @@ class TestUpdateCommand:
         assert terminal.failed_writes >= 1
         # The default hook prints the traceback to the user's stderr.
         assert thread_errors == []
-        assert "Updated mm 1.2.0 → 1.3.0." in terminal.getvalue()
+        assert "Update: mm 1.2.0 → 1.3.0." in terminal.getvalue()
 
     def test_spinner_shutdown_leaves_a_blocked_ticker_as_a_daemon(self, pipx_install, monkeypatch):
         pipx_install()
@@ -2810,7 +2810,7 @@ class TestUpdateCommand:
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
         assert "Updating mm" not in piped.getvalue()
-        assert "Updated mm 1.2.0 → 1.3.0." in piped.getvalue()
+        assert "Update: mm 1.2.0 → 1.3.0." in piped.getvalue()
 
     def test_display_that_cannot_start_falls_back_to_a_plain_update(
         self, pipx_install, monkeypatch
@@ -2843,7 +2843,7 @@ class TestUpdateCommand:
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
         assert calls == [None]
-        assert "Updated mm 1.2.0 → 1.3.0." in terminal.getvalue()
+        assert "Update: mm 1.2.0 → 1.3.0." in terminal.getvalue()
 
     def test_display_completes_when_github_is_unreachable_and_pipx_decides(
         self, pipx_install, monkeypatch
@@ -2874,7 +2874,7 @@ class TestUpdateCommand:
         assert "Updating mm 1.2.0" in output
         assert "Done" not in output
         assert output.rindex("\x1b[2K") > output.rindex("Verifying")
-        assert "already the latest release pipx can see" in _flat(output)
+        assert "Update: mm 1.2.0 is already the latest release pipx can see." in _flat(output)
 
     def test_one_progress_class_serves_push_pull_and_update(
         self, tmp_path, pipx_install, monkeypatch
@@ -2934,21 +2934,21 @@ class TestUpdateCommand:
         assert result.exit_code == 0, result.output
         output = terminal.getvalue()
         if already_current:
-            assert output == "mm 1.2.0 is up to date.\n"
+            assert output == "Update: mm 1.2.0 is up to date.\n"
             assert "Updating mm" not in output
         else:
             assert "Updating mm 1.2.0 → 1.3.0" in output
             clear_pos = output.rindex("\x1b[2K")
             assert clear_pos > output.rindex("Verifying")
             tail = output[clear_pos:].replace("\x1b[2K", "").replace("\x1b[?25h", "").lstrip("\r")
-            assert tail == "Updated mm 1.2.0 → 1.3.0.\n"
+            assert tail == "Update: mm 1.2.0 → 1.3.0.\n"
 
     def test_update_piped_prints_only_the_outcome_line(self, pipx_install, monkeypatch):
         venv = pipx_install()
         _fake_run(monkeypatch, venv, lands="1.3.0")
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
-        assert result.stdout == "Updated mm 1.2.0 → 1.3.0.\n"
+        assert result.stdout == "Update: mm 1.2.0 → 1.3.0.\n"
         assert result.stderr == ""
         assert "Updating" not in result.output
 
@@ -2985,14 +2985,21 @@ class TestUpdateCommand:
         clear_pos = output.rindex("\x1b[2K")
         tail = output[clear_pos:].replace("\x1b[2K", "").replace("\x1b[?25h", "").lstrip("\r")
         assert tail == ""
-        err = _flat(result.stderr)
         if failure == "unchanged":
-            assert "pipx found no build newer than 1.2.0, but 1.3.0 is tagged." in err
-            assert err.endswith(f"run: {upgrade.INSTALL_CMD}")
+            assert result.stderr.splitlines() == [
+                "mm: error: pipx found no build newer than 1.2.0, but 1.3.0 is tagged. "
+                "Retry in a minute.",
+                f"Run: {upgrade.INSTALL_CMD}",
+            ]
         else:
-            assert "Update did not complete: fatal: no route." in err
             reinstall = upgrade.reinstall_cmd(upgrade.detect_install())
-            assert err.endswith(f"If mm is now missing, reinstall with: {reinstall}")
+            assert result.stderr.splitlines() == [
+                "cloning",
+                "fatal: no route",
+                "mm: error: Update did not complete: fatal: no route. "
+                "If mm is now missing, reinstall with the command below.",
+                f"Run: {reinstall}",
+            ]
 
     @pytest.mark.parametrize("unchanged", [False, True])
     def test_update_metadata_controls_stay_on_one_line(self, pipx_install, monkeypatch, unchanged):
@@ -3074,8 +3081,16 @@ class TestUpdateCommand:
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1, result.output
         assert calls == []
-        phrase = "now pinned" if flip == "pinned-while-offline" else "held by pipx pin"
-        assert phrase in _flat(result.stderr)
+        if flip == "pinned-while-offline":
+            assert result.stderr.splitlines() == [
+                "mm: error: The install is now pinned; retry when GitHub is reachable.",
+                "Run: mm update",
+            ]
+        else:
+            assert result.stderr.splitlines() == [
+                "mm: error: This mm is held by pipx pin; unpin it and then rerun mm update.",
+                "Run: pipx unpin mind-meld",
+            ]
         lockfile.acquire_lock()  # the refusal released the mm lock
         lockfile.release_lock()
 
@@ -3089,7 +3104,11 @@ class TestUpdateCommand:
         monkeypatch.setattr(upgrade, "_run_pipx", cancel)
         result = runner.invoke(app, ["update"])
         assert result.exit_code != 0
-        assert upgrade.INSTALL_CMD in " ".join(result.stderr.split())
+        reinstall = upgrade.reinstall_cmd(upgrade.detect_install())
+        assert result.stderr.splitlines() == [
+            "mm: error: Update cancelled. If mm is now missing, reinstall with the command below.",
+            f"Run: {reinstall}",
+        ]
 
     @pytest.mark.parametrize("pinned, lands", [(False, "1.3.0"), (True, "1.2.0")])
     def test_changed_install_below_tagged_target_exits_1(
@@ -3100,7 +3119,12 @@ class TestUpdateCommand:
         _fake_run(monkeypatch, venv, lands=lands)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1, result.output
-        assert "1.4.0 is tagged" in _flat(result.stderr)
+        reinstall = upgrade.reinstall_cmd(upgrade.detect_install())
+        assert result.stderr.splitlines() == [
+            f"mm: error: Update did not complete: pipx installed {lands}, but 1.4.0 is tagged; "
+            "retry in a minute. If mm is now missing, reinstall with the command below.",
+            f"Run: {reinstall}",
+        ]
 
     def test_pinned_suffix_targets_the_same_environment(self, pipx_install, monkeypatch):
         original = pipx_install()
@@ -3137,7 +3161,7 @@ class TestUpdateCommand:
         assert result.exit_code == 0, result.output
         assert calls == [[PIPX, "upgrade", "mind-meld"]]
         assert "Updating mm" not in _flat(result.stdout)
-        assert "Updated mm 1.2.0 → 1.3.0." in result.stdout
+        assert result.stdout.splitlines() == ["Update: mm 1.2.0 → 1.3.0."]
         assert "Installing" not in result.stdout
         assert "\x1b" not in result.stdout
         lockfile.acquire_lock()
@@ -3155,7 +3179,7 @@ class TestUpdateCommand:
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
         assert calls == []
-        assert _flat(result.stdout) == "mm 1.2.0 is up to date."
+        assert result.stdout.splitlines() == ["Update: mm 1.2.0 is up to date."]
 
     def test_ignores_the_throttle_and_every_opt_out(self, pipx_install, monkeypatch, tmp_path):
         venv = pipx_install()
@@ -3186,7 +3210,9 @@ class TestUpdateCommand:
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
         assert len(calls) == 1
-        assert "already the latest release pipx can see" in _flat(result.stdout)
+        assert result.stdout.splitlines() == [
+            "Update: mm 1.2.0 is already the latest release pipx can see."
+        ]
 
     def test_pinned_install_is_reinstalled_onto_the_release_branch(self, pipx_install, monkeypatch):
         venv = pipx_install(spec=f"{upgrade.REPO_SPEC}@v1.2.0")
@@ -3194,9 +3220,9 @@ class TestUpdateCommand:
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
         assert calls == [[PIPX, "install", "--force", upgrade.INSTALL_SPEC]]
-        text = _flat(result.stdout)
-        assert "Updated mm 1.2.0 → 1.3.0; this install now tracks the release branch." in text
-        assert "now tracks the release branch" in text
+        assert result.stdout.splitlines() == [
+            "Update: mm 1.2.0 → 1.3.0; this install now tracks the release branch."
+        ]
 
     @pytest.mark.parametrize(
         "spec",
@@ -3214,8 +3240,8 @@ class TestUpdateCommand:
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
         assert calls == []
+        assert result.stdout.splitlines()[0] == "Update: mm 1.2.0 is up to date."
         text = _flat(result.stdout)
-        assert "mm 1.2.0 is up to date." in text
         assert f"made from {spec}" in text
         assert "mm will not update it automatically" in text
         assert upgrade.INSTALL_CMD in text
@@ -3249,17 +3275,25 @@ class TestUpdateCommand:
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
         assert calls == []
-        assert "Could not reach GitHub" in _flat(result.stderr)
+        assert result.stderr.splitlines() == [
+            "mm: error: Could not reach GitHub to check for a newer release, and this install is "
+            f"pinned to {upgrade.REPO_SPEC}@v1.2.0. Retry when online, or run the install command.",
+            f"Run: {upgrade.INSTALL_CMD}",
+        ]
 
     def test_failed_update_exits_1_and_shows_pipx_output(self, pipx_install, monkeypatch):
         venv = pipx_install()
         _fake_run(monkeypatch, venv, returncode=1, output="cloning\nfatal: no route to host\n")
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
-        err = _flat(result.stderr)
-        assert "cloning fatal: no route to host" in err
-        assert "Update did not complete: fatal: no route to host." in err
-        assert upgrade.INSTALL_CMD in err
+        reinstall = upgrade.reinstall_cmd(upgrade.detect_install())
+        assert result.stderr.splitlines() == [
+            "cloning",
+            "fatal: no route to host",
+            "mm: error: Update did not complete: fatal: no route to host. "
+            "If mm is now missing, reinstall with the command below.",
+            f"Run: {reinstall}",
+        ]
         lockfile.acquire_lock()
         lockfile.release_lock()
 
@@ -3268,17 +3302,24 @@ class TestUpdateCommand:
         _fake_run(monkeypatch, venv, returncode=1, output="fatal: no route to host\n")
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
-        err = _flat(result.stderr)
         recovery = upgrade.reinstall_cmd(upgrade.detect_install())
-        expected = f"If mm is now missing, reinstall with: {recovery}"
-        assert "".join(expected.split()) in "".join(err.split())
+        assert result.stderr.splitlines() == [
+            "fatal: no route to host",
+            "mm: error: Update did not complete: fatal: no route to host. "
+            "If mm is now missing, reinstall with the command below.",
+            f"Run: {recovery}",
+        ]
 
     def test_tagged_but_not_installable_exits_1(self, pipx_install, monkeypatch):
         venv = pipx_install()
         _fake_run(monkeypatch, venv)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
-        assert "pipx found no build newer than 1.2.0, but 1.3.0 is tagged" in _flat(result.stderr)
+        assert result.stderr.splitlines() == [
+            "mm: error: pipx found no build newer than 1.2.0, but 1.3.0 is tagged. "
+            "Retry in a minute.",
+            f"Run: {upgrade.INSTALL_CMD}",
+        ]
 
     def test_refuses_while_another_mm_holds_the_lock(self, pipx_install, monkeypatch):
         venv = pipx_install()
@@ -3305,42 +3346,67 @@ class TestUpdateCommand:
         assert "Another mm operation is running" in _flat(result.stderr)
 
     @pytest.mark.parametrize(
-        "spec, meta, phrase",
+        "spec, meta, expected_lines",
         [
-            (upgrade.INSTALL_SPEC, {"pinned": True}, "held by pipx pin"),
-            ("/Users/user/dev/mind-meld", {}, "installed from /Users/user/dev/mind-meld"),
+            (
+                upgrade.INSTALL_SPEC,
+                {"pinned": True},
+                [
+                    "mm: error: This mm is held by pipx pin; unpin it and then rerun mm update.",
+                    "Run: pipx unpin mind-meld",
+                ],
+            ),
+            (
+                "/Users/user/dev/mind-meld",
+                {},
+                [
+                    "mm: error: This mm was installed from /Users/user/dev/mind-meld, not from "
+                    "the release branch, so mm update leaves it alone.",
+                    f"Run: {upgrade.INSTALL_CMD}",
+                ],
+            ),
         ],
     )
-    def test_refuses_installs_it_does_not_own(self, pipx_install, monkeypatch, spec, meta, phrase):
+    def test_refuses_installs_it_does_not_own(
+        self, pipx_install, monkeypatch, spec, meta, expected_lines
+    ):
         venv = pipx_install(spec=spec, **meta)
         calls = _fake_run(monkeypatch, venv, lands="1.3.0")
         monkeypatch.setattr(upgrade, "_fetch_tags", lambda *a: pytest.fail("refused, yet fetched"))
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
         assert calls == []
-        assert phrase in _flat(result.stderr)
+        assert result.stderr.splitlines() == expected_lines
 
     def test_refuses_a_non_pipx_install_with_the_install_command(self, monkeypatch, tmp_path):
         _set_version(monkeypatch, "1.2.0")
         monkeypatch.setattr(upgrade, "_install_prefix", lambda: tmp_path)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
-        err = _flat(result.stderr)
-        assert "was not installed by pipx" in err
-        assert upgrade.INSTALL_CMD in err
+        assert result.stderr.splitlines() == [
+            f"mm: error: This mm ({sys.prefix}) was not installed by pipx, "
+            "so it cannot update itself.",
+            f"Run: {upgrade.INSTALL_CMD}",
+        ]
 
     def test_refuses_a_dev_build(self, monkeypatch):
         _set_version(monkeypatch, upgrade.DEV_BUILD_SENTINEL)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
-        assert "source-tree build" in _flat(result.stderr)
+        assert result.stderr.splitlines() == [
+            "mm: error: This mm is a source-tree build, not an installed release. "
+            "Update it with git."
+        ]
 
     def test_pipx_missing(self, pipx_install, monkeypatch):
         pipx_install()
         monkeypatch.setattr(upgrade, "find_pipx", lambda: None)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
-        assert "pipx was not found" in _flat(result.stderr)
+        assert result.stderr.splitlines() == [
+            "mm: error: pipx was not found. Install pipx, then run the install command.",
+            f"Run: {upgrade.INSTALL_CMD}",
+        ]
 
     # Generated by the /ship test coverage audit (pass 1).
     # Value: protects=pipx output cannot inject terminal escapes into the automatic-update
@@ -3507,20 +3573,26 @@ class TestTrack124BInstallRecordsAndPinnedRefusal:
     # why_new=only not-readable was asserted at this boundary; seam=none;
     # no_claim=live repository authentication (tag adapter and pipx are faked).
     @pytest.mark.parametrize(
-        "cause,what,fix",
+        "cause,what,extra,fix",
         [
             (
                 "not-readable",
                 "mm could not read the release tags with this machine's git credentials",
+                "",
                 "Run: gh auth setup-git",
             ),
-            ("unparseable", "GitHub listed no release tag mm could read", "Run: mm update"),
-            ("git-missing", "git was not found on PATH", "Install git, then run: mm update"),
-            ("unexpected:RuntimeError", "unexpected check error (RuntimeError)", "Run: mm update"),
+            ("unparseable", "GitHub listed no release tag mm could read", "", "Run: mm update"),
+            ("git-missing", "git was not found on PATH", " Install git.", "Run: mm update"),
+            (
+                "unexpected:RuntimeError",
+                "unexpected check error (RuntimeError)",
+                "",
+                "Run: mm update",
+            ),
         ],
     )
     def test_pinned_install_with_not_readable_check_names_cause_and_fix(
-        self, pipx_install, monkeypatch, cause, what, fix
+        self, pipx_install, monkeypatch, cause, what, extra, fix
     ):
         spec = f"{upgrade.REPO_SPEC}@v1.2.0"
         venv = pipx_install(spec=spec)
@@ -3532,11 +3604,10 @@ class TestTrack124BInstallRecordsAndPinnedRefusal:
         )
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
-        err = _flat(result.stderr)
-        assert what in err
-        assert spec in err
-        assert err.endswith(fix)
-        assert "Could not reach GitHub" not in err
+        assert result.stderr.splitlines() == [
+            f"mm: error: {what}, and this install is pinned to {spec}.{extra}",
+            fix,
+        ]
         assert calls == []
 
     # Value: protects=under-lock pinned reclassification preserves each check cause and remedy;
@@ -3544,20 +3615,26 @@ class TestTrack124BInstallRecordsAndPinnedRefusal:
     # why_new=the existing reclassification test asserts only the network refusal; seam=none;
     # no_claim=real concurrent installations (metadata change simulates the race).
     @pytest.mark.parametrize(
-        "cause,what,fix",
+        "cause,what,extra,fix",
         [
             (
                 "not-readable",
                 "mm could not read the release tags with this machine's git credentials",
+                "",
                 "Run: gh auth setup-git",
             ),
-            ("unparseable", "GitHub listed no release tag mm could read", "Run: mm update"),
-            ("git-missing", "git was not found on PATH", "Install git, then run: mm update"),
-            ("unexpected:RuntimeError", "unexpected check error (RuntimeError)", "Run: mm update"),
+            ("unparseable", "GitHub listed no release tag mm could read", "", "Run: mm update"),
+            ("git-missing", "git was not found on PATH", " Install git.", "Run: mm update"),
+            (
+                "unexpected:RuntimeError",
+                "unexpected check error (RuntimeError)",
+                "",
+                "Run: mm update",
+            ),
         ],
     )
     def test_install_becoming_pinned_names_check_cause_under_lock(
-        self, pipx_install, monkeypatch, cause, what, fix
+        self, pipx_install, monkeypatch, cause, what, extra, fix
     ):
         venv = pipx_install()
         calls = _fake_run(monkeypatch, venv, lands="1.3.0")
@@ -3569,11 +3646,10 @@ class TestTrack124BInstallRecordsAndPinnedRefusal:
         monkeypatch.setattr(upgrade, "_fetch_tags", failed_check)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1, result.output
-        err = _flat(result.stderr)
-        assert "The install is now pinned" in err
-        assert what in err
-        assert err.endswith(fix)
-        assert "Could not reach GitHub" not in err
+        assert result.stderr.splitlines() == [
+            f"mm: error: The install is now pinned, and {what}.{extra}",
+            fix,
+        ]
         assert calls == []
         lockfile.acquire_lock()
         lockfile.release_lock()
@@ -3953,6 +4029,34 @@ class TestSyncUpdateDisplay:
         assert not any(line.startswith("Run: evil") for line in stderr_lines)
         if failure == "installer-output":
             assert result.stderr.strip().endswith("(fatal: no route to host). Run: mm update")
+
+    @pytest.mark.parametrize("mode", ["terminal", "piped"])
+    def test_sync_update_unexpected_exception_emits_shared_notice(
+        self, tmp_path, monkeypatch, mode
+    ):
+        _setup_real_config(tmp_path, monkeypatch)
+        if mode == "terminal":
+            terminal = _TerminalBuffer()
+            monkeypatch.setenv("TERM", "xterm-256color")
+            term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+            monkeypatch.setattr("mind_meld.cli.console", term_console)
+            monkeypatch.setattr("mind_meld.core.console", term_console)
+
+        monkeypatch.setattr(
+            upgrade,
+            "update_or_nudge",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("unexpected boundary error")),
+        )
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+        assert result.stdout.splitlines() == ["Push: 1 content change published."]
+        assert result.stderr.splitlines() == [
+            "mm: notice: automatic update did not complete. Run: mm update"
+        ]
+        if mode == "terminal":
+            assert result.output.index("Push:") < result.output.index("mm: notice:")
+        else:
+            assert result.output.index("mm: notice:") < result.output.index("Push:")
 
     @pytest.mark.parametrize("command", ["autopush", "autopull"])
     def test_auto_commands_print_nothing_for_an_update(

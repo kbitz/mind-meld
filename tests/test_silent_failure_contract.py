@@ -833,7 +833,7 @@ def test_autopush_surfaces_sidecar_write_failure_in_quiet_mode(tmp_path, monkeyp
     assert "simulated disk full" in (r.stderr or "")
     crumb = cli_module._read_autorun_breadcrumbs()["push"]
     assert crumb["outcome"] == "degraded"
-    assert "1 post-publication maintenance failure(s)" in crumb["detail"]
+    assert "1 maintenance failure(s)" in crumb["detail"]
 
 
 # ─── Typed-error branches in autopull/autopush (contract tests) ──────────
@@ -3045,8 +3045,25 @@ def test_attended77_accepted_content_survives_later_gc_failure(tmp_path, monkeyp
     assert record["content_accepted"] is True
     assert record["outcome"] == "failed" and record["cause"] == "command-refused"
     assert record["counts"]["maintenance_failures"] == 1
+    status_out = runner.invoke(app, ["status"])
+    assert status_out.exit_code == 0, status_out.output
+    assert "1 maintenance failures. Details: mm diag" in " ".join(status_out.output.split())
     cli_module.acquire_lock()
     cli_module.release_lock()
+
+
+@pytest.mark.parametrize(
+    "legacy_phrase",
+    ["1 follow-up failure(s)", "1 post-publication maintenance failure(s)"],
+)
+def test_status_renders_legacy_maintenance_breadcrumb_phrases_verbatim(
+    tmp_path, monkeypatch, legacy_phrase
+):
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    cli_module._write_autorun_breadcrumb("push", "degraded", legacy_phrase)
+    shown = runner.invoke(app, ["status"])
+    assert shown.exit_code == 0, shown.output
+    assert legacy_phrase in " ".join(shown.output.split())
 
 
 # ─── Track 91A: deletions are data at risk, never quiet-gated ────────────
