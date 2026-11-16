@@ -44,6 +44,17 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/cli.py|tests/test_self_update.py] Test gap: current-version update outcome with metadata controls
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** Updated and unchanged outcomes have hostile metadata coverage, but the already-current `_print_update_current` outcome is tested with clean version text only.
+- **Hypothesis (untested):** extend the existing metadata-controls test with a current-version case and assert one inert physical outcome line; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/cli.py:3608
+- **Evidence:** Track 138A audit-only coverage path 06; the current renderer calls `safe_terminal_str`, and adjacent metadata-control cases pass. No failure reproduced.
+- **Revisit trigger:** the next Track touching `_print_update_current` or its metadata/output tests.
+- **Context:** Filed by /review-and-prep on branch `mmm/b042ec4e` at `5f5a042` (2026-11-16).
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: unreadable-copy inspection advice across chain failures and path spellings
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record` and the developer's Track 136A T5 backlog rule.
 - **Description:** The three refusal shapes pin move, delete and inspection advice, but do not separately pin both names being unreadable, a hop's lstat/readlink error, exhaustion of the 40-hop bound, or an unreadable copy reached through absolute, multi-hop or symlinked-parent paths.
