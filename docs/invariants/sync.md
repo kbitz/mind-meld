@@ -757,7 +757,7 @@ mints nothing.
 
 ## Validated storage keys
 
-Storage keys are constructed via helpers in `storage/keys.py` (`manifest_key`, `blob_key`, `data_prefix`, `device_key`, `parse_blob_key`, `is_content_hash`), which validate components at construction time, so a corrupt or malicious peer manifest cannot smuggle a `sha256: "../../../etc/passwd"` through `backend.get`. `data_prefix(device_id)` validates the owner and includes the trailing slash, preventing prefix-sharing identities from entering an own-device listing. Do NOT build storage keys with raw f-strings at new call sites.
+Storage keys are constructed via helpers in `storage/keys.py` (`manifest_key`, `blob_key`, `data_prefix`, `device_key`), which validate components at construction time, so a corrupt or malicious peer manifest cannot smuggle a `sha256: "../../../etc/passwd"` through `backend.get`. `is_content_hash` is the shared 64-character lowercase-hex predicate used by blob-key construction and parsing (`parse_blob_key`), tombstone generation, the mint guard and deletion candidates. `data_prefix(device_id)` validates the owner and includes the trailing slash, preventing prefix-sharing identities from entering an own-device listing. Do NOT build storage keys with raw f-strings at new call sites.
 
 ## Own-device blob collection (Track 71A)
 
