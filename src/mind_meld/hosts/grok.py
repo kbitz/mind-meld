@@ -32,9 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from mind_meld import host_usage
-from mind_meld.errors import StorageError
 from mind_meld.lockedjson import (
-    InvalidJsonCache,
     LockContended,
     locked_json_rmw,
     locked_json_snapshot,
@@ -490,7 +488,6 @@ def read_grok_usage(
                 **timing,
                 "version": host_usage.CACHE_VERSION,
                 "grok_format": _GROK_CACHE_FORMAT,
-                "census_host_version": GROK_USAGE_CENSUS_HOST_VERSION,
                 "complete_once": complete_once,
                 "usage_less_skipped": sum(1 for entry in files.values() if entry.get("absent")),
                 "last_reason": carried[0],
@@ -508,7 +505,7 @@ def read_grok_usage(
         return host_usage._incomplete("locked")
     except host_usage._NoCacheCommit as aborted:
         return aborted.result
-    except (OSError, StorageError, InvalidJsonCache):
+    except OSError:
         return host_usage._incomplete("io_error")
 
 

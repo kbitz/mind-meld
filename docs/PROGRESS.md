@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.55 | 2026-11-15 | Antigravity skips unchanged failed-read cache rewrites while keeping changed diagnostics current. |
 | 1.12.54 | 2026-11-15 | Migration, `mm gc`, init and source-toggle warnings now use the shared `mm: warning:` and `mm: error:` forms with the fix command last, `mm gc` and attended pushes send malformed-blob summaries to stderr with `Run: mm gc -v`, and source enable and disable outcomes state the action once. |
 | 1.12.53 | 2026-11-15 | `mm gc --conflicts` stops warning about conflict copies it keeps on purpose and always prints its `Gc:` line, an unmatched `mm resolve` path ends with `Run: mm conflicts`, `mm conflicts` ends with `Run: mm resolve`, and `mm resolve` names a safe repair when it cannot read a same-file conflict copy. |
 | 1.12.52 | 2026-11-15 | `mm pull` and `mm autopull` now print one `mm: warning:` line with the cause for every file they cannot apply, including unreadable, undecryptable or mismatched peer data, and a file you edit while `mm pull --conflict-mode prompt` waits for your answer is kept, with the peer's version saved beside it as a conflict copy. |

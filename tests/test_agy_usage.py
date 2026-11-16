@@ -24,7 +24,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -987,3 +987,149 @@ def test_older_census_cache_recounts_usage_less_steps(tmp_path: Path, prior_cens
     assert hu.agy_usage_diag()["usage_less_skipped"] == 1
     refreshed = json.loads(hu.AGY_CACHE_PATH.read_text(encoding="utf-8"))
     assert refreshed["census_host_version"] == hu.AGY_USAGE_CENSUS_HOST_VERSION
+
+
+def test_unchanged_failed_pass_skips_cache_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / "conversations"
+    _create_agy_db(root / "z.db", {1318: "gemini-3.8-flash"}, [])
+    (root / "z.db-journal").write_bytes(b"hot journal")
+
+    first = hu.read_agy_usage(root, consented=True)
+    assert not first.complete and first.reason == "stale"
+    before_bytes = hu.AGY_CACHE_PATH.read_bytes()
+
+    writer = Mock(wraps=lockedjson._write_json)
+    monkeypatch.setattr(lockedjson, "_write_json", writer)
+    second = hu.read_agy_usage(root, consented=True)
+    assert not second.complete and second.reason == "stale"
+    writer.assert_not_called()
+    assert hu.AGY_CACHE_PATH.read_bytes() == before_bytes
+
+
+def test_failed_pass_with_changed_error_detail_writes_cache_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = tmp_path / "conversations"
+    _create_agy_db(root / "z.db", {1318: "gemini-3.8-flash"}, [])
+    (root / "z.db-journal").write_bytes(b"hot journal")
+    hu.AGY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    hu.AGY_CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": hu.CACHE_VERSION,
+                "agy_format": hu._AGY_CACHE_FORMAT,
+                "census_host_version": hu.AGY_USAGE_CENSUS_HOST_VERSION,
+                "complete_once": False,
+                "usage_less_skipped": 0,
+                "last_reason": "stale",
+                "last_reason_since": "2026-11-01T00:00:00+00:00",
+                "last_error_detail": {"cause": "identity_changed"},
+                "error_db_count": 1,
+                "files": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    writer = Mock(wraps=lockedjson._write_json)
+    monkeypatch.setattr(lockedjson, "_write_json", writer)
+    result = hu.read_agy_usage(root, consented=True)
+    assert not result.complete and result.reason == "stale"
+    writer.assert_called_once()
+    persisted = json.loads(hu.AGY_CACHE_PATH.read_text(encoding="utf-8"))
+    assert persisted["last_error_detail"] == {"cause": "hot_journal"}
+    assert hu.agy_usage_diag()["last_error_detail"] == {"cause": "hot_journal"}
+
+
+@pytest.mark.parametrize("prior_count", [0, 2, None, -1, True, "invalid"])
+def test_failed_pass_with_changed_error_count_writes_once_then_skips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prior_count: object
+):
+    root = tmp_path / "conversations"
+    _create_agy_db(root / "z.db", {1318: "gemini-3.8-flash"}, [])
+    (root / "z.db-journal").write_bytes(b"hot journal")
+    first = hu.read_agy_usage(root, consented=True)
+    assert not first.complete and first.reason == "stale"
+    cached = json.loads(hu.AGY_CACHE_PATH.read_text(encoding="utf-8"))
+    assert cached["last_error_detail"] == {"cause": "hot_journal"}
+    cached["error_db_count"] = prior_count
+    hu.AGY_CACHE_PATH.write_text(json.dumps(cached), encoding="utf-8")
+
+    writer = Mock(wraps=lockedjson._write_json)
+    monkeypatch.setattr(lockedjson, "_write_json", writer)
+    second = hu.read_agy_usage(root, consented=True)
+    assert not second.complete and second.reason == "stale"
+    writer.assert_called_once()
+    repaired = hu.AGY_CACHE_PATH.read_bytes()
+    assert json.loads(repaired)["error_db_count"] == 1
+    assert hu.agy_usage_diag()["error_db_count"] == 1
+
+    third = hu.read_agy_usage(root, consented=True)
+    assert not third.complete and third.reason == "stale"
+    writer.assert_called_once()
+    assert hu.AGY_CACHE_PATH.read_bytes() == repaired
+
+
+@pytest.mark.parametrize(
+    ("cause", "code", "expected"),
+    [
+        ("cannot_open", "SQLITE_CANTOPEN", {"cause": "cannot_open", "code": "SQLITE_CANTOPEN"}),
+        ("cannot_open", "A" * 39 + "_", {"cause": "cannot_open", "code": "A" * 39 + "_"}),
+        ("cannot_open", "sqlite_cantopen", {"cause": "cannot_open"}),
+        ("cannot_open", "SQLITE_1", {"cause": "cannot_open"}),
+        ("cannot_open", "SQLITE-CANTOPEN", {"cause": "cannot_open"}),
+        ("cannot_open", "SQLITE CANTOPEN", {"cause": "cannot_open"}),
+        ("cannot_open", "", {"cause": "cannot_open"}),
+        ("cannot_open", "SQLITE_\u00c9", {"cause": "cannot_open"}),
+        ("cannot_open", 123, {"cause": "cannot_open"}),
+        ("cannot_open", None, {"cause": "cannot_open"}),
+        ("cannot_open", "A" * 41, {"cause": "cannot_open"}),
+        ("unknown_cause", "SQLITE_CANTOPEN", None),
+    ],
+)
+def test_retained_sqlite_diagnostic_code_filtering_in_diag(
+    cause: str, code: object, expected: dict[str, str | None] | None
+):
+    hu.AGY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    hu.AGY_CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": hu.CACHE_VERSION,
+                "agy_format": hu._AGY_CACHE_FORMAT,
+                "files": {},
+                "last_error_detail": {"cause": cause, "code": code},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert hu.agy_usage_diag()["last_error_detail"] == expected
+
+
+def test_sqlite_detail_code_filter_on_read_failure_and_error_name():
+    cases: list[tuple[str | None, bool]] = [
+        ("SQLITE_CANTOPEN", True),
+        ("A" * 39 + "_", True),
+        ("sqlite_cantopen", False),
+        ("SQLITE_1", False),
+        ("SQLITE-CANTOPEN", False),
+        ("SQLITE CANTOPEN", False),
+        ("", False),
+        ("SQLITE_\u00c9", False),
+        ("A" * 41, False),
+        (None, False),
+    ]
+    for code, allowed in cases:
+        detail = hu._ReadFailure("io_error", cause="cannot_open", code=code).detail
+        expected_detail = (
+            {"cause": "cannot_open", "store": None, "code": code}
+            if allowed
+            else {"cause": "cannot_open", "store": None}
+        )
+        assert detail == expected_detail
+        stub = Exception()
+        stub.sqlite_errorname = code  # type: ignore[attr-defined]
+        assert hu._sqlite_error_name(stub) == (code if allowed else None)
+
+    non_str_stub = Exception()
+    non_str_stub.sqlite_errorname = 123  # type: ignore[attr-defined]
+    assert hu._sqlite_error_name(non_str_stub) is None

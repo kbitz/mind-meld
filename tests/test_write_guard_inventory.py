@@ -505,12 +505,6 @@ REVIEWED = {
             "path.open('rb')",
         ],
     ),
-    "host_usage.py:_utc_day": (
-        *_READ_ONLY,
-        [
-            "value.replace('Z', '+00:00')",
-        ],
-    ),
     "hosts/grok.py:_read_usage_file": (
         *_READ_ONLY,
         [
@@ -546,14 +540,6 @@ REVIEWED = {
         [
             "refreshed_at.replace('Z', '+00:00')",
             "dt.replace(tzinfo=timezone.utc)",
-        ],
-    ),
-    "lockedjson.py:locked_json_durable_rmw": (
-        *_GUARDED,
-        [
-            "path.parent.mkdir(parents=True, exist_ok=True, mode=448)",
-            "os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 384)",
-            "os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)",
         ],
     ),
     "lockedjson.py:locked_json_rmw": (
