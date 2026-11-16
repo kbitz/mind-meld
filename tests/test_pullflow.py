@@ -111,13 +111,13 @@ def _normalize(text):
     return re.sub(r"Completed in \d+(?:\.\d+)?s", "Completed in <SECONDS>s", text)
 
 
-def _run(fleet, monkeypatch, mode, *, refusal=None, **kwargs):
+def _run(fleet, monkeypatch, mode, *, refusal=None, console_width=160, **kwargs):
     out, err = io.StringIO(), io.StringIO()
     for binding, stream in (("console", out), ("stderr_console", err)):
         monkeypatch.setattr(
             pullflow,
             binding,
-            Console(file=stream, width=160, force_terminal=False, color_system=None),
+            Console(file=stream, width=console_width, force_terminal=False, color_system=None),
         )
     monkeypatch.setattr(core, "console", pullflow.console)
     real_summary = pullflow._print_pull_summary
@@ -3560,7 +3560,9 @@ def test_verbose_tidy_diagnostics_report_singular_plural_and_suppress_when_quiet
     _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
     _record(("memory/MEMORY.md", base_index), ("memory/keep.md", b"keep\n"))
 
-    result, _, (out, err) = _run(fleet, monkeypatch, mode, verbose=verbose)
+    result, _, (out, err) = _run(
+        fleet, monkeypatch, mode, console_width=len(str(index_path)) + 80, verbose=verbose
+    )
 
     assert result.total_merged == 1
     assert err == ""
