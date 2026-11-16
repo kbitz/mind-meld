@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.57] - 2026-11-16
+
+`mm status` can retry a failed Codex log count once when reporting catch-up progress.
+
+### Changed
+
+- `mm status` can retry a failed Codex log count once when reporting catch-up progress.
+
 ## [1.12.56] - 2026-11-16
 
 `mm update` success is now an `Update:` line, and `mm update`, `mm log`, automatic sync, and `mm status` share consistent `Run:` remedies and maintenance failure wording.

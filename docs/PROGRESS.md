@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.57 | 2026-11-16 | `mm status` can retry a failed Codex log count once when reporting catch-up progress. |
 | 1.12.56 | 2026-11-16 | `mm update` success is now an `Update:` line, and `mm update`, `mm log`, automatic sync, and `mm status` share consistent `Run:` remedies and maintenance failure wording. |
 | 1.12.55 | 2026-11-15 | Antigravity skips unchanged failed-read cache rewrites while keeping changed diagnostics current. |
 | 1.12.54 | 2026-11-15 | Migration, `mm gc`, init and source-toggle warnings now use the shared `mm: warning:` and `mm: error:` forms with the fix command last, `mm gc` and attended pushes send malformed-blob summaries to stderr with `Run: mm gc -v`, and source enable and disable outcomes state the action once. |
