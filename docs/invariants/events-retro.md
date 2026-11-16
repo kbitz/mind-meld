@@ -36,8 +36,8 @@ meaning; this sync-specific policy governs presentation. No execution policy,
 cache mode, TTL, time budget, deadline, warm eligibility or capture/publication
 schema changes. Direct callers and standalone update keep their defaults.
 
-Leaf owner modules scope token/host diagnostics with Python 3.11-compatible
-ContextVar set/reset in finally; explicit callbacks cross the Git worker/pump
+Token/host diagnostics share `token_usage.diagnostic_scope`, backed by one
+Python 3.11-compatible ContextVar set/reset in finally; explicit callbacks cross the Git worker/pump
 boundary. Identity refresh has a per-call callback. No leaf imports CLI and no
 console/stderr monkeypatch implements this policy. Cache contention uses the
 existing raising lockedjson mode with identical retries, then preserves the
