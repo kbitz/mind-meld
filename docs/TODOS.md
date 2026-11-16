@@ -106,6 +106,28 @@ here by hand, use the H3 form.
 - **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/330 (branch `mmm/1f4ea780`, Track 135A) at `e9b960b` (2026-11-15).
 - **Effort:** ? (user triages in /roadmap)
 
+### [review:files=src/mind_meld/host_usage.py|tests/test_agy_usage.py] Test gap: failed Antigravity format or census refresh with unchanged diagnostics
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** Completed census refreshes are tested, but no isolated failed-pass case changes only format or census validity while the blocker, detail, count and timing stay unchanged.
+- **Hypothesis (untested):** extend the Antigravity tests with a failed old-format or old-census cache and unchanged failure metadata, and assert one corrective write; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/host_usage.py:2337
+- **Evidence:** Track 138B audit-only coverage gap A; the format/census gate and existing completed-refresh test were read, and no regression was demonstrated. The plan requires the behavior, not this additional isolated test.
+- **Revisit trigger:** the next Track whose `_touches:` cover the Antigravity reader and its tests.
+- **Context:** Filed by /review-and-prep on branch `mmm/cc18ddfd` at `cf26d36` (2026-11-16).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/host_usage.py|tests/test_agy_usage.py] Test gap: Antigravity file-only progress under an unchanged failure
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** Existing partial-progress tests preserve learned file entries while other failure metadata also changes. No isolated case changes only staged file progress with an unchanged blocker, detail, count and timing.
+- **Hypothesis (untested):** extend a partial-progress fixture to keep failure metadata stable and assert that a newly learned file still commits; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/host_usage.py:2338
+- **Evidence:** Track 138B audit-only coverage gap B; existing partial-progress tests passed in the 1,319-test targeted run. No failure was reproduced, and the plan's required partial-progress tests remain intact.
+- **Revisit trigger:** the next Track whose `_touches:` cover the Antigravity reader and its tests.
+- **Context:** Filed by /review-and-prep on branch `mmm/cc18ddfd` at `cf26d36` (2026-11-16).
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-15 (second run: full-review drain)
