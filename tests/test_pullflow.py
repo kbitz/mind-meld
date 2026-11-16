@@ -3,9 +3,9 @@
 Setup uses only core/crypto/manifest/devices/storage leaves and conftest's
 existing sidecar, history, device-lock and crypto isolation. PASSPHRASE is a
 synthetic test credential. Globals deliberately rebound here: pullflow.console,
-pullflow.stderr_console, and core._SYNC_OUTPUT (set for attended, unset for
-quiet/direct). The summary wrapper records actual output while calling the
-original renderer; no pull decisions or storage reads are mocked.
+pullflow.stderr_console, core.console, and core._SYNC_OUTPUT (set for attended,
+unset for quiet/direct). The summary wrapper records actual output while calling
+the original renderer; no pull decisions or storage reads are mocked.
 
 The quiet branch suppresses totals even with _SYNC_OUTPUT unset. A third,
 direct/nonquiet context pins the totals with elapsed/MB regex normalization.
@@ -119,6 +119,7 @@ def _run(fleet, monkeypatch, mode, *, refusal=None, **kwargs):
             binding,
             Console(file=stream, width=160, force_terminal=False, color_system=None),
         )
+    monkeypatch.setattr(core, "console", pullflow.console)
     real_summary = pullflow._print_pull_summary
     summaries = []
 
