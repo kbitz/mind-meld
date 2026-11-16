@@ -896,6 +896,10 @@ class TestAutoGC:
 
         _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
         captured = capsys.readouterr()
-        assert "1 blob(s) at unexpected path depth" in captured.out
+        assert "1 blob(s) at unexpected path depth" not in captured.out
+        assert captured.err == (
+            "mm: warning: 1 blob(s) at unexpected path depth (skipped; kept in place) "
+            "Run: mm gc -v\n"
+        )
         assert storage.exists("data/dev1/nested/stray.enc")
         assert storage.get("data/dev1/nested/stray.enc") == b"x"

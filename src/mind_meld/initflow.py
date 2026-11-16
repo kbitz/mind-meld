@@ -859,8 +859,8 @@ def _register_and_save(
             # quiet mode. Original save error wins via bare `raise` below —
             # surfacing the cleanup failure but not letting it mask the
             # real cause.
-            stderr_console.print(
-                f"mm: warning: cleanup of {dev_key} after "
+            core._warning(
+                f"cleanup of {dev_key} after "
                 f"save_config failure failed ({type(cleanup_exc).__name__}): "
                 f"{cleanup_exc}"
             )

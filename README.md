@@ -24,6 +24,15 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Migration, gc and source warning output (Track 137A):** migration, backfill,
+init-cleanup and forced unknown-source warnings now use the shared stderr
+forms, with fix commands last when present. The malformed-blob summary from
+`mm gc` and attended content-changing pushes moves from stdout to stderr;
+verbose/dry-run per-key listings stay on stdout. Source outcomes name the
+verb once (`Disable: source 'gstack' disabled on this device.`).
+Update scripts matching the old wording or stream. No migration is needed;
+exit codes, prompts and stored data are unchanged.
+
 **Cursor support removed (Tracks 114A–116A):** `mm cursor-agent`,
 `mm capture-cursor-usage`, the `cursor` source alias for `mm enable-source` /
 `mm disable-source`, the Cursor usage reader, the Cursor git-root discovery prober, and

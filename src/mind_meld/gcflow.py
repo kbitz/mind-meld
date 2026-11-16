@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mind_meld import core, retention, safety, upgrade
-from mind_meld.consoles import console, stderr_console
+from mind_meld import core, retention, safety
+from mind_meld.consoles import console
+from mind_meld.consoles import stderr_console as stderr_console
 from mind_meld.errors import LockError, MindMeldError
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.safety import safe_str
@@ -142,6 +143,7 @@ def _do_gc(
     emit_remediation: bool = True,
 ) -> GcBlobResult:
     """Collect this device's orphaned blobs from its raw manifest only."""
+    refusal_suffix = core.DRY_RUN_REFUSAL if dry_run else ""
     backend = get_backend(config)
     my_device_id = config["device"]["id"]
     own_prefix = storage_keys.data_prefix(my_device_id)
@@ -161,27 +163,26 @@ def _do_gc(
     # Only this device's raw manifest can authorize collecting its blobs.
     # Consumer exclusions/disabled sources must never filter these references.
     gc_fetch = core._fetch_remote_manifest(backend, my_device_id, passphrase, memory_kb)
-    # _error escapes markup itself; only the direct stderr print adds safe_str.
     label = safety.safe_terminal_str(
         f"{config['device'].get('name', my_device_id)} ({my_device_id})"
     )
     referenced_hashes: set[str] = set()
 
     def _skip_missing() -> GcBlobResult:
-        with core._pause_sync_progress():
-            stderr_console.print(
-                f"mm: warning: this device's manifest is missing: {safe_str(label)}. "
-                "Blob collection was skipped; no blobs were deleted. "
-                "Wait for sync, inspect with 'mm diag', then retry 'mm gc'."
-            )
+        core._warning(
+            f"this device's manifest is missing: {label}. "
+            "Blob collection was skipped; no blobs were deleted. "
+            "Wait for sync, inspect with 'mm diag', then retry",
+            fix="mm gc",
+        )
         return GcBlobResult(deleted=0, collected=False, tmp_outcome=tmp_outcome)
 
     def _refuse_unless_complete(fetch: core.ManifestFetch) -> None:
         if fetch.newer_version is not None:
             core._error(
-                "cannot GC safely — newer-format manifest is corrupt on: "
-                f"{label}. Leave it in place. "
-                f"Upgrade with: {upgrade.INSTALL_CMD}." + (core.DRY_RUN_REFUSAL if dry_run else "")
+                f"cannot GC safely — {core._newer_format_message(fetch.newer_version, 'manifest')} "
+                "Leave it in place." + refusal_suffix,
+                fix="mm update",
             )
         # A conflict copy alone cannot stand in for an absent or unreadable
         # canonical. Refuse previews too: an incomplete reference set cannot
@@ -190,15 +191,16 @@ def _do_gc(
             core._error(
                 "cannot GC safely — this device's manifest is held only by "
                 f"conflict copies (its main copy is missing or unreadable): {label}. "
-                "Run 'mm push' on this device to rewrite it, then retry GC."
-                + (core.DRY_RUN_REFUSAL if dry_run else "")
+                "Run 'mm push' on this device to rewrite it, then retry 'mm gc'." + refusal_suffix,
+                fix="mm push",
             )
         if fetch.status == "corrupt":
             core._error(
                 "cannot GC safely — this device's manifest is corrupt: "
                 f"{label}. It may reference blobs that would be reaped as orphans. "
-                "Run 'mm push' on this device to recover its manifest, then retry GC."
-                + (core.DRY_RUN_REFUSAL if dry_run else "")
+                "Run 'mm push' on this device to recover its manifest, then retry 'mm gc'."
+                + refusal_suffix,
+                fix="mm push",
             )
 
     def _add_references(fetch: core.ManifestFetch) -> None:
@@ -259,11 +261,10 @@ def _do_gc(
     if malformed_count and not (verbose or dry_run):
         # Always summarize malformed-path count even in non-verbose mode, so
         # the user has a signal that something weird is sitting in storage.
-        with core._pause_sync_progress():
-            console.print(
-                f"  [yellow]warning:[/yellow] {malformed_count} blob(s) at unexpected "
-                f"path depth (skipped; run with --verbose to see)."
-            )
+        core._warning(
+            f"{malformed_count} blob(s) at unexpected path depth (skipped; kept in place)",
+            fix="mm gc -v",
+        )
 
     if dry_run:
         console.print(f"\n[bold]Dry run:[/bold] {orphan_count} orphaned blobs found.")

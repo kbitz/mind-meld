@@ -23,7 +23,6 @@ never imports cli.
 from __future__ import annotations
 
 import difflib
-import sys
 from typing import Any
 
 import typer
@@ -134,10 +133,8 @@ def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
     if name in valid:
         return
     if force:
-        print(
-            f"mm: warning: '{name}' is not a known source "
-            f"(valid: {', '.join(valid)}); accepting via --force.",
-            file=sys.stderr,
+        core._warning(
+            f"'{name}' is not a known source (valid: {', '.join(valid)}); accepting via --force."
         )
         return
     matches = difflib.get_close_matches(name, valid, n=1, cutoff=0.6)
@@ -177,7 +174,7 @@ def disable_source(name: str, *, force: bool = False) -> None:
     if name in disabled:
         console.print(
             core._outcome_line(
-                "disable", f"Source '{safe_terminal_str(name)}' is already disabled"
+                "disable", f"source '{safe_terminal_str(name)}' is already disabled"
             ),
             markup=False,
             highlight=False,
@@ -192,7 +189,7 @@ def disable_source(name: str, *, force: bool = False) -> None:
 
     console.print(
         core._outcome_line(
-            "disable", f"Disabled source '{safe_terminal_str(name)}' on this device"
+            "disable", f"source '{safe_terminal_str(name)}' disabled on this device"
         ),
         markup=False,
         highlight=False,
@@ -269,7 +266,7 @@ def enable_source(name: str, *, force: bool = False) -> None:
         if name in explicit_names or (not has_explicit_sources and name in default_names):
             console.print(
                 core._outcome_line(
-                    "enable", f"Source '{safe_terminal_str(name)}' is already enabled"
+                    "enable", f"source '{safe_terminal_str(name)}' is already enabled"
                 ),
                 markup=False,
                 highlight=False,
@@ -285,7 +282,7 @@ def enable_source(name: str, *, force: bool = False) -> None:
 
     _record_seen([name])
     console.print(
-        core._outcome_line("enable", f"Enabled source '{safe_terminal_str(name)}' on this device"),
+        core._outcome_line("enable", f"source '{safe_terminal_str(name)}' enabled on this device"),
         markup=False,
         highlight=False,
         soft_wrap=True,

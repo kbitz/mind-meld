@@ -766,12 +766,15 @@ push use `_do_gc`. It reads only this device's raw, normalized manifest, retaini
 excluded, disabled-source and frozen nested-checkout references. It lists only
 `storage.keys.data_prefix(device_id)` and requires every parsed blob owner to
 equal that device before counting or deleting an orphan. Malformed keys are
-preserved with sanitized notices. Peer registry entries and manifests neither
+preserved with sanitized notices: one shared `mm: warning:` line on stderr
+ending `Run: mm gc -v` in both explicit `mm gc` and attended push when not
+verbose or `--dry-run` (verbose and `--dry-run` per-key lines stay on stdout).
+Peer registry entries and manifests neither
 authorize nor veto collection; no peer namespace is collected.
 
 A missing own manifest returns `GcBlobResult(deleted=0, collected=False)` without listing or deleting blob candidates,
-with a visible warning naming this device, skipped collection and no blobs
-deleted. Wait for sync, inspect with `mm diag`, then retry GC; inspection does not
+with a visible `mm: warning:` line on stderr naming this device, skipped collection and no blobs
+deleted (`... Wait for sync, inspect with 'mm diag', then retry` ending with `Run: mm gc`); inspection does not
 repair missing metadata. Explicit `mm gc` always prints its `Gc:` outcome line:
 `Gc: blob collection skipped (own manifest missing); local retention complete.`
 (or `Gc: blob collection skipped (own manifest missing).` when local retention
@@ -783,7 +786,8 @@ shared `mm: warning: Retention cleanup was incomplete ...` line follows the
 `--conflicts` or `Run: mm gc -v` otherwise; deliberate keeps (`ReapOutcome.kept`)
 never warn.
 A valid empty manifest is distinct and can collect own orphans. Own corrupt or
-newer-format metadata refuses in apply and preview. So does an own manifest held
+newer-format metadata refuses in apply and preview (`Run: mm update` for
+newer-format, `Run: mm push` for corrupt or conflict-copies-only). So does an own manifest held
 only by conflict copies (iCloud, Dropbox or Syncthing) because the canonical is absent or unreadable
 (`ManifestFetch.conflict_copies_only`): an older copy alone is an incomplete
 reference set, and no peer reference masks it any more. The refusal's `mm push`

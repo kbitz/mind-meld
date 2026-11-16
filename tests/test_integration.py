@@ -3093,7 +3093,9 @@ class TestMigrateConfigCommand:
         assert "gstack" in names
         assert "opencode" in on_disk["sync"]["disabled_sources"]
 
-    def test_maybe_prompt_migration_non_tty_warns_without_writing(self, tmp_path, monkeypatch):
+    def test_maybe_prompt_migration_non_tty_warns_without_writing(
+        self, tmp_path, monkeypatch, capsys
+    ):
         config_path = self._write_opencode_block_config(tmp_path)
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
         self._redirect_lock(monkeypatch, tmp_path)
@@ -3102,22 +3104,18 @@ class TestMigrateConfigCommand:
             def isatty(self) -> bool:
                 return False
 
-        captured: list[str] = []
         monkeypatch.setattr(cli_module.sys, "stdin", _NonTTY())
         monkeypatch.setattr(cli_module.sys, "stdout", _NonTTY())
-        monkeypatch.setattr(
-            cli_module.stderr_console,
-            "print",
-            lambda message, *a, **k: captured.append(str(message)),
-        )
 
         before = config_path.read_bytes()
         config = config_module.load_config(config_path)
         core._maybe_prompt_migration(config, read_only=False)
         assert config_path.read_bytes() == before
-        joined = " ".join(captured)
-        assert "retired" in joined.lower() or "opencode" in joined
-        assert "migrate-config" in joined
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "retired" in captured.err.lower() or "opencode" in captured.err
+        assert captured.err.startswith("mm: warning: ")
+        assert captured.err.endswith("Run: mm migrate-config\n")
 
     def test_autopush_does_not_mutate_retired_opencode_block(self, tmp_path, monkeypatch):
         config_path = self._write_opencode_block_config(tmp_path)
@@ -4129,6 +4127,11 @@ class TestGCSafety:
         before = _preview_tree(env["claude"].parent, pin=dry_run)
         result = runner.invoke(app, ["gc"] + (["--dry-run"] if dry_run else []))
         assert result.exit_code == 0, result.output
+        assert result.stderr.splitlines() == [
+            "mm: warning: this device's manifest is missing: Mac A (dev-a). "
+            "Blob collection was skipped; no blobs were deleted. "
+            "Wait for sync, inspect with 'mm diag', then retry Run: mm gc"
+        ]
         warning = " ".join(result.stderr.split())
         assert "this device's manifest is missing: Mac A (dev-a)" in warning
         assert "Blob collection was skipped; no blobs were deleted" in warning
@@ -4311,6 +4314,8 @@ class TestGCSafety:
         flat = " ".join(result.output.split())
         assert "held only by conflict copies" in flat and "Mac A (dev-a)" in flat
         assert "corrupt" not in flat
+        assert "retry 'mm gc'" in flat
+        assert result.stderr.splitlines()[-1] == "Run: mm push"
         assert listings == []
         if dry_run:
             _assert_preview_refused(result)
@@ -4456,7 +4461,7 @@ class TestGCSafety:
 
     @pytest.mark.parametrize("late", ["missing", "corrupt", "unreadable", "more-refs"])
     def test_pre_delete_recheck_requires_a_clean_own_manifest(
-        self, push_preview56, monkeypatch, late
+        self, push_preview56, monkeypatch, late, capsys
     ):
         env = push_preview56
         backend = env["backend"]
@@ -4487,10 +4492,18 @@ class TestGCSafety:
         if late in ("corrupt", "unreadable"):
             with pytest.raises(typer.Exit):
                 cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False)
+            err_lines = capsys.readouterr().err.splitlines()
+            assert "retry 'mm gc'" in err_lines[0]
+            assert err_lines[-1] == "Run: mm push"
         else:
             expected = 1 if late == "more-refs" else 0
             gc_res = cli_module.gcflow._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False)
             assert gc_res.deleted == expected
+            if late == "missing":
+                err_lines = capsys.readouterr().err.splitlines()
+                assert len(err_lines) == 1
+                assert "mm diag" in err_lines[0]
+                assert err_lines[0].endswith("Run: mm gc")
         assert calls == ["dev-a", "dev-a"]
         orphan_key = storage_keys.blob_key("dev-a", orphan)
         survivors = dict(blobs)
@@ -4511,16 +4524,18 @@ class TestGCSafety:
         config = {**env["config"], "device": {**env["config"]["device"], "name": "Mac [work]"}}
         buf = StringIO()
         monkeypatch.setattr(
-            cli_module.core if state == "corrupt" else cli_module.gcflow,
+            cli_module.core,
             "stderr_console",
             Console(file=buf, width=300, color_system=None),
         )
         if state == "corrupt":
             with pytest.raises(typer.Exit):
                 cli_module.gcflow._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
+            assert buf.getvalue().splitlines()[-1] == "Run: mm push"
         else:
             gc_res = cli_module.gcflow._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
             assert (gc_res.deleted, gc_res.collected) == (0, False)
+            assert buf.getvalue().splitlines()[-1].endswith("Run: mm gc")
         assert "Mac [work] (dev-a)" in buf.getvalue()
         assert "\\[work]" not in buf.getvalue()
 
@@ -9945,9 +9960,11 @@ def _assert_preview_complete(result):
 def _assert_preview_refused(result, exit_code=1):
     assert result.exit_code == exit_code, result.output
     assert "Dry run complete." not in result.output
-    assert _preview_text(result).endswith(
-        "Nothing was changed except the local lock file (dry run)."
-    )
+    text = _preview_text(result)
+    stderr_lines = (result.stderr or "").splitlines()
+    if stderr_lines and stderr_lines[-1].startswith("Run: "):
+        text = text[: -len(stderr_lines[-1])].rstrip()
+    assert text.endswith("Nothing was changed except the local lock file (dry run).")
 
 
 def _seed_preview_prior(env, *, event_files=()):
@@ -10855,6 +10872,8 @@ def test_refusal_paths62(preview62, monkeypatch, case):
         assert "Nothing was changed" not in result.output
     else:
         _assert_preview_refused(result)
+    if case == "gc-corrupt":
+        assert result.stderr.splitlines()[-1] == "Run: mm push"
     if case == "zero-repos":
         assert "then preview again: mm recapture --dry-run 1d" in _preview_text(result)
 
@@ -11544,7 +11563,18 @@ class TestPushPreviewNoMutation56A:
         monkeypatch.setattr(typer, "confirm", lambda *a, **kw: pytest.fail("preview prompted"))
         result = env["invoke"]()
         _assert_preview_complete(result)
-        assert "config missing recommended excludes" in result.stderr
+        assert "config missing recommended excludes" not in result.stdout
+        warning_lines = [
+            line
+            for line in result.stderr.splitlines()
+            if line.startswith("mm: warning: config missing recommended excludes")
+        ]
+        assert warning_lines == [
+            "mm: warning: config missing recommended excludes for source(s) gstack. "
+            "Run: mm migrate-config"
+        ]
+        if not tty:
+            assert result.stderr.splitlines() == warning_lines
         assert ("This preview uses your current config." in result.stderr) == tty
         assert ("default: yes" in result.stderr) == tty
 
@@ -12246,6 +12276,10 @@ class TestNewerStorage66A:
         if owner == "dev-a":
             if dry_run:
                 _assert_preview_refused(result)
+            assert "cannot GC safely" in result.stderr
+            assert "newer mm (format 0x04)" in result.stderr
+            assert "Leave it in place." in result.stderr
+            assert result.stderr.splitlines()[-1] == "Run: mm update"
             assert "Run 'mm push'" not in result.output
             return
         pull = runner.invoke(app, ["pull"])
@@ -12785,8 +12819,17 @@ def test_own_gc_refusal_preserves_post_publication_capture_state(
         monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **kw: ())
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == (0 if capture_state == "published" else 1), result.output
-    assert "corrupt" in result.stderr.lower()
+    assert "cannot gc safely" in result.stderr.lower()
+    assert (
+        "corrupt" if refusal == b"corrupt" else "newer mm (format 0x04)"
+    ) in result.stderr.lower()
     assert ("Host usage was published" in result.stderr) == (capture_state == "published")
+    if capture_state == "published":
+        assert result.stderr.splitlines()[-1].endswith("Run: mm gc")
+    else:
+        assert result.stderr.splitlines()[-1] == (
+            "Run: mm push" if refusal == b"corrupt" else "Run: mm update"
+        )
     record, reason = cli_module.attemptlog.read()
     assert reason is None
     assert (
@@ -12825,6 +12868,21 @@ def test_unreadable_peer_allows_post_push_own_collection(capture61, peer_manifes
     assert not env["backend"].exists(own_orphan)
     assert env["backend"].get(peer_blob) == b"peer"
     assert env["backend"].get(storage_keys.manifest_key("peer")) == peer_manifest
+
+
+def test_attended_push_warns_on_stderr_and_keeps_wrong_depth_own_blob(capture61):
+    env = capture61
+    malformed = "data/dev-a/nested/stray.enc"
+    env["backend"].put(malformed, b"stray")
+    (env["claude"] / "projects/-Users-user-myapp/memory/new.md").write_text("pending")
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert "blob(s) at unexpected path depth" not in result.stdout
+    assert (
+        "mm: warning: 1 blob(s) at unexpected path depth (skipped; kept in place) Run: mm gc -v"
+        in result.stderr.splitlines()
+    )
+    assert env["backend"].get(malformed) == b"stray"
 
 
 def test_attended_resolves_once_and_bootstraps_inside_lock(capture61, monkeypatch):
