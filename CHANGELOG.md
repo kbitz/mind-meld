@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.63] - 2026-11-17
+
+`mm retro-fleet` drops `--no-save` and rejects it as an unknown option.
+
+### Changed
+
+- `mm retro-fleet --no-save` now exits 2; remove the flag from scripts and refresh stale skills with `mm install-skills`, then restart the agent.
+
+### Removed
+
+- `mm retro-fleet` removes the retired `--no-save` flag and rejects it as an unknown option.
+
+### Upgrade notes
+
+- Remove `--no-save` from scripts or aliases calling `mm retro-fleet`, and run `mm install-skills` then restart any coding agent whose older `retro-fleet` skill copy still passes it.
+
 ## [1.12.62] - 2026-11-17
 
 Token usage and skill-link helpers drop unused shims.

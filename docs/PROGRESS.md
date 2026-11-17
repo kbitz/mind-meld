@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.63 | 2026-11-17 | `mm retro-fleet` drops `--no-save` and rejects it as an unknown option. |
 | 1.12.62 | 2026-11-17 | Token usage and skill-link helpers drop unused shims. |
 | 1.12.61 | 2026-11-16 | Invariant docs now spell out history bookkeeping and migration lock scope. |
 | 1.12.60 | 2026-11-16 | Invariant docs now spell out the shared content hash validation contract. |
