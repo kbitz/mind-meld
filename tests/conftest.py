@@ -514,7 +514,7 @@ def _isolate_token_cache(monkeypatch, tmp_path) -> None:
     """Redirect ``mind_meld.token_usage.CACHE_PATH`` to a per-test path
     and reset all per-process warning sets.
 
-    ``warm_token_cache_inline`` / ``gc_cache_entries`` /
+    ``warm_token_cache_inline`` / ``reap_cache_entries`` /
     ``lock_and_get_files`` all read/write
     ``~/.config/mind-meld/session-tokens.json`` by default. Without
     isolation, every test that drives ``mm push`` / ``_run_events_tail``

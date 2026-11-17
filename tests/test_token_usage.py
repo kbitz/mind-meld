@@ -3,14 +3,13 @@
 Pinned behaviors per the eng-review test diagram:
   - parse_usage: happy + various malformed inputs
   - _normalize_model_id: dated/undated/synthetic/garbage
-  - walk_jsonl_buckets: empty/single-day/midnight-cross/mixed-models/
+  - walk_jsonl_segment: empty/single-day/midnight-cross/mixed-models/
                         corrupt-line/unreadable/dedup-by-id
   - get_or_compute: cache hit/miss/concurrent-append-skip/deadline
-  - slice_window: inside/partial-overlap/outside/empty
   - estimate_cost: known/unknown/synthetic/zero
   - is_cache_cold: missing/empty/corrupt/version-mismatch/populated
   - warm_token_cache_inline: walks parent + subagent jsonls + budget gate
-  - gc_cache_entries: reaps stale entries
+  - plan_cache_entries / reap_cache_entries: reaps stale entries
 """
 
 from __future__ import annotations
@@ -358,21 +357,24 @@ class TestParseUsage:
 
 
 # ---------------------------------------------------------------------------
-# walk_jsonl_buckets
+# walk_jsonl_segment
 # ---------------------------------------------------------------------------
 
 
-class TestWalkJsonlBuckets:
+class TestWalkJsonlSegment:
     def test_empty_file(self, tmp_path: Path) -> None:
         path = tmp_path / "empty.jsonl"
         path.write_text("")
-        by_day, _ = tu.walk_jsonl_buckets(path)
-        assert by_day == {}
+        seg = tu.walk_jsonl_segment(path)
+        assert seg.by_day == {}
+        assert seg.skills_by_day == {}
+        assert seg.end_offset == 0
+        assert seg.ok is True
 
     def test_single_day_single_message(self, tmp_path: Path) -> None:
         path = tmp_path / "one.jsonl"
         _write_jsonl(path, [_wrap(_assistant_msg(), ts="2026-05-01T12:00:00.000Z")])
-        result, _ = tu.walk_jsonl_buckets(path)
+        result = tu.walk_jsonl_segment(path).by_day
         assert "2026-05-01" in result
         assert result["2026-05-01"]["input"] == 100
         assert result["2026-05-01"]["cache_read"] == 1000
@@ -387,7 +389,7 @@ class TestWalkJsonlBuckets:
                 _wrap(_assistant_msg(msg_id="b"), ts="2026-05-02T00:05:00.000Z"),
             ],
         )
-        result, _ = tu.walk_jsonl_buckets(path)
+        result = tu.walk_jsonl_segment(path).by_day
         assert "2026-05-01" in result
         assert "2026-05-02" in result
 
@@ -400,7 +402,7 @@ class TestWalkJsonlBuckets:
                 _wrap(_assistant_msg(model="claude-sonnet-4-6", msg_id="b")),
             ],
         )
-        result, _ = tu.walk_jsonl_buckets(path)
+        result = tu.walk_jsonl_segment(path).by_day
         day = result["2026-05-01"]
         assert "claude-opus-4-7" in day["by_model"]
         assert "claude-sonnet-4-6" in day["by_model"]
@@ -412,15 +414,16 @@ class TestWalkJsonlBuckets:
             f.write(json.dumps(_wrap(_assistant_msg(msg_id="a"))) + "\n")
             f.write("garbage line\n")
             f.write(json.dumps(_wrap(_assistant_msg(msg_id="b"))) + "\n")
-        result, _ = tu.walk_jsonl_buckets(path)
+        result = tu.walk_jsonl_segment(path).by_day
         # Both valid messages counted; garbage line skipped.
         assert result["2026-05-01"]["input"] == 200
 
     def test_unreadable_file_returns_empty(self, tmp_path: Path) -> None:
         path = tmp_path / "missing.jsonl"
         # File doesn't exist.
-        by_day, _ = tu.walk_jsonl_buckets(path)
-        assert by_day == {}
+        seg = tu.walk_jsonl_segment(path)
+        assert seg.by_day == {}
+        assert seg.ok is False
 
     def test_dedup_by_message_id(self, tmp_path: Path) -> None:
         path = tmp_path / "dups.jsonl"
@@ -432,7 +435,7 @@ class TestWalkJsonlBuckets:
                 _wrap(_assistant_msg(msg_id="dup")),  # duplicate
             ],
         )
-        result, _ = tu.walk_jsonl_buckets(path)
+        result = tu.walk_jsonl_segment(path).by_day
         assert result["2026-05-01"]["input"] == 100  # NOT 300
 
     def test_message_without_id_not_deduped(self, tmp_path: Path) -> None:
@@ -443,7 +446,7 @@ class TestWalkJsonlBuckets:
         m2 = _assistant_msg()
         m2.pop("id")
         _write_jsonl(path, [_wrap(m1), _wrap(m2)])
-        result, _ = tu.walk_jsonl_buckets(path)
+        result = tu.walk_jsonl_segment(path).by_day
         assert result["2026-05-01"]["input"] == 200
 
     def test_message_without_timestamp_skipped(self, tmp_path: Path) -> None:
@@ -451,7 +454,7 @@ class TestWalkJsonlBuckets:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w") as f:
             f.write(json.dumps({"message": _assistant_msg()}) + "\n")
-        result, _ = tu.walk_jsonl_buckets(path)
+        result = tu.walk_jsonl_segment(path).by_day
         assert result == {}
 
 
@@ -523,98 +526,6 @@ class TestGetOrCompute:
         cache: dict = {}
         result = tu.get_or_compute(path, cache)
         assert result == ({}, {})
-
-
-# ---------------------------------------------------------------------------
-# slice_window
-# ---------------------------------------------------------------------------
-
-
-class TestSliceWindow:
-    def _by_day_3day(self) -> dict:
-        return {
-            "2026-04-29": {
-                "input": 10,
-                "cache_create": 0,
-                "cache_read": 100,
-                "output": 5,
-                "by_model": {
-                    "claude-opus-4-7": {
-                        "input": 10,
-                        "cache_create": 0,
-                        "cache_read": 100,
-                        "output": 5,
-                    }
-                },
-            },
-            "2026-04-30": {
-                "input": 20,
-                "cache_create": 0,
-                "cache_read": 200,
-                "output": 10,
-                "by_model": {
-                    "claude-opus-4-7": {
-                        "input": 20,
-                        "cache_create": 0,
-                        "cache_read": 200,
-                        "output": 10,
-                    }
-                },
-            },
-            "2026-05-01": {
-                "input": 30,
-                "cache_create": 0,
-                "cache_read": 300,
-                "output": 15,
-                "by_model": {
-                    "claude-sonnet-4-6": {
-                        "input": 30,
-                        "cache_create": 0,
-                        "cache_read": 300,
-                        "output": 15,
-                    }
-                },
-            },
-        }
-
-    def test_full_window(self) -> None:
-        by_day = self._by_day_3day()
-        result = tu.slice_window(
-            by_day,
-            since=datetime(2026, 4, 29, tzinfo=timezone.utc),
-            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
-        )
-        assert result["input"] == 60
-        assert result["cache_read"] == 600
-        assert "claude-opus-4-7" in result["by_model"]
-        assert "claude-sonnet-4-6" in result["by_model"]
-
-    def test_partial_overlap(self) -> None:
-        by_day = self._by_day_3day()
-        result = tu.slice_window(
-            by_day,
-            since=datetime(2026, 4, 30, tzinfo=timezone.utc),
-            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
-        )
-        assert result["input"] == 50  # 20 + 30
-
-    def test_outside_window(self) -> None:
-        by_day = self._by_day_3day()
-        result = tu.slice_window(
-            by_day,
-            since=datetime(2026, 6, 1, tzinfo=timezone.utc),
-            until=datetime(2026, 6, 30, tzinfo=timezone.utc),
-        )
-        assert result["input"] == 0
-        assert result["by_model"] == {}
-
-    def test_empty_input(self) -> None:
-        result = tu.slice_window(
-            {},
-            since=datetime(2026, 4, 1, tzinfo=timezone.utc),
-            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
-        )
-        assert result["input"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1268,11 +1179,11 @@ class TestWarmTokenCacheInline:
 
 
 # ---------------------------------------------------------------------------
-# gc_cache_entries
+# plan_cache_entries / reap_cache_entries
 # ---------------------------------------------------------------------------
 
 
-class TestGcCacheEntries:
+class TestReapCacheEntries:
     def test_preview_missing_cache_does_not_create_it(self) -> None:
         assert not tu.CACHE_PATH.exists()
 
@@ -1360,8 +1271,8 @@ class TestGcCacheEntries:
         tu.warm_token_cache_inline([claude_dir])
         # Delete the jsonl.
         jsonl.unlink()
-        reaped = tu.gc_cache_entries()
-        assert reaped == 1
+        reaped = tu.reap_cache_entries()
+        assert reaped.deleted == 1
 
     def test_reaps_entries_older_than_max_age(self, tmp_path: Path) -> None:
         claude_dir = tmp_path / "claude"
@@ -1371,8 +1282,8 @@ class TestGcCacheEntries:
         _write_jsonl(proj / "ancient.jsonl", [_wrap(_assistant_msg(), ts=old_ts)])
         tu.warm_token_cache_inline([claude_dir])
         # All entries should have only old by_day buckets.
-        reaped = tu.gc_cache_entries(max_age_s=90 * 24 * 3600)
-        assert reaped == 1
+        reaped = tu.reap_cache_entries(max_age_s=90 * 24 * 3600)
+        assert reaped.deleted == 1
 
     def test_keeps_recent_entries(self, tmp_path: Path) -> None:
         claude_dir = tmp_path / "claude"
@@ -1381,16 +1292,14 @@ class TestGcCacheEntries:
         recent_ts = datetime.now(timezone.utc).isoformat()
         _write_jsonl(proj / "fresh.jsonl", [_wrap(_assistant_msg(), ts=recent_ts)])
         tu.warm_token_cache_inline([claude_dir])
-        reaped = tu.gc_cache_entries()
-        assert reaped == 0
+        reaped = tu.reap_cache_entries()
+        assert reaped.deleted == 0
 
-    # The four tests below pin the explicit reap branches that were
-    # previously uncovered (entry not a dict, by_day missing/empty,
-    # wrong-version cache). Each asserts disk state in addition to the
-    # `reaped` return value: the gc_cache_entries refactor onto
-    # lock_and_get_files relies on in-place mutation of the yielded
-    # `files` dict; a regression where `keep` is built but never
-    # persisted would pass the return-value-only assertions.
+    # The four tests below pin the explicit reap branches (entry not a
+    # dict, by_day missing/empty, wrong-version cache). Each asserts disk
+    # state in addition to the returned `TokenCacheGcResult` counts so a
+    # regression where the GC plan is built but never persisted cannot pass
+    # return-value-only assertions.
 
     @staticmethod
     def _read_disk_cache() -> dict:
@@ -1408,8 +1317,8 @@ class TestGcCacheEntries:
                 }
             )
         )
-        reaped = tu.gc_cache_entries()
-        assert reaped == 1
+        reaped = tu.reap_cache_entries()
+        assert reaped.deleted == 1
         on_disk = self._read_disk_cache()
         assert on_disk["version"] == tu.CACHE_VERSION
         assert on_disk["files"] == {}
@@ -1428,8 +1337,8 @@ class TestGcCacheEntries:
                 }
             )
         )
-        reaped = tu.gc_cache_entries()
-        assert reaped == 1
+        reaped = tu.reap_cache_entries()
+        assert reaped.deleted == 1
         assert self._read_disk_cache()["files"] == {}
 
     def test_reaps_entry_with_empty_by_day(self, tmp_path: Path) -> None:
@@ -1444,17 +1353,16 @@ class TestGcCacheEntries:
                 }
             )
         )
-        reaped = tu.gc_cache_entries()
-        assert reaped == 1
+        reaped = tu.reap_cache_entries()
+        assert reaped.deleted == 1
         assert self._read_disk_cache()["files"] == {}
 
     def test_strips_unknown_top_level_keys_on_gc(self, tmp_path: Path) -> None:
         # Regression pin (Codex/Claude cross-model HIGH on Track 11A
-        # review, 2026-05-10): pre-v0.12.4 gc_cache_entries did
-        # `ljson.data.clear() + update({version, files})` which silently
-        # stripped unknown top-level keys. The refactor onto
-        # lock_and_get_files lost this property until v0.12.4 lifted
-        # the root-sanitization into the wrapper. This test ensures
+        # review, 2026-05-10): pre-v0.12.4 token-cache GC did
+        # `ljson.data.clear() + update({version, files})` which stripped
+        # unknown top-level keys; `plan_cache_entries` / `reap_cache_entries`
+        # and `lock_and_get_files` preserve that root-sanitization so
         # `mm gc` heals a cache with bonus top-level keys.
         live = tmp_path / "live.jsonl"
         live.touch()
@@ -1475,7 +1383,9 @@ class TestGcCacheEntries:
                 }
             )
         )
-        tu.gc_cache_entries()
+        reaped = tu.reap_cache_entries()
+        assert reaped.deleted == 0
+        assert reaped.repairs_applied == 2
         on_disk = self._read_disk_cache()
         assert set(on_disk.keys()) == {"version", "files"}
         assert on_disk["version"] == tu.CACHE_VERSION
@@ -1483,12 +1393,11 @@ class TestGcCacheEntries:
         assert str(live) in on_disk["files"]
 
     def test_wrong_version_cache_normalized_to_empty(self, tmp_path: Path) -> None:
-        # Wrong-version cache pre-populated with stale entries. After
-        # the refactor, lock_and_get_files clears the file shape to
-        # `{"version": CACHE_VERSION, "files": {}}` BEFORE gc sees it,
-        # so reaped == 0 (gc never iterates the old entries — they're
-        # already gone). Disk state asserts the post-normalization
-        # shape, which is the load-bearing observable.
+        # Wrong-version cache pre-populated with stale entries.
+        # `_plan_cache_entries` marks `reset_root=True` (1 repair, 0 stale
+        # key deletions) and `_apply_cache_gc_plan` resets the root to
+        # `{"version": CACHE_VERSION, "files": {}}`. Disk state asserts the
+        # post-normalization shape, which is the load-bearing observable.
         tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tu.CACHE_PATH.write_text(
             json.dumps(
@@ -1501,8 +1410,9 @@ class TestGcCacheEntries:
                 }
             )
         )
-        reaped = tu.gc_cache_entries()
-        assert reaped == 0
+        reaped = tu.reap_cache_entries()
+        assert reaped.deleted == 0
+        assert reaped.repairs_applied == 1
         on_disk = self._read_disk_cache()
         assert on_disk["version"] == tu.CACHE_VERSION
         assert on_disk["files"] == {}
@@ -1580,7 +1490,7 @@ class TestSkillDetection:
                 ),
             ],
         )
-        _by_day, skills = tu.walk_jsonl_buckets(path)
+        skills = tu.walk_jsonl_segment(path).skills_by_day
         # toolu_a + toolu_b counted; the second toolu_a retry deduped.
         assert skills == {"2026-05-01": {"ship": 2}}
 
@@ -1613,7 +1523,7 @@ class TestSkillDetection:
                 ),
             ],
         )
-        _by_day, skills = tu.walk_jsonl_buckets(path)
+        skills = tu.walk_jsonl_segment(path).skills_by_day
         assert skills == {"2026-05-01": {"plan-eng-review": 1}}
 
     def test_non_skill_tool_use_blocks_ignored(self, tmp_path: Path) -> None:
@@ -1636,10 +1546,10 @@ class TestSkillDetection:
                 ),
             ],
         )
-        by_day, skills = tu.walk_jsonl_buckets(path)
-        assert skills == {"2026-05-01": {"plan-eng-review": 1}}
+        seg = tu.walk_jsonl_segment(path)
+        assert seg.skills_by_day == {"2026-05-01": {"plan-eng-review": 1}}
         # Tokens still recorded for the same message.
-        assert by_day["2026-05-01"]["input"] == 1
+        assert seg.by_day["2026-05-01"]["input"] == 1
 
     def test_malformed_skill_blocks_skipped(self, tmp_path: Path) -> None:
         """Plan test #3: every malformed shape skipped without raising."""
@@ -1668,16 +1578,22 @@ class TestSkillDetection:
                 ),
             ],
         )
-        _by_day, skills = tu.walk_jsonl_buckets(path)
-        # Empty-bucket pruning drops days with no skills entirely.
-        assert skills == {}
+        # Raw untrimmed segment records an empty per-day map; get_or_compute
+        # trims empty-bucket days out.
+        assert tu.walk_jsonl_segment(path).skills_by_day == {"2026-05-01": {}}
+        assert tu.get_or_compute(path, {})[1] == {}
 
-    def test_walk_jsonl_buckets_returns_tuple_shape(self, tmp_path: Path) -> None:
-        """Plan test #4: canonical walker returns token and skill views."""
+    def test_walk_jsonl_segment_returns_segment_shape(self, tmp_path: Path) -> None:
+        """Plan test #4: canonical walker returns JsonlSegment with token and skill views."""
         path = tmp_path / "session.jsonl"
         _write_jsonl(path, [_wrap(_assistant_with_blocks([_skill_block("ship")], msg_id="m1"))])
-        result = tu.walk_jsonl_buckets(path)
-        assert isinstance(result, tuple) and len(result) == 2
+        seg = tu.walk_jsonl_segment(path)
+        assert isinstance(seg, tu.JsonlSegment)
+        assert "2026-05-01" in seg.by_day
+        assert seg.skills_by_day == {"2026-05-01": {"ship": 1}}
+        assert seg.end_offset == path.stat().st_size
+        assert seg.tail_msg_ids == ("m1",)
+        assert seg.ok is True
 
 
 class TestCacheShapeUpgradeGate:
@@ -1792,7 +1708,8 @@ class TestIncrementalResume:
             [_wrap(_assistant_with_blocks([_skill_block("retro")], msg_id="m2"))],
         )
         got = tu.get_or_compute(path, cache)
-        assert got == tu.walk_jsonl_buckets(path)
+        seg = tu.walk_jsonl_segment(path)
+        assert got == (seg.by_day, seg.skills_by_day)
         assert got[1] == {"2026-05-01": {"ship": 1, "retro": 1}}
 
     def test_straddling_message_iterations_not_double_counted(self, tmp_path: Path) -> None:
@@ -1811,7 +1728,7 @@ class TestIncrementalResume:
         by_day, _skills = tu.get_or_compute(path, cache)
 
         assert by_day["2026-05-01"]["input"] == 100
-        assert by_day == tu.walk_jsonl_buckets(path)[0]
+        assert by_day == tu.walk_jsonl_segment(path).by_day
 
     def test_partial_trailing_line_deferred_then_counted_once(self, tmp_path: Path) -> None:
         """A half-written line is not parsed and not counted toward the
@@ -1834,7 +1751,7 @@ class TestIncrementalResume:
             f.write(json.dumps(_wrap(_assistant_msg(msg_id="inflight")))[40:] + "\n")
         by_day, _skills = tu.get_or_compute(path, cache)
         assert by_day["2026-05-01"]["input"] == 200
-        assert by_day == tu.walk_jsonl_buckets(path)[0]
+        assert by_day == tu.walk_jsonl_segment(path).by_day
 
     def test_truncated_file_falls_back_to_full_walk(self, tmp_path: Path) -> None:
         path = tmp_path / "session.jsonl"
@@ -1858,7 +1775,7 @@ class TestIncrementalResume:
         assert path.stat().st_size  # sanity
         by_day, _skills = tu.get_or_compute(path, cache)
         assert by_day["2026-05-01"]["input"] == 777
-        assert by_day == tu.walk_jsonl_buckets(path)[0]
+        assert by_day == tu.walk_jsonl_segment(path).by_day
 
     def test_pre_v0_12_15_entry_hits_cache_without_rewalk(
         self, tmp_path: Path, monkeypatch
@@ -1991,7 +1908,7 @@ class TestIncrementalResume:
         _append_lines(path, [_wrap(_assistant_msg(msg_id="m3"))])
         by_day, _skills = tu.get_or_compute(path, cache)
         assert by_day["2026-05-01"]["input"] == 300
-        assert by_day == tu.walk_jsonl_buckets(path)[0]
+        assert by_day == tu.walk_jsonl_segment(path).by_day
 
     def test_oversize_notice_default_label_is_the_token_walker(
         self, tmp_path: Path, monkeypatch, capsys
@@ -2004,7 +1921,7 @@ class TestIncrementalResume:
         monkeypatch.setattr(tu, "MAX_JSONL_LINE_BYTES", 512)
         path = tmp_path / "session.jsonl"
         path.write_bytes(b'{"junk":"' + (b"x" * 4000) + b'"}\n')
-        list(tu.walk_jsonl_buckets(path))
+        tu.walk_jsonl_segment(path)
         assert "token walker skipping oversize line" in capsys.readouterr().err
 
     def test_oversize_hostile_path_notice_is_printable_and_later_record_survives(
@@ -2100,9 +2017,11 @@ class TestIncrementalResume:
             ],
         )
         by_day, skills = tu.get_or_compute(path, cache)
-        # Oldest day trimmed out; incremental result still equals a full walk.
+        # Raw segment is untrimmed; get_or_compute trims the oldest day out
+        # on both full and incremental walks.
+        assert set(tu.walk_jsonl_segment(path).by_day) == {"2026-05-01", "2026-05-02", "2026-05-03"}
         assert set(by_day) == {"2026-05-02", "2026-05-03"}
-        assert (by_day, skills) == tu.walk_jsonl_buckets(path)
+        assert (by_day, skills) == tu.get_or_compute(path, {})
 
     def test_tail_ids_capped_and_recent_biased(self, tmp_path: Path) -> None:
         path = tmp_path / "session.jsonl"
@@ -2300,7 +2219,7 @@ class TestResumePlanRejection:
         path.write_bytes(data[:cut])
         assert tu.head_fingerprint(path, entry["head_len"]) == entry["head"]
         by_day, _skills = tu.get_or_compute(path, cache)
-        assert by_day == tu.walk_jsonl_buckets(path)[0]
+        assert by_day == tu.walk_jsonl_segment(path).by_day
         assert by_day["2026-05-01"]["input"] != 99999
 
     def test_shrunk_head_len_rejected_even_when_digest_agrees(self, tmp_path: Path) -> None:

@@ -666,18 +666,16 @@ def test_marker_literals_are_byte_identical_to_v0_12_18() -> None:
     """A rename silently resets every fleet machine's 24h TTL (T5)."""
     from mind_meld import skill_link
 
-    assert skill_link._SKILL_LINK_SUCCESS_MARKER == "skill-link-checked"
-    assert skill_link._SKILL_LINK_CONFLICT_MARKER == "skill-link-conflict"
-    assert skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER == "codex-skill-link-checked"
-    assert skill_link._CODEX_SKILL_LINK_CONFLICT_MARKER == "codex-skill-link-conflict"
+    rows_by_agent = {row.key: row for row in skill_link.AGENT_ROWS}
+    assert rows_by_agent["claude"].success_marker == "skill-link-checked"
+    assert rows_by_agent["claude"].conflict_marker == "skill-link-conflict"
+    assert rows_by_agent["codex"].success_marker == "codex-skill-link-checked"
+    assert rows_by_agent["codex"].conflict_marker == "codex-skill-link-conflict"
+    assert rows_by_agent["agy"].success_marker == "agy-skill-link-checked"
+    assert rows_by_agent["agy"].conflict_marker == "agy-skill-link-conflict"
     # Claude's success name is a suffix of the others, so startswith is unusable.
-    names = [
-        skill_link._SKILL_LINK_SUCCESS_MARKER,
-        skill_link._SKILL_LINK_CONFLICT_MARKER,
-        skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER,
-        skill_link._CODEX_SKILL_LINK_CONFLICT_MARKER,
-    ]
-    assert len(set(names)) == 4, names
+    names = [m for row in skill_link.AGENT_ROWS for m in (row.success_marker, row.conflict_marker)]
+    assert len(set(names)) == 2 * len(skill_link.AGENT_ROWS), names
 
 
 def test_leading_agent_keys_are_stable() -> None:
@@ -811,8 +809,7 @@ def test_synthetic_row_is_covered_with_no_other_edit(monkeypatch, tmp_path) -> N
     assert synth_desc.display_name == "Synthetic Agent"
     assert str(synth_desc.skills_dir).startswith(str(tmp_path))
 
-    targets = skill_link.skill_targets()
-    assert synth_desc.target in targets
+    assert synth_desc.target in [d.target for d in descriptors]
     assert skill_link._skill_links_check_due(may_create=None) is True
 
     results = skill_link._ensure_retro_skill_links(may_create=None)

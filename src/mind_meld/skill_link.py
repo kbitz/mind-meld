@@ -85,7 +85,9 @@ class AgentRow:
 # (``_ensure_retro_skill_links`` docstring + ordered-list assertions).
 # Removal is a deliberate retirement, not a reordering. Ordinary isolation
 # never patches this; exactly one structural-extension test does, via
-# ``redirect_skill_paths(..., extra_rows=...)``.
+# ``redirect_skill_paths(..., extra_rows=...)``. Renaming ``success_marker``
+# or ``conflict_marker`` on an ``AGENT_ROWS`` entry silently resets every
+# fleet machine's 24h TTL and re-emits one notice.
 AGENT_ROWS: tuple[AgentRow, ...] = (
     AgentRow(
         key="claude",
@@ -118,18 +120,6 @@ AGENT_ROWS: tuple[AgentRow, ...] = (
 # descriptors resolve under tmp_path. Never derive the real-home guard
 # from this map.
 _TEST_SKILL_ROOT_OVERRIDES: dict[str, str] = {}
-
-# Bound to the row values so nothing that imported the old module-level
-# names breaks. A rename of any of these four literals silently resets
-# every fleet machine's 24h TTL and re-emits one notice.
-_SKILL_LINK_SUCCESS_MARKER = next(row.success_marker for row in AGENT_ROWS if row.key == "claude")
-_SKILL_LINK_CONFLICT_MARKER = next(row.conflict_marker for row in AGENT_ROWS if row.key == "claude")
-_CODEX_SKILL_LINK_SUCCESS_MARKER = next(
-    row.success_marker for row in AGENT_ROWS if row.key == "codex"
-)
-_CODEX_SKILL_LINK_CONFLICT_MARKER = next(
-    row.conflict_marker for row in AGENT_ROWS if row.key == "codex"
-)
 
 
 def _home_relative(skills_root: str) -> Path:
@@ -1386,21 +1376,6 @@ def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
     return False
 
 
-def skill_targets() -> tuple[Path, ...]:
-    """The agent skill-link targets, in ``AGENT_ROWS`` order.
-
-    Single source of truth for the target paths. ``install_skills_cmd`` used to
-    rebuild this tuple from its own hardcoded string literals 3,000 lines away
-    from the installer, so the two could drift; after the Track 16A cut they
-    would have lived in different files under different Group 17 owners, and
-    17A's charter is literally "installer correctness".
-
-    Re-resolved per call (``expanduser`` reads ``$HOME`` at call time) so a test
-    that moves HOME moves the targets with it.
-    """
-    return tuple(descriptor.target for descriptor in _skill_target_descriptors())
-
-
 def _maintain_links_field(
     key: str,
     may_create: frozenset[str] | None,
@@ -1535,7 +1510,6 @@ __all__ = [
     "consented_agent_keys",
     "diagnose_skill_links",
     "render_skill_status",
-    "skill_targets",
     "_descriptor_for",
     "_ensure_retro_skill_links",
     "_marker_dir",
