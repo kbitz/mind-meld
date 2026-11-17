@@ -44,6 +44,16 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=tests/test_docs_routing.py] Test gap: the Track-named test file guard leaves its review alternative unanchored
+- **Test gap:** no demonstrated defect; a test-only guard, not shipped behavior.
+- **Description:** `test_no_test_file_is_named_after_a_track_or_review` matches `(?:^|_)track_?\d|review_?\d`: the track alternative is anchored to the start or an underscore, but `review_?\d` is not, so a future `tests/test_preview_2.py` or `tests/test_dry_run_preview2.py` would fail the guard falsely (`preview_2` contains `review_2`). No current test file matches.
+- **Hypothesis (untested):** anchor the review alternative the same way (`(?:^|_)(?:track|review)_?\d`) and add a parametrized case that accepts a `preview_2` stem and still rejects `review_2` and `track_146a` stems. Re-verify first.
+- **Upstream severity:** INFORMATIONAL.
+- **Found in:** tests/test_docs_routing.py (`test_no_test_file_is_named_after_a_track_or_review`), added by Track 146A (PR #345, `ad06efc`).
+- **Evidence:** the Factory Manager's 146A spot check, 2026-11-17; re-read at `c55d103`, and `ls tests` finds no `review_?\d` or `preview_?\d` stem. No failure reproduced.
+- **Context:** Relayed by the Factory Manager to the 2026-11-17 roadmap regeneration for filing as one test-gap item.
+- **Effort:** S
+
 ### [review:files=src/mind_meld/statusflow.py|tests/test_statusflow.py] Test gap: Pending join notice beside folder settings warnings
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
 - **Description:** Status tests cover folder-setting warnings and pending-join notices separately, but do not pin their relative order when both appear.
