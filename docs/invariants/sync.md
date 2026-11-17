@@ -489,10 +489,8 @@ the same database, so a lost database can let one machine mint a second record f
 file it followed. The second record carries the same hash, so it deletes only
 identical bytes a peer's base names.
 
-**Provisional tables.** `ledger`, `own_log` and `displaced` still have no
-production reader (migration 3 adopted `cursors` for Track 92A). The schema table
-below names each remaining one as "no reader" and `expire_displaced` has no caller;
-whichever current Track first needs one decides whether to reuse or drop it.
+**Provisional tables.** Migration 5 (Track 143A) dropped `ledger`, `own_log`
+and `displaced`, which no release read or wrote, without a compat bump.
 
 **Ancestry: the `from` field.** A manifest file entry gains `"from": [<16-hex sha
 prefix>, ...]`, newest first, at most 16, omitted when empty; an unchanged entry
@@ -943,10 +941,7 @@ propagating; a failed unlink can still strand it. Its consumers are
 `devices.py:register_device` and `crypto.py:bootstrap_crypto_init`. Ordinary
 `lockedjson.py:locked_json_rmw` / `_write_json` forensic caches (identity,
 upgrade, token usage, Codex/Grok/Muse/Antigravity host usage), `seen_sources` in-place flock
-writes, `fsutil.py:flock_append_jsonl` and
-`fsutil.py:append_rotatable_jsonl` / `rotate_jsonl` (an fsynced append and a
-rename-aside rotation; between them they call `_fsync_fd` and `fsync_dir`
-directly, never `atomic_write_bytes`) are separate protocols, not omitted
+writes and `fsutil.py:flock_append_jsonl` are separate protocols, not omitted
 durable atomic-write families. Pull's end-of-batch `fsync_dir` has the separate
 apply exception boundary below. This audit does not qualify the crash
 durability of these `fsync=False` writes: a directory flush covers entries, not
@@ -1622,8 +1617,7 @@ Hook site: `_pull_core` BEFORE `collect_tombstones` and the per-source download 
 `state.db` holds the forensic `history` table (this section) and, since Track 91A,
 the rebuildable pull ledger (`peer_base`, `seen_version`; see "Fast-forward,
 propagated deletions and anchors (Track 91A)"). Track 92A adopts `cursors` for
-each peer's push and waiting state. The three remaining provisional tables below
-(`ledger`, `own_log`, `displaced`) have no reader. Obligations here bind
+each peer's push and waiting state. Obligations here bind
 whichever Track first writes non-history, non-rebuildable `state.db` data.
 
 `pullhistory` owns the forensic `history` table in the local, never-synced
@@ -1667,8 +1661,7 @@ stored values (compat_version, legacy_jsonl_stat, a row's extra) are corrupt.
 A statedb write transaction is always the **innermost** lock: never acquire the
 mm lockfile or upgrade-state's flock inside one. statedb itself takes neither.
 History can be written outside the mm lock (the self-upgrade hook releases its
-upgrade flock first); the four 2.0 tables may be written only under the mm lock
-by their delivering Tracks.
+upgrade flock first); every other table may be written only under the mm lock.
 
 `append` and `append_self_upgrade` retain their legacy dict shapes; `sidecar=`
 is removed, but imported sidecar keys survive. `row` stamps `ts` at append time.
@@ -1688,7 +1681,7 @@ SQLite failure, or one that ended the transaction (FULL, IOERR), aborts the
 whole flush so a later flush retries the import; it never autocommits a part. The files remain inert. Non-ENOENT OS errors abort the entire
 legacy import, but still set `history_imported` and sanitized
 `history_import_pending`: new rows stay visible, `mm log` notices, and a later
-flush or maintenance retries the whole import exactly once. Deferred rows get
+flush retries the whole import exactly once. Deferred rows get
 ids below the current minimum. Successful import records each legacy file's
 size and mtime_ns (or absence) taken before reading, without inode/device, so
 an older mm's append during the import also fires the notice. `mm log` stats both files;
@@ -1723,8 +1716,7 @@ corruption is possible. Measured 4,500 commits cost 1,640 ms versus 5.1 ms
 batched; eight 1000-row fullfsync commits cost 124 ms. The ledger's durability
 decision is under "Fast-forward, propagated deletions and anchors (Track 91A)".
 
-`read_records()` materializes insertion order; an explicit path stays the
-tolerant JSONL reader. `query` filters in SQL (ts_us for --since), orders
+`query` filters in SQL (ts_us for --since), orders
 `ts DESC, id ASC` and applies positive limits (clamped to SQLite's integer
 range). A filter value that is not UTF-8-encodable matches no table row (such
 values live in `extra`). The legacy path retains the
@@ -1742,15 +1734,16 @@ error/notice strings and errors.STATEDB_HELP_URL.
 **Move-aside remedy boundary:** the corrupt-database move-aside advice in README is
 valid while every non-history table is rebuildable or unused. That holds for the
 pull ledger and `cursors` (both are rebuilt on the next pull; until then today's mtime and
-union rule runs and no file is deleted) and for the three remaining provisional tables. A
+union rule runs and no file is deleted). A
 Track that stores data the machine cannot rebuild in `state.db` must replace the
 advice first.
 
 ### Schema columns and readers
 
 Migration 1 pins six tables and four indexes; migration 2 adds `peer_base`,
-`seen_version` and two indexes; migration 3 drops and recreates `cursors`, and
-migration 4 adds its three manifest identity columns. Neither raises
+`seen_version` and two indexes; migration 3 drops and recreates `cursors`,
+migration 4 adds its three manifest identity columns, and migration 5 drops
+`ledger`, `own_log` and `displaced`; none raises
 `compat_version` (statedb.py). Tests assert table_info and
 index_list independently.
 
@@ -1760,17 +1753,7 @@ index_list independently.
 | history | id orders insertions/prune/ties, ts renders and sorts, ts_us filters --since, verb/device/source/rel_path/action/local_sha/remote_sha/extra reconstruct mm log rows (73B); old_version/new_version live in extra. |
 | peer_base | peer/source/path/sha: the pull rule's rows 3, 6 and 7, its baseline when no version is `held`, and the deletion guard read the peer's last-synced sha (`core.load_ledger`, `pullplan.Ledger.base`); written by pull and explicit resolution, and rebuilt on loss (Track 91A). `mm diag` counts rows per peer. |
 | seen_version | source/path/sha-prefix/time/kind/deleted_by: the pull rule's baseline and ancestry (`Ledger.newest_held`, `entries`), `stamp_ancestry`'s `from` list and the mint guard's `deleted_by` stamp read it; written by pull, push and explicit resolution (Track 91A). `mm diag` counts rows. |
-| ledger | No reader. Provisional and empty. |
 | cursors | peer/applied/seen/waiting/applied_hash/applied_canonical_hash/seen_hash: each peer's applied and seen manifest times (UTC microseconds), waiting file count, and the matching content identities described below; read by `statusflow.status` (`statedb.read_cursors`, `statusflow._peer_states`) and written at the end of an unscoped non-interrupted pull by `pullflow._record_peer_cursors` (`statedb.commit_cursors`; Track 92A). Rebuilt on the next pull. |
-| own_log | No reader. Provisional and empty. |
-| displaced | No reader. Provisional and empty; `expire_displaced` has no caller. |
-
-ledger, own_log and displaced are **provisional and empty**, with no
-reader (each row above says so). A Track that adopts one may DROP and re-CREATE it in
-a migration without raising compat_version: released binaries read only meta and
-history. `expire_displaced` is unit-tested only and has no caller: at 30 days it
-clears content and sets expired, never deletes rows or changes metadata. Whichever
-Track first needs one of these decides whether to reuse or drop it.
 
 ### History API recipes
 
@@ -1791,16 +1774,6 @@ with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
     pullhistory.import_if_needed(conn)
     pullhistory.write_rows(conn, rows)
     pullhistory.prune(conn)
-```
-
-A writer that adds rows of its own to the same transaction closes the connection
-and then maintains separately. Best-effort maintenance cannot roll back the commit:
-
-```python
-with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
-    # Another writer's rows may join this transaction.
-    pullhistory.write_rows(conn, rows)
-pullhistory.maintain_best_effort()
 ```
 
 ## Corrupt-manifest recovery (load-bearing)

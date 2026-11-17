@@ -9,6 +9,7 @@ import stat
 import pytest
 
 from mind_meld import pullhistory, statedb
+from tests.conftest import history_rows, import_history
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +66,7 @@ class TestAppend:
                 rel_path=f"memory/file-{i}.md",
                 action="written",
             )
-        assert len(pullhistory.read_records()) == 3
+        assert len(history_rows()) == 3
         assert not _live_path().exists()
 
     def test_appended_record_has_required_schema_keys(self):
@@ -77,7 +78,7 @@ class TestAppend:
             action="uploaded",
             local_sha="abc123",
         )
-        rec = pullhistory.read_records()[0]
+        rec = history_rows()[0]
         assert rec["verb"] == "push"
         assert rec["device"] == "dev-b"
         assert rec["source"] == "gstack"
@@ -94,7 +95,7 @@ class TestAppend:
             rel_path="memory/role.md",
             action="skipped",
         )
-        rec = pullhistory.read_records()[0]
+        rec = history_rows()[0]
         assert "local_sha" not in rec
         assert "remote_sha" not in rec
 
@@ -135,7 +136,7 @@ class TestAppend:
         )
 
 
-class TestReadRecords:
+class TestRead:
     def test_invalid_utf8_line_is_skipped_not_raised(self):
         """v0.12.16 T3: `_yield_lines` read text-mode guarded only by
         OSError, so one invalid UTF-8 byte raised UnicodeDecodeError out of
@@ -164,7 +165,7 @@ class TestReadRecords:
             )
 
         live.write_bytes(_rec("before.md") + b'{"rel_path":"\xe9bad"}\n' + _rec("after.md"))
-        recs = list(pullhistory.read_records())
+        recs = list(pullhistory.query(limit=0))
         assert [r["rel_path"] for r in recs] == ["before.md", "after.md"]
 
     def test_read_returns_records_in_file_order(self):
@@ -176,7 +177,7 @@ class TestReadRecords:
                 rel_path=f"f-{i}.md",
                 action="written",
             )
-        recs = list(pullhistory.read_records())
+        recs = list(history_rows())
         assert [r["rel_path"] for r in recs] == ["f-0.md", "f-1.md", "f-2.md"]
 
     def test_read_yields_rotated_then_live(self):
@@ -203,7 +204,7 @@ class TestReadRecords:
         rotated.write_text("\n".join(_rec(f"old-{i}.md") for i in range(3)) + "\n")
         live.write_text("\n".join(_rec(f"new-{i}.md") for i in range(2)) + "\n")
 
-        recs = list(pullhistory.read_records())
+        recs = list(pullhistory.query(limit=0))
         rels = [r["rel_path"] for r in recs]
         # Rotated content (older) appears first.
         assert rels == ["old-0.md", "old-1.md", "old-2.md", "new-0.md", "new-1.md"]
@@ -226,7 +227,7 @@ class TestReadRecords:
         )
         # First line is corrupt JSON; remaining lines are valid.
         rotated.write_text(f"{{not-valid-json\n{good}\n{good}\n")
-        recs = list(pullhistory.read_records())
+        recs = list(pullhistory.query(limit=0))
         assert len(recs) == 2
         assert all(r["rel_path"] == "good.md" for r in recs)
 
@@ -234,11 +235,11 @@ class TestReadRecords:
         live = _live_path()
         live.parent.mkdir(parents=True, exist_ok=True)
         live.write_text("not-json\n" + json.dumps({"verb": "pull", "rel_path": "x"}) + "\n")
-        recs = list(pullhistory.read_records())
+        recs = list(pullhistory.query(limit=0))
         assert len(recs) == 1
 
     def test_read_returns_empty_when_no_files(self):
-        assert list(pullhistory.read_records()) == []
+        assert list(pullhistory.query(limit=0)) == []
 
 
 def add(path="file", **kwargs):
@@ -271,8 +272,8 @@ def test_standalone_import_once_lossless():
     legacy(rows[1:])
     add("\udcff")
     add("second")
-    assert pullhistory.read_records()[:2] == rows
-    assert pullhistory.read_records()[2]["rel_path"] == "\udcff"
+    assert history_rows()[:2] == rows
+    assert history_rows()[2]["rel_path"] == "\udcff"
     with statedb.connect(read_only=True) as conn:
         assert dict(conn.execute("SELECT key,value FROM meta"))["history_imported"]
         stats = json.loads(dict(conn.execute("SELECT key,value FROM meta"))["legacy_jsonl_stat"])
@@ -282,7 +283,7 @@ def test_standalone_import_once_lossless():
         ]
         assert set(stats) == {"pull-history.jsonl", "pull-history.jsonl.1"}
         assert conn.execute("SELECT rel_path FROM history WHERE id=1").fetchone() == (None,)
-    assert len(pullhistory.read_records()) == 4
+    assert len(history_rows()) == 4
 
 
 def test_insert_api_outer_rollback_unknown_and_no_maintenance():
@@ -315,10 +316,10 @@ def test_bad_import_row_skipped_and_marked(monkeypatch):
 
     monkeypatch.setattr(pullhistory, "_insert", insert)
     add()
-    assert pullhistory.read_records()[0] == {"keep": True}
-    assert len(pullhistory.read_records()) == 2
+    assert history_rows()[0] == {"keep": True}
+    assert len(history_rows()) == 2
     add()
-    assert len(pullhistory.read_records()) == 3
+    assert len(history_rows()) == 3
 
 
 def test_pending_import_all_or_nothing_then_once(monkeypatch):
@@ -340,15 +341,15 @@ def test_pending_import_all_or_nothing_then_once(monkeypatch):
         assert isinstance(pullhistory.query().notices[0], pullhistory.LegacyHistoryPending)
         add("new-2")
     add("new-3")
-    assert [r["rel_path"] for r in pullhistory.read_records()] == [
+    assert [r["rel_path"] for r in history_rows()] == [
         "old-1",
         "old-2",
         "new-1",
         "new-2",
         "new-3",
     ]
-    pullhistory.maintain_best_effort()
-    assert len(pullhistory.read_records()) == 5
+    add("new-4")
+    assert len(history_rows()) == 6
     assert not pullhistory.query().notices
 
 
@@ -370,7 +371,7 @@ def test_batch_counts_stamp_nested_and_binding(monkeypatch, tmp_path):
     assert calls == [1000, 1000, 500]
     assert not statedb.db_path().exists()
     with statedb.path_scope(initial):
-        assert len(pullhistory.read_records()) == 2500
+        assert len(history_rows()) == 2500
     assert initial.exists()
 
 
@@ -379,7 +380,7 @@ def test_batch_flush_on_interrupt(interrupt):
     with pytest.raises(interrupt), pullhistory.batch():
         add()
         raise interrupt()
-    assert len(pullhistory.read_records()) == 1
+    assert len(history_rows()) == 1
 
 
 def test_empty_batch_and_failure_command_budget(monkeypatch, capsys):
@@ -402,7 +403,6 @@ def test_empty_batch_and_failure_command_budget(monkeypatch, capsys):
         with pullhistory.batch():
             for _ in range(2500):
                 add()
-        pullhistory.maintain_best_effort()
     assert calls == [1]
     assert (
         capsys.readouterr().err
@@ -440,7 +440,8 @@ def test_class_retention_and_unknown_class():
             conn.executemany(
                 "INSERT INTO history (verb,action) VALUES (?,?)", [(verb, action)] * count
             )
-    pullhistory.maintain_best_effort()
+    with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+        pullhistory.prune(conn)
     with statedb.connect(read_only=True) as conn:
         counts = {
             (v, a): n
@@ -476,7 +477,7 @@ def test_no_sqlite_writer_and_legacy_fallback(monkeypatch):
     monkeypatch.setitem(sys.modules, "sqlite3", None)
     add()
     assert not statedb.db_path().exists()
-    assert pullhistory.read_records() == [{"verb": "legacy"}]
+    assert pullhistory.query(limit=0) == [{"verb": "legacy"}]
 
 
 def test_unbounded_snapshot_null_ts_ties():
@@ -485,7 +486,7 @@ def test_unbounded_snapshot_null_ts_ties():
         for i in range(12000)
     ]
     legacy(rows)
-    pullhistory.maintain_best_effort()
+    import_history()
     expected = sorted(rows, key=lambda r: r.get("ts", ""), reverse=True)
     assert pullhistory.query(limit=0) == expected
 
@@ -505,7 +506,7 @@ def test_append_stamps_before_flush(monkeypatch):
         add()
         Clock.current = datetime(2021, 1, 1, tzinfo=timezone.utc)
         assert not statedb.db_path().exists()
-    assert pullhistory.read_records()[0]["ts"] == "2020-01-01T00:00:00+00:00"
+    assert history_rows()[0]["ts"] == "2020-01-01T00:00:00+00:00"
 
 
 def test_execute_time_errors_translate():
@@ -548,7 +549,7 @@ pullhistory.append_self_upgrade(device='d', old_version='1', new_version='2')
     ]
     for child in children:
         assert child.wait(timeout=10) == 0
-    records = pullhistory.read_records()
+    records = history_rows()
     assert records[0] == {"legacy": True}
     assert len(records) == 3
 
@@ -630,26 +631,18 @@ def test_exact_message_table(kind, body):
         assert pullhistory.explain(pullhistory.HistoryNotRecorded(exceptions[kind])) == expected
 
 
-def test_documented_history_recipes_execute(monkeypatch):
+def test_documented_history_recipes_execute():
     import re
     from pathlib import Path
 
     doc = Path(__file__).parents[1] / "docs/invariants/sync.md"
     section = doc.read_text().split("### History API recipes\n", 1)[1].split("\n## ", 1)[0]
     blocks = re.findall(r"```python\n(.*?)```", section, re.S)
-    assert len(blocks) == 3
+    assert len(blocks) == 2
     namespace = {}
     for block in blocks:
         exec(compile(block, str(doc), "exec"), namespace)
-    assert len(pullhistory.read_records()) == 2
-
-    # The last recipe's committed row survives a separate maintenance failure.
-    def broken(*args, **kwargs):
-        raise OSError("maintenance failed")
-
-    monkeypatch.setattr(pullhistory, "import_if_needed", broken)
-    exec(compile(blocks[-1], str(doc), "exec"), namespace)
-    assert len(pullhistory.read_records()) == 3
+    assert len(history_rows()) == 1
 
 
 def test_environmental_insert_failure_aborts_whole_import(monkeypatch):
@@ -675,7 +668,7 @@ def test_environmental_insert_failure_aborts_whole_import(monkeypatch):
         assert conn.execute("SELECT count(*) FROM history").fetchone() == (0,)
     assert "history_imported" not in meta
     add("kept")
-    assert [r["rel_path"] for r in pullhistory.read_records()] == [
+    assert [r["rel_path"] for r in history_rows()] == [
         *(r["rel_path"] for r in rows),
         "kept",
     ]
@@ -704,7 +697,7 @@ def test_sqlite_row_error_skips_only_that_legacy_row(monkeypatch):
     monkeypatch.setattr(sqlite3, "connect", original)
     rows = pullhistory.query(limit=0)
     assert rows.origin == "state.db"
-    assert [r["rel_path"] for r in pullhistory.read_records()] == ["old-0", "old-2", "new"]
+    assert [r["rel_path"] for r in history_rows()] == ["old-0", "old-2", "new"]
 
 
 def test_import_tripwire_covers_rows_appended_during_import(monkeypatch):
@@ -732,7 +725,7 @@ def test_deeply_nested_legacy_line_is_skipped():
     path.write_bytes(b"[" * 200_000 + b"\n" + json.dumps({"rel_path": "good"}).encode() + b"\n")
     assert [r["rel_path"] for r in pullhistory.query()] == ["good"]
     add("new")
-    assert [r["rel_path"] for r in pullhistory.read_records()] == ["good", "new"]
+    assert [r["rel_path"] for r in history_rows()] == ["good", "new"]
 
 
 def test_explain_names_foreign_exception():
@@ -791,11 +784,11 @@ def test_flush_prunes_each_class_to_newest(monkeypatch):
     monkeypatch.setattr(pullhistory, "HISTORY_CLASS_LIMIT", 3)
     for i in range(5):
         add(str(i))
-    assert [r["rel_path"] for r in pullhistory.read_records()] == ["2", "3", "4"]
+    assert [r["rel_path"] for r in history_rows()] == ["2", "3", "4"]
     with pullhistory.batch():
         for i in range(5, 10):
             add(str(i))
-    assert [r["rel_path"] for r in pullhistory.read_records()] == ["7", "8", "9"]
+    assert [r["rel_path"] for r in history_rows()] == ["7", "8", "9"]
 
 
 def test_migrated_but_unimported_database_reads_legacy():
@@ -838,7 +831,7 @@ def test_racing_first_writer_imports_once(monkeypatch):
 
     monkeypatch.setattr(statedb, "transaction", transaction)
     add("ours")
-    records = pullhistory.read_records()
+    records = history_rows()
     assert records[0] == {"legacy": True}
     assert [r.get("device") for r in records[1:]] == ["rival", "dev"]
 
@@ -849,7 +842,7 @@ def test_additive_history_column_keeps_reading_and_writing():
         conn.execute("ALTER TABLE history ADD COLUMN receipt TEXT")
         conn.execute("PRAGMA user_version = 2")
     add("after")
-    assert [r["rel_path"] for r in pullhistory.read_records()] == ["before", "after"]
+    assert [r["rel_path"] for r in history_rows()] == ["before", "after"]
     assert pullhistory.query().origin == "state.db"
 
 
@@ -864,8 +857,7 @@ def test_since_keeps_microsecond_precision():
     assert pullhistory.query(since=later) == []
 
 
-@pytest.mark.parametrize("writer", ["flush", "maintain"])
-def test_writers_recheck_compat_inside_their_transaction(monkeypatch, writer):
+def test_writers_recheck_compat_inside_their_transaction(monkeypatch):
     import sqlite3
     from contextlib import contextmanager
 
@@ -885,10 +877,7 @@ def test_writers_recheck_compat_inside_their_transaction(monkeypatch, writer):
     monkeypatch.setattr(statedb, "connect", racing)
     before = statedb.db_path().read_bytes()
     with pullhistory.command_scope():
-        if writer == "flush":
-            add("after")
-        else:
-            pullhistory.maintain_best_effort()
+        add("after")
         assert pullhistory.failed()
     monkeypatch.setattr(statedb, "connect", original)
     with sqlite3.connect(statedb.db_path()) as conn:
@@ -912,7 +901,7 @@ def test_a_deleted_row_carries_its_recovery_folder_in_extra():
         remote_sha="a" * 64,
         folder=FOLDER,
     )
-    (rec,) = pullhistory.read_records()
+    (rec,) = history_rows()
     assert (rec["verb"], rec["action"], rec["rel_path"]) == ("pull", "deleted", "old/note.md")
     assert rec["folder"] == FOLDER
     with statedb.connect(read_only=True) as conn:
@@ -953,7 +942,8 @@ def test_deleted_rows_are_pruned_per_class_like_every_other_action():
         conn.executemany(
             "INSERT INTO history (verb,action) VALUES (?,?)", [("pull", "deleted")] * 20001
         )
-    pullhistory.maintain_best_effort()
+    with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+        pullhistory.prune(conn)
     with statedb.connect(read_only=True) as conn:
         assert conn.execute("SELECT count(*) FROM history WHERE action='deleted'").fetchone() == (
             20000,

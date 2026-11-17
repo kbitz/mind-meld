@@ -638,6 +638,22 @@ def _isolate_pullhistory(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_pullhistory, "HISTORY_DIR", tmp_path / "mm_state")
 
 
+def history_rows() -> list[dict]:
+    """Return every state.db history row in insertion (id) order, or ``[]``."""
+    from mind_meld import pullhistory
+
+    rows = pullhistory._read_table()
+    return [] if rows is None else list(rows)
+
+
+def import_history() -> None:
+    """Create state.db and import legacy JSONL rows into the history table."""
+    from mind_meld import pullhistory, statedb
+
+    with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+        pullhistory.import_if_needed(conn)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_seen_sources(monkeypatch, tmp_path) -> None:
     """Redirect seen_sources.SEEN_DIR to a per-test path.
