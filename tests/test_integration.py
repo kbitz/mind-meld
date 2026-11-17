@@ -130,14 +130,6 @@ def claude_dir_a(tmp_path):
     return d
 
 
-@pytest.fixture
-def claude_dir_b(tmp_path):
-    """Simulate Machine B's ~/.claude (starts empty)."""
-    d = tmp_path / "machine_b" / ".claude"
-    d.mkdir(parents=True)
-    return d
-
-
 def _move_state_db_aside():
     """Lose this machine's pull base, as README's `state.db` move-aside remedy does."""
     from mind_meld import statedb

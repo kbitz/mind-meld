@@ -3963,19 +3963,13 @@ class TestThemesPrompt:
 
 
 class TestMainCliFlags:
-    def test_no_save_is_accepted_as_deprecated_noop(self, tmp_path, monkeypatch, capsys):
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
-        monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset(), raising=True)
-        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
-        rc = aggregator.main(["7d", "--no-save"])
-        assert rc == 0
+    def test_no_save_rejected_as_unknown_option(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            aggregator.main(["7d", "--no-save"])
+        assert exc.value.code == 2
         captured = capsys.readouterr()
-        assert captured.out.startswith("# Retro")
-        assert "mm: notice: --no-save is a no-op as of v0.12.39" in captured.err
-        assert "will be removed in 2.0" in captured.err
-        assert "warning:" not in captured.err
+        assert captured.out == ""
+        assert "unrecognized arguments: --no-save" in captured.err
 
     def test_bare_integer_window_suggests_nd(self, capsys):
         with pytest.raises(SystemExit) as exc:
@@ -3985,7 +3979,6 @@ class TestMainCliFlags:
         assert "did you mean '7d'?" in err
         assert "mm retro-fleet" in err
         assert "--dump-host-usage" not in err
-        assert "--no-save" not in err
 
     def test_theme_args_render_card(self, tmp_path, monkeypatch, capsys):
         events_dir = tmp_path / "events"
@@ -4004,7 +3997,6 @@ class TestMainCliFlags:
                 "alpha",
                 "--theme",
                 "beta",
-                "--no-save",
             ]
         )
         assert rc == 0
@@ -4016,7 +4008,7 @@ class TestMainCliFlags:
         assert "AGENTS (" in out
         assert "0 PRs" in out
         assert "MM_THEMES_PROMPT" not in out
-        assert "mm: notice: --no-save is a no-op" in captured.err
+        assert captured.err == ""
 
 
 class TestSafeProseHardening:
@@ -4115,10 +4107,6 @@ def _health(out: str) -> list[dict]:
 
 def _health_entry(out: str, code: str) -> dict | None:
     return next((e for e in _health(out) if e["code"] == code), None)
-
-
-def _health_codes(out: str) -> set[str]:
-    return {e["code"] for e in _health(out)}
 
 
 def _usage(n: int = 1) -> dict:
@@ -4341,7 +4329,11 @@ class TestHostSnapshotAcceptance:
 
         samples = [0, 1, 2**53, 2**53 + 1, -1, True, False, 1.0, "10", None]
         for sample in samples:
-            assert aggregator._host_counter_ok(sample) == host_usage._is_valid_counter(sample)
+            expected = host_usage._is_valid_counter(sample)
+            usage_bucket = {**_usage(0), "input": sample}
+            day_bucket = {**usage_bucket, "by_model": {"gpt-5": _usage(0)}}
+            assert (aggregator._copy_usage_bucket(usage_bucket) is not None) == expected
+            assert (aggregator._copy_day_bucket(day_bucket) is not None) == expected
 
 
 # Frozen history of the host-usage wire vocabulary as shipped through

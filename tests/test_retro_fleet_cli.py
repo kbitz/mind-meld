@@ -92,8 +92,7 @@ class TestRetroFleetCommand:
         assert result.exit_code == 2
 
     def test_dump_host_usage_visible_in_command_help(self):
-        """v0.12.49 un-hid the flag; this is the pin, and the exact inverse of
-        the ``--no-save`` assertion below.
+        """v0.12.49 un-hid ``--dump-host-usage``; pin that it appears in ``--help``.
 
         STRIP ANSI FIRST. Rich renders a colored option name as several
         separately-styled runs — ``ESC[1;36m-ESC[0mESC[1;36m-dumpESC[0m
@@ -123,8 +122,8 @@ class TestRetroFleetCommand:
 
     def test_theme_and_noteworthy_forwarded(self, monkeypatch):
         """v0.12.0 — second-pass card flags forward verbatim through the
-        typer wrapper. Pin: ``--theme`` repeats, ``--noteworthy``,
-        ``--name``, and ``--no-save`` all reach the aggregator argv."""
+        typer wrapper. Pin: ``--theme`` repeats, ``--noteworthy``, and
+        ``--name`` all reach the aggregator argv."""
         from mind_meld.cli import app
 
         captured: dict = {}
@@ -147,7 +146,6 @@ class TestRetroFleetCommand:
                 "shipped",
                 "--name",
                 "user",
-                "--no-save",
             ],
         )
         assert result.exit_code == 0, result.output
@@ -160,30 +158,25 @@ class TestRetroFleetCommand:
         assert "shipped" in argv
         assert "--name" in argv
         assert "user" in argv
-        assert "--no-save" in argv
 
-    def test_no_save_is_accepted_as_deprecated_noop(self, monkeypatch):
-        """Hidden flag still forwards so a stale SKILL.md Step 4 exits 0."""
+    def test_no_save_rejected_as_unknown_option(self, monkeypatch):
+        """Track 145A: ``--no-save`` is retired and rejected as an unknown option."""
         from mind_meld.cli import app
 
-        captured: dict = {}
+        called = False
 
         def _fake_main(argv):
-            captured["argv"] = list(argv)
+            nonlocal called
+            called = True
             return 0
 
         monkeypatch.setattr("mind_meld.skills.retro_fleet.aggregator.main", _fake_main)
         result = self._runner().invoke(app, ["retro-fleet", "30d", "--no-save"])
-        assert result.exit_code == 0, result.output
-        assert captured["argv"] == ["30d", "--no-save"]
-        help_result = self._runner().invoke(app, ["retro-fleet", "--help"])
-        assert help_result.exit_code == 0, help_result.output
-        # hidden=True: the Options list does not advertise the flag. The
-        # command docstring may still name it so a stale SKILL.md is explained.
-        plain_help = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", help_result.output)
-        options = plain_help.rsplit("Options", 1)[-1]
-        assert "--theme" in options
-        assert "--no-save" not in options
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        assert "mm: error: No such option: --no-save" in result.stderr
+        assert "Run: mm retro-fleet --help" in result.stderr
+        assert not called
 
 
 class TestPricingFlags:
@@ -402,6 +395,70 @@ class TestPricingFlags:
         assert first.out == second.out
         assert "Pricing:" not in first.out
         assert first.err == expected_line + second.err
+
+    def test_set_model_price_confirmation_caps_at_eight_sorted_names(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mind_meld import token_usage as tu
+        from mind_meld.skills.retro_fleet import aggregator
+
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
+
+        nine_names = [f"model-{ch}" for ch in "ihgfedcba"]
+        nine_argv = ["7d", "--no-author-filter"]
+        for model_id in nine_names:
+            nine_argv.extend(["--set-model-price", f"{model_id}=1,.2,0,3"])
+
+        rc = aggregator.main(nine_argv)
+        first = capsys.readouterr()
+        assert rc == 0
+
+        rc2 = aggregator.main(["7d", "--no-author-filter"])
+        second = capsys.readouterr()
+        assert rc2 == 0
+
+        expected_nine_line = (
+            "Pricing: saved model-a, model-b, model-c, model-d, model-e, model-f, "
+            "model-g, model-h (+1 more) to this machine's pricing cache "
+            "(set by MM_PRICING_CACHE_PATH).\n"
+        )
+        assert first.out == second.out
+        assert "Pricing:" not in first.out
+        assert first.err == expected_nine_line + second.err
+        assert "model-i" not in first.err
+        assert first.err.count("Pricing:") == 1
+        saved_nine = json.loads(tu.PRICING_CACHE_PATH.read_text())
+        assert set(saved_nine["models"]) == set(nine_names)
+
+        tu.PRICING_CACHE_PATH.unlink()
+        tu._PRICING_CACHE_MEMO = None
+
+        eight_names = [f"model-{ch}" for ch in "hgfedcba"]
+        eight_argv = ["7d", "--no-author-filter"]
+        for model_id in eight_names:
+            eight_argv.extend(["--set-model-price", f"{model_id}=1,.2,0,3"])
+
+        rc8 = aggregator.main(eight_argv)
+        eight_run = capsys.readouterr()
+        assert rc8 == 0
+
+        rc8_base = aggregator.main(["7d", "--no-author-filter"])
+        eight_base = capsys.readouterr()
+        assert rc8_base == 0
+
+        expected_eight_line = (
+            "Pricing: saved model-a, model-b, model-c, model-d, model-e, model-f, "
+            "model-g, model-h to this machine's pricing cache "
+            "(set by MM_PRICING_CACHE_PATH).\n"
+        )
+        assert eight_run.out == eight_base.out
+        assert "Pricing:" not in eight_run.out
+        assert eight_run.err == expected_eight_line + eight_base.err
+        assert "(+" not in eight_run.err
+        saved_eight = json.loads(tu.PRICING_CACHE_PATH.read_text())
+        assert set(saved_eight["models"]) == set(eight_names)
 
     def test_mark_pricing_verified_confirmation_stderr_and_unchanged_stdout(
         self, tmp_path, monkeypatch, capsys

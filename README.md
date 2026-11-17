@@ -24,6 +24,12 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**`mm retro-fleet --no-save` removed (Track 145A):** `mm retro-fleet --no-save` is
+removed and now exits 2 as an unknown option (`mm: error: No such option: --no-save`).
+Remove `--no-save` from any scripts or aliases calling `mm retro-fleet`. If an agent
+session still holds a stale `retro-fleet` skill copy that passes `--no-save`, run
+`mm install-skills` and then restart the agent so it reloads `SKILL.md`.
+
 **Migration, gc and source warning output (Track 137A):** migration, backfill,
 init-cleanup and forced unknown-source warnings now use the shared stderr
 forms, with fix commands last when present. The malformed-blob summary from

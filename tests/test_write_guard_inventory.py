@@ -671,12 +671,6 @@ REVIEWED = {
             "os.open(str(path), os.O_RDWR | os.O_CREAT, 384)",
         ],
     ),
-    "seen_sources.py:write": (
-        *_GUARDED,
-        [
-            "SEEN_DIR.mkdir(parents=True, exist_ok=True)",
-        ],
-    ),
     "sidecar.py:write": (
         *_GUARDED,
         [

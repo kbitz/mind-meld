@@ -417,7 +417,7 @@ mm log [--source NAME] [--since DATE] [--action ACTION] [--verb VERB] [--limit N
                             # query the per-file pull/push history log; ACTION is one of written, merged, merged-via-lcs, skipped, conflicted, excluded, uploaded, failed, deleted
 mm retro-fleet [WINDOW] [--no-author-filter]
                             # render fleet retrospective markdown to stdout (default 7d). Public CLI surface for the /retro-fleet Claude Code skill; safe to invoke directly for scripted exports.
-                            # Skill-internal second-pass flags (v0.12.0+): --theme TEXT (≤3x), --noteworthy TEXT, --name TEXT — supplied by the /retro-fleet skill on its second pass to render the pixel-aligned ASCII card up top. Direct CLI users typically don't pass these. --no-save is a hidden no-op as of v0.12.39.
+                            # Skill-internal second-pass flags (v0.12.0+): --theme TEXT (≤3x), --noteworthy TEXT, --name TEXT — supplied by the /retro-fleet skill on its second pass to render the pixel-aligned ASCII card up top. Direct CLI users typically don't pass these.
                             # Pricing-refresh flags: --set-model-price MODEL=INPUT,CACHE_READ,CACHE_CREATE,OUTPUT (repeatable, local override) and --mark-pricing-verified; see README "Pricing refresh and local overrides". Invalid input exits 2; a cache write failure exits 1.
 mm recapture [WINDOW] [--dry-run]
                             # recover Git history on this Mac (default 30d, 1d–90d); commits deduplicate fleet-wide. Does not relabel old event rows or refresh host usage.

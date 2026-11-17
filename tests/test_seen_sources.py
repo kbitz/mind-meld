@@ -117,28 +117,19 @@ class TestWrite:
         redirected = tmp_path / "late-patch"
         monkeypatch.setattr(seen_sources, "SEEN_DIR", redirected)
 
-        seen_sources.write({"claude"})
+        seen_sources.acknowledge(["claude"], initial=[])
 
         assert seen_sources.seen_path() == redirected / "seen-sources.json"
         assert seen_sources.seen_path().exists()
 
-    def test_write_replaces_contents(self):
-        seen_sources.write({"claude", "gstack"})
-        on_disk = json.loads(seen_sources.seen_path().read_text())
-        assert sorted(on_disk) == ["claude", "gstack"]
-
-        seen_sources.write({"claude", "gstack", "codex"})
-        on_disk = json.loads(seen_sources.seen_path().read_text())
-        assert sorted(on_disk) == ["claude", "codex", "gstack"]
-
     def test_write_sorts_for_determinism(self):
-        seen_sources.write({"zebra", "alpha", "mike"})
+        seen_sources.acknowledge(["zebra", "alpha", "mike"], initial=[])
         # Round-trip via raw bytes: confirm sorted, not just the set.
         raw = seen_sources.seen_path().read_text().strip()
         assert raw == json.dumps(["alpha", "mike", "zebra"])
 
     def test_write_mode_0600(self):
-        seen_sources.write({"claude"})
+        seen_sources.acknowledge(["claude"], initial=[])
         mode = stat.S_IMODE(os.stat(seen_sources.seen_path()).st_mode)
         assert mode == 0o600
 
@@ -181,15 +172,17 @@ class TestAcknowledge:
         assert result == {"claude", "gstack", "codex"}
 
     def test_unions_names_with_existing_set(self):
-        seen_sources.write({"claude", "gstack"})
+        seen_sources.acknowledge(["claude", "gstack"], initial=[])
         result = seen_sources.acknowledge(["codex"], initial=[])
         assert result == {"claude", "gstack", "codex"}
+        on_disk = json.loads(seen_sources.seen_path().read_text())
+        assert on_disk == ["claude", "codex", "gstack"]
 
     def test_concurrent_acknowledge_no_lost_updates(self):
         """Two concurrent acknowledge calls each adding distinct names —
         final state must contain both. The pre-fix split read+write would
         lose one of them; acknowledge serializes under flock."""
-        seen_sources.write({"claude", "gstack"})
+        seen_sources.acknowledge(["claude", "gstack"], initial=[])
         results: list[set[str]] = []
         errors: list[BaseException] = []
 
@@ -220,27 +213,14 @@ class TestAcknowledge:
 
 
 class TestStorageErrorHandling:
-    """Codex 2026-04-25: write() and acknowledge() must catch StorageError
-    (which fsutil.atomic_write_bytes raises) AND OSError, otherwise a
+    """acknowledge() must catch OSError on its in-place write, otherwise a
     disk-full / permission flip can crash the calling command through a
     non-load-bearing tracker."""
-
-    def test_write_swallows_storage_error_with_warning(self, monkeypatch, capsys):
-        from mind_meld.errors import StorageError
-
-        def boom(*_a, **_kw):
-            raise StorageError("simulated disk full")
-
-        monkeypatch.setattr("mind_meld.seen_sources.fsutil.atomic_write_bytes", boom)
-        # No exception bubbles up.
-        seen_sources.write({"claude"})
-        captured = capsys.readouterr()
-        assert "failed to write seen-sources.json" in captured.err
 
     def test_acknowledge_swallows_oserror_with_warning(self, monkeypatch, capsys):
         # Seed the file so acknowledge takes the read+merge path, not the
         # missing-file branch.
-        seen_sources.write({"claude"})
+        seen_sources.acknowledge(["claude"], initial=[])
 
         # acknowledge uses os.write in-place (not fsutil.atomic_write_bytes)
         # to preserve the inode under the flock — see the inode-swap
