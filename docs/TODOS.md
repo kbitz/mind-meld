@@ -44,215 +44,35 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=tests/test_docs_routing.py] Test gap: the Track-named test file guard leaves its review alternative unanchored
-- **Test gap:** no demonstrated defect; a test-only guard, not shipped behavior.
-- **Description:** `test_no_test_file_is_named_after_a_track_or_review` matches `(?:^|_)track_?\d|review_?\d`: the track alternative is anchored to the start or an underscore, but `review_?\d` is not, so a future `tests/test_preview_2.py` or `tests/test_dry_run_preview2.py` would fail the guard falsely (`preview_2` contains `review_2`). No current test file matches.
-- **Hypothesis (untested):** anchor the review alternative the same way (`(?:^|_)(?:track|review)_?\d`) and add a parametrized case that accepts a `preview_2` stem and still rejects `review_2` and `track_146a` stems. Re-verify first.
-- **Upstream severity:** INFORMATIONAL.
-- **Found in:** tests/test_docs_routing.py (`test_no_test_file_is_named_after_a_track_or_review`), added by Track 146A (PR #345, `ad06efc`).
-- **Evidence:** the Factory Manager's 146A spot check, 2026-11-17; re-read at `c55d103`, and `ls tests` finds no `review_?\d` or `preview_?\d` stem. No failure reproduced.
-- **Context:** Relayed by the Factory Manager to the 2026-11-17 roadmap regeneration for filing as one test-gap item.
-- **Effort:** S
-
-### [review:files=src/mind_meld/statusflow.py|tests/test_statusflow.py] Test gap: Pending join notice beside folder settings warnings
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** Status tests cover folder-setting warnings and pending-join notices separately, but do not pin their relative order when both appear.
-- **Hypothesis (untested):** Extend the status fixture with folder-option drift and a pending device, then assert primary summary, settings warning, and join notice in order. Re-verify the contract first.
-- **Upstream severity:** INFORMATIONAL.
-- **Found in:** src/mind_meld/statusflow.py:607.
-- **Evidence:** Coverage audit read the renderer and existing tests; the implementation appends the notice after the settings warning. Targeted checks passed; no failure reproduced.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/347 at `1373e81` (2026-11-17).
-- **Effort:** ? (user triages in /roadmap)
-- **Revisit:** Next Track touching the named files.
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Unreadable Syncthing management record during pull
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** Status tests pin a malformed management record, but attended pull does not separately exercise its `ConfigError` return branch.
-- **Hypothesis (untested):** Use a malformed synthetic management record during attended pull and assert success, no join notice, and zero Syncthing requests. Re-verify the contract first.
-- **Upstream severity:** INFORMATIONAL.
-- **Found in:** src/mind_meld/pullflow.py:4464.
-- **Evidence:** Coverage audit read the explicit `ConfigError` handler and pull fixtures. Targeted checks passed; no failure reproduced.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/347 at `1373e81` (2026-11-17).
-- **Effort:** ? (user triages in /roadmap)
-- **Revisit:** Next Track touching the named files.
-
-### [review:files=src/mind_meld/cli.py|tests/test_pullflow.py] Test gap: Pending join read follows sync unlock
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** Pull output tests cover the notice, but do not observe lock availability during the pending-device HTTP read or its order relative to self-update.
-- **Hypothesis (untested):** Observe the existing sync lock at the stand-in's pending request and verify self-update follows that request. Re-verify the contract first.
-- **Upstream severity:** INFORMATIONAL.
-- **Found in:** src/mind_meld/cli.py:2880.
-- **Evidence:** Coverage audit read the post-finally call placement before `_sync_update`; targeted checks passed, and no failure reproduced.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/347 at `1373e81` (2026-11-17).
-- **Effort:** ? (user triages in /roadmap)
-- **Revisit:** Next Track touching the named files.
-
-
-### [review:files=src/mind_meld/statedb.py|tests/test_statedb.py] Test gap: Migration 5 tolerates already-absent unread tables
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** Migration 5 uses `DROP TABLE IF EXISTS`, but its migration fixtures retain all three unread tables before opening the database. The already-absent-table case is not pinned.
-- **Hypothesis (untested):** Extend the existing migration-five fixture with one or all unread tables already absent, then check migration completion and preservation of live rows. Re-verify the contract first.
-- **Upstream severity:** INFORMATIONAL.
-- **Found in:** src/mind_meld/statedb.py:180.
-- **Evidence:** The coverage audit read migration 5 and its fixtures; the targeted checks passed, and no failure was reproduced. The audit estimates 90% coverage of the changed contracts.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/340 at `e7527a1` (2026-11-17).
-- **Effort:** ? (user triages in /roadmap)
-- **Revisit:** Next Track touching the named files.
-
-
-### [review:files=tests/test_module_boundaries.py|src/mind_meld/core.py] Test gap: Shared printer ownership guard
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** The historical `CORE_DEFINITIONS` extraction inventory intentionally excludes the new `_print_outcome` helper, as Track 140A specifies. Current tests do not separately reject a future duplicate printer definition or an unqualified import of that helper.
-- **Hypothesis (untested):** Add a focused shared-printer ownership guard without treating the historical extraction inventory as exhaustive. Re-verify the current architecture contract first.
-- **Upstream severity:** P2.
-- **Found in:** tests/test_module_boundaries.py:1572.
-- **Evidence:** Greptile's single review on PR #337; the source census shows all 28 current callers are qualified and no duplicate printer exists. No runtime failure reproduced.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/337 at `050041a` (2026-11-16).
-- **Effort:** ? (user triages in /roadmap)
-- **Revisit:** Next Track touching the named files.
-
-
-### [review:files=tests/test_output_style.py|src/mind_meld/devicesflow.py|src/mind_meld/recaptureflow.py] Test gap: Shared outcome printer guard shapes
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** The output-style AST census rejects a direct `_outcome_line(...)` call passed to `console.print`, but not the concatenated approval outcome or the prebuilt recapture outcome variables. Current callers all use the shared printer.
-- **Hypothesis (untested):** Extend the routing guard to reject concatenated approval lines and direct prints of the recapture outcome variables. Re-verify the current shapes first.
-- **Upstream severity:** P3.
-- **Found in:** tests/test_output_style.py:72.
-- **Evidence:** Track 140A outside review and coverage audit; no runtime failure reproduced. Existing printer and command-output tests pass.
-- **Context:** Filed by /review-and-prep on branch `mmm/f217399b` at `1f7aaff` (2026-11-16), before draft PR creation.
-- **Effort:** ? (user triages in /roadmap)
-- **Revisit:** Next Track touching the named files.
-
-### [review:files=src/mind_meld/hosts/grok.py|tests/test_grok_usage.py] Test gap: Grok lock contention with a scoped diagnostic sink
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** The real generic flock test includes Grok and protects locked/cache semantics, but no existing test installs a sink and asserts its single non-degraded notice/no stderr for Grok.
-- **Hypothesis (untested):** Extend a scoped contention table with a consented Grok reader; assert locked, exactly one sink notice, degraded=False and quiet stderr; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/hosts/grok.py:441
-- **Evidence:** Track 139A completed audit-only coverage fallback (G1); full changed-file reads and existing tests mapped. The 9,443-test portable run passed; no regression was reproduced. The plan requires the behavior, not this additional isolated test.
-- **Revisit trigger:** the next Track whose `_touches:` cover these files, or an owner report of incorrect diagnostic/capture behavior.
-- **Context:** Filed by /review-and-prep on branch `mmm/038ab664` at `e93f151` (2026-11-16).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/statusflow.py|src/mind_meld/hosts/codex.py|tests/test_statusflow.py] Test gap: Codex status retry after an unknown deadline inventory
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** The Codex deadline test always returns a known disk count. Grok pins False/True recount calls, but no Codex case separately pins the approved retry after a failed first count.
-- **Hypothesis (untested):** Extend the existing Codex deadline case with files_on_disk=None first, then a known or still-unknown count; assert one False/True retry and truthful output; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/statusflow.py:816
-- **Evidence:** Track 139A completed audit-only coverage fallback (G2); full changed-file reads and existing tests mapped. The 9,443-test portable run passed; no regression was reproduced. The plan requires the behavior, not this additional isolated test.
-- **Revisit trigger:** the next Track whose `_touches:` cover these files, or an owner report of incorrect diagnostic/capture behavior.
-- **Context:** Filed by /review-and-prep on branch `mmm/038ab664` at `e93f151` (2026-11-16).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_identity.py] Test gap: Identity refresh uses the shared scoped diagnostic sink
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** Identity refresh tests cover digest/cache behavior and broken callbacks, but the tail spy accepts diagnostic without asserting the active scope sink is forwarded. No failure was demonstrated.
-- **Hypothesis (untested):** Extend the existing tail identity fixture with a scoped sink and a refreshing gather callback; assert identity notices use that sink without stderr; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py:1881
-- **Evidence:** Track 139A completed audit-only coverage fallback (G3); full changed-file reads and existing tests mapped. The 9,443-test portable run passed; no regression was reproduced. The plan requires the behavior, not this additional isolated test.
-- **Revisit trigger:** the next Track whose `_touches:` cover these files, or an owner report of incorrect diagnostic/capture behavior.
-- **Context:** Filed by /review-and-prep on branch `mmm/038ab664` at `e93f151` (2026-11-16).
-- **Effort:** ? (user triages in /roadmap)
-
-
-### [review:files=src/mind_meld/cli.py|tests/test_self_update.py] Test gap: current-version update outcome with metadata controls
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** Updated and unchanged outcomes have hostile metadata coverage, but the already-current `_print_update_current` outcome is tested with clean version text only.
-- **Hypothesis (untested):** extend the existing metadata-controls test with a current-version case and assert one inert physical outcome line; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/cli.py:3608
-- **Evidence:** Track 138A audit-only coverage path 06; the current renderer calls `safe_terminal_str`, and adjacent metadata-control cases pass. No failure reproduced.
-- **Revisit trigger:** the next Track touching `_print_update_current` or its metadata/output tests.
-- **Context:** Filed by /review-and-prep on branch `mmm/b042ec4e` at `5f5a042` (2026-11-16).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: unreadable-copy inspection advice across chain failures and path spellings
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record` and the developer's Track 136A T5 backlog rule.
-- **Description:** The three refusal shapes pin move, delete and inspection advice, but do not separately pin both names being unreadable, a hop's lstat/readlink error, exhaustion of the 40-hop bound, or an unreadable copy reached through absolute, multi-hop or symlinked-parent paths.
-- **Hypothesis (untested):** extend the existing parametrized refusal tests with those shapes; assert the intended advice, no prompt and unchanged bytes/link names. Re-verify first; this is not a reproduced product defect or live APFS evidence.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/resolveflow.py:571
-- **Evidence:** Track 136A audit-only coverage paths C24-C27; the implemented three shapes pass, and the inspection probe preserves both names. No failure reproduced for these additional shapes.
-- **Revisit trigger:** the next Track changing `_links_through` or its refusal caller, or an owner report of incorrect same-file repair advice. Further unproven T5 cases belong here rather than reopening the approved scope.
-- **Context:** Filed by /review-and-prep on branch `mmm/a5e88aa4` at `a7bfa09` (2026-11-15); developer choice relayed at touchpoint `9cc2bd88-e14d-4d83-b1bb-564f2718c86c`.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/retention.py|tests/test_retention.py] Test gap: dry-run retention summaries explicitly pin kept
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** Apply summaries pin `kept=N`; existing dry-run assertions pin candidates, repairs, skipped and the conflict opt-in note without explicitly checking the new kept field.
-- **Hypothesis (untested):** extend the existing dry-run summary assertion with a deliberate-keep fixture and `kept=N`, retaining the existing no-mutation assertions; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/retention.py:101
-- **Evidence:** Track 136A audit-only coverage path C08; the renderer contains the field and existing preview tests pass, but no new assertion separately protects it.
-- **Revisit trigger:** the next Track changing `_render_reap_outcome` or its dry-run output.
-- **Context:** Filed by /review-and-prep on branch `mmm/a5e88aa4` at `a7bfa09` (2026-11-15).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/gcflow.py|tests/test_gc_events.py|tests/test_retention.py] Test gap: bare gc with a collected manifest and a real retention failure
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** Bare-gc failure output is pinned with a missing manifest, and collected-manifest failure output is pinned with `--conflicts`. The collected-manifest bare-gc combination has no dedicated assertion for both the final blob count and `Run: mm gc -v` warning.
-- **Hypothesis (untested):** extend the existing failure cases with a collected own manifest and no `--conflicts`, preserving bytes and asserting both output streams; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/gcflow.py:105
-- **Evidence:** Track 136A audit-only coverage path C13 and outside structured review; both adjacent cases pass and share the print-then-warn implementation. No regression demonstrated.
-- **Revisit trigger:** the next Track changing gc's collected-manifest detail or retention-warning selector.
-- **Context:** Filed by /review-and-prep on branch `mmm/a5e88aa4` at `a7bfa09` (2026-11-15).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_init_events_backfill.py] Test gap: init's no-release notice when reading the cached upgrade view fails
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `_run_events_backfill`'s `_init_no_release_reads` reads `upgrade.cached_upgrade_view(config)` inside `try/except Exception` and keeps the default `mm update` advice when that read raises. No test makes the read raise on the init path: the init test covers only a current cache, and the only raising-view test drives attended `mm push --verbose` through the shared `_capture_skip_phrase` guard, which init does not use.
-- **Hypothesis (untested):** add a case beside `test_incomplete_scan_uses_no_release_notice_when_upgrade_cache_is_current` that monkeypatches `upgrade.cached_upgrade_view` to raise, and assert init still succeeds and its notice keeps `mm update`; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/events_tail.py:2205
-- **Evidence:** Track 135A review (testing checklist, cycle 1) and coverage audit (audit-only; gap); read only, no failure reproduced.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/330 (branch `mmm/1f4ea780`, Track 135A) at `e9b960b` (2026-11-15).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/recaptureflow.py|tests/test_integration.py] Test gap: a partial recapture with a held user file is not pinned
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** On a partial run (exit 4), recapture prints `Push: N files held.` before the cause lines, because that exit skips the final print. Only `test_recapture_is_unaffected_by_a_held_user_file_75a` reaches that branch, and only because its fixture root is not a Git repository, so the walk fails; the test accepts exit 0 or 4 and does not check where the line sits.
-- **Hypothesis (untested):** add a partial case beside `test_recapture_with_a_held_user_file_ends_on_the_same_outcome_lines` with a prepared capture that has `walk_budget_aborts=1`, and assert exit 4, a single held line, and that it comes before the first cause line; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/recaptureflow.py:317
-- **Evidence:** Track 135A review (testing specialist and native adversarial, cycle 3) and coverage audit (audit-only; gap); read only, no failure reproduced.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/330 (branch `mmm/1f4ea780`, Track 135A) at `e9b960b` (2026-11-15).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/recaptureflow.py|src/mind_meld/cli.py] Base issue: recapture never prints its push's left-out outcome
-- **Base issue:** present at merge base `3289de2`; filed under `blocking=shown`
-- **Description:** docs/invariants/sync.md promises a separate `Push: N files left out because <folder> is new; run mm pull to restore them.` outcome line when a push leaves files out, and attended `mm push` prints it. `mm recapture` runs the same push but prints no such line, at the merge base and on this branch: its push has no outcome owner, the legacy push display it used prints the left-out clause only on its no-change path, which recapture's push does not reach because it carries the new mm-events rows, and recapture writes no attempt record or breadcrumb. A recapture after a restored or unreadable scan folder therefore says nothing about the files that push could not see, and because that push publishes without them (recapture appends an event batch first, so its push normally has content to publish), the next `mm push` and `mm status` do not report them either.
-- **Evidence:** read, not run: at head `e9b960b` and merge base `3289de2`, `_push_core`'s publishing-path display for callers without an outcome owner (src/mind_meld/cli.py:2786-2804) has no left-out line (its no-change path prints the clause at src/mind_meld/cli.py:2341-2342), and recaptureflow.py prints nothing from `PushResult.left_out_clause`. The published manifest drops left-out paths unseen (src/mind_meld/cli.py:1567-1571) and the left-out set is never serialized (src/mind_meld/core.py:1576-1584), so later push and status checks against this Mac's published manifest find nothing missing (src/mind_meld/statusflow.py:744-754).
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/recaptureflow.py:265
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/330 (branch `mmm/1f4ea780`, Track 135A) at `e9b960b` (2026-11-15).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/host_usage.py|tests/test_agy_usage.py] Test gap: failed Antigravity format or census refresh with unchanged diagnostics
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** Completed census refreshes are tested, but no isolated failed-pass case changes only format or census validity while the blocker, detail, count and timing stay unchanged.
-- **Hypothesis (untested):** extend the Antigravity tests with a failed old-format or old-census cache and unchanged failure metadata, and assert one corrective write; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/host_usage.py:2337
-- **Evidence:** Track 138B audit-only coverage gap A; the format/census gate and existing completed-refresh test were read, and no regression was demonstrated. The plan requires the behavior, not this additional isolated test.
-- **Revisit trigger:** the next Track whose `_touches:` cover the Antigravity reader and its tests.
-- **Context:** Filed by /review-and-prep on branch `mmm/cc18ddfd` at `cf26d36` (2026-11-16).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/host_usage.py|tests/test_agy_usage.py] Test gap: Antigravity file-only progress under an unchanged failure
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** Existing partial-progress tests preserve learned file entries while other failure metadata also changes. No isolated case changes only staged file progress with an unchanged blocker, detail, count and timing.
-- **Hypothesis (untested):** extend a partial-progress fixture to keep failure metadata stable and assert that a newly learned file still commits; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/host_usage.py:2338
-- **Evidence:** Track 138B audit-only coverage gap B; existing partial-progress tests passed in the 1,319-test targeted run. No failure was reproduced, and the plan's required partial-progress tests remain intact.
-- **Revisit trigger:** the next Track whose `_touches:` cover the Antigravity reader and its tests.
-- **Context:** Filed by /review-and-prep on branch `mmm/cc18ddfd` at `cf26d36` (2026-11-16).
-- **Effort:** ? (user triages in /roadmap)
-
 ## Drain records
+
+### Roadmap regeneration — 2026-11-17 (every planned Track shipped; empty plan)
+
+Verified against `c55d103` (v1.12.66), on the developer's "sure" to regenerating after seven or more Tracks merged. Tracks 135A, 135B, 135C, 136A to 147A and 148A merged in PRs #330 to #347 (except the documentation PR #342) and are recorded as independent receipts in docs/roadmap-shipped.md; Groups 135 to 148 are retired. Admission follows docs/SPEC.md (MVP-1 on Syncthing) and the AGENTS.md planning rules. Nothing passes the gates, so In Progress and Current Plan are empty: no Future entry records a bug seen on the owner's machines with a cause found in the code, and no Future trigger is met. Each test gap below was re-checked at `c55d103` (still open, paths present); with no Track to carry it, each waits in Future for a Track whose `_touches:` cover its files.
+
+| Inbox item | Disposition |
+|---|---|
+| Test gap: the Track-named test file guard leaves its review alternative unanchored (filed by this branch from the Factory Manager's 146A spot check) | defer (test gap; premise confirmed: `review_?\d` has no `(?:^|_)` anchor; no current file matches) |
+| Test gap: pending join notice beside folder settings warnings (PR #347) | defer (test gap) |
+| Test gap: unreadable Syncthing management record during pull (PR #347) | defer (test gap) |
+| Test gap: pending join read follows sync unlock (PR #347) | defer (test gap) |
+| Test gap: migration 5 tolerates already-absent unread tables (PR #340) | defer (test gap) |
+| Test gap: shared printer ownership guard (PR #337) | defer (test gap; no `_print_outcome` guard in `tests/test_module_boundaries.py`) |
+| Test gap: shared outcome printer guard shapes (Track 140A) | defer (test gap) |
+| Test gap: Grok lock contention with a scoped diagnostic sink (Track 139A) | defer (test gap) |
+| Test gap: Codex status retry after an unknown deadline inventory (Track 139A) | defer (test gap) |
+| Test gap: identity refresh uses the shared scoped diagnostic sink (Track 139A) | defer (test gap) |
+| Test gap: current-version update outcome with metadata controls (Track 138A) | defer (test gap) |
+| Test gap: unreadable-copy inspection advice across chain failures and path spellings (Track 136A) | defer (test gap) |
+| Test gap: dry-run retention summaries explicitly pin kept (Track 136A) | defer (test gap) |
+| Test gap: bare gc with a collected manifest and a real retention failure (Track 136A) | defer (test gap) |
+| Test gap: init's no-release notice when reading the cached upgrade view fails (PR #330) | defer (test gap) |
+| Test gap: a partial recapture with a held user file is not pinned (PR #330) | defer (test gap) |
+| Base issue: recapture never prints its push's left-out outcome (PR #330) | kill — unobserved; reversible (the push records no deletion for left-out files, peers keep them and `mm pull` restores them; the claim was read, not run); reopen if it manifests |
+| Test gap: failed Antigravity format or census refresh with unchanged diagnostics (Track 138B) | defer (test gap) |
+| Test gap: Antigravity file-only progress under an unchanged failure (Track 138B) | defer (test gap) |
+
+19 drained: 0 placed, 18 deferred, 1 killed (an unobserved defect pruned by the manifestation gate), 0 discharged. Future grows from 58 to 76 entries; its other entries passed the manifestation gate again and keep their text. No bump under SPEC documentation-only policy.
 
 ### Roadmap inbox drain — 2026-11-17 (sessionpipe comparison)
 
