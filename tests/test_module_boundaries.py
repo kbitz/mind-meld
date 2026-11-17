@@ -666,13 +666,13 @@ def test_marker_literals_are_byte_identical_to_v0_12_18() -> None:
     """A rename silently resets every fleet machine's 24h TTL (T5)."""
     from mind_meld import skill_link
 
-    by_key = {row.key: row for row in skill_link.AGENT_ROWS}
-    assert by_key["claude"].success_marker == "skill-link-checked"
-    assert by_key["claude"].conflict_marker == "skill-link-conflict"
-    assert by_key["codex"].success_marker == "codex-skill-link-checked"
-    assert by_key["codex"].conflict_marker == "codex-skill-link-conflict"
-    assert by_key["agy"].success_marker == "agy-skill-link-checked"
-    assert by_key["agy"].conflict_marker == "agy-skill-link-conflict"
+    rows_by_agent = {row.key: row for row in skill_link.AGENT_ROWS}
+    assert rows_by_agent["claude"].success_marker == "skill-link-checked"
+    assert rows_by_agent["claude"].conflict_marker == "skill-link-conflict"
+    assert rows_by_agent["codex"].success_marker == "codex-skill-link-checked"
+    assert rows_by_agent["codex"].conflict_marker == "codex-skill-link-conflict"
+    assert rows_by_agent["agy"].success_marker == "agy-skill-link-checked"
+    assert rows_by_agent["agy"].conflict_marker == "agy-skill-link-conflict"
     # Claude's success name is a suffix of the others, so startswith is unusable.
     names = [m for row in skill_link.AGENT_ROWS for m in (row.success_marker, row.conflict_marker)]
     assert len(set(names)) == 2 * len(skill_link.AGENT_ROWS), names
