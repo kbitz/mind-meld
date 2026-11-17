@@ -3676,14 +3676,12 @@ def test_track_125a_session_walk_resumes_from_stored_cursor_within_three_pushes(
     monkeypatch.setattr(events_tail.events, "_rows_digest", digest_with_post_stage_trigger)
     monkeypatch.setattr(events_tail.events, "_deadline_expired", check_deadline)
 
-    since = datetime(2026, 10, 1, tzinfo=timezone.utc)
     for push_num in (1, 2, 3):
         state["push"] = push_num
         state["scans_this_push"] = 0
         state["checks_after_stage"] = -1
         rows = events_tail.events.walk_session_metadata(
             claude_dir,
-            since=since,
             deadline_monotonic=1e12,
             token_cache_files=None,
             persist=True,

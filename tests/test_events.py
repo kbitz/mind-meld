@@ -914,9 +914,13 @@ class TestWalkGitProjects:
 
 
 class TestWalkSessionMetadata:
+    def test_signature_excludes_since(self):
+        import inspect
+
+        assert "since" not in inspect.signature(events.walk_session_metadata).parameters
+
     def test_empty_claude_dir_returns_empty(self, tmp_path):
-        since = datetime.now(timezone.utc) - timedelta(days=30)
-        out = events.walk_session_metadata(tmp_path, since)
+        out = events.walk_session_metadata(tmp_path)
         assert out[0].get("projects") == []
 
     def test_non_jsonl_files_ignored(self, tmp_path):
@@ -924,9 +928,7 @@ class TestWalkSessionMetadata:
         proj.mkdir(parents=True)
         (proj / "notes.md").write_text("not a session")
         (proj / "session.jsonl").write_text(json.dumps({"cwd": "/tmp/x", "type": "user"}) + "\n")
-        out = events.walk_session_metadata(
-            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
-        )
+        out = events.walk_session_metadata(tmp_path)
         assert len(out[0]["projects"]) == 1
         assert out[0]["projects"][0]["sessions"] == 1
 
@@ -935,9 +937,7 @@ class TestWalkSessionMetadata:
         proj.mkdir(parents=True)
         (proj / "a.jsonl").write_bytes(b"x" * 2048)
         (proj / "b.jsonl").write_bytes(b"y" * 2048)
-        out = events.walk_session_metadata(
-            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
-        )
+        out = events.walk_session_metadata(tmp_path)
         assert out[0]["projects"][0]["total_kb"] == 4
 
     def test_conductor_workspace_marked_ephemeral(self, tmp_path):
@@ -947,9 +947,7 @@ class TestWalkSessionMetadata:
         (proj / "session.jsonl").write_text(
             json.dumps({"cwd": "/Users/user/conductor/workspaces/foo", "type": "user"}) + "\n"
         )
-        out = events.walk_session_metadata(
-            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
-        )
+        out = events.walk_session_metadata(tmp_path)
         assert out[0]["projects"][0]["ephemeral"] is True
 
     def test_non_conductor_workspace_not_ephemeral(self, tmp_path):
@@ -958,9 +956,7 @@ class TestWalkSessionMetadata:
         (proj / "session.jsonl").write_text(
             json.dumps({"cwd": "/Users/user/code/foo", "type": "user"}) + "\n"
         )
-        out = events.walk_session_metadata(
-            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
-        )
+        out = events.walk_session_metadata(tmp_path)
         assert out[0]["projects"][0]["ephemeral"] is False
 
     def test_deadline_monotonic_aborts_per_project_loop(self, tmp_path):
@@ -980,7 +976,6 @@ class TestWalkSessionMetadata:
         past_deadline = time.monotonic() - 1.0
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             deadline_monotonic=past_deadline,
         )
         # Loop broke before the first iteration completed any work.
@@ -997,7 +992,6 @@ class TestWalkSessionMetadata:
             )
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             deadline_monotonic=None,
         )
         assert len(out[0]["projects"]) == 5
@@ -1008,11 +1002,11 @@ class TestWalkSessionMetadata:
         Pre-v0.11.0 semantics filtered jsonls by ``mtime >= since_ts``, making
         each snapshot a delta. Aggregating across snapshots double-counted any
         session touched in multiple windows; latest-only-wins undercounted by
-        dropping older windows. v=2 ignores ``since`` and counts EVERY jsonl,
-        so the aggregator's latest-per-(device, claude_dir) rule produces a
-        truthful point-in-time count.
+        dropping older windows. v=2 takes no ``since`` argument and counts
+        EVERY jsonl, so the aggregator's latest-per-(device, claude_dir) rule
+        produces a truthful point-in-time count.
 
-        Pin: a jsonl with mtime older than `since` must STILL be counted.
+        Pin: a 60-day-old jsonl must STILL be counted.
         """
         import os
 
@@ -1020,14 +1014,11 @@ class TestWalkSessionMetadata:
         proj.mkdir(parents=True)
         old_jsonl = proj / "old.jsonl"
         old_jsonl.write_text(json.dumps({"cwd": "/tmp/old", "type": "user"}) + "\n")
-        # Make the file mtime far older than `since`.
+        # Make the file mtime 60 days old (pre-v0.11.0 v=1 would have filtered this out).
         old_ts = (datetime.now(timezone.utc) - timedelta(days=60)).timestamp()
         os.utime(old_jsonl, (old_ts, old_ts))
 
-        # `since` is just 1 day ago — pre-v0.11.0 (v=1) would have filtered
-        # this file out.
-        since = datetime.now(timezone.utc) - timedelta(days=1)
-        out = events.walk_session_metadata(tmp_path, since)
+        out = events.walk_session_metadata(tmp_path)
         assert out[0]["v"] == events.EVENTS_SCHEMA_VERSION
         assert out[0]["v"] == 2
         assert len(out[0]["projects"]) == 1
@@ -1044,9 +1035,7 @@ class TestWalkSessionMetadata:
             # Many lines, none with a `cwd` field.
             "\n".join(json.dumps({"type": "user", "msg": f"x{i}"}) for i in range(2 * 250))
         )
-        out = events.walk_session_metadata(
-            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
-        )
+        out = events.walk_session_metadata(tmp_path)
         assert len(out[0]["projects"]) == 1
         # No crash, ephemeral derived from the encoded fallback name.
         assert out[0]["projects"][0]["ephemeral"] is False
@@ -1077,9 +1066,7 @@ class TestWalkSessionMetadata:
             "_read_cwd_from_latest_jsonl",
             lambda d, **_kw: (calls.append(d), real(d))[1],
         )
-        out = events.walk_session_metadata(
-            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
-        )
+        out = events.walk_session_metadata(tmp_path)
         assert len(calls) == 1, f"cwd scanned {len(calls)}x for one project (pre-fix: 20)"
         assert out[0]["projects"][0]["sessions"] == 20
 
@@ -1113,9 +1100,7 @@ class TestWalkSessionMetadata:
         assert events._read_cwd_from_latest_jsonl(proj) == ("/tmp/real/path", True), (
             "reader abandoned the file on the bad byte instead of skipping one line"
         )
-        out = events.walk_session_metadata(
-            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
-        )
+        out = events.walk_session_metadata(tmp_path)
         assert len(out[0]["projects"]) == 1
         assert out[0]["projects"][0]["sessions"] == 1
 
@@ -1132,9 +1117,7 @@ class TestWalkSessionMetadata:
         good.mkdir(parents=True)
         (good / "s.jsonl").write_text(json.dumps({"cwd": "/tmp/good", "type": "user"}) + "\n")
 
-        out = events.walk_session_metadata(
-            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
-        )
+        out = events.walk_session_metadata(tmp_path)
         names = {p["claude_dir"] for p in out[0]["projects"]}
         assert names == {"-tmp-bad", "-tmp-good"}
 
@@ -1208,9 +1191,7 @@ class TestWalkSessionMetadata:
         (proj / "session.jsonl").write_text(
             json.dumps({"cwd": "/Users/user/Documents/foo", "type": "user"}) + "\n"
         )
-        out = events.walk_session_metadata(
-            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
-        )
+        out = events.walk_session_metadata(tmp_path)
         assert len(out[0]["projects"]) == 1
         assert out[0]["projects"][0]["source_root"] == str(tmp_path)
 
@@ -1234,7 +1215,6 @@ class TestWalkSessionMetadata85A:
         _make_project(tmp_path, "-tmp-a", "/tmp/a")
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             persist=True,
         )
         assert len(out[0]["projects"]) == 1
@@ -1249,7 +1229,7 @@ class TestWalkSessionMetadata85A:
 
     def test_no_persist_never_touches_cache(self, tmp_path):
         _make_project(tmp_path, "-tmp-a", "/tmp/a")
-        events.walk_session_metadata(tmp_path, datetime.now(timezone.utc) - timedelta(days=30))
+        events.walk_session_metadata(tmp_path)
         events.flush_pending_session_state()
         assert not mm_config.GIT_CAPTURE_CACHE_PATH.exists()
 
@@ -1257,7 +1237,6 @@ class TestWalkSessionMetadata85A:
         _make_project(tmp_path, "-tmp-a", "/tmp/a")
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             deadline_monotonic=time.monotonic() - 1.0,
             persist=True,
         )
@@ -1267,15 +1246,14 @@ class TestWalkSessionMetadata85A:
 
     def test_unchanged_project_reused_without_rescan(self, tmp_path, monkeypatch):
         _make_project(tmp_path, "-tmp-a", "/tmp/a")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
-        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.walk_session_metadata(tmp_path, persist=True)
         events.flush_pending_session_state()
 
         def forbidden_scan(*args, **kwargs):
             raise AssertionError("unchanged project must come from session_meta")
 
         monkeypatch.setattr(events, "_scan_one_project", forbidden_scan)
-        out = events.walk_session_metadata(tmp_path, since, persist=True)
+        out = events.walk_session_metadata(tmp_path, persist=True)
         assert [p["claude_dir"] for p in out[0]["projects"]] == ["-tmp-a"]
         assert out[0]["projects"][0]["sessions"] == 1
 
@@ -1284,8 +1262,7 @@ class TestWalkSessionMetadata85A:
         sub = proj / "sess-1" / "subagents"
         sub.mkdir(parents=True)
         (sub / "s.jsonl").write_text(json.dumps({"type": "assistant"}) + "\n")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
-        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.walk_session_metadata(tmp_path, persist=True)
         events.flush_pending_session_state()
         scanned = []
         real_scan = events._scan_one_project
@@ -1297,13 +1274,13 @@ class TestWalkSessionMetadata85A:
         monkeypatch.setattr(events, "_scan_one_project", tracking_scan)
         with (proj / "a.jsonl").open("a") as fh:
             fh.write(json.dumps({"cwd": "/tmp/a", "type": "user"}) + "\n")
-        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.walk_session_metadata(tmp_path, persist=True)
         events.flush_pending_session_state()
         assert scanned, "append to a non-newest parent jsonl must invalidate"
         scanned.clear()
         with (sub / "s.jsonl").open("a") as fh:
             fh.write(json.dumps({"type": "assistant"}) + "\n")
-        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.walk_session_metadata(tmp_path, persist=True)
         assert scanned, "append to a subagent jsonl must invalidate"
 
     def test_retained_inventory_on_expired_walk(self, tmp_path):
@@ -1311,15 +1288,13 @@ class TestWalkSessionMetadata85A:
         publishes the full inventory from retained records."""
         for name in ("-tmp-a", "-tmp-b", "-tmp-c"):
             _make_project(tmp_path, name, f"/tmp/{name}")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
-        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.walk_session_metadata(tmp_path, persist=True)
         events.flush_pending_session_state()
         cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
         assert len(cache["projects"]) == 3
 
         out = events.walk_session_metadata(
             tmp_path,
-            since,
             deadline_monotonic=time.monotonic() - 1.0,
             persist=True,
         )
@@ -1333,7 +1308,6 @@ class TestWalkSessionMetadata85A:
         """O7.2: budget-limited walks rotate, retain, and complete ≤3 walks."""
         for name in ("-tmp-a", "-tmp-b", "-tmp-c"):
             _make_project(tmp_path, name, f"/tmp/{name}")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
 
         class _FakeTime:
             now = 1000.0
@@ -1357,7 +1331,6 @@ class TestWalkSessionMetadata85A:
         def one_walk():
             out = events.walk_session_metadata(
                 tmp_path,
-                since,
                 deadline_monotonic=clock.now + 1.0,
                 persist=True,
             )
@@ -1388,9 +1361,8 @@ class TestWalkSessionMetadata85A:
 
     def test_token_walk_reuse_requires_has_tokens(self, tmp_path, monkeypatch):
         _make_project(tmp_path, "-tmp-a", "/tmp/a")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
         # Seed without tokens, then walk with a token cache: must rescan.
-        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.walk_session_metadata(tmp_path, persist=True)
         events.flush_pending_session_state()
         scanned = []
         real_scan = events._scan_one_project
@@ -1400,31 +1372,29 @@ class TestWalkSessionMetadata85A:
             return real_scan(*args, **kwargs)
 
         monkeypatch.setattr(events, "_scan_one_project", tracking_scan)
-        out = events.walk_session_metadata(tmp_path, since, token_cache_files={}, persist=True)
+        out = events.walk_session_metadata(tmp_path, token_cache_files={}, persist=True)
         assert scanned, "has_tokens=False record must not satisfy a token walk"
         assert "tokens_by_day" in out[0]["projects"][0]
         events.flush_pending_session_state()
         # Now seeded with tokens: a no-token walk strips token keys on reuse.
         scanned.clear()
-        out = events.walk_session_metadata(tmp_path, since, persist=True)
+        out = events.walk_session_metadata(tmp_path, persist=True)
         assert not scanned
         assert "tokens_by_day" not in out[0]["projects"][0]
 
     def test_failed_token_read_is_not_staged_complete(self, tmp_path, monkeypatch):
         _make_project(tmp_path, "-tmp-a", "/tmp/a")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
         # A token read that persists nothing (failed/drifted segment) must
         # never be pinned as a complete session_meta record.
         monkeypatch.setattr(events.token_usage, "get_or_compute", lambda *a, **k: ({}, {}))
-        events.walk_session_metadata(tmp_path, since, token_cache_files={}, persist=True)
+        events.walk_session_metadata(tmp_path, token_cache_files={}, persist=True)
         events.flush_pending_session_state()
         cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
         assert cache["projects"] == {}
 
     def test_version_gates_reject_stale_records(self, tmp_path, monkeypatch):
         _make_project(tmp_path, "-tmp-a", "/tmp/a")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
-        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.walk_session_metadata(tmp_path, persist=True)
         events.flush_pending_session_state()
         cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
         (entry,) = cache["projects"].values()
@@ -1449,8 +1419,7 @@ class TestWalkSessionMetadata85A:
     def test_interrupted_first_project_preserves_prior_cursor(self, tmp_path, monkeypatch):
         _make_project(tmp_path, "-tmp-a", "/tmp/a")
         _make_project(tmp_path, "-tmp-b", "/tmp/b")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
-        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.walk_session_metadata(tmp_path, persist=True)
         events.flush_pending_session_state()
         cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
         cache["session_resume_after"] = {str(tmp_path): "seeded-cursor"}
@@ -1475,9 +1444,7 @@ class TestWalkSessionMetadata85A:
         # Force rescan (digest change) so the first project interrupts.
         proj = tmp_path / "projects" / "-tmp-a" / "session.jsonl"
         proj.write_text(proj.read_text() + json.dumps({"cwd": "/tmp/a"}) + "\n")
-        events.walk_session_metadata(
-            tmp_path, since, deadline_monotonic=clock.now + 1.0, persist=True
-        )
+        events.walk_session_metadata(tmp_path, deadline_monotonic=clock.now + 1.0, persist=True)
         events.flush_pending_session_state()
         cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
         assert cache["session_resume_after"].get(str(tmp_path)) == "seeded-cursor"
@@ -1488,7 +1455,6 @@ class TestWalkSessionMetadata85A:
         _make_project(root_a, "-tmp-a1", "/tmp/a1")
         _make_project(root_a, "-tmp-a2", "/tmp/a2")
         _make_project(root_b, "-tmp-b1", "/tmp/b1")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
 
         class _FakeTime:
             now = 1000.0
@@ -1508,10 +1474,8 @@ class TestWalkSessionMetadata85A:
         monkeypatch.setattr(events, "_scan_one_project", slow_scan)
         # Root A truncates; root B completes in the same staged flush. B's
         # completion must not erase A's resume cursor.
-        events.walk_session_metadata(
-            root_a, since, deadline_monotonic=clock.now + 1.0, persist=True
-        )
-        events.walk_session_metadata(root_b, since, persist=True)
+        events.walk_session_metadata(root_a, deadline_monotonic=clock.now + 1.0, persist=True)
+        events.walk_session_metadata(root_b, persist=True)
         events.flush_pending_session_state()
         cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
         assert cache["session_resume_after"].get(str(root_a))
@@ -1520,7 +1484,6 @@ class TestWalkSessionMetadata85A:
     def test_interrupted_project_does_not_advance_cursor(self, tmp_path, monkeypatch):
         _make_project(tmp_path, "-tmp-a", "/tmp/a")
         _make_project(tmp_path, "-tmp-b", "/tmp/b")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
 
         class _FakeTime:
             now = 1000.0
@@ -1538,9 +1501,7 @@ class TestWalkSessionMetadata85A:
             return result
 
         monkeypatch.setattr(events, "_scan_one_project", slow_scan)
-        events.walk_session_metadata(
-            tmp_path, since, deadline_monotonic=clock.now + 1.0, persist=True
-        )
+        events.walk_session_metadata(tmp_path, deadline_monotonic=clock.now + 1.0, persist=True)
         events.flush_pending_session_state()
         cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
         # Nothing completed, so no cursor may be recorded past project one.
@@ -1551,7 +1512,6 @@ class TestWalkSessionMetadata85A:
         """An actively written project must not stage torn meta or livelock later projects."""
         proj_a = _make_project(tmp_path, "-tmp-a", "/tmp/a")
         _make_project(tmp_path, "-tmp-b", "/tmp/b")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
         real_scan = events._scan_one_project
 
         def appending_scan(proj_path, **kwargs):
@@ -1562,7 +1522,7 @@ class TestWalkSessionMetadata85A:
             return result
 
         monkeypatch.setattr(events, "_scan_one_project", appending_scan)
-        out = events.walk_session_metadata(tmp_path, since, persist=True)
+        out = events.walk_session_metadata(tmp_path, persist=True)
         events.flush_pending_session_state()
         # Both projects appear on the wire; only the stable project (-tmp-b) is staged complete.
         assert {p["claude_dir"] for p in out[0]["projects"]} == {"-tmp-a", "-tmp-b"}
@@ -1572,8 +1532,7 @@ class TestWalkSessionMetadata85A:
 
     def test_flush_swallows_lock_contended_and_oserror_rows_degrade(self, tmp_path, monkeypatch):
         proj_a = _make_project(tmp_path, "-tmp-a", "/tmp/a")
-        since = datetime.now(timezone.utc) - timedelta(days=30)
-        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.walk_session_metadata(tmp_path, persist=True)
 
         def contended(_path):
             raise events.lockedjson.LockContended("busy")
@@ -1597,7 +1556,7 @@ class TestWalkSessionMetadata85A:
         since = datetime.now(timezone.utc) - timedelta(days=30)
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
         # Seed root A with session_meta only and root B with an indexed entry.
-        events.walk_session_metadata(claude_home, since, persist=True)
+        events.walk_session_metadata(claude_home, persist=True)
         events.flush_pending_session_state()
         cache = events.read_git_capture_cache()
         cache["projects"][str(proj_b)] = {
@@ -2929,7 +2888,6 @@ class TestTokenAggregationHook:
         self._write_session_jsonl(proj / "session.jsonl")
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             token_cache_files=None,
         )
         meta = out[0]["projects"][0]
@@ -2943,7 +2901,6 @@ class TestTokenAggregationHook:
         cache_files: dict = {}
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             token_cache_files=cache_files,
         )
         meta = out[0]["projects"][0]
@@ -2965,7 +2922,6 @@ class TestTokenAggregationHook:
         cache_files: dict = {}
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             token_cache_files=cache_files,
         )
         meta = out[0]["projects"][0]
@@ -2987,7 +2943,6 @@ class TestTokenAggregationHook:
         cache_files: dict = {}
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             token_cache_files=cache_files,
         )
         # No sessions (no parent jsonls) → no project rendered.
@@ -3066,7 +3021,6 @@ class TestSkillsAggregationHook:
         cache_files: dict = {}
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             token_cache_files=cache_files,
         )
         meta = out[0]["projects"][0]
@@ -3085,7 +3039,6 @@ class TestSkillsAggregationHook:
         cache_files: dict = {}
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             token_cache_files=cache_files,
         )
         meta = out[0]["projects"][0]
@@ -3120,7 +3073,6 @@ class TestSkillsAggregationHook:
         cache_files: dict = {}
         out = events.walk_session_metadata(
             tmp_path,
-            datetime.now(timezone.utc) - timedelta(days=30),
             token_cache_files=cache_files,
         )
         meta = out[0]["projects"][0]

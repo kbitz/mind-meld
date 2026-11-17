@@ -37,14 +37,14 @@ Read BEFORE editing any of these:
 - `src/mind_meld/statedb.py` / `src/mind_meld/cli.py` / `src/mind_meld/recaptureflow.py` — `log_cmd` / `recapture` (history scope) / (see "Pull/push history log (Track 73B)")
 - `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner` / `totals` / (see "Fast-forward, propagated deletions and anchors (Track 91A)"; also read conflicts.md)
 - `src/mind_meld/pullflow.py` — `_deletion_candidates` / `_run_deletions` / `_move_into_copy` / `_make_copy_dirs` / `_copy_then_unlink` / `_remove_owned_copy` / `_classify_with_ledger` / `_apply_fast_forward` / `_ledger_verdict` / `_own_lookup` / `deleted_clause` / `ledger_notice`
-- `src/mind_meld/core.py` — `MintGuard` / `compute_mint_guard` / `stamp_left_out` / `anchor_pending` / `publish_anchors` / `stamp_ancestry` / `record_published` / `load_ledger` / `flush_ledger_files` / `commit_ledger` / `ledger_cause`
+- `src/mind_meld/core.py` — `MintGuard` / `compute_mint_guard` / `stamp_left_out` / `observe_anchors` / `publish_anchors` / `stamp_ancestry` / `record_published` / `load_ledger` / `flush_ledger_files` / `commit_ledger` / `ledger_cause`
 - `src/mind_meld/manifest.py` — `scan_roots` / `scan_root_for` / `write_anchor` / `read_anchor` / `ANCHOR_NAME`
 - `src/mind_meld/retention.py` — `_gc_deleted_copies`
 - `src/mind_meld/resolveflow.py` — `_record_resolution`
 - `src/mind_meld/syncdiag.py` — local historical pull and anchor observations
 - `src/mind_meld/syncthing.py` / `src/mind_meld/statusflow.py` — `_peer_states` / `_overdue_peers_line` / `_format_peer_state` / `_syncthing_status_lines` / `_syncthing_diag` / `_print_syncthing_diag` / `src/mind_meld/pullflow.py` — `_record_peer_cursors` / `src/mind_meld/statedb.py` — `read_cursors` / `commit_cursors` / `src/mind_meld/core.py` — `_manifest_cursor_hash` / `_manifest_content_hash` / `ManifestFetch.canonical_hash` / `_prefetch_manifests` (`canonical_hashes_out`) (see "Syncthing state and each peer's push (Track 92A)")
 
-Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables), and for Track 92A Syncthing inspection and peer push state `tests/test_syncthing.py`, `tests/test_diag.py`, `tests/test_pullflow.py`, `tests/test_projectid.py` and `tests/test_statedb.py`.
+Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_push_anchors.py` (anchors, mint guard, `left_out`, and ancestry), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables), and for Track 92A Syncthing inspection and peer push state `tests/test_syncthing.py`, `tests/test_diag.py`, `tests/test_pullflow.py`, `tests/test_projectid.py` and `tests/test_statedb.py`.
 
 ---
 
@@ -698,7 +698,7 @@ plants it.
   files, so a separate outcome line says `Push: N files left out because <folder> is new; run mm
   pull to restore them.` (`is missing`, or `cannot be read; restore read access.`),
   and autopush carries it in its breadcrumb.
-  `anchor_pending` joins the no-op check, so a push whose only change is a token still
+  `any(row["pending"] for row in core.observe_anchors(...))` joins the no-op check, so a push whose only change is a token still
   publishes (`metadata updated`) and the next push settles. A push with left-out
   `@git-` paths keeps the prior's `wire_folders` entries for the folders it dropped
   (`encode_manifest(..., kept_wire_folders=)`) so a pull outside the checkout still

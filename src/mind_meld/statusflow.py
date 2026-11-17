@@ -308,7 +308,6 @@ def _peer_states(
     device_id: str,
     fetches: dict[str, Any],
     cursors: dict[str, statedb.CursorRow] | str | BaseException | None,
-    syncthing_state: Any = None,
     now: datetime | None = None,
     *,
     cursors_cause: str | None = None,
@@ -869,7 +868,6 @@ def status(
             device_id,
             peer_fetches,
             cursors,
-            syncthing_state,
             datetime.now(timezone.utc),
         )
         peers_overdue = _overdue_peers_line(peer_states)

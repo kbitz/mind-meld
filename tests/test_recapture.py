@@ -1,4 +1,4 @@
-"""Track 30A: git-walk visibility, cursor gate, recapture, diag projection."""
+"""Tests for git-walk visibility, push cursor gate, mm recapture, and pending-capture status."""
 
 from __future__ import annotations
 

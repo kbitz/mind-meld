@@ -2497,9 +2497,12 @@ def test_inspection_never_writes_to_syncthing_or_state_db(tmp_path, monkeypatch,
 
 
 def test_peer_states_cover_every_state_and_the_24_h_edge():
+    import inspect
     from datetime import datetime, timedelta, timezone
 
     from mind_meld import core, statedb, statusflow
+
+    assert "syncthing_state" not in inspect.signature(statusflow._peer_states).parameters
 
     now = datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc)
     just_under = (now - timedelta(hours=23, minutes=59)).isoformat()
