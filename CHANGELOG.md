@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.62] - 2026-11-17
+
+Token usage and skill-link helpers drop unused shims.
+
+### Removed
+
+- Token usage and skill-link helpers no longer include unused shims.
+
 ## [1.12.61] - 2026-11-16
 
 Invariant docs now spell out history bookkeeping and migration lock scope.
