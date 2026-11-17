@@ -16128,7 +16128,9 @@ def test_sync78_lock_failure_keeps_its_own_text_and_conflicts_name_review(capsys
         "mm: error: Push refused [lock-held]: Could not open lockfile L: permission denied;"
     )
     assert lines[1] == "Run: mm diag"
-    token = core._SYNC_OUTPUT.set({"verbose": False, "diagnostics": events_tail.Degradations()})
+    sync_output_state = core._SYNC_OUTPUT.set(
+        {"verbose": False, "diagnostics": events_tail.Degradations()}
+    )
     try:
         pullflow._print_pull_summary(
             pullflow.PullResult(total_written=1, total_conflicted=1),
@@ -16140,7 +16142,7 @@ def test_sync78_lock_failure_keeps_its_own_text_and_conflicts_name_review(capsys
             verbose=False,
         )
     finally:
-        core._SYNC_OUTPUT.reset(token)
+        core._SYNC_OUTPUT.reset(sync_output_state)
     err = capsys.readouterr().err
     assert "1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner" in err
 
