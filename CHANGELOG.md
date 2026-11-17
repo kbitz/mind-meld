@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.64] - 2026-11-17
+
+Invariant docs and the event-backfill contract now cover the full session inventory.
+
+### Changed
+
+- The event-backfill contract now describes the full session inventory.
+- Invariant docs for events, retro, and sync are updated to match current behavior.
+
 ## [1.12.63] - 2026-11-17
 
 `mm retro-fleet` drops `--no-save` and rejects it as an unknown option.
