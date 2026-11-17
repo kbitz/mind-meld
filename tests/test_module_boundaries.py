@@ -2413,13 +2413,15 @@ def test_clock_patch_gate_checks_both_owners(clock: str, owners: tuple[str, ...]
 # owner inventories when moving a symbol; imports retained for shell consumers
 # stay explicitly outside REMOVED_PULL_IMPORT_BINDINGS.
 def _pull_owner_hint(name: str) -> str:
+    if name == "_read_autorun_breadcrumbs":
+        return 'expected statusflow._read_autorun_evidence()["runs"]'
     owners = (
         ("core",)
         if name in CORE_DEFINITIONS | INIT_CORE_DEFINITIONS
         else ("pullflow",)
         if name in PULLFLOW_DEFINITIONS
         else ("statusflow",)
-        if name in (STATUSFLOW_DEFINITIONS - {"status", "diag"}) | {"_read_autorun_breadcrumbs"}
+        if name in STATUSFLOW_DEFINITIONS - {"status", "diag"}
         else ("initflow",)
         if name in INITFLOW_DEFINITIONS - {"init"}
         else ("sourceflow",)
