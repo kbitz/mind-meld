@@ -176,13 +176,11 @@ class TestRunEventsBackfill:
         assert "git-snapshot" in types
         assert "mm-push" not in types
 
-    def test_backfill_uses_30_day_window_for_git_and_sessions(self, tmp_path, monkeypatch):
-        """Both capture paths receive the same explicit 30-day window.
+    def test_backfill_uses_git_lookback_and_full_session_inventory(self, tmp_path, monkeypatch):
+        """Git capture gets a 30-day lookback; session capture takes no cursor.
 
-        The session walker currently keeps ``since`` for API stability, but
-        passing it remains part of the backfill's legible semantic contract.
-        This must not silently drift to ``resolve_push_cursor`` while the git path
-        stays correct.
+        Backfill must invoke the full session inventory without ``since`` and
+        keep Git's explicit lookback instead of using ``resolve_push_cursor``.
         """
         events_root = tmp_path / "events_root"
         claude_dir = tmp_path / ".claude"
