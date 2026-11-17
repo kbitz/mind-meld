@@ -425,7 +425,7 @@ def test_readme_host_usage_recipe_matches_fixed_width_console(tmp_path, monkeypa
     monkeypatch.setattr(
         cli.statusflow, "console", Console(file=output, width=160, height=40, color_system=None)
     )
-    cli._print_host_publication(state, reader_states={})
+    cli.statusflow._print_host_publication(state, reader_states={})
     readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
     match = re.search(rf"<!-- usage-example:{example} -->\n```text\n(.*?)\n```", readme, re.S)
     assert match is not None, f"missing README example {example}"

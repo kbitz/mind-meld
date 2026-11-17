@@ -467,10 +467,9 @@ def _imported_names(path: Path) -> frozenset[str]:
     """Names `path` merely IMPORTS. Deliberately kept apart from definitions.
 
     Counting these as definitions is what made the first version of this gate
-    partly vacuous: `cli.py` still imports `_restore_mtime_best_effort`,
-    `_stat_mtime_btime`, `_bump_canonical_mtime_post_resolve`, `CONFLICT_AGE_DAYS`,
-    `console` and `safe_str`, so a routing row that kept citing `cli.py:` for
-    any of them passed green even though every one of them moved.
+    partly vacuous: `cli.py` still imports `CONFLICT_AGE_DAYS`, `console` and
+    `safe_str`, so a routing row that kept citing `cli.py:` for any of them
+    passed green even though every one of them moved.
     """
     return _imported_names_in(path.read_text(encoding="utf-8"))
 

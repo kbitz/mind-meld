@@ -1697,7 +1697,7 @@ def test_attended_discovery_budget_leaves_autopush_and_legacy_unchanged(
 
 
 def test_status_names_recapture_as_finishing_partial_discovery(tmp_path, monkeypatch, capsys):
-    from mind_meld import cli
+    from mind_meld import statusflow
     from tests.test_recapture import _write_push
 
     def status(discovery: str, *, aborts: int, errors: int, streak: int) -> str:
@@ -1721,7 +1721,7 @@ def test_status_names_recapture_as_finishing_partial_discovery(tmp_path, monkeyp
             lambda *a: events.CursorResolution(since=since, floored_after_incomplete=False),
         )
         monkeypatch.setattr(events, "effective_capture_since", lambda roots, lower: lower)
-        assert cli._print_retro_capture_status(
+        assert statusflow._print_retro_capture_status(
             [{"name": "mm-events", "path": str(directory)}], "dev-a"
         )
         return " ".join(capsys.readouterr().out.split())

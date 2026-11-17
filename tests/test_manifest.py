@@ -1031,7 +1031,7 @@ class TestWalkGenericSourceDedup:
         """
         from datetime import datetime, timedelta, timezone
 
-        from mind_meld.cli import _filter_symlinked_paths
+        from mind_meld import core
 
         base = tmp_path / "codex"
         base.mkdir()
@@ -1048,7 +1048,7 @@ class TestWalkGenericSourceDedup:
             },
         }
 
-        filtered = _filter_symlinked_paths(
+        filtered = core._filter_symlinked_paths(
             remote, [{"name": "codex", "path": str(base), "type": "generic"}]
         )
         tombstones = generate_tombstones({"sources": {"codex": {"files": {}}}}, filtered, "me")

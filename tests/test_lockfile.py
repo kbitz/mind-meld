@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import typer
 
-from mind_meld import cli, errors, lockfile
+from mind_meld import core, errors, lockfile
 from mind_meld.errors import LockError
 from mind_meld.lockfile import acquire_lock, release_lock
 
@@ -382,7 +382,7 @@ class TestContentionGuidance:
     def test_error_render_keeps_help_before_final_ps_line(self, capsys, pid):
         text = lockfile._contention_message(pid)
         with pytest.raises(typer.Exit):
-            cli._error(text)
+            core._error(text)
         output = capsys.readouterr().err
         assert output.startswith("mm: error: ")
         normalized = "".join(output.split())

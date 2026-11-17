@@ -73,45 +73,6 @@ from mind_meld.conflictdiff import (
     format_age_delta,
 )
 from mind_meld.consoles import console, stderr_console
-
-# Compatibility imports; runtime callers resolve through the owner module.
-from mind_meld.core import (  # noqa: F401
-    _AUTORUN_VERBS,
-    _SYNC_OUTPUT,
-    FetchStatus,
-    ManifestFetch,
-    _apply_verified_crypto_repair,
-    _autorun_breadcrumb_path,
-    _build_exclude_map,
-    _build_include_map,
-    _compute_recommended_excludes_diff,
-    _compute_recommended_includes_diff,
-    _config_missing_recommended_excludes,
-    _count,
-    _error,
-    _fetch_remote_manifest,
-    _filter_disabled_sources,
-    _filter_excluded_paths,
-    _filter_symlinked_paths,
-    _freeze_nested_checkout_entries,
-    _get_config,
-    _get_passphrase_or_exit,
-    _has_mtime_only_changes_vs_remote,
-    _home_relative_path,
-    _init_crypto_session,
-    _list_devices_warn,
-    _manifest_content_hash,
-    _merge_manifests,
-    _newer_format_message,
-    _normalize_autorun_breadcrumbs,
-    _pause_sync_progress,
-    _prove_omitted_paths_absent,
-    _require_published_source_root,
-    _resolve_all_configured_sources,
-    _retain_prior_default_sources,
-    _stdin_is_terminal,
-    iter_source_diffs,
-)
 from mind_meld.crypto import (
     encrypt,
     get_passphrase,
@@ -156,42 +117,7 @@ from mind_meld.manifest import (
     _is_excluded as _manifest_is_excluded,
 )
 from mind_meld.retention import CONFLICT_AGE_DAYS
-from mind_meld.safety import (  # noqa: F401 — re-exported for backwards-compat
-    safe_str,
-    safe_text,
-    strip_terminal_escapes,
-)
-from mind_meld.statusflow import (  # noqa: F401
-    _BREADCRUMB_STALE_AFTER_HOURS,
-    _BROKEN_DIAG_STATUS_TO_INSTALL,
-    _DIAG_CAPTURE_CLAMP,
-    _DIAG_MODELS_SHOWN,
-    _DISCOVERY_REJECT_REASONS,
-    _breadcrumb_staleness_suffix,
-    _clamp_peer_text,
-    _collect_diag_state,
-    _collect_discovery_diag,
-    _collect_git_capture_diag,
-    _diag_models_line,
-    _fresh_discovery_label,
-    _host_complete_read_line,
-    _host_publication,
-    _host_read_budgets,
-    _host_read_sweep_line,
-    _host_usage_blocker,
-    _print_host_publication,
-    _print_retro_capture_status,
-    _read_autorun_breadcrumbs,
-    _read_autorun_evidence,
-    _read_capture_rows,
-    _reader_capture_readiness,
-    _render_broken_skill_status,
-    _sanitize_recorded_capture,
-    _status_notices,
-    _status_verdict,
-    _usage_capture_needs_upgrade,
-    _usage_capture_remedy,
-)
+from mind_meld.safety import safe_str, strip_terminal_escapes
 from mind_meld.storage import get_backend
 from mind_meld.storage.keys import (
     blob_key,

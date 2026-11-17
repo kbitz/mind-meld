@@ -340,7 +340,7 @@ class TestSession:
 
         In-process drift refuse was dropped because it fires spuriously in
         CliRunner tests and under auto-GC chains. Real cross-process drift
-        detection lives in cli._init_crypto_session via config.root_salt_fp.
+        detection lives in core._init_crypto_session via config.root_salt_fp.
         """
         crypto.clear_crypto_session()
         a = bytes(range(16))

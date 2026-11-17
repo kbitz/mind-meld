@@ -2076,7 +2076,7 @@ def test_events_bootstrap_0700_and_inspection_are_unguarded(
 def test_log_unexpected_refuses_incident_through_auto_command_setup(
     synthetic_account_home, monkeypatch, tmp_path, capsys, forbid_fs_mutations
 ):
-    from mind_meld import cli, config, lockfile, sidecar
+    from mind_meld import cli, config, core, lockfile, sidecar
 
     root = synthetic_account_home / ".config/mind-meld"
     target = root / "autopull.log"
@@ -2104,7 +2104,7 @@ def test_log_unexpected_refuses_incident_through_auto_command_setup(
     assert caught.value.__context__ is original
     assert "unexpected config error" in capsys.readouterr().err
     assert calls == [] and _tree_bytes_modes(root) == before
-    assert not cli._autorun_breadcrumb_path().exists()
+    assert not core._autorun_breadcrumb_path().exists()
     assert lockfile._LOCK_FDS == held_before
 
 

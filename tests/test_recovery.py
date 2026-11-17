@@ -19,7 +19,7 @@ import pytest
 import typer
 
 from mind_meld import core, sidecar
-from mind_meld.cli import ManifestFetch, _fetch_remote_manifest, _push_core
+from mind_meld.cli import _push_core
 from mind_meld.crypto import encrypt
 from mind_meld.devices import register_device
 from mind_meld.manifest import serialize_manifest
@@ -67,7 +67,7 @@ class TestRecoverPriorManifest:
     def test_ok_passes_through(self, tmp_path):
         backend = LocalBackend(tmp_path / "storage")
         manifest = _make_manifest("abc", {"a.md": {"sha256": "aaa"}})
-        fetch = ManifestFetch(status="ok", manifest=manifest)
+        fetch = core.ManifestFetch(status="ok", manifest=manifest)
 
         out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB)
         assert out is manifest
@@ -87,7 +87,7 @@ class TestRecoverPriorManifest:
                     "abc", {"a.md": {"sha256": "aaa"}}, tombstones={"claude:gone.md": deleted}
                 )
             )
-        fetch = ManifestFetch(status="ok", manifest=copies, conflict_copies_only=True)
+        fetch = core.ManifestFetch(status="ok", manifest=copies, conflict_copies_only=True)
 
         out = core._recover_prior_manifest(
             fetch, backend, "abc", PASSPHRASE, MEMORY_KB, dry_run=dry_run
@@ -110,7 +110,7 @@ class TestRecoverPriorManifest:
         """First push: missing means 'no prior state', tombstones should be empty.
         Refusing here would break every first push."""
         backend = LocalBackend(tmp_path / "storage")
-        fetch = ManifestFetch(status="missing")
+        fetch = core.ManifestFetch(status="missing")
 
         out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB)
         assert out is None
@@ -128,7 +128,7 @@ class TestRecoverPriorManifest:
         )
         sidecar.write(prior)
 
-        fetch = ManifestFetch(status="corrupt")
+        fetch = core.ManifestFetch(status="corrupt")
         out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB)
         assert out is not None
         assert out["tombstones"] == prior["tombstones"]
@@ -153,7 +153,7 @@ class TestRecoverPriorManifest:
         )
         _put_manifest(backend, "peer1", peer_manifest)
 
-        fetch = ManifestFetch(status="corrupt")
+        fetch = core.ManifestFetch(status="corrupt")
         out = core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB)
         assert out is not None
         # Synthetic prior: empty sources, peer tombstones carried forward
@@ -166,7 +166,7 @@ class TestRecoverPriorManifest:
         backend = LocalBackend(tmp_path / "storage")
         register_device(backend, "me", "me-host")
 
-        fetch = ManifestFetch(status="corrupt")
+        fetch = core.ManifestFetch(status="corrupt")
         with pytest.raises(typer.Exit):
             core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB)
 
@@ -178,7 +178,7 @@ class TestRecoverPriorManifest:
         register_device(backend, "peer1", "peer-host")
         backend.put("manifests/peer1/manifest.json.enc", b"garbage")
 
-        fetch = ManifestFetch(status="corrupt")
+        fetch = core.ManifestFetch(status="corrupt")
         with pytest.raises(typer.Exit):
             core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB)
 
@@ -211,7 +211,7 @@ class TestVanishedManifest:
 
         monkeypatch.setattr(folder, "get", get)
 
-        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
 
         assert (fetch.status, fetch.vanished) == ("missing", True)
         assert fetch.manifest is None
@@ -249,7 +249,7 @@ class TestVanishedManifest:
 
         monkeypatch.setattr(Path, "read_bytes", read)
 
-        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
 
         assert reads == 3
         missing = not corrupt_canonical and final_read == "vanished"
@@ -260,7 +260,7 @@ class TestVanishedManifest:
     def test_never_existing_manifest_is_a_plain_first_push(self, tmp_path):
         folder = SyncthingFolder(tmp_path / "storage")
 
-        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
 
         assert (fetch.status, fetch.vanished) == ("missing", False)
         assert folder.sleeps == []
@@ -270,7 +270,7 @@ class TestVanishedManifest:
         _put_manifest(folder, "abc", _make_manifest("abc", {"a.md": {"sha256": "aaa"}}))
         folder.vanish_at_open(MKEY, reappear_after=1)
 
-        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
 
         assert fetch.is_ok and fetch.vanished is False
         assert "a.md" in fetch.manifest["sources"]["claude"]["files"]
@@ -283,7 +283,7 @@ class TestVanishedManifest:
         )
         folder.vanish_at_open(MKEY)
 
-        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
 
         assert fetch.is_ok and fetch.conflict_copies_only and fetch.vanished
 
@@ -302,7 +302,7 @@ class TestVanishedManifest:
             encrypt(serialize_manifest(copy), PASSPHRASE, memory_kb=MEMORY_KB),
         )
 
-        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
 
         assert fetch.is_ok and not fetch.conflict_copies_only
         assert set(fetch.manifest["sources"]["claude"]["files"]) == {"a.md", "b.md"}
@@ -315,7 +315,7 @@ class TestVanishedManifest:
         folder.put(MKEY.replace("manifest.json.enc", copy_name), b"being-replaced")
         folder.vanish_copy_at_validation(copy_name)
 
-        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
 
         assert fetch.is_ok and not fetch.conflict_copies_only
         assert "suspicious" not in capsys.readouterr().err
@@ -332,7 +332,7 @@ class TestVanishedManifest:
         )
         sidecar.write(prior)
 
-        fetch = ManifestFetch(status="missing", vanished=True)
+        fetch = core.ManifestFetch(status="missing", vanished=True)
         out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB)
 
         assert out is not None and out["tombstones"] == prior["tombstones"]
@@ -343,7 +343,7 @@ class TestVanishedManifest:
         _isolate_sidecar(monkeypatch, tmp_path)
         backend = LocalBackend(tmp_path / "storage")
         register_device(backend, "me", "me-host")
-        fetch = ManifestFetch(status="missing", vanished=True)
+        fetch = core.ManifestFetch(status="missing", vanished=True)
 
         with pytest.raises(typer.Exit):
             core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB)
@@ -373,7 +373,7 @@ class TestVanishedManifest:
         backend = LocalBackend(tmp_path / "storage")
 
         out = core._recover_prior_manifest(
-            ManifestFetch(status="missing"), backend, "abc", PASSPHRASE, MEMORY_KB
+            core.ManifestFetch(status="missing"), backend, "abc", PASSPHRASE, MEMORY_KB
         )
 
         assert out is None
@@ -408,7 +408,7 @@ class TestVanishedManifest:
         folder.vanish_at_open("manifests/mac-a/manifest.json.enc")
         _push_core(config_a, PASSPHRASE, MEMORY_KB, quiet=True)
 
-        fetch = _fetch_remote_manifest(folder, "mac-a", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(folder, "mac-a", PASSPHRASE, MEMORY_KB)
         assert fetch.is_ok
         assert any("kill.md" in key for key in fetch.manifest.get("tombstones", {})), (
             "a vanished own manifest was read as a first push and dropped its tombstones"
@@ -624,7 +624,7 @@ class TestPushRewriteOnRecovery:
         # kicks in and the manifest is rewritten.
         _push_core(config_a, PASSPHRASE, MEMORY_KB, quiet=True)
 
-        fetch = _fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
         assert fetch.is_ok, (
             "corrupt manifest should have been healed by the recovery push "
             "even though local file diffs were zero"
@@ -693,7 +693,7 @@ class TestRejectedHostileSiblingFetch:
         payload = b"not-a-manifest"
         hostile.write_bytes(payload)
 
-        fetch = _fetch_remote_manifest(backend, "fresh", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(backend, "fresh", PASSPHRASE, MEMORY_KB)
         captured = capsys.readouterr()
         assert fetch.status == "missing"
         assert fetch.manifest is None
@@ -716,7 +716,7 @@ class TestRejectedHostileSiblingFetch:
         hostile = parent / hostile_name
         hostile.write_bytes(b"garbage")
 
-        fetch = _fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
         captured = capsys.readouterr()
         assert fetch.is_ok
         assert fetch.manifest is not None
@@ -777,7 +777,7 @@ class TestPushRecoveryIntegration:
         _push_core(config_a, PASSPHRASE, MEMORY_KB, quiet=True)
 
         # Verify tombstone was recorded in the remote manifest.
-        fetch = _fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
         assert fetch.is_ok
         tombstones = fetch.manifest.get("tombstones", {})
         assert any("kill.md" in key for key in tombstones), (
@@ -793,7 +793,7 @@ class TestPushRecoveryIntegration:
 
         # After recovery: remote manifest is readable AND still carries
         # the kill.md tombstone.
-        fetch = _fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
         assert fetch.is_ok, "remote manifest should be readable after recovery push"
         tombstones_after = fetch.manifest.get("tombstones", {})
         assert any("kill.md" in key for key in tombstones_after), (
@@ -807,7 +807,7 @@ class TestPushRecoveryIntegration:
 class TestListDevicesShapeValidation:
     """REGRESSION (Group 2 Track 2A.3): list_devices must drop shape-invalid
     entries, not just unparseable JSON, and surface warnings for dropped
-    entries when called via cli.py's _list_devices_warn wrapper.
+    entries when called via core.py's _list_devices_warn wrapper.
 
     Before the fix, devices.py:53 silently dropped only parse failures.
     Callers indexed d["device_id"] / d["device_name"] directly, so a
@@ -883,10 +883,8 @@ class TestListDevicesShapeValidation:
         assert len(result) == 1
 
     def test_warn_variant_emits_one_warning_per_dropped_entry(self, tmp_path, capsys):
-        """cli.py's _list_devices_warn wires drops to stderr_console. We
+        """core.py's _list_devices_warn wires drops to stderr_console. We
         expect one warning line per dropped entry, none for good entries."""
-        from mind_meld.cli import _list_devices_warn
-
         backend = self._with_entries(
             tmp_path,
             {
@@ -895,7 +893,7 @@ class TestListDevicesShapeValidation:
                 "bad-shape.json": json.dumps({"device_name": "missing-id"}).encode(),
             },
         )
-        result = _list_devices_warn(backend)
+        result = core._list_devices_warn(backend)
         captured = capsys.readouterr()
         # Good entry survives.
         assert len(result) == 1
@@ -925,7 +923,7 @@ class TestRecoverAbandonManifestDestructive:
     def test_abandon_manifest_loses_pending_deletion_records(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner
 
-        from mind_meld.cli import _fetch_remote_manifest, app
+        from mind_meld.cli import app
         from mind_meld.config import save_config
         from mind_meld.crypto import bootstrap_crypto_init
 
@@ -995,7 +993,7 @@ class TestRecoverAbandonManifestDestructive:
 
         # Verify: the remote manifest is readable, BUT contains no
         # tombstone for will-be-deleted.md. This is the accepted loss.
-        fetch = _fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
+        fetch = core._fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
         assert fetch.is_ok, "post-recover push should produce a readable manifest"
         tombstones = fetch.manifest.get("tombstones", {})
         # The file was deleted locally between pushes, but with no prior-

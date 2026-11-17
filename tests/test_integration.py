@@ -24,7 +24,7 @@ from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
 from mind_meld import config as config_module
-from mind_meld import core, events_tail, fsutil, initflow, pullflow, synclog
+from mind_meld import core, events_tail, fsutil, initflow, pullflow, statusflow, synclog
 from mind_meld import crypto as crypto_module
 from mind_meld import events as _mm_events
 from mind_meld import host_registry as _mm_host_registry
@@ -2061,17 +2061,13 @@ class TestFilterExcludedPathsHelper:
     round-trip."""
 
     def test_no_op_when_exclude_map_empty(self):
-        from mind_meld.cli import _filter_excluded_paths
-
         m = {
             "sources": {"gstack": {"files": {"projects/x/repo-mode.json": {"sha256": "a"}}}},
             "tombstones": {},
         }
-        assert _filter_excluded_paths(m, {}) is m
+        assert core._filter_excluded_paths(m, {}) is m
 
     def test_strips_excluded_files_from_sources(self):
-        from mind_meld.cli import _filter_excluded_paths
-
         m = {
             "sources": {
                 "gstack": {
@@ -2084,7 +2080,7 @@ class TestFilterExcludedPathsHelper:
             },
             "tombstones": {},
         }
-        out = _filter_excluded_paths(m, {"gstack": ["projects/*/repo-mode.json"]})
+        out = core._filter_excluded_paths(m, {"gstack": ["projects/*/repo-mode.json"]})
         kept = out["sources"]["gstack"]["files"]
         assert "projects/myapp/role.md" in kept
         assert "projects/myapp/repo-mode.json" not in kept
@@ -2092,8 +2088,6 @@ class TestFilterExcludedPathsHelper:
         assert "projects/myapp/repo-mode.json" in m["sources"]["gstack"]["files"]
 
     def test_strips_tombstones_for_excluded_paths(self):
-        from mind_meld.cli import _filter_excluded_paths
-
         m = {
             "sources": {"gstack": {"files": {}}},
             "tombstones": {
@@ -2101,7 +2095,7 @@ class TestFilterExcludedPathsHelper:
                 "gstack:projects/myapp/role.md": {"deleted_at": "2026-04-25T00:00:00+00:00"},
             },
         }
-        out = _filter_excluded_paths(m, {"gstack": ["projects/*/repo-mode.json"]})
+        out = core._filter_excluded_paths(m, {"gstack": ["projects/*/repo-mode.json"]})
         keys = list(out["tombstones"])
         assert "gstack:projects/myapp/role.md" in keys
         assert "gstack:projects/myapp/repo-mode.json" not in keys
@@ -2109,20 +2103,16 @@ class TestFilterExcludedPathsHelper:
     def test_legacy_bare_path_tombstones_default_to_claude_source(self):
         """Pre-v0.4 manifests had bare-path tombstone keys. Filter
         treats them as `claude` source per `normalize_manifest`'s rule."""
-        from mind_meld.cli import _filter_excluded_paths
-
         m = {
             "sources": {"claude": {"files": {}}},
             "tombstones": {
                 "projects/-foo/memory/role.md": {"deleted_at": "2026-04-25T00:00:00+00:00"},
             },
         }
-        out = _filter_excluded_paths(m, {"claude": ["projects/*/memory/role.md"]})
+        out = core._filter_excluded_paths(m, {"claude": ["projects/*/memory/role.md"]})
         assert out["tombstones"] == {}
 
     def test_unaffected_sources_pass_through_unchanged(self):
-        from mind_meld.cli import _filter_excluded_paths
-
         m = {
             "sources": {
                 "gstack": {"files": {"projects/myapp/repo-mode.json": {"sha256": "a"}}},
@@ -2130,7 +2120,7 @@ class TestFilterExcludedPathsHelper:
             },
             "tombstones": {},
         }
-        out = _filter_excluded_paths(m, {"gstack": ["projects/*/repo-mode.json"]})
+        out = core._filter_excluded_paths(m, {"gstack": ["projects/*/repo-mode.json"]})
         # claude source untouched.
         assert out["sources"]["claude"]["files"]["projects/-foo/memory/role.md"]["sha256"] == "b"
         # gstack source filtered.
@@ -2138,8 +2128,6 @@ class TestFilterExcludedPathsHelper:
 
     def test_strips_conflict_shaped_rel_paths_even_with_empty_map(self):
         """E1: a peer-chosen conflict-shaped name is rejected on pull."""
-        from mind_meld.cli import _filter_excluded_paths
-
         m = {
             "sources": {
                 "gstack": {
@@ -2151,15 +2139,13 @@ class TestFilterExcludedPathsHelper:
             },
             "tombstones": {},
         }
-        out = _filter_excluded_paths(m, {})
+        out = core._filter_excluded_paths(m, {})
         assert out is not m
         kept = out["sources"]["gstack"]["files"]
         assert "foo.md" in kept
         assert "foo.sync-conflict-19700101-000000-deadbeef.md" not in kept
 
     def test_strips_conflict_shaped_tombstones_even_with_empty_map(self):
-        from mind_meld.cli import _filter_excluded_paths
-
         m = {
             "sources": {"gstack": {"files": {"foo.md": {"sha256": "b"}}}},
             "tombstones": {
@@ -2169,14 +2155,12 @@ class TestFilterExcludedPathsHelper:
                 "gstack:foo.md": {"deleted_at": "2026-01-01T00:00:00+00:00"},
             },
         }
-        out = _filter_excluded_paths(m, {})
+        out = core._filter_excluded_paths(m, {})
         assert out is not m
         assert "gstack:foo.md" in out["tombstones"]
         assert "gstack:foo.sync-conflict-19700101-000000-deadbeef.md" not in out["tombstones"]
 
     def test_strips_extend_root_basename_even_with_empty_map(self):
-        from mind_meld.cli import _filter_excluded_paths
-
         m = {
             "sources": {
                 "codex": {
@@ -2188,7 +2172,7 @@ class TestFilterExcludedPathsHelper:
             },
             "tombstones": {},
         }
-        out = _filter_excluded_paths(m, {})
+        out = core._filter_excluded_paths(m, {})
         kept = out["sources"]["codex"]["files"]
         assert "skills/keep/SKILL.md" in kept
         assert "skills/.extend-root" not in kept
@@ -2858,7 +2842,7 @@ class TestMigrateConfigCommand:
         """A source named gstack with a non-generic type must not receive
         recommended include_patterns (which _validate_sources rejects on
         non-generic sources)."""
-        diffs = cli_module._compute_recommended_includes_diff(
+        diffs = core._compute_recommended_includes_diff(
             [{"name": "gstack", "path": str(tmp_path / ".gstack"), "type": "claude"}]
         )
         assert diffs == []
@@ -4027,7 +4011,7 @@ class TestGCSafety:
         backend = env["backend"]
         initial = runner.invoke(app, ["push"])
         assert initial.exit_code == 0, initial.output
-        own = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB).manifest
+        own = core._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB).manifest
         live = {
             storage_keys.blob_key("dev-a", info["sha256"]): backend.get(
                 storage_keys.blob_key("dev-a", info["sha256"])
@@ -4307,7 +4291,7 @@ class TestGCSafety:
         assert listings == []
         if dry_run:
             _assert_preview_refused(result)
-        fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+        fetched = core._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
         assert fetched.status == "ok" and fetched.conflict_copies_only
 
     @pytest.mark.parametrize("dry_run", [False, True])
@@ -4325,7 +4309,7 @@ class TestGCSafety:
         orphan_key = storage_keys.blob_key("dev-a", orphan)
         for blob, data in [*blobs.items(), (orphan_key, b"orphan")]:
             backend.put(blob, data)
-        fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+        fetched = core._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
         assert fetched.status == "ok" and not fetched.conflict_copies_only
         result = runner.invoke(app, ["gc"] + (["--dry-run"] if dry_run else []))
         assert result.exit_code == 0, result.output
@@ -4378,7 +4362,7 @@ class TestGCSafety:
         assert "Push: no content changes" not in healed.output
         healed_flat = " ".join(healed.output.split())
         assert "Push: manifest repaired." in healed_flat
-        fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+        fetched = core._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
         assert fetched.status == "ok" and not fetched.conflict_copies_only
         assert not conflict.exists()
         live = [
@@ -4412,7 +4396,7 @@ class TestGCSafety:
             backend.put(key, b"\x02" + b"unreadable current manifest" * 4)
         healed = runner.invoke(app, ["push"])
         assert healed.exit_code == 0, healed.output
-        fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+        fetched = core._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
         assert fetched.status == "ok" and not fetched.conflict_copies_only
         # The rewrite and the refreshed sidecar both keep the deletion record.
         assert tombstone in fetched.manifest["tombstones"]
@@ -4439,7 +4423,7 @@ class TestGCSafety:
         backend.put(key, b"\x02" + b"unreadable current manifest" * 4)
         healed = runner.invoke(app, ["push"])
         assert healed.exit_code == 0, healed.output
-        fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+        fetched = core._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
         published = fetched.manifest["sources"]["claude"]["files"]
         assert "projects/-Users-user-myapp/memory/late.md" not in published
         assert all(
@@ -4462,7 +4446,7 @@ class TestGCSafety:
         }
         for blob, data in blobs.items():
             backend.put(blob, data)
-        original = cli_module._fetch_remote_manifest
+        original = core._fetch_remote_manifest
         calls = []
 
         def fetch(storage, device_id, passphrase, memory_kb):
@@ -4470,11 +4454,11 @@ class TestGCSafety:
             if len(calls) == 1:
                 return original(storage, device_id, passphrase, memory_kb)
             if late in ("missing", "corrupt"):
-                return cli_module.ManifestFetch(status=late)
+                return core.ManifestFetch(status=late)
             files = {"late.md": {"sha256": late_ref, "size": 1, "mtime": None}}
             fields = {"conflict_copies_only": True} if late == "unreadable" else {}
             manifest = {"sources": {"late": {"files": files}}, "tombstones": {}}
-            return cli_module.ManifestFetch(status="ok", manifest=manifest, **fields)
+            return core.ManifestFetch(status="ok", manifest=manifest, **fields)
 
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fetch)
         if late in ("corrupt", "unreadable"):
@@ -6209,7 +6193,7 @@ def test_requested_capture_holds_lock_against_push_and_autopush(capture61, monke
     assert blocked[0].exit_code == 1 and "holds the lock" in blocked[0].output
     assert blocked[1].exit_code == 0 and blocked[1].output == ""
     # Existing hook behavior records contention, never a failed host capture.
-    assert cli_module._read_autorun_breadcrumbs()["push"]["outcome"] == "lock-held"
+    assert statusflow._read_autorun_evidence()["runs"]["push"]["outcome"] == "lock-held"
 
 
 def test_no_content_push_capture_usage_refreshes_once(capture61, monkeypatch):
@@ -7476,8 +7460,6 @@ class TestPushMtimeOnlyPropagation:
 
     def test_has_mtime_only_changes_detects_drift(self) -> None:
         """Pure helper unit test: same sha256, different mtime -> True."""
-        from mind_meld.cli import _has_mtime_only_changes_vs_remote
-
         local = {
             "sources": {
                 "claude": {
@@ -7488,13 +7470,11 @@ class TestPushMtimeOnlyPropagation:
         remote = {
             "claude": {"files": {"f.md": {"sha256": "abc", "mtime": "2026-05-09T08:48:00+00:00"}}}
         }
-        assert _has_mtime_only_changes_vs_remote(local, remote) is True
+        assert core._has_mtime_only_changes_vs_remote(local, remote) is True
 
     def test_has_mtime_only_changes_false_when_sha_differs(self) -> None:
         """sha256 mismatch is caught by the existing diff_files gate, NOT
         this helper -- avoid double-firing on real content changes."""
-        from mind_meld.cli import _has_mtime_only_changes_vs_remote
-
         local = {
             "sources": {
                 "claude": {
@@ -7505,13 +7485,11 @@ class TestPushMtimeOnlyPropagation:
         remote = {
             "claude": {"files": {"f.md": {"sha256": "old", "mtime": "2026-05-09T08:48:00+00:00"}}}
         }
-        assert _has_mtime_only_changes_vs_remote(local, remote) is False
+        assert core._has_mtime_only_changes_vs_remote(local, remote) is False
 
     def test_has_mtime_only_changes_false_when_file_only_local(self) -> None:
         """New file (absent from remote) is caught by diff_files as `new` --
         skip here to avoid double-counting."""
-        from mind_meld.cli import _has_mtime_only_changes_vs_remote
-
         local = {
             "sources": {
                 "claude": {
@@ -7519,16 +7497,14 @@ class TestPushMtimeOnlyPropagation:
                 }
             }
         }
-        assert _has_mtime_only_changes_vs_remote(local, {}) is False
+        assert core._has_mtime_only_changes_vs_remote(local, {}) is False
 
     def test_has_mtime_only_changes_false_when_identical(self) -> None:
         """Same sha + same mtime -> False (no work to do)."""
-        from mind_meld.cli import _has_mtime_only_changes_vs_remote
-
         info = {"sha256": "abc", "mtime": "2026-05-12T12:00:00+00:00"}
         local = {"sources": {"claude": {"files": {"f.md": info}}}}
         remote = {"claude": {"files": {"f.md": info}}}
-        assert _has_mtime_only_changes_vs_remote(local, remote) is False
+        assert core._has_mtime_only_changes_vs_remote(local, remote) is False
 
     def test_has_mtime_only_changes_false_when_local_older(self) -> None:
         """Codex P2 regression pin: forward-only invariant. Local mtime
@@ -7539,8 +7515,6 @@ class TestPushMtimeOnlyPropagation:
         the downgraded value would now hit `local_mtime > remote_mtime` on
         pull and SKIP -- silently losing the conflict surface.
         """
-        from mind_meld.cli import _has_mtime_only_changes_vs_remote
-
         local = {
             "sources": {
                 "claude": {
@@ -7551,15 +7525,13 @@ class TestPushMtimeOnlyPropagation:
         remote = {
             "claude": {"files": {"f.md": {"sha256": "abc", "mtime": "2026-05-12T12:00:00+00:00"}}}
         }
-        assert _has_mtime_only_changes_vs_remote(local, remote) is False
+        assert core._has_mtime_only_changes_vs_remote(local, remote) is False
 
     def test_has_mtime_only_changes_tolerates_malformed_mtime(self) -> None:
         """Codex P2 (5th pass) regression pin: peer with `mtime: 1234` (int,
         not string) or unparseable ISO must NOT crash the helper. Defensive
         parse path returns False (treats as non-drifting) — better to under-
         publish than crash `mm push`/`mm status` on a peer-controlled value."""
-        from mind_meld.cli import _has_mtime_only_changes_vs_remote
-
         # Peer wrote an int instead of an ISO string. load_manifest doesn't
         # type-check files[*].mtime, so this is reachable on the wire.
         local = {
@@ -7570,17 +7542,15 @@ class TestPushMtimeOnlyPropagation:
             }
         }
         remote_int = {"claude": {"files": {"f.md": {"sha256": "abc", "mtime": 1234}}}}
-        assert _has_mtime_only_changes_vs_remote(local, remote_int) is False
+        assert core._has_mtime_only_changes_vs_remote(local, remote_int) is False
 
         remote_bad = {"claude": {"files": {"f.md": {"sha256": "abc", "mtime": "not-a-date"}}}}
-        assert _has_mtime_only_changes_vs_remote(local, remote_bad) is False
+        assert core._has_mtime_only_changes_vs_remote(local, remote_bad) is False
 
     def test_has_mtime_only_changes_normalizes_z_vs_offset(self) -> None:
         """Codex P2 (5th pass): `2026-05-12T12:00:00Z` and
         `2026-05-12T12:00:00+00:00` represent the same instant but lex-sort
         differently. Parsed comparison must report no drift."""
-        from mind_meld.cli import _has_mtime_only_changes_vs_remote
-
         local = {
             "sources": {
                 "claude": {"files": {"f.md": {"sha256": "abc", "mtime": "2026-05-12T12:00:00Z"}}}
@@ -7589,7 +7559,7 @@ class TestPushMtimeOnlyPropagation:
         remote = {
             "claude": {"files": {"f.md": {"sha256": "abc", "mtime": "2026-05-12T12:00:00+00:00"}}}
         }
-        assert _has_mtime_only_changes_vs_remote(local, remote) is False
+        assert core._has_mtime_only_changes_vs_remote(local, remote) is False
 
     def test_has_mtime_only_changes_respects_source_filter(self) -> None:
         """Codex P3: source_filter scopes the walk. Drift in source `gstack`
@@ -7597,8 +7567,6 @@ class TestPushMtimeOnlyPropagation:
         ``iter_source_diffs``'s same-named arg so `mm status --source X`
         doesn't surface metadata-pending hints from sources Y, Z.
         """
-        from mind_meld.cli import _has_mtime_only_changes_vs_remote
-
         local = {
             "sources": {
                 "claude": {
@@ -7614,9 +7582,11 @@ class TestPushMtimeOnlyPropagation:
             "gstack": {"files": {"g.md": {"sha256": "xyz", "mtime": "2026-05-09T08:48:00+00:00"}}},
         }
         # gstack has forward drift; claude is in sync.
-        assert _has_mtime_only_changes_vs_remote(local, remote) is True
-        assert _has_mtime_only_changes_vs_remote(local, remote, source_filter="gstack") is True
-        assert _has_mtime_only_changes_vs_remote(local, remote, source_filter="claude") is False
+        assert core._has_mtime_only_changes_vs_remote(local, remote) is True
+        assert core._has_mtime_only_changes_vs_remote(local, remote, source_filter="gstack") is True
+        assert (
+            core._has_mtime_only_changes_vs_remote(local, remote, source_filter="claude") is False
+        )
 
     def test_push_uploads_manifest_when_only_mtime_changed(
         self, tmp_path: Path, monkeypatch
@@ -8347,7 +8317,7 @@ class TestCompleteSnapshots:
         prior = self._prior(env)
         (env["memory"] / "a.md").write_text("changed")
         calls = {"n": 0}
-        real_prove = cli_module._prove_omitted_paths_absent
+        real_prove = core._prove_omitted_paths_absent
 
         def flaky(*a, **kw):
             calls["n"] += 1
@@ -8986,9 +8956,7 @@ class TestHeldFiles75A:
             )
             conflict.write_bytes(env["backend"].get(env["manifest_key"]))
         env["backend"].put(env["manifest_key"], b"not a manifest")
-        fetch = cli_module._fetch_remote_manifest(
-            env["backend"], "dev-a", SHARED_PASSPHRASE, MEMORY_KB
-        )
+        fetch = core._fetch_remote_manifest(env["backend"], "dev-a", SHARED_PASSPHRASE, MEMORY_KB)
         assert fetch.status == ("ok" if recovery == "conflict-copies-only" else "corrupt")
         assert fetch.conflict_copies_only == (recovery == "conflict-copies-only")
 
@@ -9282,7 +9250,7 @@ class TestApplyRecovery53A:
         assert fleet.memory in fleet.fsync_calls
         if command == "autopull":
             assert result.stdout == ""
-            crumb = cli_module._read_autorun_breadcrumbs()["pull"]
+            crumb = statusflow._read_autorun_evidence()["runs"]["pull"]
             assert (crumb["outcome"], crumb["detail"]) == ("degraded", "1 file(s) failed")
             assert (
                 "mm: 1 file(s) failed to apply - see the warnings above; "
@@ -9418,7 +9386,7 @@ class TestApplyRecovery53A:
         assert propagated == [exc]
         if command == "autopull" and failure != "keyboard":
             assert result.exit_code == 0
-            crumb = cli_module._read_autorun_breadcrumbs()["pull"]
+            crumb = statusflow._read_autorun_evidence()["runs"]["pull"]
             assert (crumb["outcome"], crumb["detail"]) == ("failed", "RuntimeError")
         else:
             assert result.exit_code != 0
@@ -9665,7 +9633,7 @@ class TestApplyRecovery53A:
             assert result.exit_code == 1, result.output
         else:
             assert result.exit_code == 0, result.output
-            crumb = cli_module._read_autorun_breadcrumbs()["pull"]
+            crumb = statusflow._read_autorun_evidence()["runs"]["pull"]
             assert (crumb["outcome"], crumb["detail"]) == ("failed", "RuntimeError")
         records = fleet.records()
         expected = (
@@ -11926,7 +11894,7 @@ class TestMmEventsOwnership59A:
         assert f"- {len(prior_paths)} deleted" in preview.output
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, result.output
-        manifest = cli_module._fetch_remote_manifest(
+        manifest = core._fetch_remote_manifest(
             env["backend"], "dev-a", PASSPHRASE, MEMORY_KB
         ).manifest
         assert set(manifest["sources"]["mm-events"]["files"]) == {own}
@@ -11969,7 +11937,7 @@ class TestMmEventsOwnership59A:
         assert str(custom) in result.stderr
         assert "plug it in, create it, or run mm disable-source mm-events" in result.stderr
         assert not custom.exists()
-        manifest = cli_module._fetch_remote_manifest(
+        manifest = core._fetch_remote_manifest(
             env["backend"], "dev-a", PASSPHRASE, MEMORY_KB
         ).manifest
         assert "mm-events" not in manifest["sources"]
@@ -11984,7 +11952,7 @@ class TestMmEventsOwnership59A:
         monkeypatch.setattr(cli_module.events_tail, "_run_events_tail", lambda *a, **kw: [])
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, result.output
-        manifest = cli_module._fetch_remote_manifest(
+        manifest = core._fetch_remote_manifest(
             env["backend"], "dev-a", PASSPHRASE, MEMORY_KB
         ).manifest
         assert set(manifest["sources"]["mm-events"]["files"]) == {"events/returned.jsonl"}
@@ -12349,7 +12317,7 @@ class TestNewerStorage66A:
             return original(path)
 
         monkeypatch.setattr(Path, "read_bytes", read_bytes)
-        fetched = cli_module._fetch_remote_manifest(backend, "dev-peer", PASSPHRASE, MEMORY_KB)
+        fetched = core._fetch_remote_manifest(backend, "dev-peer", PASSPHRASE, MEMORY_KB)
         assert fetched.status == "corrupt"
         assert fetched.newer_version == 4
 
@@ -12359,7 +12327,7 @@ class TestNewerStorage66A:
         mine = env["config"]["device"]["id"]
         key = storage_keys.manifest_key(mine)
         TestGCSafety._store_manifest(backend, mine)
-        original = cli_module._fetch_remote_manifest
+        original = core._fetch_remote_manifest
         phase = {"name": "push", "n": 0}
 
         def fetch(storage, device_id, passphrase, memory_kb):
@@ -12368,7 +12336,7 @@ class TestNewerStorage66A:
                 return result
             phase["n"] += 1
             if phase["n"] > 1:
-                return cli_module.ManifestFetch(status="corrupt", newer_version=4)
+                return core.ManifestFetch(status="corrupt", newer_version=4)
             return result
 
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fetch)
@@ -13795,9 +13763,9 @@ def test_tombstoned_checkout_entry_still_on_disk_does_not_wedge_push(tmp_path):
     }
     roots: dict[str, set[str]] = {}
     local = cli_module.build_manifest_v2("dev-a", "A", [src], strict=True, nested_roots=roots)
-    frozen = cli_module._freeze_nested_checkout_entries(local, prior, roots)
+    frozen = core._freeze_nested_checkout_entries(local, prior, roots)
     prior = cli_module._drop_unfrozen_checkout_files(prior, roots, frozen)
-    cli_module._prove_omitted_paths_absent(local, prior, [src], max_file_size=52_428_800)
+    core._prove_omitted_paths_absent(local, prior, [src], max_file_size=52_428_800)
     tombstones = cli_module.generate_tombstones(local, prior, "dev-a")
     assert set(local["sources"]["g"]["files"]) == {"repo/b.md"}
     assert set(tombstones) == {"g:repo/a.md"}
@@ -13952,7 +13920,7 @@ def test_freeze_never_revives_a_tombstoned_path():
         "tombstones": {"g:repo/deleted.md": {"deleted_at": info["mtime"]}},
     }
     local = {"sources": {"g": {"files": {}}}}
-    frozen = cli_module._freeze_nested_checkout_entries(local, prior, {"g": {"repo"}})
+    frozen = core._freeze_nested_checkout_entries(local, prior, {"g": {"repo"}})
     assert frozen == {"g": {"repo/kept.md"}}
     assert list(local["sources"]["g"]["files"]) == ["repo/kept.md"]
 
@@ -13982,7 +13950,7 @@ def test_deselecting_an_include_inside_a_checkout_still_refuses_like_before(capt
 
 def test_interrupt_inside_storage_failure_handler_keeps_a_valid_record(capture61, monkeypatch):
     original_put = LocalBackend.put
-    original_error = cli_module._error
+    original_error = core._error
 
     def put(backend, key, data):
         if key.startswith("data/"):
@@ -14022,7 +13990,7 @@ def test_peer_git_segments_are_stripped_before_they_can_mark_a_checkout():
         },
         "tombstones": {"claude:projects/p/memory/x/.git": {"deleted_at": info["mtime"]}},
     }
-    out = cli_module._filter_excluded_paths(peer, {}, {})
+    out = core._filter_excluded_paths(peer, {}, {})
     assert list(out["sources"]["claude"]["files"]) == ["projects/p/memory/ok.md"]
     assert out["tombstones"] == {}
 
@@ -14041,7 +14009,7 @@ def test_peer_git_segments_are_stripped_before_they_can_mark_a_checkout():
 def test_peer_case_variant_or_noncanonical_paths_are_stripped(rel):
     info = {"sha256": "0" * 64, "size": 1, "mtime": "2026-10-07T00:00:00+00:00"}
     peer = {"sources": {"claude": {"files": {rel: info}}}, "tombstones": {f"claude:{rel}": {}}}
-    out = cli_module._filter_excluded_paths(peer, {}, {})
+    out = core._filter_excluded_paths(peer, {}, {})
     assert out["sources"]["claude"]["files"] == {}
     assert out["tombstones"] == {}
 
@@ -14308,7 +14276,7 @@ def test_unattended_push_still_fails_loudly_when_post_acceptance_maintenance_fai
     result = runner.invoke(app, ["autopush"])
     assert result.exit_code == 0, result.output
     assert "mm: push failed - unexpected error" in result.stderr
-    crumb = cli_module._read_autorun_breadcrumbs()["push"]
+    crumb = statusflow._read_autorun_evidence()["runs"]["push"]
     assert (crumb["outcome"], crumb["detail"]) == ("failed", "OSError")
     # Acceptance already happened, so the failure cannot roll the content back.
     assert rel in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
@@ -14692,7 +14660,7 @@ def test_attended_pull_2500_excluded_three_flushes73(push_preview56, monkeypatch
     cfg = env["config"]
     cfg["sync"]["sources"][0]["exclude_patterns"] = ["projects/*/memory/excluded-*"]
     save_config(cfg, env["config_path"])
-    cli_module._init_crypto_session(env["backend"], PASSPHRASE, cfg, read_only=False)
+    core._init_crypto_session(env["backend"], PASSPHRASE, cfg, read_only=False)
     peer = _publish_peer62(env, "peer-73", {})
     peer["sources"] = {
         "claude": {
@@ -15033,7 +15001,7 @@ def test_status77_malformed_autorun_sibling_stays_unknown(status77, bad):
     from datetime import timedelta
 
     stamp = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
-    cli_module._autorun_breadcrumb_path().write_text(
+    core._autorun_breadcrumb_path().write_text(
         json.dumps({"push": {"timestamp": stamp, "outcome": "success"}, "pull": bad})
     )
     result = runner.invoke(app, ["status"])
@@ -15067,7 +15035,7 @@ def test_status77_real_scoped_pull_records_selection(status77):
     assert shown.exit_code == 0, shown.output
     attended = attemptlog.read_runs()
     assert attended["runs"]["pull"]["scope"] == {"source": "claude", "from_device": "dev-b"}
-    projected = attemptlog.project_runs(cli_module._read_autorun_evidence(), attended)
+    projected = attemptlog.project_runs(statusflow._read_autorun_evidence(), attended)
     assert projected["pull"]["limited_coverage"] is True
 
 
@@ -15112,7 +15080,7 @@ def test_status77_verdict_first_both_streams_narrow_and_notty(status77, monkeypa
 
     monkeypatch.setattr(cli_module.console, "_width", width)
     monkeypatch.setattr(cli_module.stderr_console, "_width", width)
-    original = cli_module._read_capture_rows
+    original = statusflow._read_capture_rows
 
     def notices(*a, **k):
         print("preparatory stdout notice")
@@ -15237,7 +15205,7 @@ def test_status77_conflicts_and_failed_conflict_inspection(status77, monkeypatch
 def test_status77_mtime_helper_does_not_invent_forward_metadata(mtime):
     local = {"sources": {"claude": {"files": {"a": {"sha256": "same", "mtime": mtime}}}}}
     remote = {"claude": {"files": {"a": {"sha256": "same", "mtime": "2026-02-01T00:00:00+00:00"}}}}
-    assert not cli_module._has_mtime_only_changes_vs_remote(local, remote)
+    assert not core._has_mtime_only_changes_vs_remote(local, remote)
 
 
 @pytest.mark.parametrize("width", [24, 80])
@@ -15666,7 +15634,7 @@ def test_sync78_diagnostics_survive_refusal_are_bounded_and_reset(status77, monk
         cli_module.attemptlog.read_runs()["runs"]["push"]["counts"].get("events_degradations", 0)
         == 0
     )
-    assert cli_module._SYNC_OUTPUT.get() is None
+    assert core._SYNC_OUTPUT.get() is None
 
 
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
@@ -15780,7 +15748,7 @@ def test_sync78_activity_degradation_survives_later_upload_refusal(capture61, mo
     assert events_tail._ROOT_DISCOVERY_DEGRADATION in record["degradations"]
 
 
-_NEWER78 = cli_module._newer_format_message(3, "manifest")
+_NEWER78 = core._newer_format_message(3, "manifest")
 _MISSING_ROOT78 = (
     "Cannot publish: source notes is missing after it was previously published. "
     "Previous snapshot kept. Restore the source folder, or run 'mm disable-source notes' "
@@ -16063,7 +16031,7 @@ def test_sync78_each_activity_loss_is_recorded_once(capture61, monkeypatch, faul
             assert count == 0 and details == ["usage capture no-row (none)"]
     else:
         assert result.stdout == result.stderr == ""
-        crumb = cli_module._read_autorun_breadcrumbs()["push"]
+        crumb = statusflow._read_autorun_evidence()["runs"]["push"]
         assert crumb["outcome"] == "degraded"
         detail = crumb["detail"]
         assert "PRIVATE78" not in detail and "EIO" not in detail
@@ -16160,9 +16128,7 @@ def test_sync78_lock_failure_keeps_its_own_text_and_conflicts_name_review(capsys
         "mm: error: Push refused [lock-held]: Could not open lockfile L: permission denied;"
     )
     assert lines[1] == "Run: mm diag"
-    token = cli_module._SYNC_OUTPUT.set(
-        {"verbose": False, "diagnostics": events_tail.Degradations()}
-    )
+    token = core._SYNC_OUTPUT.set({"verbose": False, "diagnostics": events_tail.Degradations()})
     try:
         pullflow._print_pull_summary(
             pullflow.PullResult(total_written=1, total_conflicted=1),
@@ -16174,7 +16140,7 @@ def test_sync78_lock_failure_keeps_its_own_text_and_conflicts_name_review(capsys
             verbose=False,
         )
     finally:
-        cli_module._SYNC_OUTPUT.reset(token)
+        core._SYNC_OUTPUT.reset(token)
     err = capsys.readouterr().err
     assert "1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner" in err
 

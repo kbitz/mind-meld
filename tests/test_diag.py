@@ -1209,31 +1209,34 @@ def test_diag_models_line_branches():
     never be read as the whole set. Non-int / non-list come straight off a
     JSON cache a host wrote, so they are shapes, not hypotheticals.
     """
-    from mind_meld.cli import _DIAG_MODELS_SHOWN, _diag_models_line
+    from mind_meld import statusflow
 
-    assert _diag_models_line({}) == "0"
-    assert _diag_models_line({"model_count": 0, "models": []}) == "0"
+    assert statusflow._diag_models_line({}) == "0"
+    assert statusflow._diag_models_line({"model_count": 0, "models": []}) == "0"
     assert (
-        _diag_models_line({"model_count": 2, "models": ["gpt-5", "grok-4"]}) == "2 (gpt-5, grok-4)"
+        statusflow._diag_models_line({"model_count": 2, "models": ["gpt-5", "grok-4"]})
+        == "2 (gpt-5, grok-4)"
     )
 
-    n = _DIAG_MODELS_SHOWN + 3
-    line = _diag_models_line({"model_count": n, "models": [f"m{i}" for i in range(n)]})
+    n = statusflow._DIAG_MODELS_SHOWN + 3
+    line = statusflow._diag_models_line({"model_count": n, "models": [f"m{i}" for i in range(n)]})
     assert line.startswith(f"{n} (")
     assert "+3 more" in line
-    assert line.count(",") == _DIAG_MODELS_SHOWN  # 5 separators + the "+N more" comma
+    assert line.count(",") == statusflow._DIAG_MODELS_SHOWN  # 5 separators + the "+N more" comma
 
     # Peer-written cache shapes: never raise, never render a bogus count.
-    assert _diag_models_line({"model_count": None, "models": None}) == "0"
-    assert _diag_models_line({"model_count": True, "models": ["x"]}) == "0"
-    assert _diag_models_line({"model_count": 1, "models": "not-a-list"}) == "1"
+    assert statusflow._diag_models_line({"model_count": None, "models": None}) == "0"
+    assert statusflow._diag_models_line({"model_count": True, "models": ["x"]}) == "0"
+    assert statusflow._diag_models_line({"model_count": 1, "models": "not-a-list"}) == "1"
     # Terminal escapes are stripped, not passed through to the console.
-    assert "\x1b" not in _diag_models_line({"model_count": 1, "models": ["a\x1b[31mb"]})
+    assert "\x1b" not in statusflow._diag_models_line({"model_count": 1, "models": ["a\x1b[31mb"]})
     # A newline would forge an extra field into a block users paste into
     # support chats; `safe_str` alone leaves it. Found by Codex adversarial
     # review. Same whitelist `aggregator._safe_short` applies to the same
     # class of string — the two surfaces must not disagree.
-    forged = _diag_models_line({"model_count": 1, "models": ["gpt-5\ngrok cache:      ok"]})
+    forged = statusflow._diag_models_line(
+        {"model_count": 1, "models": ["gpt-5\ngrok cache:      ok"]}
+    )
     assert "\n" not in forged
     assert "\r" not in forged
 
@@ -1887,7 +1890,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
 ):
     from datetime import datetime, timedelta, timezone
 
-    from mind_meld import cli, events_tail
+    from mind_meld import events_tail, statusflow
 
     _setup(tmp_path, monkeypatch)
     config = load_config()
@@ -1953,7 +1956,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     assert tuple(payload["host_publication"]["readers"]) in selection
     assert payload["host_usage"]["codex"]["last_complete_at"] == at
     assert payload["host_usage"]["codex"]["last_deadline_allotted_ms"] == 250
-    line = cli._host_read_sweep_line(payload)
+    line = statusflow._host_read_sweep_line(payload)
     if total is None:
         assert line == f"unknown ({margin})"
     else:
@@ -2174,7 +2177,7 @@ def test_diag_never_walks_an_unconsented_muse_tree(tmp_path, monkeypatch):
 def test_diag77_raw_and_projected_evidence_both_formats(tmp_path, monkeypatch, state):
     from datetime import datetime, timedelta, timezone
 
-    from mind_meld import attemptlog, cli
+    from mind_meld import attemptlog, cli, core
 
     _setup(tmp_path, monkeypatch)
     now = datetime.now(timezone.utc)
@@ -2194,7 +2197,7 @@ def test_diag77_raw_and_projected_evidence_both_formats(tmp_path, monkeypatch, s
         else:
             path.write_bytes(b"{" if state == "corrupt" else b"x" * 16385)
     cli._write_autorun_breadcrumb("pull", "crypto-error", "forensic-old-detail")
-    auto_path = cli._autorun_breadcrumb_path()
+    auto_path = core._autorun_breadcrumb_path()
     raw = json.loads(auto_path.read_text())
     raw["pull"]["timestamp"] = (now - timedelta(days=1)).isoformat()
     auto_path.write_text(json.dumps(raw))
@@ -2234,18 +2237,18 @@ def test_diag77_superseded_capture_stays_forensic(tmp_path, monkeypatch):
     assert state["latest_attempt_superseded"]
     state.update(state="absent", publication="unknown", readers={}, readiness="no-reader")
     # Same renderer: only status opts into hiding proven supersession.
-    from mind_meld import cli
+    from mind_meld import cli, statusflow
 
     with cli.console.capture() as status_capture:
-        cli._print_host_publication(state, reader_states={}, hide_superseded=True)
+        statusflow._print_host_publication(state, reader_states={}, hide_superseded=True)
     with cli.console.capture() as diag_capture:
-        cli._print_host_publication(state, reader_states={})
+        statusflow._print_host_publication(state, reader_states={})
     assert "push-failed" not in status_capture.get()
     assert "push-failed" in diag_capture.get()
 
 
 def test_git_capture_diag_reports_read_only_pending_repositories(tmp_path, monkeypatch):
-    from mind_meld import cli, events
+    from mind_meld import events, statusflow
     from mind_meld.config import GIT_CAPTURE_CACHE_PATH
 
     _setup(tmp_path, monkeypatch)
@@ -2254,7 +2257,7 @@ def test_git_capture_diag_reports_read_only_pending_repositories(tmp_path, monke
         events, "count_pending_repositories", lambda roots, since: calls.append(roots) or 3
     )
     discovery = {"roots": [str(tmp_path / "repository")], "status": "complete"}
-    state = cli._collect_git_capture_diag({}, None, discovery)
+    state = statusflow._collect_git_capture_diag({}, None, discovery)
     assert state["fresh"]["pending_repos"] == 3
     assert calls == [discovery["roots"]]
     assert not GIT_CAPTURE_CACHE_PATH.exists()
@@ -3097,6 +3100,160 @@ def test_status_and_diag_visibility_filters_and_diag_section_124b(tmp_path, monk
     assert "install failure: not-tracking at 2026-11-10T01:07:10+00:00" in diag_out
     assert "Run: gh auth setup-git" in diag_out
     assert "Run: mm update" in diag_out
+
+
+def test_diag_upgrade_check_fallback_fields(tmp_path, monkeypatch):
+    from mind_meld import lockedjson, upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    monkeypatch.setattr("mind_meld.__version__", "1.0.0")
+    monkeypatch.setattr(upgrade, "__version__", "1.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    monkeypatch.setattr(upgrade, "_fetch_tags", lambda *a: pytest.fail("diag must not fetch tags"))
+    monkeypatch.setattr(
+        upgrade, "check_for_upgrade", lambda *a, **kw: pytest.fail("diag must not refresh")
+    )
+    monkeypatch.setattr(upgrade, "detect_install", lambda: upgrade.InstallInfo("not-pipx"))
+    cfg = load_config()
+    cfg.setdefault("upgrade", {})["auto_install"] = True
+    save_config(cfg)
+
+    def upgrade_section(output: str) -> list[str]:
+        block = output.split("Upgrade check\n", 1)[1].split("\nHost usage\n", 1)[0]
+        return [line for line in block.splitlines() if line]
+
+    real_view = upgrade.cached_upgrade_view
+
+    # 1. Unavailable view (upgrade_view is None)
+    assert not upgrade.CACHE_PATH.exists()
+    monkeypatch.setattr(
+        upgrade,
+        "cached_upgrade_view",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    res = runner.invoke(app, ["diag"])
+    assert res.exit_code == 0, res.output
+    assert upgrade_section(res.stdout) == ["  state:           unavailable"]
+    section_text = "\n".join(upgrade_section(res.stdout))
+    for omitted in (
+        "latest release:",
+        "check failure:",
+        "install failure:",
+        "install attempt:",
+        "fix:",
+    ):
+        assert omitted not in section_text
+    assert not upgrade.CACHE_PATH.exists()
+
+    # 2a. No record (missing cache) with real cached_upgrade_view
+    monkeypatch.setattr(upgrade, "cached_upgrade_view", real_view)
+    res = runner.invoke(app, ["diag"])
+    assert res.exit_code == 0, res.output
+    assert upgrade_section(res.stdout) == [
+        "  state:           unknown (missing cache)",
+        "  latest release:  none",
+        "  check failure:   none",
+        "  install failure: none",
+        "  install attempt: none",
+    ]
+    assert not upgrade.CACHE_PATH.exists()
+
+    # 2b. Corrupt JSON in CACHE_PATH (malformed cache)
+    upgrade.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    upgrade.CACHE_PATH.write_bytes(b"{not valid json")
+    before_corrupt = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    res = runner.invoke(app, ["diag"])
+    after_corrupt = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    assert res.exit_code == 0, res.output
+    assert before_corrupt == after_corrupt
+    assert upgrade_section(res.stdout) == [
+        "  state:           unknown (malformed cache)",
+        "  latest release:  none",
+        "  check failure:   none",
+        "  install failure: none",
+        "  install attempt: none",
+    ]
+
+    # 2c. Contended lock on CACHE_PATH (contended cache)
+    upgrade.CACHE_PATH.write_text("{}", encoding="utf-8")
+    with lockedjson.locked_json_rmw(upgrade.CACHE_PATH):
+        res = runner.invoke(app, ["diag"])
+    assert res.exit_code == 0, res.output
+    assert upgrade_section(res.stdout) == [
+        "  state:           unknown (contended cache)",
+        "  latest release:  none",
+        "  check failure:   none",
+        "  install failure: none",
+        "  install attempt: none",
+    ]
+
+    # 2d. Bare unknown (cache_state=None)
+    monkeypatch.setattr(
+        upgrade,
+        "cached_upgrade_view",
+        lambda *_a, **_kw: upgrade.UpgradeCheckResult(
+            "unknown", "1.0.0", None, None, cache_state=None
+        ),
+    )
+    res = runner.invoke(app, ["diag"])
+    assert res.exit_code == 0, res.output
+    assert upgrade_section(res.stdout) == [
+        "  state:           unknown",
+        "  latest release:  none",
+        "  check failure:   none",
+        "  install failure: none",
+        "  install attempt: none",
+    ]
+
+    # 3a. Missing check_failure_at and install_failure_at on real cache
+    monkeypatch.setattr(upgrade, "cached_upgrade_view", real_view)
+    cache = upgrade._empty_cache()
+    cache["check_failure_cause"] = "network"
+    cache["check_failure_at"] = None
+    cache["install_failure_cause"] = "pipx-missing"
+    cache["install_failure_at"] = None
+    upgrade.CACHE_PATH.write_text(json.dumps(cache), encoding="utf-8")
+    before_missing_ts = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    res = runner.invoke(app, ["diag"])
+    after_missing_ts = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    assert res.exit_code == 0, res.output
+    assert before_missing_ts == after_missing_ts
+    assert upgrade_section(res.stdout) == [
+        "  state:           unknown (malformed cache)",
+        "  latest release:  none",
+        "  check failure:   network",
+        "  install failure: pipx-missing",
+        "  install attempt: none",
+        "  fix:             Could not reach GitHub to check the latest release — Run: mm update",
+        (
+            "  fix:             pipx was not found, so mm cannot update itself — "
+            "Install pipx, then run: mm update"
+        ),
+    ]
+
+    # 3b. Missing checked_at when latest is set
+    monkeypatch.setattr(
+        upgrade,
+        "cached_upgrade_view",
+        lambda *_a, **_kw: upgrade.UpgradeCheckResult(
+            "upgrade-available",
+            "1.0.0",
+            "1.1.0",
+            upgrade.INSTALL_CMD,
+            checked_at=None,
+            cache_state="valid",
+        ),
+    )
+    res = runner.invoke(app, ["diag"])
+    assert res.exit_code == 0, res.output
+    assert upgrade_section(res.stdout) == [
+        "  state:           upgrade-available",
+        "  latest release:  1.1.0",
+        "  check failure:   none",
+        "  install failure: none",
+        "  install attempt: none",
+    ]
 
 
 @pytest.mark.parametrize("command", ["push", "autopush"])

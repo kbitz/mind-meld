@@ -1249,7 +1249,6 @@ STATUSFLOW_DEFINITIONS = frozenset(
     _host_usage_blocker
     _print_host_publication
     _print_retro_capture_status
-    _read_autorun_breadcrumbs
     _read_autorun_evidence
     _read_capture_rows
     _reader_capture_readiness
@@ -1369,6 +1368,18 @@ RECAPTUREFLOW_DEFINITIONS = frozenset(
     _recapture_commit_stats
     recapture
     """.split()
+)
+
+STALE_PULL_CLI_BINDINGS |= (
+    CORE_DEFINITIONS
+    | INIT_CORE_DEFINITIONS
+    | (STATUSFLOW_DEFINITIONS - {"status", "diag"})
+    | (INITFLOW_DEFINITIONS - {"init"})
+    | (SOURCEFLOW_DEFINITIONS - SOURCE_SHELLS)
+    | (DEVICESFLOW_DEFINITIONS - {"devices"})
+    | (GCFLOW_DEFINITIONS - {"gc"})
+    | (RECAPTUREFLOW_DEFINITIONS - {"recapture"})
+    | {"safe_text", "_read_autorun_breadcrumbs"}
 )
 
 
@@ -1564,7 +1575,7 @@ def test_status_core_single_ownership_and_qualified_calls():
         )
         assert _unqualified_owner_calls(source, module) == []
     assert len(CORE_DEFINITIONS) == 39 + len(PULL_CORE_DEFINITIONS)
-    assert len(STATUSFLOW_DEFINITIONS) == 31
+    assert len(STATUSFLOW_DEFINITIONS) == 30
     assert len(PULLFLOW_DEFINITIONS) == 47
 
 
@@ -1802,7 +1813,24 @@ def test_recaptureflow_import_does_not_register_cli():
 def test_core_sync_output_is_shared_with_cli():
     from mind_meld import cli, core
 
-    assert cli._SYNC_OUTPUT is core._SYNC_OUTPUT
+    assert cli.core._SYNC_OUTPUT is core._SYNC_OUTPUT
+    assert not hasattr(cli, "_SYNC_OUTPUT")
+
+
+def test_cli_has_no_compatibility_reexports():
+    from mind_meld import cli
+
+    source = (SRC / "cli.py").read_text()
+    assert "noqa: F401" not in source
+    removed = (
+        CORE_DEFINITIONS
+        | INIT_CORE_DEFINITIONS
+        | (STATUSFLOW_DEFINITIONS - {"status", "diag"})
+        | (DEVICESFLOW_DEFINITIONS - {"devices"})
+        | {"safe_text", "_read_autorun_breadcrumbs"}
+    )
+    for name in removed:
+        assert not hasattr(cli, name), f"{name}: use its expected owner; no cli re-export"
 
 
 def test_init_bindings_have_one_owner():
@@ -2387,9 +2415,23 @@ def test_clock_patch_gate_checks_both_owners(clock: str, owners: tuple[str, ...]
 def _pull_owner_hint(name: str) -> str:
     owners = (
         ("core",)
-        if name in PULL_CORE_DEFINITIONS
+        if name in CORE_DEFINITIONS | INIT_CORE_DEFINITIONS
         else ("pullflow",)
         if name in PULLFLOW_DEFINITIONS
+        else ("statusflow",)
+        if name in (STATUSFLOW_DEFINITIONS - {"status", "diag"}) | {"_read_autorun_breadcrumbs"}
+        else ("initflow",)
+        if name in INITFLOW_DEFINITIONS - {"init"}
+        else ("sourceflow",)
+        if name in SOURCEFLOW_DEFINITIONS - SOURCE_SHELLS
+        else ("devicesflow",)
+        if name in DEVICESFLOW_DEFINITIONS - {"devices"}
+        else ("gcflow",)
+        if name in GCFLOW_DEFINITIONS - {"gc"}
+        else ("recaptureflow",)
+        if name in RECAPTUREFLOW_DEFINITIONS - {"recapture"}
+        else ("safety",)
+        if name == "safe_text"
         else PULL_IMPORTED_BINDING_OWNERS[name]
     )
     return "expected " + " / ".join(f"{owner}.{name}" for owner in owners)
@@ -2640,6 +2682,10 @@ def test_no_stale_pull_references_or_patches_across_repo():
             "t, spy)",
             False,
         ),
+        ("from mind_meld.cli import _fetch_remote_manifest", True),
+        ("from mind_meld import cli\ncli._status_verdict()", True),
+        ("from mind_meld import cli\ncli._read_autorun_breadcrumbs()", True),
+        ("from mind_meld.cli import safe_text", True),
     ],
 )
 def test_stale_pull_patch_gate_is_not_vacuous(source, flags):

@@ -319,7 +319,7 @@ def test_auto_degraded_cause_matches_completed_result(verb):
     # fails_when=degraded execution is called command refusal;
     # why_new=existing tests assert unresolved but not this cause; seam=none;
     # no_claim=native hook or fleet acceptance.
-    from mind_meld import cli
+    from mind_meld import statusflow
 
     raw = {
         verb: {
@@ -333,7 +333,7 @@ def test_auto_degraded_cause_matches_completed_result(verb):
     assert projected[verb]["selected"]["outcome"] == "degraded"
     assert projected[verb]["selected"]["cause"] == "result-degraded"
     assert projected[verb]["unresolved"]
-    verdict = cli._status_verdict(
+    verdict = statusflow._status_verdict(
         source=None,
         blocking=None,
         conflicts=0,

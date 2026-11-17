@@ -90,7 +90,7 @@ def test_hardlink_to_session_log_is_not_walked(tmp_path):
 
 def test_muse_memory_lock_never_roams(tmp_path):
     """Muse's machine-local PID lock stays local on push and on pull."""
-    from mind_meld.cli import _build_exclude_map, _filter_excluded_paths
+    from mind_meld import core
 
     root = tmp_path / "muse"
     personal = root / "memory" / "personal"
@@ -100,7 +100,7 @@ def test_muse_memory_lock_never_roams(tmp_path):
     src = {"name": "muse", "path": str(root), "type": "muse"}
     assert set(walk_muse_source(src)) == {"memory/personal/MEMORY.md"}
 
-    exclude_map, prefixes = _build_exclude_map({}, [src])
+    exclude_map, prefixes = core._build_exclude_map({}, [src])
     incoming = {
         "sources": {
             "muse": {
@@ -112,7 +112,7 @@ def test_muse_memory_lock_never_roams(tmp_path):
         },
         "tombstones": {},
     }
-    filtered = _filter_excluded_paths(incoming, exclude_map, prefixes)
+    filtered = core._filter_excluded_paths(incoming, exclude_map, prefixes)
     assert set(filtered["sources"]["muse"]["files"]) == {"memory/personal/MEMORY.md"}
 
 

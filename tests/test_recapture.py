@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from mind_meld import cli, errors, events, events_tail, identity, retention
+from mind_meld import cli, errors, events, events_tail, identity, retention, statusflow
 from mind_meld.cli import app
 from mind_meld.skills.retro_fleet import aggregator
 
@@ -891,7 +891,7 @@ def test_status_reports_pending_git_repositories_or_recovery(
         lambda *a: events.CursorResolution(since=since, floored_after_incomplete=floored),
     )
     monkeypatch.setattr(events, "effective_capture_since", lambda roots, lower: lower)
-    assert cli._print_retro_capture_status([source], "dev-a")
+    assert statusflow._print_retro_capture_status([source], "dev-a")
     output = capsys.readouterr().out
     assert ("mm recapture" in output) == recovery
     if not recovery:
@@ -950,7 +950,7 @@ def test_idle_completed_capture_does_not_become_pending_without_a_new_push(tmp_p
     cache["repo_cursors"][str(root)] = ts.isoformat()
     config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
     _write_push(tmp_path / "events", "dev-a", ts=ts, since=ts, discovery="complete")
-    assert not cli._print_retro_capture_status(
+    assert not statusflow._print_retro_capture_status(
         [{"name": "mm-events", "path": str(tmp_path)}], "dev-a"
     )
 
@@ -965,7 +965,9 @@ def test_old_failed_walk_requires_recovery_with_a_recent_global_cursor(tmp_path,
         discovery="complete",
         walk_budget_aborts=1,
     )
-    assert cli._print_retro_capture_status([{"name": "mm-events", "path": str(tmp_path)}], "dev-a")
+    assert statusflow._print_retro_capture_status(
+        [{"name": "mm-events", "path": str(tmp_path)}], "dev-a"
+    )
     assert "mm recapture" in capsys.readouterr().out
 
 

@@ -2636,8 +2636,8 @@ class TestSourceBootstrapPreview56A:
             original(root)
 
     def test_legacy_retention_preserves_would_create(self, tmp_path, monkeypatch):
-        from mind_meld import cli
         from mind_meld import config as config_module
+        from mind_meld import core
 
         claude = tmp_path / "claude"
         claude.mkdir()
@@ -2650,7 +2650,7 @@ class TestSourceBootstrapPreview56A:
         from dataclasses import replace
 
         resolution = replace(resolution, would_create=("mm-events",))
-        retained = cli._retain_prior_default_sources(
+        retained = core._retain_prior_default_sources(
             resolution, {"sources": {"gstack": {"files": {"projects/a.md": {}}}}}, cfg
         )
         assert not retained.explicit
