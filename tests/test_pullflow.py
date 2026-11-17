@@ -4112,3 +4112,139 @@ def test_cli_autopull_surfaces_data_at_risk_warnings_on_stderr(fleet, monkeypatc
     assert crumb["outcome"] == "degraded"
     assert "1 corrupt peer manifest(s)" in crumb["detail"]
     assert "1 unknown source(s)" in crumb["detail"]
+
+
+def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_name(
+    fleet, fake_syncthing, monkeypatch
+):
+    from typer.testing import CliRunner
+
+    from mind_meld import cli
+    from mind_meld import config as config_mod
+
+    joining_a = "JOINAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA"
+    joining_b = "JOINBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB"
+    hostile_name = "hostile-joiner-[bold red]pwn[/bold red]-\x1b]52;c;ZHVtbXk=\x07-\x1b[2J"
+
+    cfg_path = fleet.root / "config.toml"
+    config_mod.save_config(fleet.config, cfg_path)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", cfg_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    config_mod.save_syncthing_record(fake_syncthing.my_id)
+
+    # 1. Normal peer pull with 1 pending device
+    _seed(fleet, {"note.md": b"peer content\n"})
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_a: {"name": hostile_name, "address": "192.0.2.12:22000"},
+    }
+    fake_syncthing.requests.clear()
+
+    res_one = CliRunner().invoke(cli.app, ["pull"])
+    assert res_one.exit_code == 0, (res_one.stdout, res_one.stderr)
+    expected_one = (
+        "mm: notice: Syncthing: 1 device is asking to join; use the ID the new machine printed. "
+        "Run: mm devices approve <device-id>"
+    )
+    assert res_one.stderr.splitlines().count(expected_one) == 1
+    combined_one = res_one.stdout + res_one.stderr
+    assert joining_a not in combined_one
+    assert "hostile-joiner" not in combined_one
+    assert "\x1b" not in combined_one
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
+
+    # 2. 1-machine fleet (no peer devices yet) with 2 pending devices
+    fleet.backend.delete(device_key(PEER))
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_a: {"name": hostile_name},
+        joining_b: {"name": "linux-b"},
+    }
+    fake_syncthing.requests.clear()
+
+    res_two = CliRunner().invoke(cli.app, ["pull"])
+    assert res_two.exit_code == 0, (res_two.stdout, res_two.stderr)
+    assert "Pull: no peer devices." in res_two.stdout.splitlines()
+    expected_two = (
+        "mm: notice: Syncthing: 2 devices are asking to join; use the ID each new machine printed. "
+        "Run: mm devices approve <device-id>"
+    )
+    assert res_two.stderr.splitlines().count(expected_two) == 1
+    combined_two = res_two.stdout + res_two.stderr
+    assert joining_a not in combined_two
+    assert joining_b not in combined_two
+    assert "hostile-joiner" not in combined_two
+    assert "linux-b" not in combined_two
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
+
+
+def test_pull_pending_syncthing_join_stays_silent_for_zero_unmanaged_dry_run_autopull_and_join(
+    fleet, fake_syncthing, monkeypatch, capsys
+):
+    from typer.testing import CliRunner
+
+    from mind_meld import cli
+    from mind_meld import config as config_mod
+
+    joining_a = "JOINAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA"
+
+    cfg_path = fleet.root / "config.toml"
+    config_mod.save_config(fleet.config, cfg_path)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", cfg_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _seed(fleet, {"note.md": b"peer content\n"})
+
+    # 1. Owner-managed machine (no syncthing.toml) makes zero Syncthing HTTP requests on mm pull
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_a: {"name": "linux-b"},
+    }
+    fake_syncthing.requests.clear()
+    res_unmanaged = CliRunner().invoke(cli.app, ["pull"])
+    assert res_unmanaged.exit_code == 0, (res_unmanaged.stdout, res_unmanaged.stderr)
+    assert "mm devices approve" not in res_unmanaged.stdout + res_unmanaged.stderr
+    assert fake_syncthing.requests == []
+
+    # 2. Managed machine: --dry-run, autopull, and _attended_pull(..., join=True) stay silent
+    config_mod.save_syncthing_record(fake_syncthing.my_id)
+    fake_syncthing.requests.clear()
+    res_dry = CliRunner().invoke(cli.app, ["pull", "--dry-run"])
+    assert res_dry.exit_code == 0, (res_dry.stdout, res_dry.stderr)
+    assert "mm devices approve" not in res_dry.stdout + res_dry.stderr
+    assert fake_syncthing.requests == []
+
+    res_auto = CliRunner().invoke(cli.app, ["autopull"])
+    assert res_auto.exit_code == 0, (res_auto.stdout, res_auto.stderr)
+    assert "mm devices approve" not in res_auto.stdout + res_auto.stderr
+    assert fake_syncthing.requests == []
+
+    capsys.readouterr()
+    cli._attended_pull(
+        from_device=None,
+        source=None,
+        verbose=False,
+        dry_run=False,
+        conflict_mode="keep-both",
+        passphrase=PASSPHRASE,
+        join=True,
+    )
+    join_out = capsys.readouterr()
+    assert "mm devices approve" not in join_out.out + join_out.err
+    assert fake_syncthing.requests == []
+
+    # 3. Managed machine with 0 pending devices, erroring endpoint, or unreachable Syncthing
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {}
+    res_zero = CliRunner().invoke(cli.app, ["pull"])
+    assert res_zero.exit_code == 0, (res_zero.stdout, res_zero.stderr)
+    assert "mm devices approve" not in res_zero.stdout + res_zero.stderr
+
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = 500
+    res_err = CliRunner().invoke(cli.app, ["pull"])
+    assert res_err.exit_code == 0, (res_err.stdout, res_err.stderr)
+    assert "mm devices approve" not in res_err.stdout + res_err.stderr
+
+    fake_syncthing.close()
+    res_down = CliRunner().invoke(cli.app, ["pull"])
+    assert res_down.exit_code == 0, (res_down.stdout, res_down.stderr)
+    assert "mm devices approve" not in res_down.stdout + res_down.stderr
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []

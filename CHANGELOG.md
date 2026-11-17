@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.66] - 2026-11-17
+
+Managed Syncthing machines now report pending join requests by count with a manual approval command, and malformed Syncthing header values are reported before a connection opens.
+
+### Added
+
+- On a machine where `mm` manages Syncthing, `mm status` and an attended `mm pull` report pending Syncthing join requests by count with `Run: mm devices approve <device-id>`.
+- Managed Syncthing machines show a count-only pending join notice and manual approval command in `mm status` and attended `mm pull`.
+
+### Fixed
+
+- Malformed Syncthing HTTP header values report unreadable configuration before any connection is opened.
+
 ## [1.12.65] - 2026-11-17
 
 The removed-wrapper hint now points to autorun evidence, and compatibility re-exports are removed from the CLI module.

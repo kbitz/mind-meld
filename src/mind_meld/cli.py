@@ -2885,6 +2885,8 @@ def _attended_pull(
             # the lock is released so the cold-cache HTTP fetch never blocks pull
             # progress and the update can take the lock for itself.
             if not dry_run:
+                if not join:
+                    pullflow.notice_pending_syncthing_join(config)
                 _sync_update(config, verbose=verbose)
 
 

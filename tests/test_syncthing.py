@@ -1347,3 +1347,155 @@ def test_byte_ceilings_for_config_response_and_stignore_and_stdlib_only(fake_syn
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported_roots.add(node.module.split(".", 1)[0])
     assert imported_roots <= sys.stdlib_module_names
+
+
+def test_pending_join_message_handles_all_count_shapes():
+    assert syncthing.PENDING_JOIN_FIX == "mm devices approve <device-id>"
+    assert syncthing.pending_join_message(None) is None
+    assert syncthing.pending_join_message(0) is None
+    assert syncthing.pending_join_message(-1) is None
+    assert syncthing.pending_join_message(True) is None  # type: ignore[arg-type]
+    assert syncthing.pending_join_message(False) is None  # type: ignore[arg-type]
+    assert syncthing.pending_join_message(1) == (
+        "Syncthing: 1 device is asking to join; use the ID the new machine printed."
+    )
+    assert syncthing.pending_join_message(2) == (
+        "Syncthing: 2 devices are asking to join; use the ID each new machine printed."
+    )
+
+
+@pytest.mark.parametrize("suffix", ["\ninvalid", "\rinvalid", "\u2603"])
+def test_read_state_malformed_header_returns_config_unreadable_without_requests(
+    fake_syncthing, suffix
+):
+    fake_syncthing.write_config(gui_value=fake_syncthing.gui_value + suffix)
+    state = syncthing.read_state(
+        fake_syncthing.storage_path,
+        stignore_line=initflow.STIGNORE_LINE,
+        managed=syncthing.ManagedRecord(fake_syncthing.my_id),
+    )
+    assert state.state == "config-unreadable"
+    assert state.config_dir == fake_syncthing.config_dir
+    assert state.pending_device_count is None
+    assert fake_syncthing.requests == []
+
+
+def test_read_state_pending_device_count_gated_by_managed_record(fake_syncthing):
+    hostile_name = "peer-[red]markup[/red]-\x1b]52;c;ZHVtbXk=\x07-\x1b[2J"
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        fake_syncthing.peer_id: {"name": hostile_name, "address": "192.0.2.10:22000"},
+        fake_syncthing.peer2_id: {"name": "linux-b"},
+        fake_syncthing.my_id: {"name": "mac-a"},
+        "not-a-device-id": {"name": "ignored"},
+        "PEERDDD-DDDDDDD-DDDDDDD-DDDDDDD-DDDDDDD-DDDDDDD-DDDDDDD-DDDDDDD": "not-a-dict",
+    }
+
+    # 1. Default managed=None sends only the 5 existing GETs and leaves pending_device_count None
+    state_default = syncthing.read_state(
+        fake_syncthing.storage_path, stignore_line=initflow.STIGNORE_LINE
+    )
+    assert state_default.state == "ok"
+    assert state_default.pending_device_count is None
+    assert [req[1] for req in fake_syncthing.requests] == [
+        "/rest/system/status",
+        "/rest/system/connections",
+        "/rest/config/folders",
+        "/rest/config/devices",
+        "/rest/db/status?folder=mind-meld",
+    ]
+
+    # 2. Mismatched or malformed ManagedRecord skips the 6th GET
+    for bad_managed in (
+        syncthing.ManagedRecord(fake_syncthing.peer_id),
+        syncthing.ManagedRecord("not-a-device-id"),
+        "not-a-record",
+    ):
+        fake_syncthing.requests.clear()
+        state_unmatched = syncthing.read_state(
+            fake_syncthing.storage_path,
+            stignore_line=initflow.STIGNORE_LINE,
+            managed=bad_managed,  # type: ignore[arg-type]
+        )
+        assert state_unmatched.state == "ok"
+        assert state_unmatched.pending_device_count is None
+        assert "/rest/cluster/pending/devices" not in [req[1] for req in fake_syncthing.requests]
+
+    # 3. Matching ManagedRecord reads 2, 1, and 0 pending devices and keeps repr free of IDs/names
+    managed = syncthing.ManagedRecord(fake_syncthing.my_id)
+    fake_syncthing.requests.clear()
+    state_two = syncthing.read_state(
+        fake_syncthing.storage_path,
+        stignore_line=initflow.STIGNORE_LINE,
+        managed=managed,
+    )
+    assert state_two.state == "ok"
+    assert state_two.pending_device_count == 2
+    assert [req[0] for req in fake_syncthing.requests] == ["GET"] * 6
+    assert fake_syncthing.requests[-1][1] == "/rest/cluster/pending/devices"
+    assert fake_syncthing.peer_id not in repr(state_two)
+    assert fake_syncthing.peer2_id not in repr(state_two)
+    assert hostile_name not in repr(state_two)
+    assert "linux-b" not in repr(state_two)
+
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        fake_syncthing.peer_id: {"name": hostile_name},
+    }
+    state_one = syncthing.read_state(
+        fake_syncthing.storage_path,
+        stignore_line=initflow.STIGNORE_LINE,
+        managed=managed,
+    )
+    assert state_one.state == "ok"
+    assert state_one.pending_device_count == 1
+    assert fake_syncthing.peer_id not in repr(state_one)
+    assert hostile_name not in repr(state_one)
+
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {}
+    state_zero = syncthing.read_state(
+        fake_syncthing.storage_path,
+        stignore_line=initflow.STIGNORE_LINE,
+        managed=managed,
+    )
+    assert state_zero.state == "ok"
+    assert state_zero.pending_device_count == 0
+
+
+def test_read_state_pending_device_failures_do_not_degrade_syncthing_state(fake_syncthing):
+    managed = syncthing.ManagedRecord(fake_syncthing.my_id)
+    for bad_spec in (404, 500, 403, ["not-a-dict"], b"{not-json"):
+        fake_syncthing.responses["/rest/cluster/pending/devices"] = bad_spec
+        state = syncthing.read_state(
+            fake_syncthing.storage_path,
+            stignore_line=initflow.STIGNORE_LINE,
+            managed=managed,
+        )
+        assert state.state == "ok"
+        assert state.cause is None
+        assert state.pending_device_count is None
+        assert state.folder_id == "mind-meld"
+        assert state.folder_state == "idle"
+        assert state.connected_peers == 2
+        assert state.total_peers == 2
+        assert state.problems == ()
+
+    # Timeout on /rest/cluster/pending/devices leaves state == "ok" and pending_device_count None
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        fake_syncthing.peer_id: {"name": "linux-b"}
+    }
+    hold_ev = fake_syncthing.hold("/rest/cluster/pending/devices")
+    try:
+        state_timeout = syncthing.read_state(
+            fake_syncthing.storage_path,
+            stignore_line=initflow.STIGNORE_LINE,
+            timeout=0.05,
+            budget=0.5,
+            managed=managed,
+        )
+    finally:
+        hold_ev.set()
+        fake_syncthing.holds.clear()
+    assert state_timeout.state == "ok"
+    assert state_timeout.cause is None
+    assert state_timeout.pending_device_count is None
+    assert state_timeout.folder_id == "mind-meld"
+    assert state_timeout.folder_state == "idle"

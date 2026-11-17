@@ -53,6 +53,7 @@ from mind_meld import (
     safety,
     statedb,
     syncdiag,
+    syncthing,
 )
 from mind_meld.config import MM_INTERNAL_SOURCE_NAMES, resolve_sources
 from mind_meld.conflictdiff import (
@@ -78,6 +79,7 @@ from mind_meld.errors import (
     DELETED_FILES_URL,
     LEDGER_URL,
     PULL_FAILURES_URL,
+    ConfigError,
     CryptoError,
     MindMeldError,
     NewerFormatError,
@@ -4453,3 +4455,24 @@ def _pull_core(
                     "inspected (see the warnings above)."
                 )
         return _partial_result
+
+
+def notice_pending_syncthing_join(config: dict[str, Any]) -> None:
+    """Emit a pending-join notice after an attended pull on a managed machine."""
+    try:
+        recorded = _config_module.load_syncthing_record()
+    except ConfigError:
+        return
+    if not isinstance(recorded, str) or not recorded:
+        return
+    storage = config.get("storage") if isinstance(config, dict) else None
+    raw_path = storage.get("path") if isinstance(storage, dict) else None
+    if not isinstance(raw_path, (str, Path)) or not str(raw_path).strip():
+        return
+    storage_root = Path(raw_path).expanduser()
+    st = syncthing.read_state(
+        storage_root,
+        managed=syncthing.ManagedRecord(device_id=recorded),
+    )
+    if st.state == "ok" and (msg := syncthing.pending_join_message(st.pending_device_count)):
+        core._notice(msg, fix=syncthing.PENDING_JOIN_FIX)
