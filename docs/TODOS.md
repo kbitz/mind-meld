@@ -45,6 +45,18 @@ here by hand, use the H3 form.
 ## Unprocessed
 
 
+### [review:files=src/mind_meld/statedb.py|tests/test_statedb.py] Test gap: Migration 5 tolerates already-absent unread tables
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** Migration 5 uses `DROP TABLE IF EXISTS`, but its migration fixtures retain all three unread tables before opening the database. The already-absent-table case is not pinned.
+- **Hypothesis (untested):** Extend the existing migration-five fixture with one or all unread tables already absent, then check migration completion and preservation of live rows. Re-verify the contract first.
+- **Upstream severity:** INFORMATIONAL.
+- **Found in:** src/mind_meld/statedb.py:180.
+- **Evidence:** The coverage audit read migration 5 and its fixtures; the targeted checks passed, and no failure was reproduced. The audit estimates 90% coverage of the changed contracts.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/340 at `e7527a1` (2026-11-17).
+- **Effort:** ? (user triages in /roadmap)
+- **Revisit:** Next Track touching the named files.
+
+
 ### [review:files=tests/test_module_boundaries.py|src/mind_meld/core.py] Test gap: Shared printer ownership guard
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
 - **Description:** The historical `CORE_DEFINITIONS` extraction inventory intentionally excludes the new `_print_outcome` helper, as Track 140A specifies. Current tests do not separately reject a future duplicate printer definition or an unqualified import of that helper.
