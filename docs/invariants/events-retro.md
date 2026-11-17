@@ -23,7 +23,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS` / `DEFAULT_ATTENDED_CAPTURE_CAP_MS` / `ATTENDED_CAPTURE_CAP_MAX_MS`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
-Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_adapter_contract.py` (host reader contract), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_agy_usage.py`, `tests/test_diag.py`, `tests/test_root_probers.py` (host-record root probers).
+Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_adapter_contract.py` (host reader contract), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_agy_usage.py`, `tests/test_diag.py`, `tests/test_root_probers.py` (host-record root probers), `tests/test_recapture.py`.
 
 
 ## Sync diagnostic presentation (Track 78A)
@@ -498,7 +498,7 @@ Do **not** use a single `complete` boolean: discovery and walk fail independentl
 
 Git-walk cost is *monotone in cursor age*. Discovery cost and a zero-root walk are *flat* in cursor age. Holding the cursor on a walk failure creates a positive feedback loop (held cursor → longer walk → more aborts → held further back) that permanently wedges unattended autopush. Holding on discovery failure or zero-roots cannot.
 
-`walk_session_metadata` ignores `since` (`events.py`, `# noqa: ARG001`, v=2 full inventory). That is *why* holding on zero roots is free: the session walk does not grow with cursor age.
+`walk_session_metadata` takes no `since` cursor (`events.py`, v=2 full inventory). That is *why* holding on zero roots is free: the session walk does not grow with cursor age.
 
 **Walk failures NEVER affect the cursor.** `capture_advances_cursor` is an allowlist on `discovery` only (`complete` / `not-run` ADVANCE; `partial` / `empty` HOLD; absent / malformed / unknown ADVANCE). A denylist would default every future value to HOLD, which is the wedge direction.
 
@@ -2659,7 +2659,7 @@ v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is cou
 
 **Mixed-fleet transition rule.** A retained v=1 sessions row records pre-v0.11.0 delta semantics, not the peer's current binary. The aggregator omits its session total and reports `sessions_incomplete` in `MM_HEALTH`; its refresh remedy follows the registry-evidence rule above. A new v=2 capture supplies usable totals; the legacy health marker remains while a v=1 row is in the requested window.
 
-**`since` parameter retained for API stability.** `walk_session_metadata(claude_dir, since, *, deadline_monotonic)` still accepts `since` to keep the call-site signature stable; the value is now ignored (suppressed via `# noqa: ARG001`). A future v=3 schema can re-introduce delta semantics with a new field name without breaking callers.
+**No `since` parameter.** `walk_session_metadata(claude_dir, *, deadline_monotonic=..., token_cache_files=..., persist=...)` takes no `since` parameter because v=2 scans the full project inventory on every call.
 
 **`source_root` field on `SessionMetadata` (load-bearing, post-v0.11.2 Group 8 hotfix).** Every `SessionMetadata` carries a `source_root: str` field equal to `str(claude_dir)` from the `walk_session_metadata` caller. The aggregator keys on the 3-tuple `(device, source_root, claude_dir)` instead of the original 2-tuple — pre-fix, two configured `type: claude` source roots that both contained a project encoded as e.g. `-Users-user-Documents-foo` silently overwrote each other in `latest`. The schema change is additive (`SessionMetadata` is `TypedDict, total=False` — old readers ignore unknown fields, new readers default missing field to `""`), so no v=3 bump.
 

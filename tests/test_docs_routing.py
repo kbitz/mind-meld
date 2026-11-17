@@ -1453,3 +1453,13 @@ def test_readme_names_every_history_action_the_log_command_accepts():
     assert documented == set(get_args(cli._LogAction)), (
         f"README's mm log --action list {sorted(documented)} != the accepted values"
     )
+
+
+def test_no_test_file_is_named_after_a_track_or_review():
+    pattern = re.compile(r"(?:^|_)track_?\d|review_?\d", re.IGNORECASE)
+    offenders = [
+        p.relative_to(ROOT).as_posix()
+        for p in sorted((ROOT / "tests").rglob("test_*.py"))
+        if pattern.search(p.stem)
+    ]
+    assert offenders == [], f"test files named after a Track or review: {offenders}"

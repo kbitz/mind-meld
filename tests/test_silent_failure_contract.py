@@ -1660,38 +1660,76 @@ def test_recover_prior_manifest_surfaces_peer_fallback_in_quiet_mode(tmp_path, m
     """When the remote manifest is corrupt AND no local sidecar exists, recovery
     falls through to peer-fallback. That branch carries the riskiest semantics
     (recent local deletions can be lost) and must surface to stderr in quiet
-    mode. Unit-tested at the helper boundary because reproducing the full
-    multi-device, multi-tombstone push-side scenario via CliRunner is heavy.
+    mode alongside conflict_copies_only recovery.
     """
+    from mind_meld import sidecar
     from mind_meld.cli import ManifestFetch
 
     fetch = ManifestFetch(status="corrupt", manifest=None)
-    monkeypatch.setattr("mind_meld.sidecar.read", lambda *a, **kw: None)
     fake_tombstones = {
-        "claude:projects/x/memory/foo.md": {"deleted_at": "2026-04-23T00:00:00+00:00"}
+        "claude:projects/x/memory/foo.md": {
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "device_id": "peer-b",
+        }
     }
     monkeypatch.setattr(
         "mind_meld.core._collect_peer_tombstones",
         lambda *a, **kw: fake_tombstones,
     )
 
-    result = core._recover_prior_manifest(
-        fetch,
-        backend=None,
-        device_id="dev-a",
-        passphrase="x",
-        memory_kb=1024,
-        quiet=True,
-    )
+    with monkeypatch.context() as mp:
+        mp.setattr("mind_meld.sidecar.read", lambda *a, **kw: None)
+        result = core._recover_prior_manifest(
+            fetch,
+            backend=None,
+            device_id="dev-a",
+            passphrase="x",
+            memory_kb=1024,
+        )
 
     captured = capsys.readouterr()
     # Returned the synthetic manifest with the peer tombstones intact.
     assert result is not None
     assert result["tombstones"] == fake_tombstones
-    # Quiet-mode warning landed on stderr (load-bearing path).
+    # Warning landed on stderr.
     assert "corrupt" in captured.err
     assert "tombstone" in captured.err
     assert "may be lost" in captured.err
+
+    # Also exercise `mm autopush` (`_push_core(..., quiet=True)`) on both
+    # conflict_copies_only and peer-fallback recovery.
+    _setup_real_config(tmp_path, monkeypatch)
+    r_init = runner.invoke(app, ["push"])
+    assert r_init.exit_code == 0, r_init.stderr
+
+    storage_dir = tmp_path / "storage"
+    backend = LocalBackend(storage_dir)
+    canonical_manifest = storage_dir / "manifests" / "dev-a" / "manifest.json.enc"
+    conflict_copy = (
+        storage_dir
+        / "manifests"
+        / "dev-a"
+        / "manifest.json.sync-conflict-20260101-101010-ABCDEFG.enc"
+    )
+    conflict_copy.write_bytes(canonical_manifest.read_bytes())
+    backend.put("manifests/dev-a/manifest.json.enc", b"corrupt-canonical-bytes")
+
+    r_conflict = runner.invoke(app, ["autopush"])
+    assert r_conflict.exit_code == 0, (r_conflict.stdout, r_conflict.stderr)
+    assert r_conflict.stdout == ""
+    assert "mm: warning: this device's manifest is held only by conflict copies" in (
+        r_conflict.stderr or ""
+    )
+
+    backend.put("manifests/dev-a/manifest.json.enc", b"corrupt-for-peer-fallback")
+    sidecar.sidecar_path().unlink(missing_ok=True)
+    r_peer = runner.invoke(app, ["autopush"])
+    assert r_peer.exit_code == 0, (r_peer.stdout, r_peer.stderr)
+    assert r_peer.stdout == ""
+    assert (
+        "mm: warning: remote manifest corrupt and no local sidecar; "
+        "recovered 1 tombstone(s) from peer device(s)." in (r_peer.stderr or "")
+    )
 
 
 def test_autopush_breadcrumb_no_sources_distinguishes_from_success(tmp_path, monkeypatch):

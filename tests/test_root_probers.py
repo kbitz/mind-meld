@@ -1698,7 +1698,7 @@ def test_attended_discovery_budget_leaves_autopush_and_legacy_unchanged(
 
 def test_status_names_recapture_as_finishing_partial_discovery(tmp_path, monkeypatch, capsys):
     from mind_meld import cli
-    from tests.test_track_30a import _write_push
+    from tests.test_recapture import _write_push
 
     def status(discovery: str, *, aborts: int, errors: int, streak: int) -> str:
         now = datetime.now(timezone.utc)

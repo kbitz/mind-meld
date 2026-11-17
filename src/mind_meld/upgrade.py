@@ -819,11 +819,7 @@ def record_nudge(latest_version: str, *, now: datetime | None = None) -> None:
 # ── Self-version transition detection ─────────────────────────────────────
 
 
-def detect_self_version_transition(
-    config: dict[str, Any] | None = None,
-    *,
-    now: datetime | None = None,
-) -> tuple[str, str] | None:
+def detect_self_version_transition() -> tuple[str, str] | None:
     """Compare __version__ against last_seen_self_version; return (old, new)
     on transition, None otherwise.
 
@@ -900,7 +896,7 @@ def run_transition_hook(config: dict[str, Any]) -> None:
     each caller's distinct error policy while still centralizing the hook
     logic.
     """
-    transition = detect_self_version_transition(config)
+    transition = detect_self_version_transition()
     if transition is None:
         return
     old, new = transition

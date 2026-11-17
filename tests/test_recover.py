@@ -16,6 +16,7 @@ Contract under test:
 
 from __future__ import annotations
 
+import inspect
 from datetime import datetime, timezone
 
 import pytest
@@ -214,13 +215,14 @@ def test_recover_reconciles_real_crypto_conflict_copy(tmp_path, monkeypatch):
 def test_quarantine_unit_read_then_atomic_write_then_unlink(tmp_path, monkeypatch):
     """_quarantine_corrupt_manifest moves src → dst atomically. The dst
     exists and has the original bytes; the src no longer exists."""
+    assert "backend" not in inspect.signature(_quarantine_corrupt_manifest).parameters
     storage = tmp_path / "icloud"
     storage.mkdir()
     backend = LocalBackend(storage)
     original = b"corrupt-manifest-bytes-here"
     backend.put("manifests/mac-a/manifest.json.enc", original)
 
-    dst = _quarantine_corrupt_manifest(backend, storage, "mac-a")
+    dst = _quarantine_corrupt_manifest(storage, "mac-a")
 
     assert dst.exists()
     assert dst.read_bytes() == original
@@ -243,7 +245,7 @@ def test_quarantine_collision_picks_unique_name(tmp_path, monkeypatch):
     collision = manifest_dir / f"manifest.json.enc.corrupt-{ts}"
     collision.write_bytes(b"already-there")
 
-    dst = _quarantine_corrupt_manifest(backend, storage, "mac-a")
+    dst = _quarantine_corrupt_manifest(storage, "mac-a")
     # Collision still there, untouched.
     assert collision.read_bytes() == b"already-there"
     # Our quarantine landed at a DIFFERENT name.
@@ -255,6 +257,5 @@ def test_quarantine_collision_picks_unique_name(tmp_path, monkeypatch):
 def test_quarantine_raises_when_src_missing(tmp_path):
     storage = tmp_path / "icloud"
     storage.mkdir()
-    backend = LocalBackend(storage)
     with pytest.raises(FileNotFoundError):
-        _quarantine_corrupt_manifest(backend, storage, "nope")
+        _quarantine_corrupt_manifest(storage, "nope")

@@ -2054,7 +2054,7 @@ def _push_core(
         # Heal would replace this Mac's newer manifest with a v2 snapshot.
         core._error(core._newer_format_message(fetch.newer_version, "manifest"))
     remote_manifest = core._recover_prior_manifest(
-        fetch, backend, device_id, passphrase, memory_kb, quiet=quiet, dry_run=dry_run
+        fetch, backend, device_id, passphrase, memory_kb, dry_run=dry_run
     )
     advertised_prior_sources = set((remote_manifest or {}).get("sources", {}))
     # A manifest held only by conflict copies is rewritten like a corrupt one,
@@ -4031,7 +4031,6 @@ def conflicts() -> None:
 
 
 def _quarantine_corrupt_manifest(
-    backend: LocalBackend,
     storage_root: Path,
     device_id: str,
 ) -> Path:
@@ -4185,7 +4184,7 @@ def recover(
             raise typer.Exit(1)
 
     try:
-        quarantine_path = _quarantine_corrupt_manifest(backend, storage_root, device_id)
+        quarantine_path = _quarantine_corrupt_manifest(storage_root, device_id)
     except FileNotFoundError:
         core._error(f"{manifest_key(device_id)} not found on disk. Nothing to quarantine.")
     except OSError as e:

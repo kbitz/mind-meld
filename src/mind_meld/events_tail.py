@@ -1513,7 +1513,6 @@ def _capture_event_snapshots(
         for claude_dir in claude_paths:
             for row in events.walk_session_metadata(
                 claude_dir,
-                since=since,
                 deadline_monotonic=deadline,
                 token_cache_files=token_cache_files,
                 **_accepted_kwargs(events.walk_session_metadata, persist=persist),

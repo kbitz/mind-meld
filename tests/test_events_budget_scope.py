@@ -98,7 +98,8 @@ class TestSharedCapturePath:
 
         monkeypatch.setattr(_mm_token_usage, "lock_and_get_files", fake_lock)
 
-        def fake_session_walk(claude_dir, since, **kwargs):
+        def fake_session_walk(claude_dir, **kwargs):
+            assert "since" not in kwargs
             assert kwargs["token_cache_files"] is cache_files
             trace.append(f"session-{claude_dir.name}")
             return [{"projects": [{"name": claude_dir.name}]}]

@@ -29,6 +29,12 @@
       "tests/test_muse_usage.py"
     ],
     "tests/sim/**": [],
-    "tests/test_store_format.py": []
+    "tests/test_push_review91.py": [
+      "tests/test_push_anchors.py"
+    ],
+    "tests/test_store_format.py": [],
+    "tests/test_track_30a.py": [
+      "tests/test_recapture.py"
+    ]
   }
 }

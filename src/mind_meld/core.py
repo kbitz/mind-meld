@@ -1582,15 +1582,6 @@ def stamp_left_out(guard: MintGuard, *manifests: dict | None) -> None:
                 entry["left_out"] = set(paths)
 
 
-def anchor_pending(
-    prior: dict | None,
-    sources: list[dict[str, Any]],
-    nested_roots: Mapping[str, Iterable[str]],
-) -> bool:
-    """True when a writable scan root's token differs from the one last published."""
-    return any(row["pending"] for row in observe_anchors(prior, sources, nested_roots))
-
-
 def observe_anchors(
     prior: dict | None,
     sources: list[dict[str, Any]],
@@ -2329,7 +2320,6 @@ def _recover_prior_manifest(
     passphrase: str,
     memory_kb: int,
     *,
-    quiet: bool = False,
     dry_run: bool = False,
 ) -> dict | None:
     """Resolve a prior-state manifest for tombstone generation.

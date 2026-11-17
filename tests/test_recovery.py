@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,19 +61,21 @@ def _make_manifest(device_id: str, files: dict, tombstones: dict | None = None) 
 
 
 class TestRecoverPriorManifest:
+    def test_signature_excludes_quiet(self):
+        assert "quiet" not in inspect.signature(core._recover_prior_manifest).parameters
+
     def test_ok_passes_through(self, tmp_path):
         backend = LocalBackend(tmp_path / "storage")
         manifest = _make_manifest("abc", {"a.md": {"sha256": "aaa"}})
         fetch = ManifestFetch(status="ok", manifest=manifest)
 
-        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
+        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB)
         assert out is manifest
 
     @pytest.mark.parametrize("dry_run", [False, True])
-    @pytest.mark.parametrize("quiet", [False, True])
     @pytest.mark.parametrize("has_sidecar", [True, False])
     def test_conflict_copies_only_merges_sidecar_and_always_warns(
-        self, tmp_path, monkeypatch, capsys, has_sidecar, quiet, dry_run
+        self, tmp_path, monkeypatch, capsys, has_sidecar, dry_run
     ):
         _isolate_sidecar(monkeypatch, tmp_path)
         backend = LocalBackend(tmp_path / "storage")
@@ -87,7 +90,7 @@ class TestRecoverPriorManifest:
         fetch = ManifestFetch(status="ok", manifest=copies, conflict_copies_only=True)
 
         out = core._recover_prior_manifest(
-            fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=quiet, dry_run=dry_run
+            fetch, backend, "abc", PASSPHRASE, MEMORY_KB, dry_run=dry_run
         )
         captured = capsys.readouterr()
         # Autopush (quiet) and attended runs both surface this data-at-risk rewrite on stderr.
@@ -109,7 +112,7 @@ class TestRecoverPriorManifest:
         backend = LocalBackend(tmp_path / "storage")
         fetch = ManifestFetch(status="missing")
 
-        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
+        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB)
         assert out is None
 
     def test_corrupt_recovers_from_sidecar(self, tmp_path, monkeypatch):
@@ -126,7 +129,7 @@ class TestRecoverPriorManifest:
         sidecar.write(prior)
 
         fetch = ManifestFetch(status="corrupt")
-        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
+        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB)
         assert out is not None
         assert out["tombstones"] == prior["tombstones"]
         assert out["sources"] == prior["sources"]
@@ -151,7 +154,7 @@ class TestRecoverPriorManifest:
         _put_manifest(backend, "peer1", peer_manifest)
 
         fetch = ManifestFetch(status="corrupt")
-        out = core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+        out = core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB)
         assert out is not None
         # Synthetic prior: empty sources, peer tombstones carried forward
         assert out["sources"] == {}
@@ -165,7 +168,7 @@ class TestRecoverPriorManifest:
 
         fetch = ManifestFetch(status="corrupt")
         with pytest.raises(typer.Exit):
-            core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+            core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB)
 
     def test_corrupt_peers_all_corrupt_refuses(self, tmp_path, monkeypatch):
         """Corrupt + no sidecar + peers exist but all corrupt → refuse."""
@@ -177,7 +180,7 @@ class TestRecoverPriorManifest:
 
         fetch = ManifestFetch(status="corrupt")
         with pytest.raises(typer.Exit):
-            core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+            core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB)
 
 
 # ── Track 87A: vanished and Syncthing-copied own manifests ────────────
@@ -330,7 +333,7 @@ class TestVanishedManifest:
         sidecar.write(prior)
 
         fetch = ManifestFetch(status="missing", vanished=True)
-        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
+        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB)
 
         assert out is not None and out["tombstones"] == prior["tombstones"]
 
@@ -343,7 +346,7 @@ class TestVanishedManifest:
         fetch = ManifestFetch(status="missing", vanished=True)
 
         with pytest.raises(typer.Exit):
-            core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+            core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB)
         err = capsys.readouterr().err
         assert "still arriving from sync" in err and "Wait for the sync to finish" in err
         assert "mm init" not in err
@@ -363,14 +366,14 @@ class TestVanishedManifest:
                 },
             ),
         )
-        out = core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+        out = core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB)
         assert out is not None and "claude:by-peer.md" in out["tombstones"]
 
     def test_first_push_missing_still_has_no_prior_state(self, tmp_path):
         backend = LocalBackend(tmp_path / "storage")
 
         out = core._recover_prior_manifest(
-            ManifestFetch(status="missing"), backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True
+            ManifestFetch(status="missing"), backend, "abc", PASSPHRASE, MEMORY_KB
         )
 
         assert out is None

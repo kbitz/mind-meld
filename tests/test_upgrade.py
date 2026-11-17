@@ -16,9 +16,11 @@ Covers:
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import random
+import signal
 import subprocess
 import sys
 import tempfile
@@ -328,9 +330,12 @@ class TestNudgeGate:
 
 
 class TestTransitionDetection:
+    def test_signature_takes_no_parameters(self):
+        assert len(inspect.signature(upgrade.detect_self_version_transition).parameters) == 0
+
     def test_dev_build_noop(self, monkeypatch):
         _set_version(monkeypatch, "0.0.0+dev")
-        result = upgrade.detect_self_version_transition(config={})
+        result = upgrade.detect_self_version_transition()
         assert result is None
         # Cache file should not exist (or be empty)
         if upgrade.CACHE_PATH.exists():
@@ -339,17 +344,17 @@ class TestTransitionDetection:
 
     def test_first_run_seeds_no_transition(self, monkeypatch):
         _set_version(monkeypatch, "0.9.3")
-        result = upgrade.detect_self_version_transition(config={})
+        result = upgrade.detect_self_version_transition()
         assert result is None
         cache = json.loads(upgrade.CACHE_PATH.read_text())
         assert cache["last_seen_self_version"] == "0.9.3"
 
     def test_no_transition_same_version(self, monkeypatch):
         _set_version(monkeypatch, "0.9.3")
-        upgrade.detect_self_version_transition(config={})
+        upgrade.detect_self_version_transition()
         # Reset within-process flag so we can call again
         upgrade._TRANSITION_DETECTED_THIS_INVOCATION = False
-        result = upgrade.detect_self_version_transition(config={})
+        result = upgrade.detect_self_version_transition()
         assert result is None
 
     def test_upgrade_transition_detected(self, monkeypatch):
@@ -358,7 +363,7 @@ class TestTransitionDetection:
         cache["last_seen_self_version"] = "0.9.3"
         upgrade.CACHE_PATH.write_text(json.dumps(cache))
         _set_version(monkeypatch, "0.9.4")
-        result = upgrade.detect_self_version_transition(config={})
+        result = upgrade.detect_self_version_transition()
         assert result == ("0.9.3", "0.9.4")
         # Cache updated
         cache_after = json.loads(upgrade.CACHE_PATH.read_text())
@@ -369,7 +374,7 @@ class TestTransitionDetection:
         cache["last_seen_self_version"] = "1.0.0"
         upgrade.CACHE_PATH.write_text(json.dumps(cache))
         _set_version(monkeypatch, "0.9.4")
-        result = upgrade.detect_self_version_transition(config={})
+        result = upgrade.detect_self_version_transition()
         assert result == ("1.0.0", "0.9.4")
 
     def test_within_invocation_idempotent(self, monkeypatch):
@@ -377,8 +382,8 @@ class TestTransitionDetection:
         cache["last_seen_self_version"] = "0.9.3"
         upgrade.CACHE_PATH.write_text(json.dumps(cache))
         _set_version(monkeypatch, "0.9.4")
-        result1 = upgrade.detect_self_version_transition(config={})
-        result2 = upgrade.detect_self_version_transition(config={})
+        result1 = upgrade.detect_self_version_transition()
+        result2 = upgrade.detect_self_version_transition()
         assert result1 == ("0.9.3", "0.9.4")
         assert result2 is None  # second call within process: no double-log
 
@@ -388,7 +393,7 @@ class TestTransitionDetection:
         upgrade.CACHE_PATH.write_text(json.dumps(cache))
         _set_version(monkeypatch, "0.9.4")
         upgrade.set_invocation_skip(True)
-        result = upgrade.detect_self_version_transition(config={})
+        result = upgrade.detect_self_version_transition()
         assert result is None
         # Cache NOT mutated when --no-check-version is set
         cache_after = json.loads(upgrade.CACHE_PATH.read_text())
@@ -836,6 +841,64 @@ class TestFetchTagsGitAdapter124B:
         with pytest.raises(ProcessLookupError):
             os.kill(grandchild_pid, 0)
 
+    def test_keyboard_interrupt_kills_sleeping_process_group_and_reraises(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(upgrade, "_refuse_git_under_pytest", lambda: None)
+        pids_file = tmp_path / "group-pids.json"
+        pids_tmp = tmp_path / "group-pids.json.tmp"
+        fake_git = tmp_path / "fake-git-interrupt"
+        fake_git.write_text(
+            f"#!{sys.executable}\n"
+            + textwrap.dedent(
+                f"""
+                import json, os, subprocess, sys, time
+                child = subprocess.Popen(
+                    [{sys.executable!r}, "-c", "import time; time.sleep(60)"]
+                )
+                with open({str(pids_tmp)!r}, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps({{"parent": os.getpid(), "child": child.pid}}))
+                os.replace({str(pids_tmp)!r}, {str(pids_file)!r})
+                time.sleep(60)
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+
+        def _interrupt_after_spawn(self_proc, *args, **kwargs):
+            deadline = time.monotonic() + 5.0
+            while not pids_file.exists() and time.monotonic() < deadline:
+                # gstack-timing-ok: bounded poll for child pid file before interrupt
+                time.sleep(0.01)
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(subprocess.Popen, "communicate", _interrupt_after_spawn)
+
+        parent_pid: int | None = None
+        child_pid: int | None = None
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                upgrade._run_git([str(fake_git), "ls-remote"], env={}, timeout=30)
+            recorded = json.loads(pids_file.read_text(encoding="utf-8"))
+            parent_pid = int(recorded["parent"])
+            child_pid = int(recorded["child"])
+            with pytest.raises(ProcessLookupError):
+                os.kill(parent_pid, 0)
+            with pytest.raises(ProcessLookupError):
+                os.kill(child_pid, 0)
+        finally:
+            if pids_file.exists() and (parent_pid is None or child_pid is None):
+                recorded = json.loads(pids_file.read_text(encoding="utf-8"))
+                parent_pid = int(recorded["parent"])
+                child_pid = int(recorded["child"])
+            for pid in (parent_pid, child_pid):
+                if pid is not None:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     def test_no_prompt_environment_ssh_command_precedence(self, monkeypatch):
         # 1) Existing GIT_SSH_COMMAND gets -o BatchMode=yes appended
         env = upgrade._no_prompt_environment({"GIT_SSH_COMMAND": "ssh -p 2222"})
@@ -865,6 +928,52 @@ class TestFetchTagsGitAdapter124B:
         monkeypatch.setattr(upgrade, "_run_git", _fail_git)
         env = upgrade._no_prompt_environment({})
         assert env["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
+
+    def test_no_prompt_environment_preserves_batch_mode_and_http_low_speed(self, monkeypatch):
+        # 1) Custom non-empty HTTP low-speed settings pass through unchanged,
+        #    and existing GIT_SSH_COMMAND with BatchMode=yes is trimmed without duplication.
+        custom_env = upgrade._no_prompt_environment(
+            {
+                "GIT_HTTP_LOW_SPEED_LIMIT": "250",
+                "GIT_HTTP_LOW_SPEED_TIME": "15",
+                "GIT_SSH_COMMAND": "  ssh -p 2222 -o BatchMode=yes  ",
+            }
+        )
+        assert custom_env["GIT_HTTP_LOW_SPEED_LIMIT"] == "250"
+        assert custom_env["GIT_HTTP_LOW_SPEED_TIME"] == "15"
+        assert custom_env["GIT_SSH_COMMAND"] == "ssh -p 2222 -o BatchMode=yes"
+        assert custom_env["GIT_SSH_COMMAND"].count("BatchMode=yes") == 1
+        assert custom_env["GIT_TERMINAL_PROMPT"] == "0"
+        assert custom_env["GIT_ASKPASS"] == ""
+        assert custom_env["SSH_ASKPASS"] == ""
+        assert custom_env["SSH_ASKPASS_REQUIRE"] == "never"
+        assert custom_env["GCM_INTERACTIVE"] == "never"
+
+        # 2) Empty strings receive the 1000 / 60 defaults, and core.sshCommand
+        #    already carrying BatchMode=yes is not duplicated.
+        monkeypatch.setattr(upgrade, "find_git", lambda: "/usr/bin/git")
+        monkeypatch.setattr(
+            upgrade,
+            "_run_git",
+            lambda argv, *, env, timeout: subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=b"ssh -i /Users/user/.ssh/id_test -o BatchMode=yes\n",
+                stderr=b"",
+            ),
+        )
+        defaulted_env = upgrade._no_prompt_environment(
+            {
+                "GIT_HTTP_LOW_SPEED_LIMIT": "",
+                "GIT_HTTP_LOW_SPEED_TIME": "",
+            }
+        )
+        assert defaulted_env["GIT_HTTP_LOW_SPEED_LIMIT"] == "1000"
+        assert defaulted_env["GIT_HTTP_LOW_SPEED_TIME"] == "60"
+        assert (
+            defaulted_env["GIT_SSH_COMMAND"] == "ssh -i /Users/user/.ssh/id_test -o BatchMode=yes"
+        )
+        assert defaulted_env["GIT_SSH_COMMAND"].count("BatchMode=yes") == 1
 
     def test_pytest_guard_refuses_before_spawning_git(self, monkeypatch, tmp_path):
         marker = tmp_path / "ran-git"

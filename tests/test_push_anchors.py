@@ -1,4 +1,4 @@
-"""Push-side regression cases found during the Track 91A implementation review."""
+"""Tests for push-side scan-root anchors, the mint guard, left_out, and ledger ancestry."""
 
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -46,10 +46,11 @@ def test_unreadable_ledger_blocks_new_user_records_but_preserves_carried_records
 
 @pytest.mark.parametrize("root_ids", [None, [], {"d": None}, {"d": 1}, {"d": []}])
 def test_first_anchor_is_pending_when_both_recorded_and_disk_tokens_are_missing(tmp_path, root_ids):
+    assert not hasattr(core, "anchor_pending")
     cfg, _, prior, _ = anchored_pair(tmp_path)
     (tmp_path / "d" / manifest.ANCHOR_NAME).unlink()
     prior["sources"]["notes"]["root_ids"] = root_ids
-    assert core.anchor_pending(prior, [cfg], {})
+    assert any(row["pending"] for row in core.observe_anchors(prior, [cfg], {}))
 
 
 def test_unreadable_ledger_keeps_unchanged_published_ancestry(tmp_path):
@@ -72,7 +73,7 @@ def test_dot_include_covers_the_whole_root_for_anchor_and_membership(tmp_path):
     assert core.compute_mint_guard(local, prior, [cfg], pullplan.Ledger()).skip == set()
     assert core.publish_anchors(local, [cfg], {}) == []
     assert local["sources"]["notes"]["root_ids"][""] == manifest.read_anchor(tmp_path, "")
-    assert not core.anchor_pending(local, [cfg], {})
+    assert not any(row["pending"] for row in core.observe_anchors(local, [cfg], {}))
 
 
 def test_symlinked_source_root_can_publish_and_use_its_anchor(tmp_path):
@@ -86,7 +87,7 @@ def test_symlinked_source_root_can_publish_and_use_its_anchor(tmp_path):
     assert core.publish_anchors(local, [cfg], {}) == []
     assert local["sources"]["notes"]["root_ids"][""] == manifest.read_anchor(real, "")
     (real / manifest.ANCHOR_NAME).unlink()
-    assert core.anchor_pending(local, [cfg], {})
+    assert any(row["pending"] for row in core.observe_anchors(local, [cfg], {}))
 
 
 @pytest.mark.parametrize("alias_root", [False, True])
@@ -106,7 +107,7 @@ def test_overlapping_sources_publish_one_generation_for_the_same_scan_root(tmp_p
         local["sources"]["notes"]["root_ids"]["d"]
         == local["sources"]["alias"]["root_ids"][other_root]
     )
-    assert not core.anchor_pending(local, [cfg, other], {})
+    assert not any(row["pending"] for row in core.observe_anchors(local, [cfg, other], {}))
 
 
 def test_anchor_helpers_do_not_enter_descendant_links_or_nested_checkouts(tmp_path):
@@ -124,7 +125,7 @@ def test_anchor_helpers_do_not_enter_descendant_links_or_nested_checkouts(tmp_pa
     }
     local = {"sources": {"notes": {"files": {}}}}
     nested = {"notes": {"repo"}}
-    assert not core.anchor_pending(None, [cfg], nested)
+    assert core.observe_anchors(None, [cfg], nested) == []
     assert core.publish_anchors(local, [cfg], nested) == []
     assert "root_ids" not in local["sources"]["notes"]
     assert not list(tmp_path.rglob(manifest.ANCHOR_NAME))

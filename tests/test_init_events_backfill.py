@@ -220,9 +220,10 @@ class TestRunEventsBackfill:
 
         monkeypatch.setattr(_mm_token_usage, "lock_and_get_files", fake_lock)
 
-        def fake_session_walk(path, since, **kwargs):
+        def fake_session_walk(path, **kwargs):
             assert path == claude_dir
-            captured["session_since"] = since
+            assert "since" not in kwargs
+            captured["session_called"] = True
             return []
 
         monkeypatch.setattr(_mm_events, "walk_session_metadata", fake_session_walk)
@@ -239,7 +240,7 @@ class TestRunEventsBackfill:
         assert abs(delta - target) < 60, (
             f"since must be ~now-30d, got delta={delta}s vs target={target}s"
         )
-        assert captured["session_since"] == since
+        assert captured["session_called"] is True
 
 
 class TestBackfillHostSnapshot:

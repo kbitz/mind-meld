@@ -2638,7 +2638,6 @@ def discard_pending_session_state() -> None:
 
 def walk_session_metadata(
     claude_dir: Path,
-    since: datetime,  # noqa: ARG001 — kept for API stability; v=2 ignores it (see EVENTS_SCHEMA_VERSION docstring)
     *,
     deadline_monotonic: float | None = None,
     token_cache_files: dict | None = None,
@@ -2648,12 +2647,12 @@ def walk_session_metadata(
     session metadata. Returns one SessionsSnapshot row aggregating all
     projects (single row mirrors walk_git_projects' shape).
 
-    v=2 FULL INVENTORY (Group 8). Every jsonl is counted regardless of mtime.
-    The ``since`` parameter is retained for API stability but ignored — the
-    aggregator picks the LATEST snapshot per (device, claude_dir) so a snap-
-    shot's value is its current point-in-time view of the local sessions, not
-    a delta against the prior cursor. See EVENTS_SCHEMA_VERSION docstring for
-    the cross-model-review rationale that drove this change.
+    v=2 FULL INVENTORY (Group 8). Every jsonl is counted regardless of mtime,
+    and no ``since`` cursor is accepted — the aggregator picks the LATEST
+    snapshot per (device, claude_dir) so a snapshot's value is its current
+    point-in-time view of the local sessions, not a delta against the prior
+    cursor. See EVENTS_SCHEMA_VERSION docstring for the cross-model-review
+    rationale that drove this change.
 
     `ephemeral: True` when the decoded project path matches
     `*/conductor/workspaces/*` — matched on the decoded path string, NOT
