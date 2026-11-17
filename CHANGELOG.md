@@ -2,6 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.65] - 2026-11-17
+
+The removed-wrapper hint now points to autorun evidence, and compatibility re-exports are removed from the CLI module.
+
+### Fixed
+
+- The removed-wrapper hint now points to autorun evidence.
+
+### Removed
+
+- Compatibility re-exports are removed from the CLI module.
+
 ## [1.12.64] - 2026-11-17
 
 Invariant docs and the event-backfill contract now cover the full session inventory.
