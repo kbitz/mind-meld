@@ -425,6 +425,29 @@ on real machines by the persisted `check_failure_cause`, `install_failure_cause`
 and `install_attempt_*` records. Cause categories describe failures rather than
 proving their origin: a network sandbox can also emit a permission error.
 
+Post-merge observation (2026-11-17, closing Track 124B criterion 9): on `linux-a`,
+before, pipx showed mind-meld `1.12.53`, and `upgrade-state.json` had `checked_at`
+and `attempted_at` `2026-11-16T02:13:46Z`, `latest_version` `1.12.53` and
+`install_attempt_version` `1.12.35` (`2026-11-11`; the `2026-11-16T02:13Z` move from
+`1.12.47` to `1.12.53` was the developer's own `mm update` and does not count). The
+developer then ran a plain attended `mm push` (no `mm update`) with the machine seven
+releases behind, not one (accepted by the developer as criterion 9's observation; no
+`mm --version` or `mm status` output was captured); the push completed first and the
+upgrade ran at its tail (`docs/SPEC.md` Constraints). After, `upgrade-state.json` had
+`checked_at` and `attempted_at` `2026-11-17T03:21:30Z`, `latest_version` `1.12.60`,
+`install_attempt_at` `2026-11-17T03:21:30Z`, `install_attempt_version` `1.12.60`,
+`install_attempt_outcome` `null`, `install_failure_*` `null` and
+`last_seen_self_version` still `1.12.53` (it refreshes on the new binary's next run);
+`auto-update.log` held
+`2026-11-17T03:21:32+00:00 mm 1.12.53: /usr/bin/pipx upgrade mind-meld` and
+`upgraded package mind-meld from 1.12.53 to 1.12.60`, and pipx then showed `1.12.60`.
+`install_attempt_outcome` staying `null` after a successful install is expected,
+because no code path records success there — `_claim_install_attempt` stamps it `null`
+and only `_record_install_failed` stamps `"failed"`; an attended success instead
+clears the `install_failure_*` pair and writes `auto-update.log`, a detached install
+reports nothing back, and later runs read success from the installed version having
+reached the latest release.
+
 ## Upgrade nudge (v0.9.5)
 
 `mind_meld.upgrade` runs a leading-edge version check to move the fleet toward
