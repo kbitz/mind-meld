@@ -35,7 +35,6 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from mind_meld import fsutil
-from mind_meld.errors import StorageError
 
 SEEN_DIR = Path.home() / ".config" / "mind-meld"
 
@@ -134,15 +133,15 @@ def acknowledge(names: Iterable[str], *, initial: Iterable[str]) -> set[str]:
     """Add `names` to the seen set under a single flock-guarded
     read-modify-write. Returns the new seen set.
 
-    Codex 2026-04-25 caught the read-modify-write race: a caller doing
-    `seen = read(...); seen.add(name); write(seen)` has an unprotected
-    window between read's flock release and write's open. Two concurrent
+    Codex 2026-04-25 caught the read-modify-write race: a split read followed
+    by an unlocked rewrite has an unprotected window between releasing the
+    read lock and reopening the file to replace it, so two concurrent
     `mm enable-source X` invocations could lose one acknowledgment.
     `acknowledge` holds the flock across the whole RMW so concurrent
     callers serialize cleanly.
 
     Behaves like `read(initial)` for the missing-file branch (lazy seed),
-    then unions `names` and atomically rewrites the file.
+    then unions `names` and rewrites the file in place under the lock.
     """
     new_names = set(names)
     initial_set = set(initial)
@@ -189,39 +188,6 @@ def acknowledge(names: Iterable[str], *, initial: Iterable[str]) -> set[str]:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
-
-
-def write(seen: Iterable[str]) -> None:
-    """Atomically write the seen set. Called after enable / disable /
-    reconfigure to record that the user has now acknowledged a name.
-
-    Sorted on disk for deterministic output / stable diffs in tests.
-
-    fsync=False: non-load-bearing tracker. Crash-window loss at worst
-    means one "new source!" hint shown twice. The config.toml mutation
-    via patch_config_on_disk is the actual durability point.
-
-    Race-prone with concurrent callers — prefer `acknowledge()` for
-    enable/disable/reconfigure paths. `write()` remains for full-set
-    overwrites (e.g. tests) where the caller already serializes externally.
-    """
-    seen_list = sorted(set(seen))
-    data = (json.dumps(seen_list) + "\n").encode("utf-8")
-    # Catch BOTH OSError (mkdir failure) AND StorageError (atomic_write_bytes
-    # wraps OSError as StorageError). Codex 2026-04-25 caught this: without
-    # the StorageError catch, a disk-full / permission flip / bad temp dir
-    # would crash mm status / enable-source / disable-source through a
-    # non-load-bearing tracker.
-    fsutil.refuse_real_state_write_under_pytest(seen_path())
-    try:
-        SEEN_DIR.mkdir(parents=True, exist_ok=True)
-        fsutil.atomic_write_bytes(seen_path(), data, fsync=False, mode=0o600)
-    except (OSError, StorageError) as e:
-        print(
-            f"mm: warning: failed to write seen-sources.json ({e}); "
-            f"new-source hints may repeat next run",
-            file=sys.stderr,
-        )
 
 
 def _seed_in_place_under_lock(fd: int, initial: set[str]) -> None:

@@ -163,12 +163,6 @@ MAX_PENDING_LEFT = 2**31 - 1
 """Cap on ``pending_left`` counts on host-usage rows and ``git_capture``.
 Mirrors ``events.MAX_PENDING_LEFT``."""
 
-HOST_SNAPSHOT_MIN_VERSION = "v0.12.32"
-"""First mm release whose event tail publishes ``host-usage-snapshot`` rows.
-Named in events-retro as the schema floor. Refresh remedies use
-``ATTENDED_USAGE_MIN_VERSION``; a machine below this schema floor still
-cannot contribute agent-log activity no matter how often it pushes."""
-
 SKILL_MIN_VERSION = "v1.1.0"
 """Floor for SKILL.md's own Step 0 gate.
 
@@ -2058,14 +2052,6 @@ def _safe_int(x: object) -> int:
     return 0
 
 
-def _host_counter_ok(value: object) -> bool:
-    """Same predicate as ``host_usage._is_valid_counter``. Local so the
-    aggregator does not treat a private reader helper as a public API.
-    Never route peer host fields through ``_safe_int`` — that clamps
-    ``True`` / ``"-1"`` into a legal view."""
-    return host_usage._is_valid_counter(value)
-
-
 def _parse_aware_ts(ts: object) -> datetime | None:
     """Timezone-aware ISO-8601 only. Naive strings fail (unlike ``_parse_iso``)."""
     if not isinstance(ts, str) or not ts:
@@ -2161,7 +2147,7 @@ def _copy_usage_bucket(bucket: object) -> dict[str, int] | None:
     out: dict[str, int] = {}
     for field_name in token_usage.TOKEN_FIELDS:
         value = bucket[field_name]
-        if not _host_counter_ok(value):
+        if not host_usage._is_valid_counter(value):
             return None
         out[field_name] = value
     return out
@@ -2170,8 +2156,10 @@ def _copy_usage_bucket(bucket: object) -> dict[str, int] | None:
 def _copy_day_bucket(bucket: object) -> dict | None:
     """Copy a ``DayBucket`` across the trust boundary.
 
-    Exact key-set plus ``_host_counter_ok``. Does NOT use
-    ``token_usage.merge_by_model``: that helper is for trusted local data.
+    Exact key-set plus ``host_usage._is_valid_counter``. Never route peer host
+    fields through ``_safe_int`` — that clamps ``True`` / ``"-1"`` into a legal
+    view. Does NOT use ``token_usage.merge_by_model``: that helper is for
+    trusted local data.
 
     **Bound before you copy.** ``by_model`` is a peer-chosen map of
     peer-chosen keys, so its cardinality is checked BEFORE the copy loop and
@@ -2189,7 +2177,7 @@ def _copy_day_bucket(bucket: object) -> dict | None:
     out: dict = {}
     for field_name in token_usage.TOKEN_FIELDS:
         value = bucket[field_name]
-        if not _host_counter_ok(value):
+        if not host_usage._is_valid_counter(value):
             return None
         out[field_name] = value
     by_model_raw = bucket["by_model"]
@@ -5309,10 +5297,6 @@ def _resolve_events_dir() -> Path:
     return DEFAULT_EVENTS_DIR
 
 
-NO_SAVE_REMOVED_IN = "v0.12.39"
-"""Version where snapshot saving was removed; the flag remains until 2.0."""
-
-
 def _read_mm_events_config_path() -> Path | None:
     """Best-effort read of mm config.toml's ``mm-events`` source ``path``
     field. Returns the expanded Path or None on any failure (config absent,
@@ -5439,11 +5423,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional name shown in the ASCII card header (e.g. 'user').",
     )
     parser.add_argument(
-        "--no-save",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--dump-host-usage",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -5541,17 +5520,6 @@ def main(argv: list[str] | None = None) -> int:
                 f"Pricing: marked verified {date_str} in this machine's pricing cache "
                 f"({location}).\n"
             )
-
-    if args.no_save:
-        # stderr, not stdout: the documented recipe redirects stdout
-        # (``mm retro-fleet 30d --no-save > /tmp/retro.md``). Tier is
-        # ``mm: notice:`` — docs/invariants/auto-upgrade.md reserves ``warning``
-        # for data-at-risk degradation and a no-op flag is not that.
-        sys.stderr.write(
-            f"mm: notice: --no-save is a no-op as of {NO_SAVE_REMOVED_IN} "
-            "(trends are computed from the events corpus; snapshots are gone) "
-            "and will be removed in 2.0.\n"
-        )
 
     events_dir = _resolve_events_dir()
     _emit_custom_path_notice_if_due(events_dir)

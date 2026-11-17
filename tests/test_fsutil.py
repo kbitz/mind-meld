@@ -1481,7 +1481,6 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
         "stignore_write": ".stignore",
         "seen_read": "seen-sources.json",
         "seen_acknowledge": "seen-sources.json",
-        "seen_write": "seen-sources.json",
         "pipx_install_lock": upgrade.INSTALL_LOCK_NAME,
         "update_log": upgrade.UPDATE_LOG_NAME,
         "acquire_lock": "mm.lock",
@@ -1552,8 +1551,6 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
             return seen_sources.read(["new"])
         if writer == "seen_acknowledge":
             return seen_sources.acknowledge(["new"], initial=["old"])
-        if writer == "seen_write":
-            return seen_sources.write(["new"])
         if writer == "pipx_install_lock":
             with upgrade._pipx_install_lock():
                 return upgrade._install_is_running()
@@ -1825,14 +1822,6 @@ def test_seen_acknowledge_refuses_protected_root(raw_writer_refusal, raw_writer_
 
 def test_seen_acknowledge_tmp_control(raw_writer_control, raw_writer_exists):
     raw_writer_control("seen_acknowledge", raw_writer_exists)
-
-
-def test_seen_write_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
-    raw_writer_refusal("seen_write", raw_writer_exists)
-
-
-def test_seen_write_tmp_control(raw_writer_control, raw_writer_exists):
-    raw_writer_control("seen_write", raw_writer_exists)
 
 
 def test_pipx_install_lock_refuses_protected_root(raw_writer_refusal, raw_writer_exists):

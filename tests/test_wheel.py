@@ -1,7 +1,7 @@
 """Wheel-shape pins for the skills/ subpackage.
 
 Group 7 preflight ships a placeholder src/mind_meld/skills/ package
-(__init__.py + .gitkeep) so the wheel always contains the skills/
+(__init__.py) so the wheel always contains the skills/
 subpackage via hatchling's `packages = ["src/mind_meld"]`. Group 8
 fills it with retro-fleet/SKILL.md; the assertions here pin the
 contract that future build-backend changes (zipped wheels, dropped
@@ -28,6 +28,7 @@ def test_skills_resources_dir_exists():
         "check pyproject.toml hasn't excluded the dir or moved to a "
         "build backend that ignores subpackages without explicit listing."
     )
+    assert not (skills_dir / ".gitkeep").exists()
 
 
 def test_skills_dir_is_real_path():

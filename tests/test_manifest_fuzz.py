@@ -51,17 +51,6 @@ valid_tombstone_value_strategy = st.one_of(
     st.dictionaries(st.text(min_size=0, max_size=10), st.text(min_size=0, max_size=20), max_size=4),
 )
 
-# Wild tombstone values: dicts AND junk (text/none/int). Strategy used for
-# normalize_manifest crash-resistance tests where the function must tolerate
-# arbitrary input. load_manifest will REJECT these via ManifestError; that's
-# the intended hardened behavior post-cross-model-review.
-wild_tombstone_value_strategy = st.one_of(
-    valid_tombstone_value_strategy,
-    st.text(),
-    st.none(),
-    st.integers(),
-)
-
 # Valid rel-paths for round-trip tests. v0.11.21 added a path-traversal
 # guard at the load boundary (manifest._validate_rel_path) that rejects
 # `..` segments, absolute paths, drive letters, and null bytes. Round-trip

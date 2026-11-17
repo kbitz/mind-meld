@@ -927,7 +927,7 @@ that raise StorageError") owns repair.
 
 **Exclusions.** Explicit False calls are `pullflow.py:_apply_write`, `_apply_merge`,
 `_apply_conflict`, both writes in `_apply_incoming_file`,
-`resolveflow.py:_resolve_interactive_loop`, `seen_sources.py:write` and
+`resolveflow.py:_resolve_interactive_loop`, and
 `synclog.py:write_sync_log`. Omitted/default-False calls are the two sentinel
 writes in `skill_link.py:_prepare_store_dir`, payload/metadata writes in
 `_publish_skill_store`, `manifest.py:write_anchor` and `initflow.py:_write_stignore`.

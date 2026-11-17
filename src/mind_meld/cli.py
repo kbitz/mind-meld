@@ -3469,12 +3469,6 @@ def retro_fleet_cmd(
     name: str = typer.Option(
         "", "--name", help="Optional name in the ASCII card header (e.g. 'user')."
     ),
-    no_save: bool = typer.Option(
-        False,
-        "--no-save",
-        hidden=True,
-        help="Deprecated no-op. Snapshot persistence was removed in v0.12.39.",
-    ),
     set_model_price: list[str] = typer.Option(
         [],
         "--set-model-price",
@@ -3504,8 +3498,7 @@ def retro_fleet_cmd(
       sidecar, synthesizes themes + noteworthy, then re-invokes.
     * Pass 2 — ``mm retro-fleet 7d --theme A --theme B --theme C
       --noteworthy "..." --name user`` re-renders with a pixel-aligned
-      ASCII card up top. ``--no-save`` is accepted as a hidden no-op
-      (removed as of v0.12.39; kept so a stale skill copy still exits 0).
+      ASCII card up top.
 
     Thin wrapper around ``mind_meld.skills.retro_fleet.aggregator.main``.
     Routes through ``mm`` (guaranteed on PATH wherever mm is installed)
@@ -3526,8 +3519,6 @@ def retro_fleet_cmd(
         argv.extend(["--noteworthy", noteworthy])
     if name:
         argv.extend(["--name", name])
-    if no_save:
-        argv.append("--no-save")
     if dump_host_usage:
         argv.append("--dump-host-usage")
     for spec in set_model_price:
