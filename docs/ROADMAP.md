@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Tracks 132G (manifest property tests under host load) and 132F (an empty `.git` directory freezing a synced folder) shipped in v1.12.49 and v1.12.50 (independent receipts in shipped history). The remaining output fixes and the findings the developer approved from the 2026-11-15 full review are planned below. The owner will decide the path to 2.0 after using the Syncthing fleet for a while. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); its qualification, Track 96A, waits in Future for 2.0.0's acceptance.
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Tracks 132G (manifest property tests under host load) and 132F (an empty `.git` directory freezing a synced folder) shipped in v1.12.49 and v1.12.50 (independent receipts in shipped history). The remaining output fixes and the findings the developer approved from the 2026-11-15 full review are planned below, followed by Track 148A (a pending join request shown on fleet machines), which the developer admitted on 2026-11-17. The owner will decide the path to 2.0 after using the Syncthing fleet for a while. Cross-model memory is planned after 2.0 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)); its qualification, Track 96A, waits in Future for 2.0.0's acceptance.
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -497,6 +497,37 @@ _Source: /full-review findings C6 and C4 at `3289de2`, approved in the 2026-11-1
 2. No test reaches a non-cli name through `cli`; `_read_autorun_breadcrumbs` is gone.
 3. The placed test gap has a test; `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
 
+### Group 148: Pending join requests on fleet machines
+
+_Depends on: Group 147_
+
+**This group delivers:** a fleet machine where mm manages Syncthing tells the owner, in `mm status` and an attended `mm pull`, that a new machine is waiting to be approved.
+
+#### Track 148A: Show a pending Syncthing join request in mm status and an attended mm pull
+_3 tasks . ~200 LOC . low risk . 10 files_
+**Outcome:** When a new machine has run `mm init` and asked to share mm's folder, the owner sees it on the next `mm status` or attended `mm pull` on a fleet machine where mm manages Syncthing, with the approval command to run, instead of the join waiting silently until the owner thinks to check.
+**Supports:** MVP-1 on Syncthing; docs/SPEC.md O2.3 (approval with `mm devices approve`) and O2.6 (`mm status` and `mm diag` read and report Syncthing's state); O8.1 (a line the owner must act on). Admitted by the developer's direct word on PR #342, 2026-11-17: "342 as-is is fine, but maybe we should address your issue with idea 2?"
+**Done when:** the acceptance list below passes: status and an attended pull each print one shared-style line while Syncthing lists a pending device, print nothing when it lists none or cannot be read, autopull stays silent, and the invariants and README say so.
+_touches: src/mind_meld/syncthing.py, src/mind_meld/statusflow.py, src/mind_meld/pullflow.py, src/mind_meld/cli.py, tests/test_syncthing.py, tests/test_statusflow.py, tests/test_pullflow.py, docs/invariants/init-devices.md, docs/invariants/sync.md, README.md_
+_blocked-by: Track 147A_
+_read-first: docs/invariants/README.md, docs/invariants/init-devices.md (`mm devices approve` steps 7 to 9, "No automatic pairing"), docs/invariants/sync.md (the Track 117A writer paragraph), src/mind_meld/syncthing.py (`SyncthingWriter.pending_devices`, `read_state`, `SyncthingState`), src/mind_meld/statusflow.py (`_syncthing_status_lines`), src/mind_meld/devicesflow.py (`approve`, read only)_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
+
+_Source: sessionpipe comparison, 2026-11-17 (fleet onboarding idea 2), filed and deferred in PR #342; promoted in the same PR on the developer's word above. The Factory Manager's case: the read already exists (`mm devices approve` gets pending devices from `SyncthingWriter.pending_devices()`, a GET of Syncthing's pending-devices endpoint), and without a prompt a join waits until the owner thinks to check. Verified at `fa7f1c9`: only `devicesflow.approve` calls `pending_devices()`; `mm status` renders `syncthing.read_state` through `_syncthing_status_lines` with no pending-device field; `mm pull` reads no Syncthing state. Ordered after Track 147A, which also edits `cli.py` and `statusflow.py`._
+
+- **GET-only pending-device read for inspection** -- Give the inspection path a pending-device count from a GET of Syncthing's pending-devices endpoint (the read `SyncthingWriter.pending_devices` sends), as a `SyncthingState` field or a GET-only helper under the same `ManagedRecord` gate as `SyncthingWriter`, within `read_state`'s existing timeout and budget; a failed read leaves the count unknown and never changes `read_state`'s other fields. _src/mind_meld/syncthing.py, tests/test_syncthing.py, ~50 lines._ (S)
+- **One line in status and in an attended pull** -- On a machine where mm manages Syncthing, `mm status` adds one Syncthing line and an attended `mm pull` prints one shared-style notice (O8.6), for example `Syncthing: 1 device is asking to join. To approve it, run mm devices approve <device-id> with the ID the new machine printed.` Print the count only: pending device IDs and names stay unprinted, as `mm devices approve` already requires, so approval still rests on the ID pasted from the new machine (O2.3's exact match). `mm autopull`, `mm autopush`, previews and owner-managed machines print nothing; an unknown count prints nothing (status and diag already report an unreachable Syncthing). Pull's read adds no wait when Syncthing is unreachable beyond `read_state`'s budget. _src/mind_meld/statusflow.py, src/mind_meld/pullflow.py, src/mind_meld/cli.py, tests/test_statusflow.py, tests/test_pullflow.py, ~110 lines._ (M)
+- **Invariants and README** -- Record in init-devices.md that inspection reads pending devices GET-only and prints only a count, keeping "No automatic pairing" (no push, pull or auto command accepts a device); add the read to sync.md's writer paragraph and README's Syncthing paragraph and `mm status` description. _docs/invariants/init-devices.md, docs/invariants/sync.md, README.md, ~40 lines._ (S)
+
+**Acceptance:**
+
+1. Against the Syncthing stand-in, with one or more pending devices on a managed machine, `mm status` prints one line naming the count and `mm devices approve <device-id>`, and an attended `mm pull` prints the same notice once; tests pin both.
+2. No pending device ID or name appears in either output; a test seeds a peer-controlled name and ID and asserts neither is printed.
+3. With no pending device, an unreachable or erroring Syncthing, an owner-managed machine, `mm autopull`, and `mm pull --dry-run`, nothing new prints; tests pin each.
+4. No new code path calls a Syncthing write route; the existing write-route guard and "No automatic pairing" tests still pass.
+5. docs/invariants/init-devices.md, docs/invariants/sync.md and README.md describe the read and the line.
+6. `./bin/check --affected` passes, and the full `./bin/check` passes in CI.
+
 ### Execution Map
 
 A Group may launch when every Group in its ← set has landed. Document order is priority, not gating.
@@ -515,9 +546,10 @@ A Group may launch when every Group in its ← set has landed. Document order is
 - Group 145 ← {144}
 - Group 146 ← {145}
 - Group 147 ← {146}
+- Group 148 ← {147}
 ```
 
-**Total: 0 phases . 13 groups . 15 tracks remaining.**
+**Total: 0 phases . 14 groups . 16 tracks remaining.**
 
 The 2.0 cut still needs the owner's O1 to O4 Syncthing observations on one Mac and both Linux machines, with O6 to O8 holding, recorded in PROGRESS.md Acceptance. A Mac not yet moved holds nothing up; publication is a separate owner decision. Retiring the pre-v0.9.2 conflict format, which the developer approved for 2.0, waits in Future for that line.
 
@@ -525,7 +557,7 @@ The 2.0 cut still needs the owner's O1 to O4 Syncthing observations on one Mac a
 
 ## Future
 
-Deferred: docs/roadmap-future.md (53 items)
+Deferred: docs/roadmap-future.md (58 items)
 
 ## Shipped
 

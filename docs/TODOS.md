@@ -211,6 +211,24 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap inbox drain — 2026-11-17 (sessionpipe comparison)
+
+Verified against `9573882` (v1.12.61), from the manager's brief carrying the developer's "Yes" to filing the sessionpipe comparison's takeaways T1 to T4 and fleet onboarding ideas 1 and 2, with idea 3 to Future. The seven items were filed in this branch's first commit and drained here. Admission follows docs/SPEC.md (MVP-1 on Syncthing) and the AGENTS.md planning rules: none is needed for the selected target, none records a defect seen on the owner's machines, and the two fleet ideas would change an O2 flow that works today. The In Progress and Current Plan sections and the fifteen earlier inbox items are left for the next full regeneration.
+
+| Inbox item | Disposition |
+|---|---|
+| Decide whether autopull and autopush run from native SessionStart/SessionEnd hooks (T1) | defer (no stale-autorun sighting recorded; `linux-a`'s last autopull was minutes old at drain) |
+| Mutation sweep over every host-usage reader fixture (T2) | defer (coverage, no reader failure on a real host upgrade) |
+| Read back the keyring after storing the passphrase (T3) | kill — unobserved; reversible (a dropped write shows as a keyring skip on the next auto command and a rerun of `mm init` or `MINDMELD_PASSPHRASE` recovers; python-keyring's native backends raise on failure); reopen if it manifests |
+| Document Antigravity IDE data dirs and Codex ephemeral threads as usage coverage gaps (T4) | defer (facts unverified on current host versions; `linux-a` has only `antigravity-cli`) |
+| Joining mm init waits for the fleet instead of stopping and asking for a rerun (idea 1) | defer the remainder; the key-header wait is already shipped (discharged@`a6f3e73`, Track 127A, v1.12.35: a 120 s bounded wait with a clean Ctrl-C stop), and the open part is the stop before the fleet approves the join |
+| Fleet machines surface a pending Syncthing join request in mm status and mm pull (idea 2) | place (Track 148A), on the developer's word below; first drafted as a deferral |
+| Short-code pairing for adding a machine to the fleet (idea 3) | defer (the developer's choice; SPEC refuses invite codes until its trigger) |
+
+7 drained: 1 placed, 5 deferred, 1 killed, 0 discharged (idea 1's header half is discharged and its remainder deferred). Future grows from 53 to 58 entries. No bump under SPEC documentation-only policy.
+
+Idea 2 was first deferred because nothing fails without it. The developer then answered on PR #342: "342 as-is is fine, but maybe we should address your issue with idea 2?", which admits it as Track 148A (Group 148, after Track 147A, whose `cli.py` and `statusflow.py` edits it shares). The Factory Manager's case: the read already exists in `mm devices approve`, and without a prompt a join waits until the owner thinks to check. The card prints only a count of pending devices, never an ID or name, so approval still rests on the ID pasted from the new machine (O2.3).
+
 ### Roadmap regeneration — 2026-11-15 (second run: full-review drain)
 
 Verified against `f08f10b` (v1.12.50), from the manager's brief. Tracks 132G (PR #326, v1.12.49) and 132F (PR #327, v1.12.50) recorded as shipped; Group 132 is retired and its observation Track 132B is now 135B. Track 135A (branch `mmm/1f4ea780`) stays pinned in Group 135. Track 132D's D5 is folded into Track 136A at the developer's request. Every premise below was re-grepped at `f08f10b`; none had changed since the review at `3289de2`.
