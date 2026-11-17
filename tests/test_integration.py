@@ -49,7 +49,7 @@ from mind_meld.manifest import (
 from mind_meld.storage import keys as storage_keys
 from mind_meld.storage.local import LocalBackend
 from mind_meld.synclog import write_sync_log
-from tests.conftest import make_git_checkout
+from tests.conftest import history_rows, import_history, make_git_checkout
 
 PASSPHRASE = "integration-test-passphrase"
 MEMORY_KB = 1024  # Low for fast tests
@@ -3834,8 +3834,6 @@ class TestShipFixes5E:
         """F4 ship-fix: autopull (quiet=True) skips the per-excluded-path
         pullhistory.append calls so the 1MB cap doesn't rotate within
         hours under repeated hook fires."""
-        from mind_meld import pullhistory
-
         # Isolate pullhistory dir.
         history_dir = tmp_path / "mm_state"
         monkeypatch.setattr("mind_meld.pullhistory.HISTORY_DIR", history_dir)
@@ -3894,7 +3892,7 @@ class TestShipFixes5E:
         assert result.exit_code == 0, result.output
 
         # Verify: NO "excluded" records were written by the quiet pull.
-        records = list(pullhistory.read_records())
+        records = list(history_rows())
         excluded = [r for r in records if r.get("action") == "excluded"]
         assert excluded == [], (
             f"autopull (quiet=True) must NOT log excluded paths "
@@ -3906,8 +3904,6 @@ class TestShipFixes5E:
         """F4 fix complement: interactive `mm pull` (not quiet) DOES
         write the excluded records — the audit-log feature still works
         for users who explicitly ran the command."""
-        from mind_meld import pullhistory
-
         history_dir = tmp_path / "mm_state"
         monkeypatch.setattr("mind_meld.pullhistory.HISTORY_DIR", history_dir)
 
@@ -3958,7 +3954,7 @@ class TestShipFixes5E:
         result = runner.invoke(app, ["pull"])
         assert result.exit_code == 0, result.output
 
-        records = list(pullhistory.read_records())
+        records = list(history_rows())
         excluded = [r for r in records if r.get("action") == "excluded"]
         # repo-mode.json should appear (excluded by B's pattern)
         assert any(r.get("rel_path") == "projects/myapp/repo-mode.json" for r in excluded)
@@ -5164,8 +5160,6 @@ class TestMultiSourceSync:
     @pytest.mark.parametrize("command", ["pull", "autopull"])
     def test_mixed_timestamp_pull_bookkeeping_and_retry(self, tmp_path, monkeypatch, command):
         """Full CLI: mixed JSONL merges, ordinary file arrives, retry is quiet."""
-        from mind_meld import pullhistory
-
         env = self._prepare_mixed_timestamp_fleet(tmp_path, monkeypatch)
         jsonl_path = env["jsonl_path"]
         notes_path = env["notes_path"]
@@ -5192,7 +5186,7 @@ class TestMultiSourceSync:
         missing = expected_parents - unique_parents
         assert not missing, f"missing fsync parents {missing}; actual {unique_parents}"
 
-        records = list(pullhistory.read_records())
+        records = list(history_rows())
         pull_records = [r for r in records if r.get("verb") == "pull"]
         actions = {(r["rel_path"], r["action"]) for r in pull_records}
         assert ("projects/-app/memory/learnings.jsonl", "merged") in actions
@@ -5233,7 +5227,7 @@ class TestMultiSourceSync:
 
         retry_records = [
             r
-            for r in pullhistory.read_records()
+            for r in history_rows()
             if r.get("verb") == "pull"
             and r.get("rel_path") == "projects/-app/memory/learnings.jsonl"
             and r.get("action") == "merged"
@@ -9193,7 +9187,6 @@ def apply_failure_fleet(tmp_path, monkeypatch):
     """Real encrypted peers and CLI, all state isolated by conftest into tmp_path."""
     from types import SimpleNamespace
 
-    from mind_meld import pullhistory
     from mind_meld.storage.keys import blob_key, manifest_key
 
     storage_dir = tmp_path / "storage53"
@@ -9245,7 +9238,7 @@ def apply_failure_fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(fsutil, "fsync_dir", fsync)
 
     def records():
-        return [r for r in pullhistory.read_records() if r.get("verb") == "pull"]
+        return [r for r in history_rows() if r.get("verb") == "pull"]
 
     def ordered(names):
         # Pin the apply sequence explicitly for interruption assertions. The
@@ -9863,7 +9856,7 @@ def _preview_tree(root, *, pin=False, exemptions=()):
 
 @pytest.fixture
 def push_preview56(tmp_path, monkeypatch):
-    from mind_meld import __version__, pullhistory, upgrade
+    from mind_meld import __version__, upgrade
     from tests.conftest import _make_config, _populate_claude
 
     assert __version__ != upgrade.DEV_BUILD_SENTINEL
@@ -9936,7 +9929,7 @@ def push_preview56(tmp_path, monkeypatch):
         "claude": claude,
         "upgrade": upgrade,
         "cache": cache,
-        "history": pullhistory.read_records,
+        "history": history_rows,
         "history_baseline": [],
         "fetches": fetches,
         "keyring_writes": keyring_writes,
@@ -14367,7 +14360,7 @@ def history73(request):
         + b"".join(json.dumps(r, sort_keys=True).encode() + b"\n" for r in rows)
     )
     if request.param == "table":
-        pullhistory.maintain_best_effort()
+        import_history()
     return rows, request.param
 
 
@@ -14420,7 +14413,7 @@ def test_log_errors_plain_empty_stdout73(kind, tmp_path, monkeypatch):
     from mind_meld import pullhistory, statedb
     from tests.test_statedb import make_hot_journal
 
-    pullhistory.maintain_best_effort()
+    import_history()
     monkeypatch.setattr(statedb, "BUSY_TIMEOUT_MS", 100)
     locker = None
     if kind == "hot":
@@ -14531,7 +14524,7 @@ def test_log_zero_byte_fallback_write_free_then_migrate73(history73):
 def test_log_stale_notice_write_free_and_silenced73(history73):
     from mind_meld import pullhistory
 
-    pullhistory.maintain_best_effort()
+    import_history()
     path = pullhistory.history_path()
     with path.open("ab") as file:
         file.write(b'{"stale":true}\n')
@@ -14665,7 +14658,7 @@ def test_transition_and_busy_database_one_stall73(push_preview56, monkeypatch):
     import sqlite3
     from contextlib import contextmanager
 
-    from mind_meld import pullhistory, statedb
+    from mind_meld import statedb
 
     env = push_preview56
     assert runner.invoke(app, ["push"]).exit_code == 0
@@ -14696,7 +14689,7 @@ def test_transition_and_busy_database_one_stall73(push_preview56, monkeypatch):
         assert result.exit_code == 0, result.exception
         assert opens == [1]
         assert result.stderr.count("mm: notice: history not recorded") == 1
-    assert not any(r.get("old_version") == "0.0.1" for r in pullhistory.read_records())
+    assert not any(r.get("old_version") == "0.0.1" for r in history_rows())
 
 
 def test_attended_pull_2500_excluded_three_flushes73(push_preview56, monkeypatch):

@@ -456,20 +456,6 @@ REVIEWED = {
             "os.open(str(path), flags, mode)",
         ],
     ),
-    "fsutil.py:append_rotatable_jsonl": (
-        *_GUARDED,
-        [
-            "path.parent.mkdir(parents=True, exist_ok=True, mode=448)",
-            "os.open(str(path), os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, mode)",
-        ],
-    ),
-    "fsutil.py:rotate_jsonl": (
-        *_GUARDED,
-        [
-            "os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)",
-            "os.rename(path, destination)",
-        ],
-    ),
     "fsutil.py:fsync_dir": (
         *_READ_ONLY,
         [

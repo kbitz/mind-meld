@@ -429,17 +429,6 @@ def batch():
             _batch.reset(token)
 
 
-def maintain_best_effort():
-    if failed():
-        return
-    try:
-        with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
-            import_if_needed(conn)
-            prune(conn)
-    except Exception as exc:
-        record_failure(exc)
-
-
 def _yield_lines(path, *, strict=False) -> Iterator[dict]:
     """Tolerate invalid bytes/JSON per line; import distinguishes absence from I/O."""
     try:
@@ -519,14 +508,6 @@ def _read_table(*, where="", params=(), ordering="id ASC", limit=0):
         if any(value is not None and value != old.get(key) for key, value in current.items()):
             notices.append(LegacyHistoryDiverged(meta["history_imported"]))
     return QueryRows(_decode(tuples), origin="state.db", notices=notices)
-
-
-def read_records(path: Path | None = None) -> list[dict]:
-    if path is None:
-        rows = _read_table()
-        if rows is not None:
-            return rows
-    return _legacy_records(path if path is not None else history_path())
 
 
 def query(*, source=None, action=None, verb=None, since=None, limit=50):
