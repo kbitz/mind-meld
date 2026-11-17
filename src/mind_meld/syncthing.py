@@ -88,6 +88,19 @@ class SyncthingState:
     options: dict[str, Any] = field(default_factory=dict)
     problems: tuple[str, ...] = ()
     stignore: str | None = None
+    pending_device_count: int | None = None
+
+
+PENDING_JOIN_FIX = "mm devices approve <device-id>"
+
+
+def pending_join_message(count: int | None) -> str | None:
+    """Return the count-only pending-join message, or ``None`` when none."""
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        return None
+    if count == 1:
+        return "Syncthing: 1 device is asking to join; use the ID the new machine printed."
+    return f"Syncthing: {count} devices are asking to join; use the ID each new machine printed."
 
 
 def config_dirs() -> list[Path]:
@@ -426,12 +439,24 @@ def _lint_stignore(folder_root: Path, stignore_line: str) -> tuple[str, str | No
     return ("missing-line", "stignore-line")
 
 
+def _header_value_ok(header_val: str) -> bool:
+    """Return whether ``header_val`` is safe as a single Latin-1 HTTP header value."""
+    if "\r" in header_val or "\n" in header_val:
+        return False
+    try:
+        header_val.encode("latin-1")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def read_state(
     storage_path: str | Path,
     *,
     stignore_line: str = _DEFAULT_STIGNORE_LINE,
     timeout: float = 2.0,
     budget: float = 5.0,
+    managed: ManagedRecord | None = None,
 ) -> SyncthingState:
     """Discover local Syncthing, query its REST API read-only and lint options."""
     try:
@@ -440,6 +465,7 @@ def read_state(
             stignore_line=stignore_line,
             timeout=timeout,
             budget=budget,
+            managed=managed,
         )
     except Exception:
         return SyncthingState(state="error", cause="bad-response")
@@ -451,11 +477,17 @@ def _read_state_inner(
     stignore_line: str,
     timeout: float,
     budget: float,
+    managed: ManagedRecord | None = None,
 ) -> SyncthingState:
     disc_state, cfg_dir, use_tls, raw_addr, header_val = _discover_config()
     if disc_state == "not-found" or cfg_dir is None:
         return SyncthingState(state="not-found")
-    if disc_state != "ok" or raw_addr is None or header_val is None:
+    if (
+        disc_state != "ok"
+        or raw_addr is None
+        or header_val is None
+        or not _header_value_ok(header_val)
+    ):
         return SyncthingState(state="config-unreadable", config_dir=cfg_dir)
 
     st_state, st_problem = _lint_stignore(storage_path, stignore_line)
@@ -698,6 +730,28 @@ def _read_state_inner(
             if isinstance(pe, int) and not isinstance(pe, bool):
                 pull_errors = pe
 
+    # 6. /rest/cluster/pending/devices
+    pending_device_count: int | None = None
+    if (
+        isinstance(managed, ManagedRecord)
+        and is_device_id(managed.device_id)
+        and my_id == managed.device_id
+    ):
+        out6, pending_data, _ = _get_json(
+            norm_addr,
+            "/rest/cluster/pending/devices",
+            header_val=header_val,
+            tls_context=tls_context,
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        if out6 == "ok" and isinstance(pending_data, dict):
+            pending_device_count = sum(
+                1
+                for dev_id, info in pending_data.items()
+                if is_device_id(dev_id) and dev_id != my_id and isinstance(info, dict)
+            )
+
     return SyncthingState(
         state="ok",
         cause=None,
@@ -717,6 +771,7 @@ def _read_state_inner(
         options=options,
         problems=tuple(problems),
         stignore=st_state,
+        pending_device_count=pending_device_count,
     )
 
 
@@ -1388,11 +1443,7 @@ class SyncthingWriter:
             )
         # http.client includes invalid header bytes in its ValueError. Validate
         # before the gate's GET as well as every later write using this endpoint.
-        try:
-            endpoint.header_val.encode("latin-1")
-        except UnicodeEncodeError:
-            return (None, None, per_req_timeout, deadline, WriteResult("config-unreadable"))
-        if "\r" in endpoint.header_val or "\n" in endpoint.header_val:
+        if not _header_value_ok(endpoint.header_val):
             return (None, None, per_req_timeout, deadline, WriteResult("config-unreadable"))
         out, sys_status, req_cause = _get_json(
             endpoint.norm_addr,

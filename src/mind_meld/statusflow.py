@@ -58,6 +58,7 @@ from mind_meld.devices import inventory_devices
 from mind_meld.errors import (
     KEYRING_UNAVAILABLE_URL,
     RETIRE_MACHINE_URL,
+    ConfigError,
     MindMeldError,
     SnapshotError,
 )
@@ -547,6 +548,17 @@ def _format_peer_state(p: PeerState) -> str:
     return push_str
 
 
+def _managed_syncthing_record() -> syncthing.ManagedRecord | None:
+    """Return the persisted ``ManagedRecord`` when readable, or ``None``."""
+    try:
+        recorded = _config_module.load_syncthing_record()
+    except ConfigError:
+        return None
+    if isinstance(recorded, str) and recorded:
+        return syncthing.ManagedRecord(device_id=recorded)
+    return None
+
+
 def _syncthing_status_lines(st: syncthing.SyncthingState, storage_path: Path) -> list[str]:
     lines: list[str] = []
     if st.state == "not-found":
@@ -596,6 +608,8 @@ def _syncthing_status_lines(st: syncthing.SyncthingState, storage_path: Path) ->
         lines.append(
             f"  Syncthing folder settings need attention ({len(setting_problems)}). Run: mm diag"
         )
+    if st.state == "ok" and (join_msg := syncthing.pending_join_message(st.pending_device_count)):
+        lines.append(f"  {join_msg} {outputstyle._fix_line(syncthing.PENDING_JOIN_FIX)}")
     return [safe_str(line) for line in lines]
 
 
@@ -862,7 +876,11 @@ def status(
         except (statedb.StateDBError, OSError) as exc:
             cursors = exc
         storage_root = _backend_storage_path(backend, config)
-        syncthing_state = syncthing.read_state(storage_root, stignore_line=initflow.STIGNORE_LINE)
+        syncthing_state = syncthing.read_state(
+            storage_root,
+            stignore_line=initflow.STIGNORE_LINE,
+            managed=_managed_syncthing_record(),
+        )
         peer_states = _peer_states(
             devices,
             device_id,

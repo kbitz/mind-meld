@@ -648,3 +648,119 @@ def test_status_and_diag_autorun_breadcrumb_matches_current_upgrade_cache_verdic
     diag_out = " ".join(diag_after.stdout.split())
     assert f"detail: {crumb_detail}" in diag_out
     assert "mm update" not in diag_out
+
+
+def test_status_reports_pending_syncthing_join_by_count_without_printing_id_or_name(
+    inspection, fake_syncthing
+):
+    joining_a = "JOINAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA"
+    joining_b = "JOINBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB"
+    hostile_name = "hostile-joiner-[bold red]pwn[/bold red]-\x1b]52;c;ZHVtbXk=\x07-\x1b[2J"
+
+    config.save_syncthing_record(fake_syncthing.my_id)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_a: {"name": hostile_name, "address": "192.0.2.11:22000"},
+    }
+    fake_syncthing.requests.clear()
+
+    res_one = runner.invoke(app, ["status"])
+    assert res_one.exit_code == 0, res_one.output
+    lines_one = res_one.stdout.splitlines()
+    st_lines_one = [line for line in lines_one if line.startswith("  Syncthing:")]
+    assert st_lines_one == [
+        "  Syncthing: connected 2 of 2 devices; up to date",
+        (
+            "  Syncthing: 1 device is asking to join; use the ID the new machine printed. "
+            "Run: mm devices approve <device-id>"
+        ),
+    ]
+    combined_one = res_one.stdout + res_one.stderr
+    assert joining_a not in combined_one
+    assert "hostile-joiner" not in combined_one
+    assert "\x1b" not in combined_one
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
+
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_a: {"name": hostile_name},
+        joining_b: {"name": "linux-b"},
+    }
+    fake_syncthing.requests.clear()
+
+    res_two = runner.invoke(app, ["status"])
+    assert res_two.exit_code == 0, res_two.output
+    st_lines_two = [line for line in res_two.stdout.splitlines() if line.startswith("  Syncthing:")]
+    assert st_lines_two == [
+        "  Syncthing: connected 2 of 2 devices; up to date",
+        (
+            "  Syncthing: 2 devices are asking to join; use the ID each new machine printed. "
+            "Run: mm devices approve <device-id>"
+        ),
+    ]
+    combined_two = res_two.stdout + res_two.stderr
+    assert joining_a not in combined_two
+    assert joining_b not in combined_two
+    assert "hostile-joiner" not in combined_two
+    assert "linux-b" not in combined_two
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
+
+
+def test_status_pending_syncthing_join_stays_silent_for_zero_unmanaged_and_errors(
+    inspection, fake_syncthing
+):
+    joining_a = "JOINAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA"
+
+    # 1. Managed machine with 0 pending devices
+    config.save_syncthing_record(fake_syncthing.my_id)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {}
+    res_zero = runner.invoke(app, ["status"])
+    assert res_zero.exit_code == 0, res_zero.output
+    assert [line for line in res_zero.stdout.splitlines() if line.startswith("  Syncthing:")] == [
+        "  Syncthing: connected 2 of 2 devices; up to date"
+    ]
+    assert "mm devices approve" not in res_zero.stdout + res_zero.stderr
+
+    # 2. Managed machine when /rest/cluster/pending/devices errors
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = 500
+    res_err = runner.invoke(app, ["status"])
+    assert res_err.exit_code == 0, res_err.output
+    assert [line for line in res_err.stdout.splitlines() if line.startswith("  Syncthing:")] == [
+        "  Syncthing: connected 2 of 2 devices; up to date"
+    ]
+    assert "mm devices approve" not in res_err.stdout + res_err.stderr
+
+    # 3. Owner-managed machine (absent/mismatched record) and malformed syncthing.toml
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_a: {"name": "linux-b"},
+    }
+    record_file = config.syncthing_record_path()
+    record_file.unlink()
+    fake_syncthing.requests.clear()
+    res_unmanaged = runner.invoke(app, ["status"])
+    assert res_unmanaged.exit_code == 0, res_unmanaged.output
+    assert "mm devices approve" not in res_unmanaged.stdout + res_unmanaged.stderr
+    assert "/rest/cluster/pending/devices" not in [req[1] for req in fake_syncthing.requests]
+
+    config.save_syncthing_record(fake_syncthing.peer_id)
+    fake_syncthing.requests.clear()
+    res_mismatch = runner.invoke(app, ["status"])
+    assert res_mismatch.exit_code == 0, res_mismatch.output
+    assert "mm devices approve" not in res_mismatch.stdout + res_mismatch.stderr
+    assert "/rest/cluster/pending/devices" not in [req[1] for req in fake_syncthing.requests]
+
+    record_file.write_text("not = [valid toml", encoding="utf-8")
+    fake_syncthing.requests.clear()
+    res_malformed = runner.invoke(app, ["status"])
+    assert res_malformed.exit_code == 0, res_malformed.output
+    assert "mm devices approve" not in res_malformed.stdout + res_malformed.stderr
+    assert "/rest/cluster/pending/devices" not in [req[1] for req in fake_syncthing.requests]
+
+    # 4. Unreachable Syncthing on a managed machine
+    config.save_syncthing_record(fake_syncthing.my_id)
+    fake_syncthing.close()
+    res_down = runner.invoke(app, ["status"])
+    assert res_down.exit_code == 0, res_down.output
+    assert "mm devices approve" not in res_down.stdout + res_down.stderr
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
