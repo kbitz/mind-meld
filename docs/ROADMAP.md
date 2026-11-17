@@ -525,7 +525,7 @@ The 2.0 cut still needs the owner's O1 to O4 Syncthing observations on one Mac a
 
 ## Future
 
-Deferred: docs/roadmap-future.md (53 items)
+Deferred: docs/roadmap-future.md (59 items)
 
 ## Shipped
 

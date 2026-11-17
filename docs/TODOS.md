@@ -209,51 +209,23 @@ here by hand, use the H3 form.
 - **Context:** Filed by /review-and-prep on branch `mmm/cc18ddfd` at `cf26d36` (2026-11-16).
 - **Effort:** ? (user triages in /roadmap)
 
-### [manual] Decide whether autopull and autopush run from native SessionStart/SessionEnd hooks
-- **Source:** sessionpipe comparison, 2026-11-17 (takeaway T1; a read-only review of the public sessionpipe project at commit `8eada32`, with mind-meld claims checked at `9573882`).
-- **Why:** today the README "Claude Code Integration" and "Codex Integration" sections ask the owner to paste an instruction block, and the model decides whether to run `mm autopull`/`mm autopush`. A native hook (Claude Code SessionStart/SessionEnd, Codex `~/.codex/hooks.json`) would remove "the model forgot" as a failure mode for O1 convergence; a SessionStart hook's stdout reaches the session, so autopull's conflict output would still be surfaced. It would land as a new command (for example `mm install-hooks`, or inside `init`/`enable-source`) in a leaf module, with `mm diag` reporting and README text.
-- **Design question, gated on demand:** per AGENTS.md "Establish demand", first check whether the stale-autorun line (`stale — no autorun in Nh`, `statusflow._breadcrumb_staleness_suffix`, 48 h) has actually shown on an owner machine. If it has not, this waits with that trigger.
-- **Caveats (from sessionpipe's history):** a broken hook entry can block the harness (sessionpipe's Antigravity hook read `{}` as a deny and blocked every tool call; Devin drops a whole hooks file on one unknown event name), so keep to the two events mm needs, print nothing where stdout is a decision, and pin each harness's answer semantics with fixtures. Grok Build and Devin also run `~/.claude/settings.json` hooks, so a Claude hook would fire inside their sessions too; autopull/autopush are lock-guarded and change-gated, so a double fire is probably harmless, but tests must prove it. Codex hooks need the owner's `/hooks` trust review, and a `notify` fallback must sit before the first `[table]` in `config.toml`. SessionEnd/autopush must detach or stay inside the harness timeout. mm must keep `~/.codex/hooks.json` out of the Codex source (today it syncs `skills/`, `plugins/` and `AGENTS.md` only).
-- **Effort:** M
-- **Context:** facts about other harnesses are dated to the host versions sessionpipe recorded; re-verify on current versions before acting.
-
-### [manual] Mutation sweep over every host-usage reader fixture
-- **Source:** sessionpipe comparison, 2026-11-17 (takeaway T2).
-- **Why:** SPEC O7 depends on host readers surviving host upgrades, and drift coverage today is per reader and hand-picked (`tests/test_grok_usage.py` `_mutate` has about six cases). A shared parametrized test would bend each recorded record under `tests/fixtures/host_sessions/` (Antigravity, Grok, Muse) and the Codex rollout fixtures (drop each key, add an unknown key, flip types, empty string, null, truncated JSON, unknown event) and assert the reader returns a declared unsupported/failed verdict or a valid result, and never raises or publishes a partial total: the fail-closed contract in `hosts/grok.py` and the reader-isolation rule in `docs/invariants/events-retro.md`.
-- **Demand check:** no reader failure on a real host upgrade is recorded; this is coverage, not a known defect.
-- **Effort:** S to M (one test module plus a per-reader shim).
-
-### [manual] Read back the keyring after storing the passphrase
-- **Source:** sessionpipe comparison, 2026-11-17 (takeaway T3; sessionpipe trusts only a read-back because macOS `security -i` exits 0 whatever its commands did).
-- **Why:** `crypto.store_passphrase_in_keyring` returns True straight after `kr.set_password` with no `get_password` compare. A backend that accepts and drops the write would leave `init` saying the passphrase was stored while later auto commands skip on the keyring. Defence in depth: python-keyring's native backends usually raise on failure, so this is not a known bug.
-- **Constraints:** the `PYTEST_CURRENT_TEST` guard on `crypto.store_passphrase_in_keyring` and the rest of `docs/invariants/init-devices.md` apply.
-- **Effort:** S
-
-### [manual] Document Antigravity IDE data dirs and Codex ephemeral threads as usage coverage gaps
-- **Source:** sessionpipe comparison, 2026-11-17 (takeaway T4 and section 5).
-- **Why:** sessionpipe documents two host facts mm's readers do not cover. Antigravity keeps data in `~/.gemini/antigravity`, `antigravity-cli` and `antigravity-ide`, while mm reads only `~/.gemini/antigravity-cli/conversations/*.db` (`host_usage.AGY_CONVERSATIONS_PATH`) and `rootprobes` only `antigravity-cli/conversation_summaries.db`. Codex ephemeral threads (`codex exec --ephemeral`, Codex Desktop background work such as titles) write no rollout, so `hosts/codex.py` never sees that spend, and neither the reader nor `docs/invariants/events-retro.md` says so. Docs first: the events-retro census notes and the README usage-coverage text.
-- **Unverified:** both facts come from sessionpipe's adapter notes, dated to Antigravity 2.19.1/2.23.1 and codex-cli 0.157.1/0.160.0; neither is verified on current host versions or on the owner's fleet. Whether the IDE dirs hold a `conversations/*.db` with the same `steps` table is unknown.
-- **Effort:** S
-
-### [manual] Joining mm init waits for the fleet instead of stopping and asking for a rerun
-- **Source:** sessionpipe comparison, 2026-11-17 (fleet onboarding idea 1; the developer asked "The way you add machines to your fleet seems much better than ours no?").
-- **Why:** a joining `mm init` should wait, with a bounded wait and a clear stop, for what it needs from the fleet instead of stopping and asking the owner to rerun.
-- **History:** the 2026-10-30 decision (Track 89A, v1.11.20; the owner's stop-and-rerun challenge UC2 was settled by the O2.1 wording in `937f327`, PR #244, now docs/SPEC.md O2 criterion 5) kept stop-and-rerun: plain `mm init` writes nothing until `mm-crypto-init` arrives. This item reopens it only as a candidate and does not change SPEC.
-- **Effort:** ? (user triages in /roadmap)
-
-### [manual] Fleet machines surface a pending Syncthing join request in mm status and mm pull
-- **Source:** sessionpipe comparison, 2026-11-17 (fleet onboarding idea 2).
-- **Why:** when a new machine asks to share mm's folder, a machine already in the fleet should say so in `mm status` and `mm pull`, so the owner knows to run `mm devices approve <device-id>` there (for example on `mac-a` after `linux-a` runs `mm init`). Today only `mm devices approve` reads Syncthing's pending devices (`devicesflow` calls `syncthing` `pending_devices()`).
-- **Constraints:** docs/SPEC.md O2.6 lets `mm status` and `mm diag` read and report Syncthing's state; a `mm pull` line must meet O8 (the owner must act). mm still never accepts a device on its own (O2.3).
-- **Effort:** ? (user triages in /roadmap)
-
-### [manual] Short-code pairing for adding a machine to the fleet
-- **Source:** sessionpipe comparison, 2026-11-17 (fleet onboarding idea 3: pair with a short code, as sessionpipe does, instead of pasting device IDs both ways).
-- **Why:** pasting a full Syncthing device ID on each side is the slowest step of a join.
-- **Constraints:** docs/SPEC.md "Non-goals and later work" refuses invite codes until the fleet grows past a handful of machines or pairing causes an observed missed sync; the ROADMAP standing constraint "Syncthing stays owner-managed outside O2" repeats it. The developer chose Future only for this one.
-- **Effort:** ? (user triages in /roadmap)
-
 ## Drain records
+
+### Roadmap inbox drain — 2026-11-17 (sessionpipe comparison)
+
+Verified against `9573882` (v1.12.61), from the manager's brief carrying the developer's "Yes" to filing the sessionpipe comparison's takeaways T1 to T4 and fleet onboarding ideas 1 and 2, with idea 3 to Future. The seven items were filed in this branch's first commit and drained here. Admission follows docs/SPEC.md (MVP-1 on Syncthing) and the AGENTS.md planning rules: none is needed for the selected target, none records a defect seen on the owner's machines, and the two fleet ideas would change an O2 flow that works today. The In Progress and Current Plan sections and the fifteen earlier inbox items are left for the next full regeneration.
+
+| Inbox item | Disposition |
+|---|---|
+| Decide whether autopull and autopush run from native SessionStart/SessionEnd hooks (T1) | defer (no stale-autorun sighting recorded; `linux-a`'s last autopull was minutes old at drain) |
+| Mutation sweep over every host-usage reader fixture (T2) | defer (coverage, no reader failure on a real host upgrade) |
+| Read back the keyring after storing the passphrase (T3) | kill — unobserved; reversible (a dropped write shows as a keyring skip on the next auto command and a rerun of `mm init` or `MINDMELD_PASSPHRASE` recovers; python-keyring's native backends raise on failure); reopen if it manifests |
+| Document Antigravity IDE data dirs and Codex ephemeral threads as usage coverage gaps (T4) | defer (facts unverified on current host versions; `linux-a` has only `antigravity-cli`) |
+| Joining mm init waits for the fleet instead of stopping and asking for a rerun (idea 1) | defer the remainder; the key-header wait is already shipped (discharged@`a6f3e73`, Track 127A, v1.12.35: a 120 s bounded wait with a clean Ctrl-C stop), and the open part is the stop before the fleet approves the join |
+| Fleet machines surface a pending Syncthing join request in mm status and mm pull (idea 2) | defer (nothing fails without it; only `mm devices approve` reads pending devices today) |
+| Short-code pairing for adding a machine to the fleet (idea 3) | defer (the developer's choice; SPEC refuses invite codes until its trigger) |
+
+7 drained: 0 placed, 6 deferred, 1 killed, 0 discharged (idea 1's header half is discharged and its remainder deferred). Future grows from 53 to 59 entries. No bump under SPEC documentation-only policy.
 
 ### Roadmap regeneration — 2026-11-15 (second run: full-review drain)
 
