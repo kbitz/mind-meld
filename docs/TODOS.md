@@ -44,6 +44,39 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/statusflow.py|tests/test_statusflow.py] Test gap: Pending join notice beside folder settings warnings
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** Status tests cover folder-setting warnings and pending-join notices separately, but do not pin their relative order when both appear.
+- **Hypothesis (untested):** Extend the status fixture with folder-option drift and a pending device, then assert primary summary, settings warning, and join notice in order. Re-verify the contract first.
+- **Upstream severity:** INFORMATIONAL.
+- **Found in:** src/mind_meld/statusflow.py:607.
+- **Evidence:** Coverage audit read the renderer and existing tests; the implementation appends the notice after the settings warning. Targeted checks passed; no failure reproduced.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/347 at `1373e81` (2026-11-17).
+- **Effort:** ? (user triages in /roadmap)
+- **Revisit:** Next Track touching the named files.
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Unreadable Syncthing management record during pull
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** Status tests pin a malformed management record, but attended pull does not separately exercise its `ConfigError` return branch.
+- **Hypothesis (untested):** Use a malformed synthetic management record during attended pull and assert success, no join notice, and zero Syncthing requests. Re-verify the contract first.
+- **Upstream severity:** INFORMATIONAL.
+- **Found in:** src/mind_meld/pullflow.py:4464.
+- **Evidence:** Coverage audit read the explicit `ConfigError` handler and pull fixtures. Targeted checks passed; no failure reproduced.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/347 at `1373e81` (2026-11-17).
+- **Effort:** ? (user triages in /roadmap)
+- **Revisit:** Next Track touching the named files.
+
+### [review:files=src/mind_meld/cli.py|tests/test_pullflow.py] Test gap: Pending join read follows sync unlock
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** Pull output tests cover the notice, but do not observe lock availability during the pending-device HTTP read or its order relative to self-update.
+- **Hypothesis (untested):** Observe the existing sync lock at the stand-in's pending request and verify self-update follows that request. Re-verify the contract first.
+- **Upstream severity:** INFORMATIONAL.
+- **Found in:** src/mind_meld/cli.py:2880.
+- **Evidence:** Coverage audit read the post-finally call placement before `_sync_update`; targeted checks passed, and no failure reproduced.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/347 at `1373e81` (2026-11-17).
+- **Effort:** ? (user triages in /roadmap)
+- **Revisit:** Next Track touching the named files.
+
 
 ### [review:files=src/mind_meld/statedb.py|tests/test_statedb.py] Test gap: Migration 5 tolerates already-absent unread tables
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
