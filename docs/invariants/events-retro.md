@@ -2689,7 +2689,7 @@ Source dir on disk is `retro_fleet/` (underscore — Python identifier so
 `retro-fleet` (hyphen — Claude Code skill convention).
 
 **`AGENT_ROWS` is the one table.** Every consumer — descriptors,
-`skill_targets()`, the installer, diagnosis, test isolation, and the
+`mm install-skills`, the installer, diagnosis, test isolation, and the
 real-home guard — derives from it. It lists **active supported agents**;
 removal is a deliberate retirement, not a reordering (Track 37C dropped
 the OpenCode row). Canonical `~`-relative roots live on
@@ -3288,7 +3288,7 @@ size/mtime cache hit — pre-v0.11.27 entries match size/mtime but lack
 the field, so they fall through to a fresh walk. NOT a `CACHE_VERSION`
 bump (would invalidate token data fleet-wide unnecessarily). One-time
 post-upgrade re-walk gated by the existing 5s warm budget. Token data
-is preserved byte-identical because `walk_jsonl_buckets` re-derives
+is preserved byte-identical because `walk_jsonl_segment` re-derives
 both views from the same source. Pinned by
 `test_d2_old_entry_without_skills_field_triggers_rewalk`.
 
@@ -3458,8 +3458,8 @@ as a line instead of raising `UnicodeDecodeError` out through the
 whole events tail (a latent crash before v0.12.15). Pinned by
 `test_invalid_utf8_line_is_skipped_not_fatal`.
 
-Equivalence is the acceptance bar, not speed: `walk_jsonl_buckets` is
-now a trimming shim over `walk_jsonl_segment`, and any change here
+Equivalence is the acceptance bar, not speed: `get_or_compute` trims
+`walk_jsonl_segment` output on both full and resumed walks, and any change here
 must keep merged-incremental output identical to a single full walk.
 Verified pre-merge across 358 live session jsonls at four split points
 each (1,432 cases, including mid-line cuts) and against the pre-change

@@ -66,8 +66,12 @@ def _due(key: str = "claude") -> bool:
     return skill_link._skill_link_check_due_for(skill_link._descriptor_for(key))
 
 
+def _row_for(key: str = "claude") -> skill_link.AgentRow:
+    return next(r for r in skill_link.AGENT_ROWS if r.key == key)
+
+
 def _target_for(home: Path, key: str) -> Path:
-    row = next(r for r in skill_link.AGENT_ROWS if r.key == key)
+    row = _row_for(key)
     skills_dir = home / row.skills_root[2:]
     skills_dir.mkdir(parents=True, exist_ok=True)
     return skills_dir / "retro-fleet"
@@ -204,13 +208,13 @@ class TestTargetAbsent:
         _install()
         _assert_store_link(target)
         # Success marker touched.
-        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('claude').success_marker}"
         assert marker.exists()
 
     def test_creates_codex_symlink_when_target_absent(self, codex_target, skill_src, config_dir):
         _install("codex")
         _assert_store_link(codex_target)
-        marker = config_dir / f".{skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('codex').success_marker}"
         assert marker.exists()
 
     @pytest.mark.parametrize("key", [row.key for row in skill_link.AGENT_ROWS])
@@ -242,7 +246,7 @@ class TestTargetCorrect:
         _install()
         assert target.is_symlink()
         _assert_store_link(target)
-        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('claude').success_marker}"
         assert marker.exists()
 
 
@@ -293,7 +297,7 @@ class TestConflictSkip:
         assert target.read_text() == "user's own retro-fleet skill"
         assert not target.is_symlink()
         # Conflict marker touched (per cross-model #3 two-marker gate).
-        conflict_marker = config_dir / f".{skill_link._SKILL_LINK_CONFLICT_MARKER}"
+        conflict_marker = config_dir / f".{_row_for('claude').conflict_marker}"
         assert conflict_marker.exists()
         # Notice emitted.
         captured = capsys.readouterr()
@@ -347,7 +351,7 @@ class TestNoClaudeCode:
         captured = capsys.readouterr()
         assert captured.err == ""
         # No marker touched — next call still due.
-        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('claude').success_marker}"
         assert not marker.exists()
 
 
@@ -375,7 +379,7 @@ class TestSymlinkToError:
         assert "mm: notice:" in captured.err
         assert "PermissionError" in captured.err
         # Neither marker touched (transient failure → next push retries).
-        assert not (config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}").exists()
+        assert not (config_dir / f".{_row_for('claude').success_marker}").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +444,7 @@ class TestSkillLinkCheckDue:
 
     def test_stale_marker_means_due(self, target, skill_src, config_dir):
         target.symlink_to(skill_src)
-        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('claude').success_marker}"
         marker.touch()
         old = time.time() - (25 * 3600)
         os.utime(marker, (old, old))
@@ -456,7 +460,7 @@ class TestSkillLinkCheckDue:
         ``install_skills_cmd``'s docstring already names this exact case as its
         first use ("post-cleanup recovery (link removed by hand...)").
         """
-        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('claude').success_marker}"
         marker.touch()
         assert _due() is False
 
@@ -472,7 +476,7 @@ class TestSkillLinkCheckDue:
         import shutil
 
         shutil.rmtree(deleted_target.parent.parent)
-        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('claude').success_marker}"
         marker.touch()
         assert _due() is True
 
@@ -484,7 +488,7 @@ class TestSkillLinkCheckDue:
         their_dir = _isolate_paths / "their-skill"
         their_dir.mkdir()
         target.symlink_to(their_dir)
-        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('claude').success_marker}"
         marker.touch()
         assert _due() is True
 
@@ -495,7 +499,7 @@ class TestSkillLinkCheckDue:
         target_dir = target.parent / "anything"
         target_dir.mkdir()
         target.symlink_to(target_dir)
-        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('claude').success_marker}"
         marker.touch()
 
         def boom():
@@ -508,7 +512,7 @@ class TestSkillLinkCheckDue:
         """TODO#3 critical-gap fix: EACCES / EIO on the marker dir must
         fail-open (treat as if no marker — re-run installer). Pre-fix the
         bare os.stat would crash push."""
-        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('claude').success_marker}"
         marker.touch()
 
         from pathlib import Path
@@ -534,41 +538,37 @@ class TestDryRun:
         """`mm push --dry-run` must NOT mutate the symlink or the marker."""
         _install(dry_run=True)
         assert not target.exists()
-        assert not (config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}").exists()
+        assert not (config_dir / f".{_row_for('claude').success_marker}").exists()
 
 
 # ---------------------------------------------------------------------------
-# Track 16A NEW: `skill_targets()` — the single source of truth the six
-# installer wrappers and `install_skills_cmd` must agree on.
+# `_skill_target_descriptors()` — single source of truth for agent target
+# paths, re-resolved per call against `$HOME`.
 # ---------------------------------------------------------------------------
 
 
-class TestSkillTargets:
-    """`install_skills_cmd` used to rebuild this tuple from its own hardcoded
-    literals 3,000 lines from the installer, so the two could drift silently.
-    After the Track 16A cut they live in different FILES under different Group
-    17 owners, which makes the drift cheaper to introduce and harder to see.
-    Nothing pinned the agreement, so pin it here."""
+class TestSkillTargetDescriptors:
+    """``_skill_target_descriptors()`` derives every agent target from
+    ``AGENT_ROWS`` and re-expands ``$HOME`` at call time so test isolation
+    and the installer stay in lockstep."""
 
-    def test_skill_targets_are_exactly_the_installer_targets(self, agent_targets):
+    def test_descriptors_match_agent_rows_targets(self, agent_targets):
         """Order matches ``AGENT_ROWS``, matching this file's row-keyed helper."""
-        assert skill_link.skill_targets() == tuple(
+        descriptors = skill_link._skill_target_descriptors()
+        assert tuple(d.target for d in descriptors) == tuple(
             agent_targets[row.key] for row in skill_link.AGENT_ROWS
         )
 
-    def test_each_wrapper_installs_at_its_skill_targets_entry(self, agent_targets, skill_src):
-        """The stronger form: drive the real installers and confirm the links
-        land exactly where ``skill_targets()`` says they will.
-
-        Comparing tuples alone would still pass if BOTH sides drifted together
-        (e.g. someone renames a row's ``skills_root``);
-        asserting on the on-disk result is what makes that visible.
-        """
+    def test_installer_places_symlinks_at_descriptor_targets(self, agent_targets, skill_src):
+        """Drive the real installer and confirm the links land exactly where
+        ``_skill_target_descriptors()`` says they will."""
         skill_link._ensure_retro_skill_links(may_create=None)
         expected = [agent_targets[row.key] for row in skill_link.AGENT_ROWS]
-        assert [t for t in skill_link.skill_targets() if t.is_symlink()] == expected
+        assert [
+            d.target for d in skill_link._skill_target_descriptors() if d.target.is_symlink()
+        ] == expected
 
-    def test_skill_targets_are_re_resolved_per_call(self, _isolate_paths, monkeypatch, tmp_path):
+    def test_descriptors_re_resolve_home_per_call(self, _isolate_paths, monkeypatch, tmp_path):
         """``expanduser()`` must read ``$HOME`` at CALL time, not import time.
 
         A "simplification" to a module-level constant (the shape
@@ -576,11 +576,11 @@ class TestSkillTargets:
         docstring warns about) would freeze these at the developer's real home
         and silently defeat every isolation fixture in the suite.
         """
-        before = skill_link.skill_targets()
+        before = [d.target for d in skill_link._skill_target_descriptors()]
         moved = tmp_path / "moved-home"
         moved.mkdir()
         monkeypatch.setenv("HOME", str(moved))
-        after = skill_link.skill_targets()
+        after = [d.target for d in skill_link._skill_target_descriptors()]
         assert after != before
         assert all(str(t).startswith(str(moved)) for t in after), after
 
@@ -909,7 +909,7 @@ class TestInstallSkillsCommand:
         marker. The gate only governs the implicit self-heal in push."""
         from mind_meld.cli import app
 
-        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('claude').success_marker}"
         marker.touch()  # fresh — would suppress push-time self-heal
         # Link is still missing; the command must create it anyway.
         result = self._runner().invoke(app, ["install-skills"])
@@ -1473,7 +1473,7 @@ class TestConsentGate:
     def test_declined_row_touches_no_marker_and_emits_no_failure(
         self, agent_targets, skill_src, config_dir, capsys
     ):
-        marker = config_dir / f".{skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{_row_for('codex').success_marker}"
         results = skill_link._ensure_retro_skill_links(may_create=frozenset({"claude"}))
         assert _result_for(results, "codex").status == "declined"
         assert not marker.exists()

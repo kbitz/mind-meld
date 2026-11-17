@@ -229,10 +229,6 @@ DEFAULT_WARM_BUDGET_S = 5.0
 upgrade transition. ~2.4s on a 642-jsonl Mac with hot OS cache; capped
 generously. Slow disks degrade gracefully via the budget."""
 
-SUBSCRIPTION_CAVEAT = "Cost estimates do not account for subscription plan pricing."
-"""Single source of truth — both this module's cost helpers and the
-aggregator's render side reference this string."""
-
 # ---------------------------------------------------------------------------
 # Pricing (per-million-token rates in USD, list price)
 # ---------------------------------------------------------------------------
@@ -1305,8 +1301,7 @@ def walk_jsonl_segment(
 
     Buckets are returned UNTRIMMED — the caller trims after merging with
     any cached prefix, so a day that falls out of the ``MAX_BY_DAY_DAYS``
-    window can't be resurrected half-populated. ``walk_jsonl_buckets`` is
-    the trimming full-file shim over this function.
+    window can't be resurrected half-populated.
 
     Token dedup is by ``message.id`` — Claude Code logs each model
     iteration as a separate jsonl line under the same ``message.id``,
@@ -1443,16 +1438,6 @@ def _carry_tail_ids(seed: tuple[str, ...], seen: list[str]) -> tuple[str, ...]:
     # position and inherit the recency of `fresh` below.
     carried = [mid for mid in _dedup(seed) if mid not in fresh]
     return tuple((carried + fresh)[-TAIL_MSG_ID_LOOKBACK:])
-
-
-def walk_jsonl_buckets(path: Path) -> tuple[dict[str, DayBucket], SkillBuckets]:
-    """Full-file walk returning both trimmed views. Thin shim over
-    ``walk_jsonl_segment`` — the canonical parser. Returns ``({}, {})``
-    on any I/O failure."""
-    seg = walk_jsonl_segment(path)
-    return _trim_by_day(seg.by_day, MAX_BY_DAY_DAYS), _trim_skills_by_day(
-        seg.skills_by_day, MAX_BY_DAY_DAYS
-    )
 
 
 def _accumulate_skills(
@@ -1717,7 +1702,7 @@ def get_or_compute(
     from /plan-eng-review 2026-05-06): pre-v0.11.27 cache entries lack
     the field; we re-walk those once to populate both views in one I/O
     pass. Token data is preserved across the rebuild because
-    ``walk_jsonl_buckets`` re-derives both from the same source.
+    ``walk_jsonl_segment`` re-derives both from the same source.
 
     Concurrent append safety: stat once, walk, stat again. If size or
     mtime drifted during the walk, treat as a miss and DO NOT persist
@@ -1958,34 +1943,6 @@ def head_fingerprint(path: Path, probe_len: int) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Window slicing
-# ---------------------------------------------------------------------------
-
-
-def slice_window(
-    by_day: dict[str, DayBucket],
-    *,
-    since: datetime,
-    until: datetime,
-) -> DayBucket:
-    """Sum the day-buckets whose YYYY-MM-DD key falls in ``[since, until]``.
-
-    Returns a single rolled-up DayBucket with ``by_model`` aggregated.
-    Empty input or non-overlapping window → zero-valued bucket.
-    """
-    since_d = since.astimezone(timezone.utc).date().isoformat()
-    until_d = until.astimezone(timezone.utc).date().isoformat()
-    out: DayBucket = zero_day_bucket()
-    for day_key, bucket in by_day.items():
-        if not (since_d <= day_key <= until_d):
-            continue
-        merge_usage_bucket(out, bucket)
-        # zero_day_bucket() guarantees `by_model` is present.
-        merge_by_model(out["by_model"], bucket.get("by_model") or {})
-    return out
-
-
-# ---------------------------------------------------------------------------
 # Cost
 # ---------------------------------------------------------------------------
 
@@ -2068,10 +2025,10 @@ def lock_and_get_files(on_contention: CacheMode) -> Iterator[dict[str, Any] | No
     (or ``None`` on warn-mode contention).
 
     Replaces the ``locked_json_rmw + version-check + isinstance-check +
-    ljson.data['files']`` boilerplate at every cache call site (cli.py's
-    ``_run_events_tail`` / ``_run_events_backfill``,
-    ``warm_token_cache_inline``, ``gc_cache_entries``). Owner of cache-
-    shape invariants is this module, not the caller.
+    ljson.data['files']`` boilerplate at every cache call site
+    (``events_tail.py``'s ``_run_events_tail`` / ``_run_events_backfill`` and
+    ``warm_token_cache_inline``). Owner of cache-shape invariants is this
+    module, not the caller.
 
     ``None`` semantics: yielded ONLY for ``on_contention="warn"`` after
     retry budget exhaustion. Version mismatch and malformed ``files``
@@ -2106,7 +2063,7 @@ def lock_and_get_files(on_contention: CacheMode) -> Iterator[dict[str, Any] | No
         else:
             # Strict canonical-root shape: drop unknown top-level keys.
             # The v1 schema defines exactly two top-level keys, ``version``
-            # and ``files``. Pre-v0.12.4 ``gc_cache_entries`` did this via
+            # and ``files``. Pre-v0.12.4 token-cache GC did this via
             # ``ljson.data.clear() + update({"version": ..., "files": ...})``
             # at the end of every gc pass; lifting that root-sanitization
             # into the wrapper closes the gap where a current-version cache
@@ -2378,15 +2335,6 @@ def reap_cache_entries(
     return TokenCacheGcResult(plan=plan, write_error=ljson.write_error)
 
 
-def gc_cache_entries(*, max_age_s: float = 90 * 24 * 3600) -> int:
-    """Compatibility wrapper returning successful stale-entry deletions.
-
-    Callers that need candidate, repair, and persistence details should use
-    ``plan_cache_entries`` / ``reap_cache_entries`` instead.
-    """
-    return reap_cache_entries(max_age_s=max_age_s).deleted
-
-
 def _plan_cache_entries(
     snapshot: LockedJsonSnapshot,
     *,
@@ -2482,7 +2430,6 @@ __all__ = [
     "vendor_model_family",
     "VENDOR_FAMILY_TIERS",
     "VENDOR_LONG_CONTEXT_TIERS",
-    "SUBSCRIPTION_CAVEAT",
     "SkillBuckets",
     "TAIL_MSG_ID_LOOKBACK",
     "TOKEN_FIELDS",
@@ -2491,7 +2438,6 @@ __all__ = [
     "Usage",
     "JsonlSegment",
     "estimate_cost",
-    "gc_cache_entries",
     "get_or_compute",
     "head_fingerprint",
     "head_probe_len",
@@ -2511,9 +2457,7 @@ __all__ = [
     "VERIFIED_MODEL_IDS",
     "long_context_ceiling_known",
     "resolve_long_context_prices",
-    "slice_window",
     "sum_bucket",
-    "walk_jsonl_buckets",
     "walk_jsonl_segment",
     "warm_token_cache_inline",
     "zero_day_bucket",
