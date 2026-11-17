@@ -413,7 +413,6 @@ _OBSOLETE_ROUTING_CITATIONS: dict[tuple[str, str], str] = {
             "_invalidate_inline_bump",
             "_plan_pull",
             "_prefetch_manifests",
-            "_preflight_conflicts",
             "_print_inline_paths",
             "_print_preflight_conflicts",
             "_print_pull_prediction",

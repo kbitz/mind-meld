@@ -1135,7 +1135,6 @@ PULLFLOW_DEFINITIONS = frozenset(
     _invalidate_inline_bump
     _plan_pull
     _prefetch_manifests
-    _preflight_conflicts
     _print_inline_paths
     _print_preflight_conflicts
     _print_pull_prediction
@@ -1569,7 +1568,7 @@ def test_status_core_single_ownership_and_qualified_calls():
         assert _unqualified_owner_calls(source, module) == []
     assert len(CORE_DEFINITIONS) == 39 + len(PULL_CORE_DEFINITIONS)
     assert len(STATUSFLOW_DEFINITIONS) == 31
-    assert len(PULLFLOW_DEFINITIONS) == 48
+    assert len(PULLFLOW_DEFINITIONS) == 47
 
 
 def test_init_single_ownership_and_qualified_calls():

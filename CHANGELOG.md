@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.60] - 2026-11-16
+
+Invariant docs now spell out the shared content hash validation contract.
+
+### Changed
+
+- Sync invariant docs and the invariants overview now state the shared content hash validation contract.
+
 ## [1.12.59] - 2026-11-16
 
 Invariant docs now spell out which timestamp cursor resolution returns.

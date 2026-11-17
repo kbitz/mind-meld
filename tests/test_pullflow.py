@@ -111,13 +111,13 @@ def _normalize(text):
     return re.sub(r"Completed in \d+(?:\.\d+)?s", "Completed in <SECONDS>s", text)
 
 
-def _run(fleet, monkeypatch, mode, *, refusal=None, **kwargs):
+def _run(fleet, monkeypatch, mode, *, refusal=None, console_width=160, **kwargs):
     out, err = io.StringIO(), io.StringIO()
     for binding, stream in (("console", out), ("stderr_console", err)):
         monkeypatch.setattr(
             pullflow,
             binding,
-            Console(file=stream, width=160, force_terminal=False, color_system=None),
+            Console(file=stream, width=console_width, force_terminal=False, color_system=None),
         )
     monkeypatch.setattr(core, "console", pullflow.console)
     real_summary = pullflow._print_pull_summary
@@ -678,16 +678,6 @@ def _republish(fleet, peer_manifest):
         manifest_key(PEER),
         crypto.encrypt(manifest.serialize_manifest(peer_manifest), PASSPHRASE, MEMORY_KB),
     )
-
-
-def _shape_remote(fleet, peer_manifest, name, *, mtime=None, ancestors=None):
-    """Give a seeded file a chosen manifest mtime and `from` list, then publish again."""
-    info = peer_manifest["sources"][NOTES]["files"][name]
-    if mtime is not None:
-        info["mtime"] = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
-    if ancestors is not None:
-        info["from"] = [_sha(b)[:16] for b in ancestors]
-    _republish(fleet, peer_manifest)
 
 
 def _put_local(fleet, name, data, mtime):
@@ -2084,7 +2074,6 @@ def test_a_failing_commit_of_a_normal_pull_reports_the_cause_and_fails_nothing(f
 #   * "kept" and "held" are quiet in a real pull (nothing is counted) and named in a preview.
 
 HELD_ROW_NAME = "removed-here.md"
-OLD_RELS = {"old-version.md"}
 
 
 def _parity_world(fleet):
@@ -3538,6 +3527,59 @@ def test_a_late_tidy_flush_failure_keeps_the_tidied_index_and_prints_one_notice(
         in notice_lines[0]
     )
     assert "lines for missing memory files may remain." in notice_lines[0]
+
+
+@pytest.mark.parametrize(
+    ("mode", "verbose", "dangling"),
+    (
+        ("attended", True, ("gone.md",)),
+        ("attended", True, ("gone-a.md", "gone-b.md")),
+        ("quiet", True, ("gone.md",)),
+        ("attended", False, ("gone.md",)),
+    ),
+)
+def test_verbose_tidy_diagnostics_report_singular_plural_and_suppress_when_quiet(
+    fleet, monkeypatch, mode, verbose, dangling
+):
+    dangling_lines = b"".join(
+        f"- [Gone {idx}]({name})\n".encode() for idx, name in enumerate(dangling, start=1)
+    )
+    base_index = dangling_lines + b"- [Keep](keep.md)\n"
+    local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
+    peer_index = dangling_lines + b"- [Keep](keep.md)\n- [Peer](peer.md)\n"
+    _seed(
+        fleet,
+        {
+            "memory/MEMORY.md": peer_index,
+            "memory/keep.md": b"keep\n",
+            "memory/peer.md": b"peer\n",
+        },
+    )
+    index_path = _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/keep.md", b"keep\n", 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/keep.md", b"keep\n"))
+
+    result, _, (out, err) = _run(
+        fleet, monkeypatch, mode, console_width=len(str(index_path)) + 80, verbose=verbose
+    )
+
+    assert result.total_merged == 1
+    assert err == ""
+    assert index_path.read_bytes() == (
+        b"- [Keep](keep.md)\n- [Local](local.md)\n- [Peer](peer.md)\n"
+    )
+    if mode == "attended" and verbose and len(dangling) == 1:
+        assert f"  tidied {index_path} (1 dangling line dropped)\n" in out
+        assert "dangling lines" not in out
+    elif mode == "attended" and verbose:
+        assert f"  tidied {index_path} (2 dangling lines dropped)\n" in out
+        assert "1 dangling line" not in out
+    else:
+        assert "tidied " not in out
+        assert "tidied " not in err
+        if mode == "quiet":
+            assert out == ""
 
 
 def test_a_dry_run_never_tidies_an_index(fleet, monkeypatch):

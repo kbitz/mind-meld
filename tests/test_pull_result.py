@@ -540,16 +540,12 @@ class TestPullResultDeletionFields:
     def test_defaults_report_nothing(self):
         r = pullflow.PullResult()
         assert (r.total_deleted, r.deleted_origins, r.deleted_folder) == (0, [], None)
-        assert (r.older, r.total_older, r.ledger_cause) == ([], 0, None)
+        assert (r.older, r.ledger_cause) == ([], None)
 
     def test_a_deletion_is_not_an_applied_file_a_conflict_or_an_older_edit(self):
         r = _deleted(older=[pullflow.OlderEdit("Mac B", "notes", "a.md")], total_written=1)
         assert r.total_applied == 1  # written only: deleted and older never count as applied
-        assert r.total_older == 1
-
-    def test_the_older_edits_count_is_the_list_length(self):
-        edits = [pullflow.OlderEdit("Mac B", "notes", f"{i}.md") for i in range(3)]
-        assert pullflow.PullResult(older=edits).total_older == 3
+        assert len(r.older) == 1
 
 
 class TestDeletionWording:
