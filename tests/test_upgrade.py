@@ -877,6 +877,7 @@ class TestFetchTagsGitAdapter124B:
 
         parent_pid: int | None = None
         child_pid: int | None = None
+        cleanup_verified = False
         try:
             with pytest.raises(KeyboardInterrupt):
                 upgrade._run_git([str(fake_git), "ls-remote"], env={}, timeout=30)
@@ -887,17 +888,19 @@ class TestFetchTagsGitAdapter124B:
                 os.kill(parent_pid, 0)
             with pytest.raises(ProcessLookupError):
                 os.kill(child_pid, 0)
+            cleanup_verified = True
         finally:
-            if pids_file.exists() and (parent_pid is None or child_pid is None):
-                recorded = json.loads(pids_file.read_text(encoding="utf-8"))
-                parent_pid = int(recorded["parent"])
-                child_pid = int(recorded["child"])
-            for pid in (parent_pid, child_pid):
-                if pid is not None:
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+            if not cleanup_verified:
+                if pids_file.exists() and (parent_pid is None or child_pid is None):
+                    recorded = json.loads(pids_file.read_text(encoding="utf-8"))
+                    parent_pid = int(recorded["parent"])
+                    child_pid = int(recorded["child"])
+                for pid in (parent_pid, child_pid):
+                    if pid is not None:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
     def test_no_prompt_environment_ssh_command_precedence(self, monkeypatch):
         # 1) Existing GIT_SSH_COMMAND gets -o BatchMode=yes appended
