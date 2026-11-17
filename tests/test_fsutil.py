@@ -426,100 +426,6 @@ class TestFlockAppendJsonl:
         assert stat.S_IMODE(target.stat().st_mode) == 0o666
 
 
-class TestRotatableSpool:
-    def test_append_never_lands_in_a_spool_rotated_while_it_waited(self, tmp_path, monkeypatch):
-        import fcntl
-
-        spool, taken = tmp_path / "spool.jsonl", tmp_path / "spool.jsonl.merging"
-        fsutil.append_rotatable_jsonl(spool, b'{"n":1}', max_bytes=1024)
-        real_flock = fcntl.flock
-        rotated = []
-
-        def reader_rotates_first(fd, op):
-            if not rotated and op == fcntl.LOCK_EX:
-                rotated.append(fsutil.rotate_jsonl(spool, taken))
-            return real_flock(fd, op)
-
-        monkeypatch.setattr(fsutil.fcntl, "flock", reader_rotates_first)
-        fsutil.append_rotatable_jsonl(spool, b'{"n":2}', max_bytes=1024)
-        assert rotated == [True]
-        assert taken.read_bytes() == b'{"n":1}\n'
-        assert spool.read_bytes() == b'{"n":2}\n'
-        assert stat.S_IMODE(spool.stat().st_mode) == 0o600
-
-    def test_append_reopens_when_a_new_spool_replaced_the_locked_one(self, tmp_path, monkeypatch):
-        import fcntl
-
-        spool, taken = tmp_path / "spool.jsonl", tmp_path / "spool.jsonl.merging"
-        fsutil.append_rotatable_jsonl(spool, b'{"n":1}', max_bytes=1024)
-        real_flock = fcntl.flock
-        raced = []
-
-        def rotate_then_another_writer(fd, op):
-            if not raced and op == fcntl.LOCK_EX:
-                raced.append(fsutil.rotate_jsonl(spool, taken))
-                spool.write_bytes(b'{"n":3}\n')  # a second writer's fresh spool
-            return real_flock(fd, op)
-
-        monkeypatch.setattr(fsutil.fcntl, "flock", rotate_then_another_writer)
-        fsutil.append_rotatable_jsonl(spool, b'{"n":2}', max_bytes=1024)
-        assert taken.read_bytes() == b'{"n":1}\n'
-        assert spool.read_bytes() == b'{"n":3}\n{"n":2}\n'
-
-    def test_every_append_binds_the_directory_entry(self, tmp_path, monkeypatch):
-        calls = []
-        monkeypatch.setattr(fsutil, "fsync_dir", calls.append)
-        spool = tmp_path / "spool.jsonl"
-        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
-        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
-        assert calls == [tmp_path, tmp_path]
-
-    def test_rotation_never_sleeps_past_its_deadline(self, tmp_path, monkeypatch):
-        import fcntl
-        import time
-
-        spool, taken = tmp_path / "spool.jsonl", tmp_path / "spool.jsonl.merging"
-        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
-        fd = os.open(spool, os.O_RDONLY)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        slept = []
-        monkeypatch.setattr(fsutil.time, "sleep", slept.append)
-        try:
-            assert fsutil.rotate_jsonl(spool, taken, deadline=time.monotonic()) is False
-        finally:
-            os.close(fd)
-        assert slept == [0.0]
-
-    def test_append_isolates_a_torn_row_and_enforces_its_ceiling(self, tmp_path):
-        spool = tmp_path / "spool.jsonl"
-        spool.write_bytes(b'{"torn')
-        fsutil.append_rotatable_jsonl(spool, b'{"n":1}', max_bytes=1024)
-        assert spool.read_bytes() == b'{"torn\n{"n":1}\n'
-        with pytest.raises(fsutil.AppendSizeLimit):
-            fsutil.append_rotatable_jsonl(spool, b"x" * 2048, max_bytes=1024)
-        assert spool.read_bytes() == b'{"torn\n{"n":1}\n'
-
-    def test_rotation_skips_absent_busy_or_foreign_spools(self, tmp_path):
-        import fcntl
-
-        spool, taken = tmp_path / "spool.jsonl", tmp_path / "spool.jsonl.merging"
-        assert fsutil.rotate_jsonl(spool, taken) is False
-        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
-        fd = os.open(spool, os.O_RDONLY)
-        fcntl.flock(fd, fcntl.LOCK_EX)  # an append in progress
-        try:
-            assert fsutil.rotate_jsonl(spool, taken, retry_intervals=(0.01,)) is False
-        finally:
-            os.close(fd)
-        assert spool.exists() and not taken.exists()
-        spool.unlink()
-        os.mkfifo(spool)
-        with pytest.raises(OSError):
-            fsutil.rotate_jsonl(spool, taken)
-        with pytest.raises(OSError):
-            fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
-
-
 def _assert_guard_diagnostic(error, path, cause):
     message = str(error)
     assert repr(str(path)) in message
@@ -796,7 +702,7 @@ class TestRealStateWriteGuard:
         _assert_guard_diagnostic(caught.value, path, "protected account-state path or alias under")
         assert calls == [] and sorted(synthetic_account_home.iterdir()) == before
 
-    @pytest.mark.parametrize("helper", ["atomic", "append", "strict-append", "spool"])
+    @pytest.mark.parametrize("helper", ["atomic", "append", "strict-append"])
     @pytest.mark.parametrize("exists", [False, True])
     def test_helpers_refuse_before_first_mutation(
         self, helper, exists, writer_state_root, forbid_fs_mutations
@@ -812,8 +718,6 @@ class TestRealStateWriteGuard:
         with pytest.raises(fsutil.PytestRealStateWriteError):
             if helper == "atomic":
                 fsutil.atomic_write_bytes(path, b"refused")
-            elif helper == "spool":
-                fsutil.append_rotatable_jsonl(path, b"{}", max_bytes=1024)
             else:
                 fsutil.flock_append_jsonl(path, [b"{}"], strict=helper == "strict-append")
         assert calls == []
@@ -821,24 +725,6 @@ class TestRealStateWriteGuard:
             assert path.stat() == before and path.read_bytes() == b"keep\n"
         else:
             assert not path.exists() and not path.parent.exists()
-
-    @pytest.mark.parametrize("protected_side", ["source", "destination"])
-    def test_rotation_checks_both_paths(
-        self, protected_side, synthetic_state_root, tmp_path, forbid_fs_mutations
-    ):
-        synthetic_state_root.mkdir(parents=True)
-        protected, allowed = synthetic_state_root / "spool", tmp_path / "allowed"
-        protected.write_bytes(b"protected\n")
-        allowed.write_bytes(b"allowed\n")
-        before = (protected.stat(), allowed.stat())
-        source, destination = (
-            (protected, allowed) if protected_side == "source" else (allowed, protected)
-        )
-        calls = forbid_fs_mutations()
-        with pytest.raises(fsutil.PytestRealStateWriteError):
-            fsutil.rotate_jsonl(source, destination)
-        assert calls == [] and (protected.stat(), allowed.stat()) == before
-        assert protected.read_bytes() == b"protected\n" and allowed.read_bytes() == b"allowed\n"
 
     def test_parent_alias_into_root_with_final_link_out_refuses(
         self, synthetic_state_root, tmp_path, forbid_fs_mutations
@@ -860,19 +746,15 @@ class TestRealStateWriteGuard:
         assert calls == [] and sorted(nested.iterdir()) == entries
         assert (nested / "state.json").is_symlink() and outside.read_bytes() == b"{}"
 
-    @pytest.mark.parametrize("helper", ["append", "spool"])
     def test_dot_dot_out_of_missing_root_refuses_before_mkdir(
-        self, helper, synthetic_state_root, forbid_fs_mutations
+        self, synthetic_state_root, forbid_fs_mutations
     ):
         """Recursive mkdir creates `<root>/missing` although `..` normalizes it away."""
         synthetic_state_root.parent.mkdir(parents=True, exist_ok=True)
         path = synthetic_state_root / "missing" / ".." / ".." / "escape" / "log.jsonl"
         calls = forbid_fs_mutations()
         with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
-            if helper == "append":
-                fsutil.flock_append_jsonl(path, [b"{}"])
-            else:
-                fsutil.append_rotatable_jsonl(path, b"{}", max_bytes=1024)
+            fsutil.flock_append_jsonl(path, [b"{}"])
         _assert_guard_diagnostic(caught.value, path, "protected account-state path under")
         assert calls == [] and not synthetic_state_root.exists()
         assert not (synthetic_state_root.parent / "escape").exists()
@@ -1033,8 +915,6 @@ class TestRealStateWriteGuard:
         for helper in (
             "atomic_write_bytes",
             "flock_append_jsonl",
-            "append_rotatable_jsonl",
-            "rotate_jsonl",
             "locked_json_rmw",
         ):
             assert any(helper in row for row in rows), helper

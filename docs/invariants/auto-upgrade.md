@@ -532,8 +532,9 @@ and takes the maximum version. Why tags rather than `pyproject.toml` on `main`:
 **Lock-order invariants (load-bearing):** NEVER acquire mm lockfile while holding
 upgrade-state's flock; RELEASE upgrade-state's flock BEFORE appending to
 state.db history. A statedb write transaction is always the innermost lock: never
-acquire the mm lockfile or upgrade-state flock inside one. History alone may
-write outside the mm lock; the four provisional 2.0 tables require it.
+acquire the mm lockfile or upgrade-state flock inside one. History, its import
+bookkeeping in `meta`, and schema migrations may write outside the mm lock;
+row writes to `peer_base`, `seen_version` and `cursors` require it.
 Transition detection runs OUTSIDE the mm lock by design — its
 correctness is bounded by upgrade-state's own flock. The attended self-update
 takes the mm lock FIRST and claims its attempt second, for the same reason.

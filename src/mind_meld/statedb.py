@@ -1,10 +1,9 @@
 """Private local SQLite state. Write transactions are always the innermost lock.
 
-Live tables: ``history`` (forensic log), ``peer_base`` and ``seen_version`` (pull
-fast-forward ledger, rebuildable), and ``cursors`` (each peer's last applied push
-and waiting count). The provisional store tables ``ledger``, ``own_log`` and
-``displaced`` have no production reader by design; ``sync.md``'s schema table
-says so for each. No connection is cached and sqlite3 is loaded lazily.
+Live tables: ``meta``, ``history`` (forensic log), ``peer_base`` and
+``seen_version`` (pull fast-forward ledger, rebuildable), and ``cursors`` (each
+peer's last applied push and waiting count). No connection is cached and sqlite3
+is loaded lazily.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ from mind_meld import fsutil
 DB_DIR = Path.home() / ".config" / "mind-meld"
 BUSY_TIMEOUT_MS = 5000
 SCHEMA_VERSION = 1
-DISPLACED_MAX_AGE = 30 * 24 * 60 * 60
 _bound_path: ContextVar[Path | None] = ContextVar("state_db_path", default=None)
 
 
@@ -177,6 +175,17 @@ MIGRATIONS = (
         ),
         None,
     ),
+    # Migration 5 drops the three unread tables from migration 1; no released
+    # binary ever read or wrote them, so there is no compat bump and older
+    # binaries keep working.
+    (
+        (
+            "DROP TABLE IF EXISTS ledger",
+            "DROP TABLE IF EXISTS own_log",
+            "DROP TABLE IF EXISTS displaced",
+        ),
+        None,
+    ),
 )
 
 
@@ -291,20 +300,6 @@ def recover_if_needed():
     except Exception as exc:
         return exc
     return None
-
-
-def expire_displaced(conn, now, *, max_age=DISPLACED_MAX_AGE):
-    """The caller owns the transaction; expiry retains all forensic metadata.
-
-    No production caller: the ``displaced`` table has no reader.
-    """
-    if not conn.in_transaction:
-        raise StateDBError("expiry requires a transaction")
-    with translate():
-        conn.execute(
-            "UPDATE displaced SET content=NULL, expired=1 WHERE time <= ?",
-            (now - max_age,),
-        )
 
 
 SEEN_MAX_AGE_US = 365 * 24 * 60 * 60 * 1_000_000

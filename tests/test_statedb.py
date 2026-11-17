@@ -22,16 +22,6 @@ def database(tmp_path, monkeypatch):
 # Hardcoded independently of migration SQL: name, type, notnull, default, pk.
 SCHEMA = {
     "meta": [("key", "TEXT", 1, None, 1), ("value", "TEXT", 1, None, 0)],
-    "ledger": [
-        ("source", "TEXT", 1, None, 1),
-        ("path", "TEXT", 1, None, 2),
-        ("sha", "TEXT", 0, None, 0),
-        ("vv", "TEXT", 1, None, 0),
-        ("size", "INTEGER", 0, None, 0),
-        ("mtime", "REAL", 0, None, 0),
-        ("deleted", "INTEGER", 1, "0", 0),
-        ("pending", "INTEGER", 1, "0", 0),
-    ],
     "cursors": [
         ("peer", "TEXT", 1, None, 1),
         ("applied", "INTEGER", 0, None, 0),
@@ -40,28 +30,6 @@ SCHEMA = {
         ("applied_hash", "TEXT", 0, None, 0),
         ("applied_canonical_hash", "TEXT", 0, None, 0),
         ("seen_hash", "TEXT", 0, None, 0),
-    ],
-    "own_log": [
-        ("seq", "INTEGER", 0, None, 1),
-        ("prev", "TEXT", 0, None, 0),
-        ("hash", "TEXT", 1, None, 0),
-        ("parts", "INTEGER", 1, None, 0),
-        ("bytes", "INTEGER", 1, None, 0),
-        ("time", "INTEGER", 1, None, 0),
-    ],
-    "displaced": [
-        ("id", "INTEGER", 0, None, 1),
-        ("source", "TEXT", 1, None, 0),
-        ("path", "TEXT", 1, None, 0),
-        ("sha", "TEXT", 0, None, 0),
-        ("vv", "TEXT", 1, None, 0),
-        ("size", "INTEGER", 0, None, 0),
-        ("mtime", "REAL", 0, None, 0),
-        ("deleted", "INTEGER", 1, "0", 0),
-        ("content", "BLOB", 0, None, 0),
-        ("reason", "TEXT", 1, None, 0),
-        ("time", "INTEGER", 1, None, 0),
-        ("expired", "INTEGER", 1, "0", 0),
     ],
     "history": [("id", "INTEGER", 0, None, 1)]
     + [
@@ -97,10 +65,7 @@ SCHEMA = {
 }
 INDEXES = {
     "meta": [("sqlite_autoindex_meta_1", 1, "pk", 0)],
-    "ledger": [("sqlite_autoindex_ledger_1", 1, "pk", 0)],
     "cursors": [("sqlite_autoindex_cursors_1", 1, "pk", 0)],
-    "own_log": [],
-    "displaced": [("displaced_time", 0, "c", 0)],
     "history": [
         ("history_class", 0, "c", 0),
         ("history_order", 0, "c", 0),
@@ -117,7 +82,7 @@ INDEXES = {
 def test_schema_settings_and_reopen():
     for _ in range(2):
         with statedb.connect(read_only=False) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone() == (4,)
+            assert conn.execute("PRAGMA user_version").fetchone() == (5,)
             assert conn.execute("PRAGMA auto_vacuum").fetchone() == (2,)
             assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
             assert conn.execute("PRAGMA synchronous").fetchone() == (2,)
@@ -132,14 +97,13 @@ def test_schema_settings_and_reopen():
                     INDEXES[table]
                 )
             for table in (
-                "ledger",
                 "cursors",
-                "own_log",
-                "displaced",
                 "peer_base",
                 "seen_version",
             ):
                 assert conn.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
+            names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+            assert not (names & {"ledger", "own_log", "displaced", "displaced_time"})
     assert stat.S_IMODE(statedb.db_path().stat().st_mode) == 0o600
     assert stat.S_IMODE(statedb.DB_DIR.stat().st_mode) == 0o700
 
@@ -152,7 +116,7 @@ def test_read_only_absent_populated_and_closes():
         pass
     before = {p.name: p.read_bytes() for p in statedb.DB_DIR.iterdir()}
     with statedb.connect(read_only=True) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (4,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (5,)
     assert {p.name: p.read_bytes() for p in statedb.DB_DIR.iterdir()} == before
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
@@ -217,34 +181,14 @@ def test_nested_and_outer_rollback():
         assert conn.execute("SELECT value FROM meta WHERE key='rolled'").fetchone() is None
 
 
-def test_displaced_expiry_preserves_metadata():
-    with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
-        conn.execute(
-            (
-                "INSERT INTO displaced "
-                "(source,path,sha,vv,size,mtime,content,reason,time) VALUES "
-                "('s','p','sha','{}',3,2,?,'conflict',100)"
-            ),
-            (b"abc",),
-        )
-        before = conn.execute("SELECT * FROM displaced").fetchone()
-        statedb.expire_displaced(conn, 100 + statedb.DISPLACED_MAX_AGE - 1)
-        assert conn.execute("SELECT * FROM displaced").fetchone() == before
-        statedb.expire_displaced(conn, 100 + statedb.DISPLACED_MAX_AGE)
-        after = conn.execute("SELECT * FROM displaced").fetchone()
-        assert after[:8] == before[:8]
-        assert after[8:] == (None, "conflict", 100, 1)
-
-
 def test_compatible_future_and_wal_then_incompatible_untouched():
     with statedb.connect(read_only=False) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA user_version=5")  # newer than this build (4) but compatible
-        conn.execute("DROP TABLE ledger")
-        conn.execute("CREATE TABLE ledger (future TEXT)")
+        conn.execute("PRAGMA user_version=6")  # newer than this build (5) but compatible
+        conn.execute("CREATE TABLE future (x TEXT)")
     for read_only in (True, False):
         with statedb.connect(read_only=read_only) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone() == (5,)
+            assert conn.execute("PRAGMA user_version").fetchone() == (6,)
             assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
     with sqlite3.connect(statedb.db_path()) as conn:
         conn.execute("PRAGMA journal_mode=DELETE")
@@ -335,7 +279,7 @@ import sys
 from mind_meld import statedb
 statedb.DB_DIR = Path(sys.argv[1])
 with statedb.connect(read_only=False) as conn:
-    assert conn.execute('PRAGMA user_version').fetchone() == (4,)
+    assert conn.execute('PRAGMA user_version').fetchone() == (5,)
 """
     children = [
         subprocess.Popen(
@@ -431,7 +375,7 @@ def test_racing_opener_migrates_before_our_begin(monkeypatch):
 
     monkeypatch.setattr(statedb, "transaction", transaction)
     with statedb.connect(read_only=False) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (4,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (5,)
         assert conn.execute("SELECT count(*) FROM meta").fetchone() == (1,)
     assert raced == [1]
 
@@ -457,7 +401,7 @@ def test_writer_refuses_compat_raised_before_its_transaction(monkeypatch):
             newer = sqlite3.connect(statedb.db_path())
             with newer:  # the newer mm migrates after our gate, before our BEGIN
                 newer.execute("UPDATE meta SET value='2' WHERE key='compat_version'")
-                newer.execute("PRAGMA user_version = 5")
+                newer.execute("PRAGMA user_version = 6")
             newer.close()
             raced.append(statedb.db_path().read_bytes())
         with original(conn):
@@ -532,13 +476,15 @@ def test_migration_two_keeps_compat_and_a_v1_database_reads_silently():
     assert statedb.db_path().read_bytes() == before
 
     with statedb.connect(read_only=False) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (4,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (5,)
         # No compat bump: a release that only knows version 1 keeps working.
         assert conn.execute("SELECT value FROM meta WHERE key='compat_version'").fetchone() == (
             "1",
         )
         assert conn.execute("SELECT count(*) FROM history").fetchone() == (1,)
         assert conn.execute("SELECT count(*) FROM peer_base").fetchone() == (0,)
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+        assert not (names & {"ledger", "own_log", "displaced", "displaced_time"})
 
 
 def test_absent_database_reads_as_no_ledger_and_creates_nothing():
@@ -844,7 +790,7 @@ def _seed_v2_database():
 def test_migration_three_recreates_cursors_without_a_compat_bump():
     _seed_v2_database()
     with statedb.connect(read_only=False) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (4,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (5,)
         assert conn.execute("SELECT value FROM meta WHERE key='compat_version'").fetchone() == (
             "1",
         )
@@ -869,11 +815,113 @@ def test_migration_four_preserves_legacy_cursor_times_without_inventing_identity
         assert statedb.read_cursors(conn) == {}
     assert statedb.db_path().read_bytes() == before
     with statedb.connect(read_only=False) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (4,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (5,)
         assert conn.execute("SELECT value FROM meta WHERE key='compat_version'").fetchone() == (
             "1",
         )
         assert statedb.read_cursors(conn) == {"peer1": statedb.CursorRow(100, 100, 0)}
+
+
+def test_migration_five_drops_the_unread_tables_and_keeps_history_and_cursors():
+    from mind_meld import pullhistory
+    from tests.conftest import history_rows
+
+    statedb.DB_DIR.mkdir(parents=True)
+    raw = sqlite3.connect(statedb.db_path())
+    for statements, _ in statedb.MIGRATIONS[:4]:
+        for statement in statements:
+            raw.execute(statement)
+    raw.execute("INSERT INTO meta VALUES ('compat_version', '1')")
+    raw.execute("INSERT INTO meta VALUES ('history_imported', '2026-01-01T00:00:00+00:00')")
+    raw.execute(
+        "INSERT INTO history (ts, verb, device, source, rel_path, action) "
+        "VALUES ('2026-01-01T00:00:00+00:00', 'pull', 'peer1', 'notes', 'a.md', 'written')"
+    )
+    cursor_row = statedb.CursorRow(100, 200, 1, "a" * 64, "b" * 64, "c" * 64)
+    raw.execute("INSERT INTO cursors VALUES ('peer1', ?, ?, ?, ?, ?, ?)", cursor_row)
+    raw.execute(
+        "INSERT INTO peer_base (peer, source, path, sha) VALUES ('peer1', 'notes', 'a.md', ?)",
+        (FULL,),
+    )
+    raw.execute(
+        "INSERT INTO seen_version (source, path, sha, time, kind, deleted_by) "
+        "VALUES ('notes', 'a.md', ?, 100, 'held', NULL)",
+        (SHA_A,),
+    )
+    raw.execute(
+        "INSERT INTO displaced (source, path, sha, vv, size, mtime, content, reason, time) "
+        "VALUES ('notes', 'a.md', 'sha', '{}', 3, 2, ?, 'conflict', 100)",
+        (b"abc",),
+    )
+    raw.execute("PRAGMA user_version = 4")
+    raw.commit()
+    raw.close()
+    before = statedb.db_path().read_bytes()
+
+    with statedb.connect(read_only=True) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (4,)
+    assert statedb.db_path().read_bytes() == before
+
+    with statedb.connect(read_only=False) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (5,)
+        assert conn.execute("SELECT value FROM meta WHERE key='compat_version'").fetchone() == (
+            "1",
+        )
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+        assert not (names & {"ledger", "own_log", "displaced", "displaced_time"})
+        assert statedb.read_cursors(conn) == {"peer1": cursor_row}
+        assert statedb.read_peer_bases(conn, "peer1") == {("notes", "a.md"): FULL}
+        assert statedb.read_seen(conn) == {("notes", "a.md"): [(SHA_A, "held", 100, None)]}
+    expected_history = [
+        {
+            "ts": "2026-01-01T00:00:00+00:00",
+            "verb": "pull",
+            "device": "peer1",
+            "source": "notes",
+            "rel_path": "a.md",
+            "action": "written",
+        }
+    ]
+    assert history_rows() == expected_history
+    assert list(pullhistory.query(limit=0)) == expected_history
+
+
+def test_a_released_reader_keeps_working_on_a_migrated_database(monkeypatch):
+    from mind_meld import pullhistory
+    from tests.conftest import history_rows
+
+    pullhistory.append(
+        verb="pull",
+        device="peer1",
+        source="notes",
+        rel_path="a.md",
+        action="written",
+    )
+    initial_cursor = statedb.CursorRow(100, 100, 0, "a" * 64, "b" * 64, "a" * 64)
+    with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+        statedb.commit_cursors(conn, {"peer1": initial_cursor})
+        assert conn.execute("PRAGMA user_version").fetchone() == (5,)
+
+    monkeypatch.setattr(statedb, "MIGRATIONS", statedb.MIGRATIONS[:4])
+    with statedb.connect(read_only=True) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (5,)
+        assert statedb.read_cursors(conn) == {"peer1": initial_cursor}
+    assert len(history_rows()) == 1
+
+    updated_cursor = statedb.CursorRow(200, 200, 1, "c" * 64, None, "d" * 64)
+    with statedb.connect(read_only=False) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (5,)
+        with statedb.transaction(conn):
+            statedb.commit_cursors(conn, {"peer1": updated_cursor})
+        assert statedb.read_cursors(conn) == {"peer1": updated_cursor}
+    pullhistory.append(
+        verb="push",
+        device="peer1",
+        source="notes",
+        rel_path="b.md",
+        action="uploaded",
+    )
+    assert [r["rel_path"] for r in history_rows()] == ["a.md", "b.md"]
 
 
 def test_cursor_identities_advance_atomically_and_clear_a_missing_canonical():

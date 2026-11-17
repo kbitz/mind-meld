@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from mind_meld import pullhistory, statedb, upgrade
+from tests.conftest import history_rows
 
 # ── Isolation fixtures ────────────────────────────────────────────────────
 
@@ -406,7 +407,7 @@ class TestTransitionHook:
         config = {"device": {"id": "dev-test"}}
         upgrade.run_transition_hook(config)
 
-        records = list(pullhistory.read_records())
+        records = list(history_rows())
         upgrade_rows = [r for r in records if r.get("verb") == "self-upgrade"]
         assert len(upgrade_rows) == 1
         row = upgrade_rows[0]
@@ -421,13 +422,13 @@ class TestTransitionHook:
     def test_no_log_on_no_transition(self, monkeypatch):
         _set_version(monkeypatch, "0.9.3")
         upgrade.run_transition_hook({"device": {"id": "dev-test"}})
-        records = list(pullhistory.read_records())
+        records = list(history_rows())
         assert [r for r in records if r.get("verb") == "self-upgrade"] == []
 
     def test_no_log_on_dev_build(self, monkeypatch):
         _set_version(monkeypatch, "0.0.0+dev")
         upgrade.run_transition_hook({"device": {"id": "dev-test"}})
-        records = list(pullhistory.read_records())
+        records = list(history_rows())
         assert [r for r in records if r.get("verb") == "self-upgrade"] == []
 
 
@@ -521,17 +522,17 @@ class TestEmitNudge:
 class TestPullhistoryContract:
     def test_self_upgrade_missing_old_version_silently_skips(self):
         pullhistory.append_self_upgrade(device="dev-test", old_version="", new_version="0.9.4")
-        records = list(pullhistory.read_records())
+        records = list(history_rows())
         assert records == []
 
     def test_self_upgrade_missing_new_version_silently_skips(self):
         pullhistory.append_self_upgrade(device="dev-test", old_version="0.9.3", new_version="")
-        records = list(pullhistory.read_records())
+        records = list(history_rows())
         assert records == []
 
     def test_self_upgrade_valid_writes_row(self):
         pullhistory.append_self_upgrade(device="dev-test", old_version="0.9.3", new_version="0.9.4")
-        records = list(pullhistory.read_records())
+        records = list(history_rows())
         assert len(records) == 1
         assert records[0]["verb"] == "self-upgrade"
 
@@ -1130,7 +1131,7 @@ class TestRacePin:
             )
 
         monkeypatch.setattr(statedb, "DB_DIR", cache_dir)
-        rows = pullhistory.read_records()
+        rows = history_rows()
         upgrade_rows = [r for r in rows if r.get("verb") == "self-upgrade"]
         assert len(upgrade_rows) == 1, (
             f"expected exactly 1 self-upgrade row under flock-protected "

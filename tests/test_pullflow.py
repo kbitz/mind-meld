@@ -50,6 +50,7 @@ from mind_meld import (
 )
 from mind_meld.storage.keys import blob_key, device_key, manifest_key
 from mind_meld.storage.local import LocalBackend
+from tests.conftest import history_rows
 from tests.syncthing_folder import SyncthingFolder
 
 PASSPHRASE = "pullflow-contract-test-only"
@@ -382,9 +383,7 @@ def test_fail_mode_refuses_apply_but_characterizes_migration_and_history(
         assert (sidecar.SIDECAR_DIR / "inversion-installed-at").exists()
         assert statedb.db_path().exists() is (mode == "attended")
         expected_history = [("excluded", "excluded.md")] if mode == "attended" else []
-        assert [
-            (r["action"], r["rel_path"]) for r in pullhistory.read_records()
-        ] == expected_history
+        assert [(r["action"], r["rel_path"]) for r in history_rows()] == expected_history
 
 
 def test_pullflow_contract_import_does_not_register_cli():
@@ -464,7 +463,7 @@ def test_manifest_before_blobs_reports_waiting_then_applies(fleet, syncthing, mo
     assert result.total_failed == 0 and result.durability_fsync_failures == 0
     assert not (fleet.local / "a.md").exists() and not (fleet.local / "b.md").exists()
     assert syncthing.sleeps == []
-    assert list(pullhistory.read_records()) == []
+    assert list(history_rows()) == []
     if mode == "quiet":
         assert summaries == [("", "")]
     elif mode == "attended":
@@ -875,7 +874,7 @@ def test_a_conflict_copy_already_holding_the_peers_bytes_counts_nothing_and_warn
     # Nothing was written: both files are exactly as left, and the copy stays listed.
     assert local.read_bytes() == b"local content\n" and copy.read_bytes() == b"peer content\n"
     assert [(n, p) for n, p, _ in resolveflow._find_conflict_files(fleet.config)] == [(NOTES, copy)]
-    assert pullhistory.read_records() == []  # no history row for a non-event
+    assert history_rows() == []  # no history row for a non-event
 
 
 def test_a_kept_copy_settles_the_peers_version_so_the_next_pull_is_silent_too(fleet, monkeypatch):
@@ -1268,7 +1267,7 @@ def test_a_followed_deletion_keeps_a_private_recovery_copy_and_says_so_in_the_re
 def test_a_followed_deletion_is_recorded_in_the_history_with_its_folder(fleet, monkeypatch):
     _setup_deletion(fleet)
     result, _, _ = _run(fleet, monkeypatch, "attended")
-    rows = [r for r in pullhistory.read_records() if r["action"] == "deleted"]
+    rows = [r for r in history_rows() if r["action"] == "deleted"]
     assert len(rows) == 1
     assert (rows[0]["verb"], rows[0]["source"], rows[0]["rel_path"]) == ("pull", NOTES, "note.md")
     assert rows[0]["folder"] == result.deleted_folder
@@ -1320,7 +1319,7 @@ def test_one_record_from_two_peers_gives_one_copy_and_one_count(fleet, monkeypat
 
     assert not path.exists() and result.total_deleted == 1
     assert len(_copies()) == 1
-    assert len([r for r in pullhistory.read_records() if r["action"] == "deleted"]) == 1
+    assert len([r for r in history_rows() if r["action"] == "deleted"]) == 1
 
 
 def test_an_older_peers_hashless_record_still_suppresses_but_deletes_nothing(fleet, monkeypatch):
@@ -2212,7 +2211,7 @@ def test_the_planner_and_a_real_pull_agree_on_every_branch(fleet, monkeypatch):
     monkeypatch.setattr(pullflow._ApplyReporter, "record", spy)
     result, _, _ = _run(fleet, monkeypatch, "quiet")
 
-    acted = {r["rel_path"]: r["action"] for r in pullhistory.read_records()}
+    acted = {r["rel_path"]: r["action"] for r in history_rows()}
     older = {e.rel_path for e in result.older}
     real = {
         name: "older" if name in older else acted.get(name) or recorded.get(name, "unchanged")
@@ -2358,7 +2357,7 @@ def test_kept_only_retry_retries_failed_directory_flush(fleet, monkeypatch):
     assert result.total_conflicted == result.durability_fsync_failures == 1
     assert _committed().base(PEER, NOTES, "note.md") is None
     kept = next(fleet.local.glob("note.sync-conflict-*.md"))
-    history = list(pullhistory.read_records())
+    history = list(history_rows())
 
     files.clear()
     parents.clear()
@@ -2376,7 +2375,7 @@ def test_kept_only_retry_retries_failed_directory_flush(fleet, monkeypatch):
     _counts(result)
     assert files == [kept] and fleet.local in parents
     assert _committed().base(PEER, NOTES, "note.md") == _sha(b"peer bytes\n")
-    assert list(pullhistory.read_records()) == history
+    assert list(history_rows()) == history
     assert local.read_bytes() == b"my bytes\n" and kept.read_bytes() == b"peer bytes\n"
     assert list(fleet.local.glob("note.sync-conflict-*.md")) == [kept]
 
@@ -2434,7 +2433,7 @@ def test_agreeing_apply_flushes_before_settling(fleet, monkeypatch, agreement, f
     assert files == [local] and local.parent in parents
     assert _committed().base(PEER, NOTES, name) == _sha(remote)
     assert local.read_bytes() == (remote if agreement == "apply-time-equality" else union)
-    assert not list(pullhistory.read_records())
+    assert not list(history_rows())
 
 
 def test_an_interrupted_pull_still_commits_what_it_settled(fleet, monkeypatch):
@@ -2654,7 +2653,7 @@ def test_mixed_apply_and_deletion_keep_both_in_the_project_sync_log(fleet, monke
     assert result.total_written == result.total_deleted == 1
     log = (fleet.local / "projects/demo/.mind-meld-log.md").read_text()
     assert "memory/new.md" in log and "memory/gone.md" in log
-    rows = [r for r in pullhistory.read_records() if r.get("rel_path") in {added, removed}]
+    rows = [r for r in history_rows() if r.get("rel_path") in {added, removed}]
     assert [(r["action"], r["rel_path"]) for r in rows] == [
         ("written", added),
         ("deleted", removed),
@@ -2860,7 +2859,7 @@ def test_interrupted_deletion_keeps_completed_history_folder_and_unexecuted_base
     for name in names[1:]:
         assert (fleet.local / name).read_bytes() == SHARED
         assert _ledger_state(name) == (_sha(SHARED), None)
-    rows = [r for r in pullhistory.read_records() if r.get("rel_path") in {*names, added}]
+    rows = [r for r in history_rows() if r.get("rel_path") in {*names, added}]
     assert [(r["action"], r["rel_path"]) for r in rows] == [
         ("written", added),
         ("deleted", names[0]),
@@ -2906,7 +2905,7 @@ def test_interruption_inside_a_moved_file_keeps_its_stamp_without_claiming_succe
         assert _ledger_state(name) == (None, PEER)
     assert (fleet.local / "c.md").read_bytes() == SHARED
     assert _ledger_state("c.md") == (_sha(SHARED), None)
-    rows = [r for r in pullhistory.read_records() if r.get("action") == "deleted"]
+    rows = [r for r in history_rows() if r.get("action") == "deleted"]
     assert [r["rel_path"] for r in rows] == ["a.md"]
     assert str(folder) in capture["output"][1]
     assert "deletion interrupted" in capture["output"][1]

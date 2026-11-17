@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.61] - 2026-11-16
+
+Invariant docs now spell out history bookkeeping and migration lock scope.
+
+### Changed
+
+- Sync and auto-upgrade invariant docs and the invariants overview now state history bookkeeping and migration lock scope.
+
 ## [1.12.60] - 2026-11-16
 
 Invariant docs now spell out the shared content hash validation contract.
