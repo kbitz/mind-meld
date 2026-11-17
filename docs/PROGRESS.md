@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.65 | 2026-11-17 | The removed-wrapper hint now points to autorun evidence, and compatibility re-exports are removed from the CLI module. |
 | 1.12.64 | 2026-11-17 | Invariant docs and the event-backfill contract now cover the full session inventory. |
 | 1.12.63 | 2026-11-17 | `mm retro-fleet` drops `--no-save` and rejects it as an unknown option. |
 | 1.12.62 | 2026-11-17 | Token usage and skill-link helpers drop unused shims. |

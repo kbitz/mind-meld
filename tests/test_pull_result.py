@@ -17,7 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mind_meld import core, pullflow
-from mind_meld.cli import app, iter_source_diffs
+from mind_meld.cli import app
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
 from mind_meld.storage.local import LocalBackend
@@ -72,7 +72,7 @@ class TestIterSourceDiffs:
                 "gstack": {},
             }
         )
-        out = list(iter_source_diffs(local, remote))
+        out = list(core.iter_source_diffs(local, remote))
         names = [t[0] for t in out]
         assert names == ["claude", "gstack"]
 
@@ -83,18 +83,18 @@ class TestIterSourceDiffs:
                 "gstack": {"b.md": _fi("bb")},
             }
         )
-        out = list(iter_source_diffs(local, {}, source_filter="claude"))
+        out = list(core.iter_source_diffs(local, {}, source_filter="claude"))
         assert [t[0] for t in out] == ["claude"]
 
     def test_unknown_source_filter_yields_nothing(self):
         local = _fake_manifest({"claude": {"a.md": _fi("aa")}})
-        out = list(iter_source_diffs(local, {}, source_filter="nonexistent"))
+        out = list(core.iter_source_diffs(local, {}, source_filter="nonexistent"))
         assert out == []
 
     def test_missing_remote_src_defaults_to_empty_files(self):
         """Source present locally but absent from remote: diff treats remote as {}."""
         local = _fake_manifest({"claude": {"a.md": _fi("aa")}})
-        out = list(iter_source_diffs(local, {}))
+        out = list(core.iter_source_diffs(local, {}))
         assert len(out) == 1
         _name, _src_data, remote_src, diff = out[0]
         assert remote_src == {"files": {}}
@@ -114,20 +114,20 @@ class TestIterSourceDiffs:
                 "gstack": {"b.md": _fi("changed")},  # diverged → should yield
             }
         )
-        out = list(iter_source_diffs(local, remote, skip_unchanged=True))
+        out = list(core.iter_source_diffs(local, remote, skip_unchanged=True))
         assert [t[0] for t in out] == ["gstack"]
 
     def test_skip_unchanged_false_keeps_in_sync_sources(self):
         local = _fake_manifest({"claude": {"a.md": _fi("aa")}})
         remote = _fake_remote({"claude": {"a.md": _fi("aa")}})
-        out = list(iter_source_diffs(local, remote, skip_unchanged=False))
+        out = list(core.iter_source_diffs(local, remote, skip_unchanged=False))
         assert len(out) == 1
         assert not out[0][3].has_changes
 
     def test_yields_intact_src_data_for_callers(self):
         """Callers (push) depend on src_data carrying base_path + files."""
         local = _fake_manifest({"claude": {"a.md": _fi("aa")}})
-        out = list(iter_source_diffs(local, {}))
+        out = list(core.iter_source_diffs(local, {}))
         _name, src_data, _remote_src, _diff = out[0]
         assert src_data["base_path"] == "/fake/claude"
         assert "a.md" in src_data["files"]

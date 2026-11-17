@@ -4071,7 +4071,7 @@ def test_bookkeeping_and_manifest_cleanup_warnings_use_shared_stderr_helper(
 def test_cli_autopull_surfaces_data_at_risk_warnings_on_stderr(fleet, monkeypatch):
     from typer.testing import CliRunner
 
-    from mind_meld import cli
+    from mind_meld import cli, statusflow
     from mind_meld import config as config_mod
 
     cfg_path = fleet.root / "config.toml"
@@ -4108,7 +4108,7 @@ def test_cli_autopull_surfaces_data_at_risk_warnings_on_stderr(fleet, monkeypatc
         "mm: warning: skipping unknown source 'mystery-src' from Peer B - "
         "not configured locally" in err_lines
     )
-    crumb = cli._read_autorun_breadcrumbs()["pull"]
+    crumb = statusflow._read_autorun_evidence()["runs"]["pull"]
     assert crumb["outcome"] == "degraded"
     assert "1 corrupt peer manifest(s)" in crumb["detail"]
     assert "1 unknown source(s)" in crumb["detail"]

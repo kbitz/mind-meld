@@ -496,7 +496,7 @@ class TestConflictFilename:
         base = pullflow.conflict_filename(canonical, "devA1234", now=now)
         base.write_bytes(b"occupied-base")
         tokens = iter(["aaaa", "bbbb"])
-        monkeypatch.setattr("mind_meld.cli.secrets.token_hex", lambda n: next(tokens))
+        monkeypatch.setattr("mind_meld.pullflow.secrets.token_hex", lambda n: next(tokens))
         occupied = canonical.with_name(f"{base.stem}-aaaa{base.suffix}")
         occupied.write_bytes(b"occupied-random")
         chosen = pullflow.conflict_filename(canonical, "devA1234", now=now)
@@ -523,7 +523,7 @@ class TestConflictFilename:
             calls.append(tok)
             return tok
 
-        monkeypatch.setattr("mind_meld.cli.secrets.token_hex", take)
+        monkeypatch.setattr("mind_meld.pullflow.secrets.token_hex", take)
         with pytest.raises(ValueError, match="no unused name"):
             pullflow.conflict_filename(canonical, "devA1234", now=now)
         assert calls == tokens
@@ -2488,7 +2488,7 @@ class TestResolveLocalMtimeBump:
         are NOT applied — abort means the user does not trust this pull, so
         half-made decisions are not broadcast to the fleet."""
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch
+        from mind_meld import core
 
         (tmp_path / "storage").mkdir()
         (tmp_path / "claude").mkdir()
@@ -2521,7 +2521,7 @@ class TestResolveLocalMtimeBump:
 
         def fake_fetch_remote_manifest(b, did, pp, mk):
             if did == "peer":
-                return ManifestFetch(
+                return core.ManifestFetch(
                     status="ok",
                     manifest={
                         "sources": {
@@ -2538,7 +2538,7 @@ class TestResolveLocalMtimeBump:
                         "tombstones": {},
                     },
                 )
-            return ManifestFetch(status="missing")
+            return core.ManifestFetch(status="missing")
 
         def aborting_download_and_apply(b, bp, td, did, pp, mk, **kw):
             # Simulate: user picked keep-canonical (records a bump), then
@@ -2583,7 +2583,7 @@ class TestResolveLocalMtimeBump:
         device loop — canonical's mtime ends up bumped past the recorded peer
         mtime."""
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch
+        from mind_meld import core
 
         (tmp_path / "storage").mkdir()
         (tmp_path / "claude").mkdir()
@@ -2616,7 +2616,7 @@ class TestResolveLocalMtimeBump:
 
         def fake_fetch_remote_manifest(b, did, pp, mk):
             if did == "peer":
-                return ManifestFetch(
+                return core.ManifestFetch(
                     status="ok",
                     manifest={
                         "sources": {
@@ -2633,7 +2633,7 @@ class TestResolveLocalMtimeBump:
                         "tombstones": {},
                     },
                 )
-            return ManifestFetch(status="missing")
+            return core.ManifestFetch(status="missing")
 
         def keep_local_download_and_apply(b, bp, td, did, pp, mk, **kw):
             # Simulate keep-canonical: record the bump, don't touch canonical.

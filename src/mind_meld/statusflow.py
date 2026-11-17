@@ -2963,8 +2963,3 @@ def _read_autorun_evidence() -> dict:
             evidence["state"] = "corrupt"
         evidence["runs"] = normalized
     return evidence
-
-
-def _read_autorun_breadcrumbs() -> dict[str, dict]:
-    """Current or legacy raw entries, without waiting or creating anything."""
-    return _read_autorun_evidence()["runs"]

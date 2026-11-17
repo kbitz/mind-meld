@@ -23,8 +23,6 @@ from mind_meld.cli import (
     _held_count_phrase,
     _include_prior_host_if_needed,
     _inject_held_entries,
-    _prove_omitted_paths_absent,
-    _retain_prior_default_sources,
     _upload_changed_blobs,
 )
 from mind_meld.config import DEFAULT_SOURCES, SourceResolution
@@ -544,12 +542,11 @@ class TestSelectDevices:
 class TestPrefetchManifests:
     def test_all_ok_no_corrupt(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch
 
         monkeypatch.setattr(
             cli_module.core,
             "_fetch_remote_manifest",
-            lambda backend, did, pp, mk: ManifestFetch(
+            lambda backend, did, pp, mk: core.ManifestFetch(
                 status="ok", manifest={"sources": {}, "tombstones": {}}
             ),
         )
@@ -563,12 +560,11 @@ class TestPrefetchManifests:
 
     def test_corrupt_peer_surfaces(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch
 
         def fake_fetch(backend, did, pp, mk):
             if did == "bad":
-                return ManifestFetch(status="corrupt")
-            return ManifestFetch(status="ok", manifest={"sources": {}, "tombstones": {}})
+                return core.ManifestFetch(status="corrupt")
+            return core.ManifestFetch(status="ok", manifest={"sources": {}, "tombstones": {}})
 
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch)
         devices = [
@@ -584,12 +580,11 @@ class TestPrefetchManifests:
 
     def test_missing_peer_no_warning(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch
 
         monkeypatch.setattr(
             cli_module.core,
             "_fetch_remote_manifest",
-            lambda *a, **kw: ManifestFetch(status="missing"),
+            lambda *a, **kw: core.ManifestFetch(status="missing"),
         )
         devices = [{"device_id": "A", "device_name": "A"}]
         cache, corrupt = pullflow._prefetch_manifests(None, devices, "pp", 1024)
@@ -1491,7 +1486,6 @@ class TestWarningsSurvivePartialPull:
         prefetch phase must still reach stderr via _print_pull_summary.
         """
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch
         from mind_meld.errors import StorageError
 
         # Build a config
@@ -1510,9 +1504,9 @@ class TestWarningsSurvivePartialPull:
 
         def fake_fetch_remote_manifest(b, did, pp, mk):
             if did == "badpeer":
-                return ManifestFetch(status="corrupt")
+                return core.ManifestFetch(status="corrupt")
             if did == "goodpeer":
-                return ManifestFetch(
+                return core.ManifestFetch(
                     status="ok",
                     manifest={
                         "sources": {
@@ -1529,7 +1523,7 @@ class TestWarningsSurvivePartialPull:
                         "tombstones": {},
                     },
                 )
-            return ManifestFetch(status="missing")
+            return core.ManifestFetch(status="missing")
 
         def fake_download_and_apply(b, bp, td, did, pp, mk, **kw):
             return 10, {
@@ -1593,7 +1587,6 @@ class TestWriteSyncLogBestEffort:
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch
 
         (tmp_path / "storage").mkdir()
         (tmp_path / "claude").mkdir()
@@ -1621,7 +1614,7 @@ class TestWriteSyncLogBestEffort:
 
         def fake_fetch_remote_manifest(b, did, pp, mk):
             if did == "peerA":
-                return ManifestFetch(
+                return core.ManifestFetch(
                     status="ok",
                     manifest={
                         "sources": {
@@ -1638,7 +1631,7 @@ class TestWriteSyncLogBestEffort:
                         "tombstones": {},
                     },
                 )
-            return ManifestFetch(status="missing")
+            return core.ManifestFetch(status="missing")
 
         def fake_download_and_apply(b, bp, td, did, pp, mk, **kw):
             return 10, {
@@ -2588,7 +2581,7 @@ class TestSnapshotPublicationHelpers:
                 }
             }
         }
-        _prove_omitted_paths_absent(
+        core._prove_omitted_paths_absent(
             {"sources": {"claude": {"files": {}}}},
             prior,
             [{"name": "claude", "path": str(trusted)}],
@@ -2615,7 +2608,7 @@ class TestSnapshotPublicationHelpers:
             }
         }
         with pytest.raises(SnapshotError, match="still present"):
-            _prove_omitted_paths_absent(
+            core._prove_omitted_paths_absent(
                 local,
                 prior,
                 [{"name": "gstack", "path": str(root)}],
@@ -2635,7 +2628,7 @@ class TestSnapshotPublicationHelpers:
         monkeypatch.setattr(Path, "stat", boom)
         prior = {"sources": {"gstack": {"files": {"a.md": {"sha256": "a" * 64}}}}}
         with pytest.raises(SnapshotError, match="could not be read"):
-            _prove_omitted_paths_absent(
+            core._prove_omitted_paths_absent(
                 {"sources": {"gstack": {"files": {}}}},
                 prior,
                 [{"name": "gstack", "path": str(root)}],
@@ -2860,7 +2853,7 @@ class TestSnapshotPublicationHelpers:
             }
         }
         local = {"sources": {"muse": {"files": {}}}}
-        _prove_omitted_paths_absent(local, prior, [muse_cfg], max_file_size=1024)
+        core._prove_omitted_paths_absent(local, prior, [muse_cfg], max_file_size=1024)
 
     def test_legacy_prior_default_source_stays_selected(self):
         resolution = SourceResolution(
@@ -2869,14 +2862,14 @@ class TestSnapshotPublicationHelpers:
             explicit=False,
         )
         remote = {"sources": {"claude": {"files": {}}, "gstack": {"files": {"a.md": {}}}}}
-        out = _retain_prior_default_sources(resolution, remote, {"sync": {}})
+        out = core._retain_prior_default_sources(resolution, remote, {"sync": {}})
         assert any(src["name"] == "gstack" for src in out.selected)
         explicit = SourceResolution(
             selected=[{"name": "claude", "path": "/tmp/claude", "type": "claude"}],
             available=[{"name": "claude", "path": "/tmp/claude", "type": "claude"}],
             explicit=True,
         )
-        kept = _retain_prior_default_sources(explicit, remote, {"sync": {}})
+        kept = core._retain_prior_default_sources(explicit, remote, {"sync": {}})
         assert not any(src["name"] == "gstack" for src in kept.selected)
 
     def test_legacy_prior_grok_entry_is_not_retained_refused_or_tombstoned(self, tmp_path):
@@ -2900,7 +2893,7 @@ class TestSnapshotPublicationHelpers:
             },
             "tombstones": {},
         }
-        out = _retain_prior_default_sources(resolution, remote, {"sync": {}})
+        out = core._retain_prior_default_sources(resolution, remote, {"sync": {}})
         assert [s["name"] for s in out.selected] == ["claude"]
         _refuse_unavailable_selected_sources(out, remote, out.available)
         filtered = _filter_unselected_sources(remote, [s["name"] for s in out.selected])
@@ -2948,7 +2941,7 @@ class TestSnapshotPublicationHelpers:
                 }
             }
         }
-        _prove_omitted_paths_absent(
+        core._prove_omitted_paths_absent(
             {"sources": {"grok": {"files": {}}}},
             prior,
             [{"name": "grok", "path": str(root), "type": "grok"}],
@@ -2967,7 +2960,7 @@ class TestSnapshotPublicationHelpers:
                 }
             }
         }
-        _prove_omitted_paths_absent(
+        core._prove_omitted_paths_absent(
             {"sources": {"codex": {"files": {}}}},
             prior,
             [
@@ -2997,7 +2990,7 @@ class TestSnapshotPublicationHelpers:
         monkeypatch.setattr(Path, "lstat", boom)
         prior = {"sources": {"gstack": {"files": {"a.md": {"sha256": "a" * 64}}}}}
         with pytest.raises(SnapshotError, match="could not be read"):
-            _prove_omitted_paths_absent(
+            core._prove_omitted_paths_absent(
                 {"sources": {"gstack": {"files": {}}}},
                 prior,
                 [{"name": "gstack", "path": str(root)}],
@@ -3758,7 +3751,7 @@ class TestInjectHeldEntries:
             "sources": {"gstack": {"base_path": str(root), "files": {"docs/sub": _entry("b")}}},
             "tombstones": {},
         }
-        prior = cli._merge_manifests([old, canonical])
+        prior = core._merge_manifests([old, canonical])
         assert set(prior["sources"]["gstack"]["files"]) == {"docs/sub", "docs/sub/a.md"}
         assert not (root / "docs/sub").exists()
         with pytest.raises(SnapshotError, match="disappeared while being read"):

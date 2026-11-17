@@ -19,14 +19,12 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from mind_meld import seen_sources
+from mind_meld import core, seen_sources
 from mind_meld.cli import (
-    _filter_disabled_sources,
     _filter_unselected_sources,
     app,
 )
 from mind_meld.config import get_default_source, save_config
-from mind_meld.core import _prompt_source_toggle
 from mind_meld.errors import ConfigError
 from mind_meld.sourceflow import _known_source_names, _validate_source_name
 
@@ -114,7 +112,7 @@ class TestPromptSourceToggle:
             return default
 
         monkeypatch.setattr(typer, "confirm", fake_confirm)
-        result = _prompt_source_toggle(
+        result = core._prompt_source_toggle(
             {"name": "claude", "path": str(tmp_path)}, current_state=True
         )
         assert result is True
@@ -126,7 +124,7 @@ class TestPromptSourceToggle:
             return default
 
         monkeypatch.setattr(typer, "confirm", fake_confirm)
-        result = _prompt_source_toggle(
+        result = core._prompt_source_toggle(
             {"name": "gstack", "path": str(tmp_path)}, current_state=False
         )
         assert result is False
@@ -883,7 +881,7 @@ class TestFilterDisabledSources:
             "sources": {"claude": {"files": {"a.md": {"sha256": "x"}}}},
             "tombstones": {"claude:b.md": {"deleted_by": "x"}},
         }
-        assert _filter_disabled_sources(manifest, []) is manifest
+        assert core._filter_disabled_sources(manifest, []) is manifest
 
     def test_drops_disabled_source_entries(self):
         manifest = {
@@ -893,7 +891,7 @@ class TestFilterDisabledSources:
             },
             "tombstones": {},
         }
-        out = _filter_disabled_sources(manifest, ["gstack"])
+        out = core._filter_disabled_sources(manifest, ["gstack"])
         assert "claude" in out["sources"]
         assert "gstack" not in out["sources"]
 
@@ -910,7 +908,7 @@ class TestFilterDisabledSources:
                 "gstack:b.md": {"deleted_by": "x"},
             },
         }
-        out = _filter_disabled_sources(manifest, ["gstack"])
+        out = core._filter_disabled_sources(manifest, ["gstack"])
         # BOTH tombstones flow through — disable does not undo prior consensus.
         assert "claude:a.md" in out["tombstones"]
         assert "gstack:b.md" in out["tombstones"]

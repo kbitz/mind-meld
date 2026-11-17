@@ -20,7 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
-from mind_meld import core, pullflow
+from mind_meld import core, pullflow, statusflow
 from mind_meld import events as _mm_events
 from mind_meld import host_usage as _mm_host_usage
 from mind_meld import token_usage as _mm_token_usage
@@ -831,7 +831,7 @@ def test_autopush_surfaces_sidecar_write_failure_in_quiet_mode(tmp_path, monkeyp
     assert r.exit_code == 0, (r.stdout, r.stderr)
     assert "sidecar" in (r.stderr or "")
     assert "simulated disk full" in (r.stderr or "")
-    crumb = cli_module._read_autorun_breadcrumbs()["push"]
+    crumb = statusflow._read_autorun_evidence()["runs"]["push"]
     assert crumb["outcome"] == "degraded"
     assert "1 maintenance failure(s)" in crumb["detail"]
 
@@ -1663,9 +1663,8 @@ def test_recover_prior_manifest_surfaces_peer_fallback_in_quiet_mode(tmp_path, m
     mode alongside conflict_copies_only recovery.
     """
     from mind_meld import sidecar
-    from mind_meld.cli import ManifestFetch
 
-    fetch = ManifestFetch(status="corrupt", manifest=None)
+    fetch = core.ManifestFetch(status="corrupt", manifest=None)
     fake_tombstones = {
         "claude:projects/x/memory/foo.md": {
             "deleted_at": datetime.now(timezone.utc).isoformat(),
@@ -2527,19 +2526,13 @@ class TestBreadcrumbStaleness:
         return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
 
     def test_fresh_breadcrumb_has_no_marker(self) -> None:
-        from mind_meld.cli import _breadcrumb_staleness_suffix
-
-        assert _breadcrumb_staleness_suffix(self._iso(1)) == ""
+        assert statusflow._breadcrumb_staleness_suffix(self._iso(1)) == ""
 
     def test_just_under_the_threshold_is_not_stale(self) -> None:
-        from mind_meld.cli import _breadcrumb_staleness_suffix
-
-        assert _breadcrumb_staleness_suffix(self._iso(47.5)) == ""
+        assert statusflow._breadcrumb_staleness_suffix(self._iso(47.5)) == ""
 
     def test_past_the_threshold_is_marked_stale(self) -> None:
-        from mind_meld.cli import _breadcrumb_staleness_suffix
-
-        out = _breadcrumb_staleness_suffix(self._iso(72))
+        out = statusflow._breadcrumb_staleness_suffix(self._iso(72))
         assert "stale" in out
         assert "72h" in out
 
@@ -2548,32 +2541,24 @@ class TestBreadcrumbStaleness:
         on 3.11 unless the suffix is normalized first."""
         from datetime import datetime, timedelta, timezone
 
-        from mind_meld.cli import _breadcrumb_staleness_suffix
-
         z = (datetime.now(timezone.utc) - timedelta(hours=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        assert "stale" in _breadcrumb_staleness_suffix(z)
+        assert "stale" in statusflow._breadcrumb_staleness_suffix(z)
 
     def test_naive_timestamp_is_treated_as_utc_not_crashed_on(self) -> None:
         from datetime import datetime, timedelta
 
-        from mind_meld.cli import _breadcrumb_staleness_suffix
-
         naive = (datetime.utcnow() - timedelta(hours=100)).isoformat()
-        assert "stale" in _breadcrumb_staleness_suffix(naive)
+        assert "stale" in statusflow._breadcrumb_staleness_suffix(naive)
 
     @pytest.mark.parametrize("bad", ["", "not-a-date", None, 12345, {"ts": 1}])
     def test_unparseable_input_degrades_to_no_marker(self, bad) -> None:
         """Diagnostics must never raise into `mm status`."""
-        from mind_meld.cli import _breadcrumb_staleness_suffix
-
-        assert _breadcrumb_staleness_suffix(bad) == ""
+        assert statusflow._breadcrumb_staleness_suffix(bad) == ""
 
     def test_clock_skew_from_the_future_is_not_stale(self) -> None:
         """A breadcrumb written by a peer with a fast clock yields a NEGATIVE
         age. It must read as fresh, not render `stale — no autorun in -3h`."""
-        from mind_meld.cli import _breadcrumb_staleness_suffix
-
-        assert _breadcrumb_staleness_suffix(self._iso(-3)) == ""
+        assert statusflow._breadcrumb_staleness_suffix(self._iso(-3)) == ""
 
     def _plant(self, tmp_path, monkeypatch, hours_ago: float):
         _setup_real_config(tmp_path, monkeypatch)
@@ -2711,7 +2696,7 @@ def test_status77_stale_crypto_replaced_by_real_attended_push(tmp_path, monkeypa
     _setup_events_tail_config(tmp_path, monkeypatch)
     monkeypatch.setattr(cli_module.statusflow.console, "_width", 240)
     cli_module._write_autorun_breadcrumb("push", "crypto-error", "old-crypto-diagnostic")
-    path = cli_module._autorun_breadcrumb_path()
+    path = core._autorun_breadcrumb_path()
     raw = json.loads(path.read_text())
     raw["push"]["timestamp"] = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
     path.write_text(json.dumps(raw))
@@ -2838,7 +2823,7 @@ def test_attended77_auto_maintenance_failure_cannot_prove_recovery(tmp_path, mon
     attended = attemptlog.read_runs()
     assert attended["runs"]["push"]["outcome"] == "degraded"
     assert runner.invoke(app, ["autopush"]).exit_code == 0
-    auto = cli_module._read_autorun_evidence()
+    auto = statusflow._read_autorun_evidence()
     assert auto["runs"]["push"]["outcome"] == "degraded"
     assert attemptlog.project_runs(auto, attended)["push"]["unresolved"] is True
 
@@ -2958,44 +2943,44 @@ def test_status77_pure_precedence_and_hostile_scope():
         first_push=False,
     )
     assert (
-        cli_module._status_verdict(**base)
+        statusflow._status_verdict(**base)
         == "2 new, 3 modified and 4 deleted waiting to push. Run: mm push"
     )
-    assert cli_module._status_verdict(**{**base, "conflicts": 2}).startswith(
+    assert statusflow._status_verdict(**{**base, "conflicts": 2}).startswith(
         "2 unresolved conflicts"
     )
-    assert cli_module._status_verdict(
+    assert statusflow._status_verdict(
         **{**base, "blocking": "storage failed. Run: mm diag", "conflicts": 2}
     ).startswith("storage failed")
     failure = attemptlog.make_run(outcome="failed", cause="storage-error")
     state = attemptlog.project_runs(
         {"state": "missing", "runs": {}}, {"state": "valid", "runs": {"pull": failure}}
     )
-    assert "Latest pull needs attention" in cli_module._status_verdict(
+    assert "Latest pull needs attention" in statusflow._status_verdict(
         **{**base, "projection": state}
     )
     capture = {**base, "capture_action": "Usage capture needs attention. Run: mm diag"}
-    assert cli_module._status_verdict(**capture) == capture["capture_action"]
+    assert statusflow._status_verdict(**capture) == capture["capture_action"]
     assert (
-        cli_module._status_verdict(**{**capture, "first_push": True}) == capture["capture_action"]
+        statusflow._status_verdict(**{**capture, "first_push": True}) == capture["capture_action"]
     )
-    assert cli_module._status_verdict(
+    assert statusflow._status_verdict(
         **{**capture, "blocking": "storage failed. Run: mm diag"}
     ).startswith("storage failed")
-    assert cli_module._status_verdict(**{**capture, "conflicts": 2}).startswith(
+    assert statusflow._status_verdict(**{**capture, "conflicts": 2}).startswith(
         "2 unresolved conflicts"
     )
-    assert "Latest pull needs attention" in cli_module._status_verdict(
+    assert "Latest pull needs attention" in statusflow._status_verdict(
         **{**capture, "projection": state}
     )
-    assert "Metadata-only" in cli_module._status_verdict(**{**base, "counts": (0, 0, 0)})
-    assert "has not pushed yet" in cli_module._status_verdict(**{**base, "first_push": True})
-    assert cli_module._status_verdict(**{**base, "manifest_arriving": True}) == (
+    assert "Metadata-only" in statusflow._status_verdict(**{**base, "counts": (0, 0, 0)})
+    assert "has not pushed yet" in statusflow._status_verdict(**{**base, "first_push": True})
+    assert statusflow._status_verdict(**{**base, "manifest_arriving": True}) == (
         "This device's manifest is still arriving from sync. Run: mm status"
     )
     clean = {**base, "counts": (0, 0, 0), "metadata": False}
-    assert cli_module._status_verdict(**clean) == "In sync with this device's last push."
-    text = cli_module._status_verdict(**{**clean, "source": "[red]evil\n\x1b[2Jname"})
+    assert statusflow._status_verdict(**clean) == "In sync with this device's last push."
+    text = statusflow._status_verdict(**{**clean, "source": "[red]evil\n\x1b[2Jname"})
     assert text.startswith("Source '[red]evil\\n") and "\n" not in text and "\x1b" not in text
 
 
@@ -3009,7 +2994,7 @@ def test_status77_skip_and_opposite_verb_regressions(tmp_path, monkeypatch, late
     monkeypatch.setattr(cli_module.statusflow.console, "_width", 240)
     assert runner.invoke(app, ["push"]).exit_code == 0
     now = datetime.now(timezone.utc)
-    path = cli_module._autorun_breadcrumb_path()
+    path = core._autorun_breadcrumb_path()
     path.write_text(
         json.dumps(
             {

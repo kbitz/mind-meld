@@ -364,7 +364,6 @@ class TestMergeManifestsAfterLoadRefactor:
     newest-timestamp wins."""
 
     def test_pre_normalized_inputs_merge_correctly(self):
-        from mind_meld.cli import _merge_manifests
         from mind_meld.manifest import load_manifest
 
         old_blob = serialize_manifest(
@@ -420,7 +419,7 @@ class TestMergeManifestsAfterLoadRefactor:
         old = load_manifest(old_blob)
         new = load_manifest(new_blob)
 
-        merged = _merge_manifests([old, new])
+        merged = core._merge_manifests([old, new])
         # File entry: union with newer-timestamp manifest winning per-key.
         assert merged["sources"]["claude"]["files"]["a.md"]["sha256"] == "new"
         # Tombstone: newest-timestamp wins (this is the load-bearing
@@ -435,7 +434,6 @@ class TestMergeManifestsAfterLoadRefactor:
         either writer, that mirror would carry through the copy and resurrect
         a silently-stale view of the claude source. Lock it out.
         """
-        from mind_meld.cli import _merge_manifests
         from mind_meld.manifest import load_manifest
 
         # Simulate a pre-Track-1B manifest that still carries the mirror.
@@ -468,7 +466,7 @@ class TestMergeManifestsAfterLoadRefactor:
         # Read-path invariant: scrubbed on v2 passthrough.
         assert "files" not in loaded
 
-        merged = _merge_manifests([loaded])
+        merged = core._merge_manifests([loaded])
         # Merge output inherits the scrubbed shape.
         assert "files" not in merged
         # Source-scoped files survived unchanged.
@@ -485,7 +483,6 @@ class TestMergeManifestsAfterLoadRefactor:
         could briefly see different merged states for the same pair of
         conflict copies.
         """
-        from mind_meld.cli import _manifest_content_hash, _merge_manifests
         from mind_meld.manifest import load_manifest
 
         same_ts = "2026-04-22T10:00:00+00:00"
@@ -521,8 +518,8 @@ class TestMergeManifestsAfterLoadRefactor:
         a = load_manifest(a_blob)
         b = load_manifest(b_blob)
 
-        merged_ab = _merge_manifests([a, b])
-        merged_ba = _merge_manifests([b, a])
+        merged_ab = core._merge_manifests([a, b])
+        merged_ba = core._merge_manifests([b, a])
 
         # Both inputs contribute files (UNION semantic).
         assert set(merged_ab["sources"]["claude"]["files"].keys()) == {"x.md", "y.md"}
@@ -536,8 +533,8 @@ class TestMergeManifestsAfterLoadRefactor:
         # The winner is the manifest with the lexicographically LARGER
         # content hash (per the sort key). Pin this explicitly so a future
         # "oh let's flip to min instead of max" refactor gets caught.
-        hash_a = _manifest_content_hash(a)
-        hash_b = _manifest_content_hash(b)
+        hash_a = core._manifest_content_hash(a)
+        hash_b = core._manifest_content_hash(b)
         winner = a if hash_a > hash_b else b
         assert merged_ab["device_name"] == winner["device_name"]
 
@@ -633,8 +630,6 @@ class TestConflictManifestMerge:
 
     def test_conflict_copy_read_error_skipped(self, tmp_path):
         """Conflict copies that can't be read are skipped gracefully."""
-        from mind_meld.cli import _fetch_remote_manifest
-
         backend = LocalBackend(tmp_path / "storage")
 
         # Write a valid canonical manifest
@@ -651,7 +646,7 @@ class TestConflictManifestMerge:
         conflict.write_bytes(b"not valid encrypted data")
 
         # Should still return the canonical manifest (status == "ok")
-        result = _fetch_remote_manifest(backend, "abc", PASSPHRASE, MEMORY_KB)
+        result = core._fetch_remote_manifest(backend, "abc", PASSPHRASE, MEMORY_KB)
         assert result.is_ok
         # Post-Track-1B: v1 input is promoted to v2 and the top-level "files"
         # mirror is scrubbed. The payload lives under sources.claude.files.
@@ -659,12 +654,10 @@ class TestConflictManifestMerge:
 
     def test_all_copies_corrupt_returns_corrupt_status(self, tmp_path):
         """If all manifest copies are corrupt, return status='corrupt'."""
-        from mind_meld.cli import _fetch_remote_manifest
-
         backend = LocalBackend(tmp_path / "storage")
         backend.put("manifests/abc/manifest.json.enc", b"corrupt data")
 
-        result = _fetch_remote_manifest(backend, "abc", PASSPHRASE, MEMORY_KB)
+        result = core._fetch_remote_manifest(backend, "abc", PASSPHRASE, MEMORY_KB)
         assert result.status == "corrupt"
         assert result.manifest is None
 
@@ -672,12 +665,10 @@ class TestConflictManifestMerge:
         """If no manifest exists (first push / fresh device), return
         status='missing' — NOT corrupt. Conflating the two would refuse
         every first push."""
-        from mind_meld.cli import _fetch_remote_manifest
-
         backend = LocalBackend(tmp_path / "storage")
         # no put — device has never pushed
 
-        result = _fetch_remote_manifest(backend, "fresh-device", PASSPHRASE, MEMORY_KB)
+        result = core._fetch_remote_manifest(backend, "fresh-device", PASSPHRASE, MEMORY_KB)
         assert result.status == "missing"
         assert result.manifest is None
 

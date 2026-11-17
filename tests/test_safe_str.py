@@ -269,10 +269,10 @@ class TestFinalOutputSinks:
     def test_error_renders_exception_text_as_literal_rich_text(self, capsys):
         import typer
 
-        from mind_meld import cli
+        from mind_meld import core
 
         with pytest.raises(typer.Exit):
-            cli._error("bad \x1b]52;c;ZXZpbA==\x07[red]configuration[/red]")
+            core._error("bad \x1b]52;c;ZXZpbA==\x07[red]configuration[/red]")
 
         out = capsys.readouterr().err
         assert "\x1b" not in out
@@ -281,7 +281,7 @@ class TestFinalOutputSinks:
         assert out.startswith("mm: error: ")
 
     def test_dropped_device_warning_renders_peer_fields_as_literal(self, monkeypatch, capsys):
-        from mind_meld import cli
+        from mind_meld import core
         from mind_meld import devices as devices_mod
 
         evil = "peer\x1b]52;c;ZXZpbA==\x07[red]name[/red]"
@@ -291,7 +291,7 @@ class TestFinalOutputSinks:
             "inventory_devices",
             lambda _backend: devices_mod.DeviceInventory(dropped=[(evil, evil)]),
         )
-        assert cli._list_devices_warn(object()) == []
+        assert core._list_devices_warn(object()) == []
 
         out = capsys.readouterr().err
         assert "\x1b" not in out
@@ -358,10 +358,10 @@ class TestFinalOutputSinks:
     def test_error_nested_st_probe_has_no_esc_or_c1(self, capsys):
         import typer
 
-        from mind_meld import cli
+        from mind_meld import core
 
         with pytest.raises(typer.Exit):
-            cli._error(f"bad {_NESTED_OSC_ST}[red]configuration[/red]")
+            core._error(f"bad {_NESTED_OSC_ST}[red]configuration[/red]")
 
         out = capsys.readouterr().err
         _assert_no_esc_or_c1(out)
