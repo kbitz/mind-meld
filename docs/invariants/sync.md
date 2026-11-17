@@ -1660,8 +1660,9 @@ stored values (compat_version, legacy_jsonl_stat, a row's extra) are corrupt.
 
 A statedb write transaction is always the **innermost** lock: never acquire the
 mm lockfile or upgrade-state's flock inside one. statedb itself takes neither.
-History can be written outside the mm lock (the self-upgrade hook releases its
-upgrade flock first); every other table may be written only under the mm lock.
+History, its import bookkeeping in `meta`, and schema migrations may write
+outside the mm lock (the self-upgrade hook releases its upgrade flock first);
+row writes to `peer_base`, `seen_version` and `cursors` require the mm lock.
 
 `append` and `append_self_upgrade` retain their legacy dict shapes; `sidecar=`
 is removed, but imported sidecar keys survive. `row` stamps `ts` at append time.
