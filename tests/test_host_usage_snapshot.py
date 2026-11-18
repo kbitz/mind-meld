@@ -2411,9 +2411,9 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
     if evidence_state != "absent":
         evidence = events_tail.HostReadEvidence()
     if evidence_state == "known_converged":
-        evidence = events_tail.HostReadEvidence(250, 300, "2999-01-01T00:00:00+00:00", 51, 51)
+        evidence = events_tail.HostReadEvidence(750, 800, "2999-01-01T00:00:00+00:00", 51, 51)
     elif evidence_state == "known":
-        evidence = events_tail.HostReadEvidence(250, 300, "2999-01-01T00:00:00+00:00", 50, 51)
+        evidence = events_tail.HostReadEvidence(750, 800, "2999-01-01T00:00:00+00:00", 51, 52)
     phrase = events_tail._host_skip_phrase(
         reader, "deadline", readiness="ready", verb=verb, evidence=evidence, in_diag=in_diag
     )
@@ -2438,7 +2438,7 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
         assert "Run `mm push` to refresh usage and warm cold readers." in phrase
         assert "host_usage_autopush_budget_ms" not in phrase
         if evidence_state == "known_converged":
-            assert "Last read allowed 250 ms; last complete read 300 ms (in the future)" in phrase
+            assert "Last read allowed 750 ms; last complete read 800 ms (in the future)" in phrase
             assert f"51 of 51 {unit} cached" in phrase
         else:
             assert "Last read allowed unknown ms; last complete read unknown ms (unknown)" in phrase
@@ -3360,7 +3360,7 @@ class TestCaptureBudget85A:
             "dev-a",
             since=datetime.now(timezone.utc),
             walk_budget_ms=500,
-            root_discovery_budget_ms=50,
+            root_discovery_budget_ms=_mm_events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS,
             deadline_monotonic=_time.monotonic() - 0.1,
         )
         assert len(rows) == 1
@@ -3797,7 +3797,7 @@ def test_track_125a_progress_scope_receives_host_and_git_counts_and_isolates_fau
             "dev-a",
             since=datetime(2026, 10, 1, tzinfo=timezone.utc),
             walk_budget_ms=500,
-            root_discovery_budget_ms=50,
+            root_discovery_budget_ms=_mm_events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS,
         )
     assert calls == [
         ("Recording activity", 0, 2, "repositories"),
@@ -3816,7 +3816,7 @@ def test_track_125a_progress_scope_receives_host_and_git_counts_and_isolates_fau
             "dev-a",
             since=datetime(2026, 10, 1, tzinfo=timezone.utc),
             walk_budget_ms=500,
-            root_discovery_budget_ms=50,
+            root_discovery_budget_ms=_mm_events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS,
         )
     assert actual_usage == expected_usage
     assert {p["project"] for p in git_rows[0]["projects"]} == {"r1", "r2"}

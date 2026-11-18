@@ -243,8 +243,8 @@ def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monke
             {
                 "version": 1,
                 "last_reason": "deadline",
-                "last_deadline_allotted_ms": 250,
-                "last_complete_ms": 300,
+                "last_deadline_allotted_ms": 750,
+                "last_complete_ms": 800,
                 "last_complete_at": "2999-01-01T00:00:00+00:00",
                 "files": {"warm": {"states": []}},
             }
@@ -255,7 +255,7 @@ def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monke
     assert result.exit_code == 0, result.output
     text = " ".join(result.output.split())
     assert "(codex deadline)" in text
-    assert "Last read allowed 250 ms; last complete read 300 ms (in the future)" in text
+    assert "Last read allowed 750 ms; last complete read 800 ms (in the future)" in text
     assert "Run `mm push` to refresh usage and warm cold readers." in text
     assert "host_usage_autopush_budget_ms" not in text
     assert "not yet scanned" not in text
@@ -1882,10 +1882,10 @@ def test_autopush_breadcrumb_success_when_events_tail_is_healthy(tmp_path, monke
 def test_autopush_measured_warm_reads_record_success_breadcrumb_and_overrun_records_degraded(
     tmp_path, monkeypatch
 ):
-    """Track 149A: under the 750 ms default autopush sweep and 250 ms grace floor,
+    """Track 149A: under the default autopush sweep and later-reader grace floor,
     measured warm reads (Codex 266 ms, Antigravity 153 ms) complete with a
     `success` breadcrumb; an overrunning reader (800 ms) still records `deadline`
-    and `degraded` while Antigravity finishes inside the 250 ms grace floor."""
+    and `degraded` while Antigravity finishes inside its grace window."""
     from mind_meld import events_tail, host_usage, token_usage
 
     iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
@@ -1936,7 +1936,7 @@ def test_autopush_measured_warm_reads_record_success_breadcrumb_and_overrun_reco
     assert "degraded_sources" not in host_row_ok
 
     # Now make a substantive edit and make Codex overrun the 750 ms default (800 ms);
-    # Antigravity (153 ms) still completes in the 250 ms grace floor while Codex records deadline.
+    # Antigravity still completes in its grace window while Codex records deadline.
     (claude_root / "projects" / "-Users-user-myapp" / "memory" / "role.md").write_text("updated")
     costs["codex"] = 0.800
     r_over = runner.invoke(app, ["autopush"])
