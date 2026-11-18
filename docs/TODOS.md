@@ -44,25 +44,20 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/events_tail.py|tests/test_integration.py] Test gap: Pin the remaining gates for held Git cursor recovery
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The CLI test covers a clean recovery and a budget-aborted walk after a hold. It does not isolate recovery when the terminal append is unconfirmed, the discovery refresh window is pending, or the Git walk returns an error.
-- **Hypothesis (untested):** Extend the held-interval test to vary those conditions individually and check the recorded degradation and recovery notice.
-- **Evidence:** Track 149A coverage audit at `85c4284`. The success, advisory and automatic catch-up probes passed after repair.
-- **Revisit:** A track that changes held-cursor recovery or the recovery test fixture.
-- **Effort:** S
-
-### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Assert the missing custom events folder remedy appears once
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The missing-folder test counts warnings. A duplicate remedy in a trailing push notice would leave that count unchanged.
-- **Hypothesis (untested):** Extend the missing custom `mm-events` root test to count the remedy across warning and notice output.
-- **Evidence:** Track 149A coverage audit at `85c4284`. The recorded path-free detail is already skipped by the notice filter.
-- **Revisit:** A track that changes the attended push notice filter or custom events root handling.
-- **Effort:** S
-
 ## Drain records
+
+### Roadmap inbox drain — 2026-11-18 (two flaky tests carded; Track 149A recorded)
+
+Verified against `6431854` (v1.12.67), from the Factory Manager's brief carrying the developer's "ok for a longshoreman" to carding the two tests that failed intermittently that day as one small Track and draining the two test gaps in the same run. Track 149A merged in PR #350 and is recorded as an independent receipt in docs/roadmap-shipped.md; Group 149 is retired. Admission follows docs/SPEC.md (MVP-1 on Syncthing), the AGENTS.md planning rules and the standing constraint that a reproducible bug seen on the owner's machines or CI goes to Current Plan: both flakes failed real runs (the v1.12.67 release script's full suite on `linux-a`, and PR #350's macOS CI), so they pass the manifestation gate. Track 150A touches `tests/test_bin_check.py`, `tests/test_upgrade.py` and `bin/_check.py`, which cover neither test gap's files, so both wait in Future for a Track whose `_touches:` cover them.
+
+| Item | Disposition |
+|---|---|
+| Brief: `test_reverting_dirty_non_python_file_seeded_during_refresh_triggers_full_run` failed in the v1.12.67 release run | place (Track 150A); the brief's mtime hypothesis does not hold (selection compares SHA-256 content), and the card names the route found at HEAD: a green `--refresh` that keeps the old record |
+| Brief: `test_timeout_kills_sleeping_grandchild_and_records_network` failed in PR #350's macOS CI | place (Track 150A), test-only: `_run_git` kills the process group correctly, and the re-parented grandchild can still be an unreaped zombie when the test checks it |
+| Test gap: Pin the remaining gates for held Git cursor recovery (PR #350) | defer (test gap; still open, no test added after `85c4284`) |
+| Test gap: Assert the missing custom events folder remedy appears once (PR #350) | defer (test gap; still open, no test added after `85c4284`) |
+
+4 drained: 2 placed, 2 deferred, 0 killed, 0 discharged. Future grows from 76 to 78 entries; its other entries keep their text. No bump under SPEC documentation-only policy.
 
 ### Roadmap regeneration — 2026-11-17 (every planned Track shipped; empty plan)
 

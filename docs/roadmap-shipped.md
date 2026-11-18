@@ -1086,3 +1086,13 @@ Recorded by the 2026-11-17 regeneration at `c55d103`. Identity for each Track co
 ### Track 148A: Show a pending Syncthing join request in mm status and an attended mm pull ✓ Shipped (v1.12.66)
 - 2026-11-17: merged [PR #347](https://github.com/kbitz/mind-meld/pull/347) (commit `c55d103c4360b99df303bce5fb2d77c40cdc2835`); verified land-time Track 148A, original Group 148, factory branch `mmm/75dc278f`. Introduction/lineage: carded by the 2026-11-17 inbox drain (`f87db09`, PR #342) on the developer's word on that PR.
 - Approved-scope evidence: on a machine where mm manages Syncthing, `mm status` and an attended `mm pull` report pending join requests by count with the `mm devices approve` command; pending IDs and names stay unprinted; previews, automatic commands and owner-managed machines stay quiet; v1.12.66 release row. Three test gaps went to the inbox (deferred by the 2026-11-17 regeneration).
+
+## Individual Track history
+
+_tombstone: 149_
+
+Recorded by the 2026-11-18 inbox drain at `6431854`. Identity: PR #350's body names Track 149A, and its head branch `mmm/2ddc7a0f` matches the factory item the factory's advance records for 149A (`adv-149a-2.json`). Scope evidence is the merged PR's review-and-prep and ship receipts, the merged content and the release row in docs/PROGRESS.md.
+
+### Track 149A: Size autopush host reads from measured reads, print attended owner actions, and name machines rather than Macs ✓ Shipped (v1.12.67)
+- 2026-11-18: merged [PR #350](https://github.com/kbitz/mind-meld/pull/350) (commit `6431854452e48ed045dac5e53131b743a7dd499c`); verified land-time Track 149A, original Group 149, factory branch `mmm/2ddc7a0f`. Introduction/lineage: carded by the 2026-11-18 drain (`c4bb3d8`, PR #349) from that day's acceptance-check bugs on `mac-a` and `linux-a`.
+- Approved-scope evidence: merged PR review/prep and ship receipts (release head `9fdf6fe`, full `./bin/check` passed there; CI passed on its rerun and on `main`), merged implementation/tests and the v1.12.67 release row. The autopush sweep default is 750 ms with a 250 ms later-reader grace (`config.DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS`, `events_tail.HOST_READER_GRACE_MS`), and `tests/test_host_usage_snapshot.py` completes the measured Codex 266 ms and Antigravity 153 ms reads under it; an attended push prints a recorded owner action as a `mm: notice:` line, and a held cursor whose run records automatic Git catch-up omits the recapture remedy (an auto-chosen review decision recorded in the PR); `rg -n "this Mac|other Macs|every Mac|another Mac" src/` finds only code comments and internal docstrings (re-grepped at `6431854`). Two test gaps went to the inbox (deferred by the 2026-11-18 drain).
