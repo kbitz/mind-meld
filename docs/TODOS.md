@@ -44,6 +44,50 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=bin/_check.py|tests/test_bin_check.py] Test gap: Git selector timeout translation
+
+- **Test gap:** no demonstrated defect, filed under `test-gaps=record`.
+- **Description:** The post-suite failure test injects a selection error after Git. The selector's 60-second Git subprocess bound and its timeout diagnostic need direct coverage.
+- **Hypothesis (untested):** Inject a timeout at the Git subprocess call and check the translated selection error and bound.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `bin/_check.py` (`_git`)
+- **Evidence:** Track 150A coverage audit found no failure on this path.
+- **Context:** /review-and-prep for Track 150A, `3dcfff8` (2026-11-18). Revisit in the next Track touching these files.
+- **Effort:** ?
+
+### [review:files=bin/_check.py|tests/test_bin_check.py] Test gap: Missing coverage in the running interpreter
+
+- **Test gap:** no demonstrated defect, filed under `test-gaps=record`.
+- **Description:** The missing-coverage fallback test replaces the whole environment probe, leaving the in-process `coverage` import failure untested.
+- **Hypothesis (untested):** Exercise that probe with the import unavailable and verify the reported coverage flag.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `bin/_check.py` (`probe_env`)
+- **Evidence:** Track 150A coverage audit found no failure on this path.
+- **Context:** /review-and-prep for Track 150A, `3dcfff8` (2026-11-18). Revisit in the next Track touching these files.
+- **Effort:** ?
+
+### [review:files=bin/_check.py|tests/test_bin_check.py] Test gap: Worker parts with no collected nodes
+
+- **Test gap:** no demonstrated defect, filed under `test-gaps=record`.
+- **Description:** The empty-worker test covers a valid collection beside an empty part. The no-tests pytest exit bypasses the merger when every worker part is empty.
+- **Hypothesis (untested):** Extend the merge test with only empty parts and check that it refuses to publish a baseline.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `bin/_check.py` (`_merge_parts`)
+- **Evidence:** Track 150A coverage audit found no failure on this path.
+- **Context:** /review-and-prep for Track 150A, `3dcfff8` (2026-11-18). Revisit in the next Track touching these files.
+- **Effort:** ?
+
+### [review:files=bin/_check.py|tests/test_bin_check.py] Test gap: Cleanup lock contention after refresh fallback
+
+- **Test gap:** no demonstrated defect, filed under `test-gaps=record`.
+- **Description:** The existing second-recorder test covers contention when seeding. Lock contention during stale-record cleanup after a green fallback is untested.
+- **Hypothesis (untested):** Hold the lock during fallback cleanup and verify that it preserves the existing record and the green exit.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `bin/_check.py` (`_drop_stale_refresh_record`)
+- **Evidence:** Track 150A coverage audit found no failure on this path.
+- **Context:** /review-and-prep for Track 150A, `3dcfff8` (2026-11-18). Revisit in the next Track touching these files.
+- **Effort:** ?
+
 ## Drain records
 
 ### Roadmap inbox drain — 2026-11-18 (two flaky tests carded; Track 149A recorded)
