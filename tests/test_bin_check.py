@@ -747,6 +747,11 @@ def affected(root: Path, *args: str, **kw):
     return check(root, "--affected", "--serial", *args, **kw)
 
 
+def _assert_refresh_recorded(proc: subprocess.CompletedProcess[str], *, tests: int = 4) -> None:
+    assert proc.returncode == 0, both(proc)
+    assert f"recorded coverage for {tests} tests" in proc.stderr, both(proc)
+
+
 class TestAffectedArgv:
     def test_flags_parse(self) -> None:
         mod = load_check()
@@ -1116,7 +1121,11 @@ class TestAffectedSelection:
     ) -> None:
         doc = proj / "README.md"
         doc.write_text("dirty at refresh\n")
-        assert affected(proj, "--refresh").returncode == 0
+        _assert_refresh_recorded(affected(proj, "--refresh"))
+        assert (
+            "README.md"
+            in json.loads((proj / ".mm-test-selection" / "record.json").read_text())["files"]
+        )
         ran(proj)
         doc.unlink()
         proc = affected(proj)
@@ -1144,7 +1153,7 @@ class TestAffectedSelection:
         git(proj, "add", "tests/test_other.py")
         git(proj, "commit", "-m", "make test_other env-toggleable")
         git(proj, "update-ref", "refs/remotes/origin/main", "HEAD")
-        assert affected(proj, "--refresh").returncode == 0
+        _assert_refresh_recorded(affected(proj, "--refresh"))
         ran(proj)
 
         doc = proj / "README.md"
@@ -1280,6 +1289,171 @@ class TestAffectedSelection:
         with pytest.raises(mod.SelectError) as ei:
             mod.ensure_select_dir(other)
         assert ei.value.code == "cache-unowned"
+
+    def test_unrecorded_green_refresh_fails_assertion_and_unlinks_stale_record(
+        self, proj: Path, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        doc = proj / "README.md"
+        doc.write_text("dirty at refresh\n")
+        hook_dir = tmp_path / "midrun-hook"
+        hook_dir.mkdir()
+        (hook_dir / "sitecustomize.py").write_text(
+            "import os, pathlib\n"
+            "if os.environ.get('MM_SELECT_CONFIG'):\n"
+            f"    with open({str(doc)!r}, 'a', encoding='utf-8') as fh:\n"
+            "        fh.write('mutated mid-run\\n')\n",
+            encoding="utf-8",
+        )
+        refresh = affected(proj, "--refresh", env={"PYTHONPATH": str(hook_dir)})
+        assert refresh.returncode == 0, both(refresh)
+        with pytest.raises(
+            AssertionError, match="record not updated: files changed while the suite ran"
+        ):
+            _assert_refresh_recorded(refresh)
+        record_path = proj / ".mm-test-selection" / "record.json"
+        assert not record_path.exists()
+        ran(proj)
+
+        doc.unlink()
+        followup = affected(proj)
+        assert followup.returncode == 0, both(followup)
+        assert "ran 0 of 4" not in both(followup)
+        assert ran(proj) == ALL_TESTS
+        assert record_path.is_file()
+
+        # Post-suite SelectError in seed_record and pre-suite SelectError fallback on --refresh
+        # both remove any pre-existing record.json rather than leaving a stale baseline.
+        mod = load_check()
+        calls = 0
+
+        def fail_second_changed_since(_root: Path, _mb: str) -> dict[str, str]:
+            nonlocal calls
+            calls += 1
+            if calls >= 2:
+                raise mod.SelectError("untracked files", "git timed out", "git-unavailable", "fix")
+            return {}
+
+        monkeypatch.setattr(mod, "changed_since", fail_second_changed_since)
+        monkeypatch.setattr(mod, "run_owned", lambda *_a, **_kw: 0)
+        args = mod.parse_argv(["--affected", "--refresh", "--serial"])
+        sel = proj / ".mm-test-selection"
+        assert (
+            mod.seed_record(args, proj, sel, Path(sys.executable), [], {"fp": "x"}, "cfg", "mb")
+            == 0
+        )
+        assert "record not updated:" in capsys.readouterr().err
+        assert not record_path.exists()
+
+        record_path.write_text('{"stale": true}', encoding="utf-8")
+        monkeypatch.setattr(
+            mod,
+            "resolve_merge_base",
+            lambda *_a: (_ for _ in ()).throw(
+                mod.SelectError("merge base", "git timed out", "git-unavailable", "fix")
+            ),
+        )
+        monkeypatch.setattr(mod, "fallback_pytest", lambda *_a: 0)
+        assert mod.run_affected(args, proj, Path(sys.executable), []) == 0
+        assert not record_path.exists()
+
+    def test_merge_parts_ignores_empty_worker_collection_and_rejects_disagreement(
+        self, proj: Path, tmp_path: Path
+    ) -> None:
+        mod = load_check()
+        out_dir = tmp_path / "parts"
+        out_dir.mkdir()
+        nodes = sorted(ALL_TESTS)
+        (out_dir / "part-100.json").write_text(
+            json.dumps(
+                {
+                    "collected": [],
+                    "filtered": False,
+                    "filters": [],
+                    "ctx": {},
+                    "reads": {},
+                    "opaque": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (out_dir / "part-200.json").write_text(
+            json.dumps(
+                {
+                    "collected": nodes,
+                    "filtered": False,
+                    "filters": [],
+                    "ctx": {"src/mind_meld/leaf.py": ["tests/test_leaf.py::test_leaf[1]"]},
+                    "reads": {},
+                    "opaque": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        merged = mod._merge_parts(out_dir)
+        assert merged["nodes"] == nodes
+        record = mod.build_record(
+            proj, out_dir, mod.inventory(proj), {"fp": "env-fp"}, "cfg-fp", "deadbeef"
+        )
+        assert record["nodes"] == nodes
+
+        (out_dir / "part-100.json").write_text(
+            json.dumps(
+                {
+                    "collected": ["tests/test_other.py::test_other"],
+                    "filtered": False,
+                    "filters": [],
+                    "ctx": {},
+                    "reads": {},
+                    "opaque": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="workers collected different tests"):
+            mod._merge_parts(out_dir)
+
+    def test_same_interpreter_probe_env_runs_in_process_without_subprocess_timeout(
+        self, proj: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        mod = load_check()
+        real_run = subprocess.run
+        expected_proc = real_run(
+            [sys.executable, "-c", mod.ENV_PROBE],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        expected_env = json.loads(expected_proc.stdout)
+
+        def timeout_on_env_probe(cmd, *args, **kwargs):
+            if list(cmd)[1:3] == ["-c", mod.ENV_PROBE]:
+                raise subprocess.TimeoutExpired(cmd, mod.SELECT_SUBPROCESS_TIMEOUT_S)
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(mod.subprocess, "run", timeout_on_env_probe)
+        assert mod.probe_env(Path(sys.executable)) == expected_env
+
+        other_py = tmp_path / "other-python"
+        other_py.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        other_py.chmod(0o755)
+        with pytest.raises(mod.SelectError) as ei:
+            mod.probe_env(other_py)
+        assert ei.value.code == "env-probe"
+
+        monkeypatch.setenv("MM_CHECK_ROOT", str(proj))
+        monkeypatch.setenv("MM_PYTHON", sys.executable)
+        monkeypatch.setenv("RAN_LOG", str(ran_log(proj)))
+        doc = proj / "README.md"
+        doc.write_text("dirty at refresh\n")
+        assert mod.main(["--no-bootstrap", "--tests", "--affected", "--refresh", "--serial"]) == 0
+        assert (
+            "README.md"
+            in json.loads((proj / ".mm-test-selection" / "record.json").read_text())["files"]
+        )
+        ran(proj)
+        doc.unlink()
+        assert mod.main(["--no-bootstrap", "--tests", "--affected", "--serial"]) == 0
+        assert ran(proj) == ALL_TESTS
 
 
 class TestSkeleton:

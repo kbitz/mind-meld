@@ -545,6 +545,19 @@ class TestPullhistoryContract:
 # ── _fetch_tags git adapter + no-prompt / failure recording (Track 124B) ──
 
 
+def _wait_pid_gone(pid: int, *, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        # gstack-timing-ok: bounded poll for init/launchd to reap killed descendant
+        time.sleep(0.02)
+
+
 class TestFetchTagsGitAdapter124B:
     @pytest.mark.parametrize("seed", [124, 999])
     def test_218_tags_any_order_picks_highest_stable_without_http(self, monkeypatch, seed):
@@ -804,24 +817,34 @@ class TestFetchTagsGitAdapter124B:
         assert res.state == "unknown"
         assert res.check_failure == "not-readable"
 
-    def test_timeout_kills_sleeping_grandchild_and_records_network(self, monkeypatch, tmp_path):
+    def _run_timeout_grandchild_check(
+        self,
+        monkeypatch,
+        tmp_path,
+        *,
+        detach_grandchild: bool = False,
+        reap_timeout: float = 5.0,
+    ) -> None:
         _set_version(monkeypatch, "1.0.0")
         monkeypatch.setattr(upgrade, "_refuse_git_under_pytest", lambda: None)
         monkeypatch.setattr(upgrade, "CHECK_TIMEOUT_SECONDS", 1)
         pid_file = tmp_path / "grandchild.pid"
+        pid_tmp = tmp_path / "grandchild.pid.tmp"
+        popen_extra = ", preexec_fn=os.setsid" if detach_grandchild else ""
         fake_git = tmp_path / "fake-git-sleep"
         fake_git.write_text(
             f"#!{sys.executable}\n"
             + textwrap.dedent(
                 f"""
-                import subprocess, sys, time
+                import os, subprocess, sys, time
                 if sys.argv[1:2] == ["config"]:
                     sys.exit(1)
                 child = subprocess.Popen(
-                    [{sys.executable!r}, "-c", "import time; time.sleep(60)"]
+                    [{sys.executable!r}, "-c", "import time; time.sleep(60)"]{popen_extra}
                 )
-                with open({str(pid_file)!r}, "w", encoding="utf-8") as fh:
+                with open({str(pid_tmp)!r}, "w", encoding="utf-8") as fh:
                     fh.write(str(child.pid))
+                os.replace({str(pid_tmp)!r}, {str(pid_file)!r})
                 time.sleep(60)
                 """
             ).lstrip(),
@@ -830,16 +853,59 @@ class TestFetchTagsGitAdapter124B:
         fake_git.chmod(0o755)
         monkeypatch.setattr(upgrade, "find_git", lambda: str(fake_git))
 
-        start = time.monotonic()
-        res = upgrade.check_for_upgrade(force=True)
-        elapsed = time.monotonic() - start
-        # gstack-timing-ok: forced 1s subprocess timeout must bound descendant cleanup too.
-        assert elapsed < 5.0
-        assert res.state == "unknown"
-        assert res.check_failure == "network"
-        grandchild_pid = int(pid_file.read_text(encoding="utf-8").strip())
-        with pytest.raises(ProcessLookupError):
-            os.kill(grandchild_pid, 0)
+        grandchild_pid: int | None = None
+        cleanup_verified = False
+        try:
+            start = time.monotonic()
+            res = upgrade.check_for_upgrade(force=True)
+            elapsed = time.monotonic() - start
+            # gstack-timing-ok: forced 1s subprocess timeout must bound descendant cleanup too.
+            assert elapsed < 5.0
+            assert res.state == "unknown"
+            assert res.check_failure == "network"
+            grandchild_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            assert _wait_pid_gone(grandchild_pid, timeout=reap_timeout), (
+                f"grandchild {grandchild_pid} still alive after {reap_timeout}s"
+            )
+            cleanup_verified = True
+        finally:
+            if not cleanup_verified:
+                if grandchild_pid is None and pid_file.exists():
+                    grandchild_pid = int(pid_file.read_text(encoding="utf-8").strip())
+                if grandchild_pid is not None:
+                    try:
+                        os.kill(grandchild_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    _wait_pid_gone(grandchild_pid, timeout=2.0)
+
+    def test_timeout_kills_sleeping_grandchild_and_records_network(self, monkeypatch, tmp_path):
+        self._run_timeout_grandchild_check(monkeypatch, tmp_path)
+
+        calls = 0
+
+        def fake_kill(_pid: int, _sig: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls >= 3:
+                raise ProcessLookupError
+
+        monkeypatch.setattr(os, "kill", fake_kill)
+        assert _wait_pid_gone(999999, timeout=1.0) is True
+        assert calls == 3
+
+    def test_timeout_grandchild_check_fails_when_grandchild_calls_setsid(
+        self, monkeypatch, tmp_path
+    ):
+        with pytest.raises(AssertionError, match="still alive"):
+            self._run_timeout_grandchild_check(
+                monkeypatch,
+                tmp_path,
+                detach_grandchild=True,
+                reap_timeout=0.3,
+            )
+        grandchild_pid = int((tmp_path / "grandchild.pid").read_text(encoding="utf-8").strip())
+        assert _wait_pid_gone(grandchild_pid, timeout=1.0) is True
 
     def test_keyboard_interrupt_kills_sleeping_process_group_and_reraises(
         self, monkeypatch, tmp_path

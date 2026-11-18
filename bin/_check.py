@@ -42,6 +42,7 @@ SELECT_FAILED = "failed.json"
 SELECT_LOCK = ".lock"
 SELECT_SCHEMA = 1
 SELECT_DEFAULT_BASE = "origin/main"
+SELECT_SUBPROCESS_TIMEOUT_S = 60
 # A change to any of these can alter what every test does: never narrow.
 SELECT_CONFIG_PATHS = ("pyproject.toml", "bin/check", "bin/_check.py")
 
@@ -1072,7 +1073,7 @@ def _git(root: Path, *args: str, op: str) -> bytes:
         proc = subprocess.run(
             ["git", "-C", str(root), *args],
             capture_output=True,
-            timeout=15,
+            timeout=SELECT_SUBPROCESS_TIMEOUT_S,
             check=False,
             env=env,
         )
@@ -1235,8 +1236,32 @@ print(json.dumps({"fp": fp, "coverage": cov}))
 
 def probe_env(tool: Path) -> dict:
     try:
+        same_interpreter = tool.is_file() and os.path.realpath(tool) == os.path.realpath(
+            sys.executable
+        )
+    except OSError:
+        same_interpreter = False
+    if same_interpreter:
+        import importlib.metadata as metadata
+
+        dists = sorted({f"{d.metadata['Name']}=={d.version}" for d in metadata.distributions()})
+        try:
+            import coverage as _coverage  # noqa: F401
+
+            cov = True
+        except ImportError:
+            cov = False
+        fp = hashlib.sha256(
+            ("\n".join(dists) + sys.version + os.path.realpath(sys.executable)).encode()
+        ).hexdigest()
+        return {"fp": fp, "coverage": cov}
+    try:
         proc = subprocess.run(
-            [str(tool), "-c", ENV_PROBE], capture_output=True, text=True, timeout=15, check=False
+            [str(tool), "-c", ENV_PROBE],
+            capture_output=True,
+            text=True,
+            timeout=SELECT_SUBPROCESS_TIMEOUT_S,
+            check=False,
         )
         result = json.loads(proc.stdout) if proc.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError):
@@ -1488,7 +1513,7 @@ def _merge_parts(out_dir: Path) -> dict:
     for part in parts:
         if part["filtered"]:
             raise ValueError("pytest filtered the run (%s)" % ", ".join(part["filters"]))
-    collected = parts[0]["collected"]
+    collected = next((part["collected"] for part in parts if part["collected"]), [])
     if any(part["collected"] != collected for part in parts if part["collected"]):
         raise ValueError("workers collected different tests")
     if not collected:
@@ -1602,11 +1627,17 @@ def run_affected(args: Args, root: Path, tool: Path, n_args: list[str]) -> int:
         plan = plan_selection(root, record, merge_base, changed_since(root, merge_base), failed)
     except SelectError as err:
         select_error_report(err, base, sel)
-        return fallback_pytest(args, sel, tool, n_args)
+        result = fallback_pytest(args, sel, tool, n_args)
+        if args.refresh and result == 0:
+            _drop_stale_refresh_record(sel)
+        return result
     except Exception as exc:
         err = SelectError("select tests", f"{type(exc).__name__}: {exc}", "unexpected", "report it")
         select_error_report(err, base, sel)
-        return fallback_pytest(args, sel, tool, n_args)
+        result = fallback_pytest(args, sel, tool, n_args)
+        if args.refresh and result == 0:
+            _drop_stale_refresh_record(sel)
+        return result
     if plan.full:
         log(f"affected: {plan.full}; running the full suite")
         return fallback_pytest(args, sel, tool, n_args)
@@ -1635,6 +1666,22 @@ def _clean_failed_on_green(sel: Path, result: int) -> int:
         except OSError:
             pass
     return result
+
+
+def _drop_stale_refresh_record(sel: Path) -> None:
+    if not sel.is_dir() or sel.is_symlink() or not (sel / SELECT_OWNER).is_file():
+        return
+    try:
+        fd = os.open(sel / SELECT_LOCK, os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        (sel / SELECT_RECORD).unlink(missing_ok=True)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def select_run(args: Args, sel: Path, tool: Path, n_args: list[str], plan: Plan) -> int:
@@ -1718,7 +1765,12 @@ def seed_record(
                 if not any(record["ctx"].values()):
                     raise ValueError(f"no coverage of src/mind_meld under {root}")
                 atomic_write_json(sel / SELECT_RECORD, record)
-            except (OSError, ValueError, KeyError) as exc:
+            except (OSError, ValueError, KeyError, SelectError) as exc:
+                if args.refresh:
+                    try:
+                        (sel / SELECT_RECORD).unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 log(f"affected: record not updated: {exc}")
                 return result
             log(f"affected: recorded coverage for {len(record['nodes'])} tests")
