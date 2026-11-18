@@ -479,7 +479,7 @@ def test_track_125a_status_git_capture_catching_up_and_error_shows_failure(tmp_p
     assert statusflow._print_retro_capture_status(sources, "dev-a") is True
     out = " ".join(buf.getvalue().split())
     assert f"Retro capture: catching up ({expected_pending} left)" in out
-    assert "Continue capture on this Mac: mm push" in out
+    assert "Continue capture on this machine: mm push" in out
 
     # Error-only stop (walk_budget_aborts=0, walk_errors=1) shows failure and recapture remedy.
     buf_err = StringIO()
@@ -499,7 +499,7 @@ def test_track_125a_status_git_capture_catching_up_and_error_shows_failure(tmp_p
     err_out = " ".join(buf_err.getvalue().split())
     assert "Retro capture: incomplete since" in err_out
     assert "1 repository was skipped." in err_out
-    assert "mm recapture" in err_out
+    assert "Recover this machine's last 5 days: mm recapture 5d" in err_out
     assert "catching up (" not in err_out
 
 
@@ -550,7 +550,7 @@ def test_status_incomplete_discovery_with_zero_pending_has_no_positive_catching_
     out = " ".join(buf.getvalue().split())
     assert "Retro capture: 0 known repositories left to catch up." in out
     assert "Repository discovery is still catching up." in out
-    assert "Continue capture on this Mac: mm push" in out
+    assert "Continue capture on this machine: mm push" in out
     assert "catching up (" not in out
 
 
@@ -764,3 +764,76 @@ def test_status_pending_syncthing_join_stays_silent_for_zero_unmanaged_and_error
     assert "mm devices approve" not in res_down.stdout + res_down.stderr
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []
+
+
+def test_src_mac_phrases_appear_only_in_comments_or_internal_docstrings():
+    """Track 149A: user-facing output, CLI --help, and retro_fleet/SKILL.md use
+    machine-neutral terms; any match of `this Mac|other Macs|every Mac|another Mac`
+    under `src/` lives only in `#` comments or internal docstrings."""
+    import ast
+    import re
+    from pathlib import Path
+
+    src_root = Path(__file__).resolve().parents[1] / "src"
+    four_phrases = re.compile(r"this Mac|other Macs|every Mac|another Mac")
+    user_facing_mac = re.compile(
+        r"this\s+Mac|other\s+Macs|every\s+Mac|another\s+Mac|"
+        r"\bNo\s+Mac\b|\ba\s+Mac\b|leave\s+the\s+Mac"
+    )
+
+    skill_md = (src_root / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert four_phrases.search(skill_md) is None
+    assert re.search(r"all my Macs|the right Mac|the rendering Mac", skill_md) is None
+
+    for py_path in sorted(src_root.rglob("*.py")):
+        source = py_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(py_path))
+        internal_doc_nodes: set[int] = set()
+        internal_doc_lines: set[int] = set()
+
+        def mark_doc(body, *, is_cli_command: bool = False):
+            for idx, stmt in enumerate(body):
+                if idx == 0 and is_cli_command:
+                    continue
+                if (
+                    isinstance(stmt, ast.Expr)
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                ):
+                    doc_node = stmt.value
+                    internal_doc_nodes.add(id(doc_node))
+                    for lineno in range(
+                        doc_node.lineno, (doc_node.end_lineno or doc_node.lineno) + 1
+                    ):
+                        internal_doc_lines.add(lineno)
+
+        mark_doc(tree.body)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                is_cmd = py_path.name == "cli.py" and any(
+                    isinstance(dec, ast.Call)
+                    and isinstance(dec.func, ast.Attribute)
+                    and dec.func.attr in ("command", "callback")
+                    for dec in node.decorator_list
+                )
+                mark_doc(node.body, is_cli_command=is_cmd)
+
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in internal_doc_nodes
+            ):
+                match = user_facing_mac.search(node.value)
+                assert match is None, (
+                    f"{py_path}:{node.lineno} has user-facing Mac phrase {match.group(0)!r}"
+                )
+
+        for lineno, line in enumerate(source.splitlines(), start=1):
+            if four_phrases.search(line):
+                assert line.lstrip().startswith("#") or lineno in internal_doc_lines, (
+                    f"{py_path}:{lineno} matches four-phrase Mac regex outside "
+                    f"comment/internal docstring: {line!r}"
+                )

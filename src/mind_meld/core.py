@@ -287,9 +287,9 @@ def _newer_format_message(version: int, subject: str = "mm-crypto-init") -> str:
     """One upgrade remedy for newer envelopes, owned by the shared command core."""
     return (
         f"crypto: {subject} was written by a newer mm (format 0x{version:02x}) "
-        f"or is damaged; this Mac runs mm {__version__}. "
+        f"or is damaged; this machine runs mm {__version__}. "
         f"Upgrade with: {upgrade.INSTALL_CMD}. "
-        f"If this Mac is already on the latest release, see {NEWER_STORAGE_URL}."
+        f"If this machine is already on the latest release, see {NEWER_STORAGE_URL}."
     )
 
 
@@ -3024,8 +3024,8 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
             )
         console.print(
             f"\n{explanation}. Pushing publishes the smaller set: that push counts these files "
-            "as deleted from this Mac's manifest, writes no tombstones, and every Mac keeps "
-            "its copy. Removing a recommended glob later brings this prompt back."
+            "as deleted from this machine's manifest, writes no tombstones, and every machine "
+            "keeps its copy. Removing a recommended glob later brings this prompt back."
         )
         console.print("\n[bold]Recommended exclude_patterns updates:[/bold]")
         for name, missing, current in diffs:
@@ -3037,10 +3037,10 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
             console.print(
                 "\nThe include_patterns allowlist syncs only context with a cross-machine "
                 "reader (checkpoints, plans, learnings/decisions ledgers, handoffs); per-run "
-                "output (review-prep trees, loop state, gate diffs) stays on this Mac. "
+                "output (review-prep trees, loop state, gate diffs) stays on this machine. "
                 "Factory manager files, evidence ledgers, pair-review resume copies and "
                 "non-document files in artifact directories stay local too. "
-                "Pushing publishes the smaller set with no tombstones, and every Mac keeps "
+                "Pushing publishes the smaller set with no tombstones, and every machine keeps "
                 "its local files. Deleting the key later brings this prompt back; editing "
                 "the list (even to empty) is respected as your choice."
             )

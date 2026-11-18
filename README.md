@@ -121,8 +121,11 @@ Pins in `[retro] repo_roots` for repositories these sources now name can be remo
 host-usage default (`host_usage_interactive_budget_ms`) rises from 500 ms to 3,000 ms,
 host reads (sweep plus inline warm) get up to three fifths of the attended scan cap
 (`capture_budget_ms` before Track 124A; half before Track 101A), and each later attended reader keeps a reserve of up to 300 ms, so a
-slow Codex read can no longer take Antigravity's or Muse's. Autopush is
-unchanged at 250 ms and never warms. If you pinned `host_usage_interactive_budget_ms`
+slow Codex read can no longer take Antigravity's or Muse's. Autopush stayed
+at 250 ms in Track 101A before settled-aggregate memoization; after Track 105A cut
+warm Codex reads to 266 ms over 7,536 rollouts, Track 149A raised the autopush sweep
+default (`host_usage_autopush_budget_ms`) to 750 ms with a 250 ms later-reader grace
+floor (autopush still never warms). If you pinned `host_usage_interactive_budget_ms`
 in `~/.config/mind-meld/config.toml` as a workaround, remove that line and run
 `mm push`; the measured reader timings fit the new default. Live verification
 across up to three attended pushes follows release installation. Codex also
@@ -906,11 +909,11 @@ How Grok memory sync works:
 
 ### Muse
 
-`mm enable-source muse` does two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this Mac into reading completed model-step token totals from local Muse session logs. Prompts never leave the Mac. Muse is never enabled automatically, even when `~/.local/share/muse/memory/` exists (Muse creates it on first run); `mm init` asks with a default of N. Muse's own `.muse-memory.lock` file never syncs. `~/.config/muse` (credentials, settings, trust) is never a sync source. Muse 1.4.14 usage accepts additive model-step metadata, four required usage counters with optional cache-read/write counters, and validated zero-token steps without a model; a nonzero step still requires a model. In the fleet retro, Muse models appear under the `Muse` row. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
+`mm enable-source muse` does two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this machine into reading completed model-step token totals from local Muse session logs. Prompts never leave this machine. Muse is never enabled automatically, even when `~/.local/share/muse/memory/` exists (Muse creates it on first run); `mm init` asks with a default of N. Muse's own `.muse-memory.lock` file never syncs. `~/.config/muse` (credentials, settings, trust) is never a sync source. Muse 1.4.14 usage accepts additive model-step metadata, four required usage counters with optional cache-read/write counters, and validated zero-token steps without a model; a nonzero step still requires a model. In the fleet retro, Muse models appear under the `Muse` row. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
 
 ### Antigravity (agy)
 
-`mm enable-source agy` does three things: it syncs `~/.gemini/config` (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`; session DBs, settings, hooks, and `agents/` stay local), maintains a `retro-fleet` skill link under `~/.gemini/config/skills/`, and opts this Mac into reading completed step token totals from `~/.gemini/antigravity-cli/conversations/<cid>.db`. Prompts never leave the Mac. The fleet retro gains an `Antigravity` row alongside Claude, Codex, and Muse.
+`mm enable-source agy` does three things: it syncs `~/.gemini/config` (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`; session DBs, settings, hooks, and `agents/` stay local), maintains a `retro-fleet` skill link under `~/.gemini/config/skills/`, and opts this machine into reading completed step token totals from `~/.gemini/antigravity-cli/conversations/<cid>.db`. Prompts never leave this machine. The fleet retro gains an `Antigravity` row alongside Claude, Codex, and Muse.
 
 Upgrade is per Mac, and **upgrading is not enough**. On each Mac, first run
 `mm update` to install the release with Antigravity support, verify with
@@ -2028,8 +2031,8 @@ with `This device's manifest is still arriving from sync. Run: mm status` instea
 of the first-push line and shows
 `Remote manifest: still arriving from sync; check again shortly.`; run it again
 once Syncthing finishes.
-If this Mac's own manifest vanishes while `mm pull` reads it, that is not
-waiting: its deletion records were not applied, so files deleted on this Mac may
+If this machine's own manifest vanishes while `mm pull` reads it, that is not
+waiting: its deletion records were not applied, so files deleted on this machine may
 come back from peers. Pull warns on stderr and `mm autopull` records `degraded`
 (its detail counts it as `1 corrupt peer manifest(s)`); check those files before
 the next `mm push`.
@@ -2045,7 +2048,7 @@ mm pull --verbose
 
 | Warning cause | What to do |
 |---|---|
-| A peer published a folder where this Mac has a file | Decide which layout you want. Keep your file and exclude that peer path, or move your file aside before retrying. The warning names the actual blocking ancestor, even for a deeply nested path. |
+| A peer published a folder where this machine has a file | Decide which layout you want. Keep your file and exclude that peer path, or move your file aside before retrying. The warning names the actual blocking ancestor, even for a deeply nested path. |
 | Permission denied | Check write permission on the named parent folder, then `mm pull`. |
 | Read-only filesystem | Restore writable access or choose a writable local source folder, then `mm pull`. |
 | Disk full | Free disk space, then `mm pull`. |
@@ -2445,14 +2448,15 @@ Older undated blockers gain a date when this version first observes them.
 | `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
 | `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |
 | `partial` | A final record is unfinished. | Let the host finish the record, then `mm push`; `mm diag` shows the reader's state. |
-| `deadline`, last complete read over the autopush budget | The warm read costs more than this Mac allows. | Raise `[retro] host_usage_autopush_budget_ms` using the last complete read and sweep estimate in `mm diag`. Stay at or below `capture_budget_ms` when that key is set, and at or below an explicitly set interactive budget. When neither is set, stay at or below the 3,000 ms interactive default. When both apply, stay at or below the smaller one. If the read is over what an attended push allows, raise `[retro] attended_capture_cap_ms`, keeping it at least `capture_budget_ms`; host capture and warm retries get three fifths of that cap. |
+| `deadline`, last complete read over the allotted budget | The read costs more than that pass allowed. | Run `mm push` to refresh usage and warm cold readers. If the last complete read is over what an attended push allows, raise `[retro] attended_capture_cap_ms`, keeping it at least `capture_budget_ms`; host capture and warm retries get three fifths of that cap. |
 | `deadline`, last complete read within budget or unknown | The latest attempt ran out of time; a cold or changing store may need more work. | Run `mm push` again. Host sweep and inline warm share at most three fifths of the attended scan cap (default 30,000 ms, or `capture_budget_ms` when larger). Only an explicit `host_usage_interactive_budget_ms`, with neither `capture_budget_ms` nor `attended_capture_cap_ms`, keeps about 5 s of warm scanning per cold reader. Then compare the last complete read and counts in `mm diag`. |
 
 Every attended push attempts a fresh capture. If every consented reader later
 fails, no host row is written and this snapshot ages. If another reader
 completes, the newer row supersedes the device's coverage and may omit the
-failed reader. Status shows the latest coverage. The read-budget lever is
-the lasting fix when warm autopush reads consistently exceed their allowance.
+failed reader. Status shows the latest coverage. The default 750 ms autopush
+sweep and 250 ms later-reader grace floor cover ordinary warm reads; attended
+`mm push` and `attended_capture_cap_ms` handle cold or outsized corpora.
 Fleet retros flag devices whose last snapshot predates the requested window.
 Days a `deadline` read missed come back on the reader's next complete read: readers
 aggregate the whole local corpus, each row carries the device's last 90 UTC days, and
@@ -2461,13 +2465,13 @@ capture only and cannot recover them. They do not come back when the retro windo
 more than 24 hours before that read, when they are older than 90 days, or when the host
 deleted its files; `mm status` names `[retro] attended_capture_cap_ms` as the attended fix.
 
-Set budgets in this Mac's `~/.config/mind-meld/config.toml`:
+Set budgets in this machine's `~/.config/mind-meld/config.toml`:
 
 ```toml
 [retro]
 capture_budget_ms = 5000
 attended_capture_cap_ms = 30000
-host_usage_autopush_budget_ms = 350
+host_usage_autopush_budget_ms = 750
 host_usage_interactive_budget_ms = 3000
 ```
 
@@ -2490,13 +2494,14 @@ by the reader count), so one reader's overrun cannot take another's whole read. 
 `host_usage_interactive_budget_ms` remains the sweep preference within its host share. Autopush, `mm autopull`, `mm init` backfill, and `mm recapture` keep
 their own budgets regardless.
 
-Autopush defaults to **250 ms** (range **100–5,000**); interactive push and init default to **3,000 ms** (range **250–5,000**).
-All must be integers. Effective autopush must not exceed `capture_budget_ms`
+Autopush defaults to **750 ms** (range **100–5,000**, with a **250 ms** later-reader grace floor; sized from measured warm reads of 266 ms for Codex over 7,536 rollouts, 104–153 ms for Antigravity over 500 conversation DBs, and 19–20 ms for Grok Build); interactive push and init default to **3,000 ms** (range **250–5,000**).
+All must be integers. An explicit `host_usage_autopush_budget_ms` must not exceed `capture_budget_ms`
 when that key is set, and must not exceed an explicitly set interactive budget.
 When neither is set, it must not exceed the 3,000 ms interactive default. When
-both ceilings apply, it must not exceed the smaller one.
+both ceilings apply, it must not exceed the smaller one. When `host_usage_autopush_budget_ms` is unset,
+mm clamps the 750 ms default to the active attended ceiling (`capture_budget_ms` and/or `host_usage_interactive_budget_ms`, else 3,000 ms).
 Invalid values stop sync like any other `[retro]` error. Raising
-a budget trades more autopush latency for read headroom. This is per Mac and
+a budget trades more autopush latency for read headroom. This is per machine and
 per mm version: remeasure after corpus or interpreter changes; do not copy a
 fleet-wide number. `mm diag` shows the effective host sweep budgets and base capture
 budget with their `default` or `config` source, each reader's **last complete read**, and the combined sweep

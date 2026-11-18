@@ -553,7 +553,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     return config
 
 
-DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS = 250
+DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS = 750
 DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS = 3000
 HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS = 100
 HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS = 250
@@ -616,11 +616,13 @@ def _validate(config: dict[str, Any]) -> None:
                     f"{min_cap} and {ATTENDED_CAPTURE_CAP_MAX_MS}, got {value}. "
                     f"Fix [retro] attended_capture_cap_ms in ~/.config/mind-meld/config.toml."
                 )
-        autopush = retro.get("host_usage_autopush_budget_ms", DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS)
         # capture_budget_ms takes precedence as the attended ceiling, and the
         # legacy rule still applies when the legacy key is set explicitly: a
         # user who pinned the attended sweep does not get a larger unattended
-        # one. Autopush otherwise keeps its fixed share (Track 85A d1).
+        # one. When host_usage_autopush_budget_ms is unset, resolve_host_read_budget
+        # clamps the default to the active attended ceiling so configs that set
+        # capture_budget_ms or host_usage_interactive_budget_ms in 250..749
+        # remain valid. Autopush otherwise keeps its fixed share (Track 85A d1).
         ceilings: list[tuple[int, str]] = []
         if "capture_budget_ms" in retro:
             ceilings.append((retro["capture_budget_ms"], "capture_budget_ms"))
@@ -635,11 +637,15 @@ def _validate(config: dict[str, Any]) -> None:
                 )
             )
         interactive, interactive_key = min(ceilings)
-        if autopush > interactive:
-            raise ConfigError(
-                f"config: retro.host_usage_autopush_budget_ms ({autopush}) must not exceed "
-                f"retro.{interactive_key} ({interactive})."
-            )
+        if "host_usage_autopush_budget_ms" in retro:
+            autopush = retro["host_usage_autopush_budget_ms"]
+            if autopush > interactive:
+                raise ConfigError(
+                    f"config: retro.host_usage_autopush_budget_ms ({autopush}) must not exceed "
+                    f"retro.{interactive_key} ({interactive})."
+                )
+        elif "capture_budget_ms" not in retro and "host_usage_interactive_budget_ms" not in retro:
+            assert DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS <= interactive
         if "repo_roots" in retro:
             _validate_repo_roots(retro["repo_roots"])
 

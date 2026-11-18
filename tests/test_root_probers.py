@@ -1729,7 +1729,8 @@ def test_status_names_recapture_as_finishing_partial_discovery(tmp_path, monkeyp
     partial = status("partial", aborts=0, errors=0, streak=3)
     assert "repository discovery has not finished" in partial
     assert (
-        "Finish repository discovery and recover this Mac's last 3 days: mm recapture 3d" in partial
+        "Finish repository discovery and recover this machine's last 3 days: mm recapture 3d"
+        in partial
     )
     complete = status("complete", aborts=0, errors=1, streak=1)
     assert "mm recapture" in complete and "Finish repository discovery" not in complete

@@ -256,6 +256,8 @@ def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monke
     text = " ".join(result.output.split())
     assert "(codex deadline)" in text
     assert "Last read allowed 250 ms; last complete read 300 ms (in the future)" in text
+    assert "Run `mm push` to refresh usage and warm cold readers." in text
+    assert "host_usage_autopush_budget_ms" not in text
     assert "not yet scanned" not in text
 
 
@@ -1875,6 +1877,82 @@ def test_autopush_breadcrumb_success_when_events_tail_is_healthy(tmp_path, monke
     assert r.exit_code == 0, (r.stdout, r.stderr)
     payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "success", payload
+
+
+def test_autopush_measured_warm_reads_record_success_breadcrumb_and_overrun_records_degraded(
+    tmp_path, monkeypatch
+):
+    """Track 149A: under the 750 ms default autopush sweep and 250 ms grace floor,
+    measured warm reads (Codex 266 ms, Antigravity 153 ms) complete with a
+    `success` breadcrumb; an overrunning reader (800 ms) still records `deadline`
+    and `degraded` while Antigravity finishes inside the 250 ms grace floor."""
+    from mind_meld import events_tail, host_usage, token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    clock = {"t": 100.0}
+    real_capture = events_tail._capture_host_usage
+
+    def sweep(readers, *, deadline, **kwargs):
+        return real_capture(readers, deadline=deadline, now=lambda: clock["t"], **kwargs)
+
+    monkeypatch.setattr(events_tail.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(events_tail, "_capture_host_usage", sweep)
+    day = datetime.now(timezone.utc).date().isoformat()
+    costs = {"codex": 0.266, "agy": 0.153}
+
+    def make_reader(name: str):
+        def read(*, deadline):
+            end = clock["t"] + costs[name]
+            if end > deadline:
+                clock["t"] = deadline
+                return host_usage.HostUsageResult({}, False, "deadline")
+            clock["t"] = end
+            usage = {"input": 1, "cache_create": 0, "cache_read": 0, "output": 1}
+            return host_usage.HostUsageResult(
+                {name: {day: usage}},
+                True,
+                tokens_by_day={day: {**usage, "by_model": {f"{name}-m": usage}}},
+            )
+
+        return read
+
+    readers = (("codex", make_reader("codex")), ("agy", make_reader("agy")))
+    monkeypatch.setattr(events_tail, "_default_host_readers", lambda *_a, **_kw: readers)
+
+    r_ok = runner.invoke(app, ["autopush"])
+    assert r_ok.exit_code == 0, (r_ok.stdout, r_ok.stderr)
+    crumb_ok = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert crumb_ok["outcome"] == "success", crumb_ok
+    events_files = sorted((tmp_path / "mm-events" / "events").glob("*.jsonl"))
+    rows_ok = [
+        json.loads(line)
+        for f in events_files
+        for line in f.read_text().splitlines()
+        if line.strip()
+    ]
+    host_row_ok = [r for r in rows_ok if r["type"] == "host-usage-snapshot"][-1]
+    assert host_row_ok["token_sources"] == ["codex", "agy"]
+    assert "degraded_sources" not in host_row_ok
+
+    # Now make a substantive edit and make Codex overrun the 750 ms default (800 ms);
+    # Antigravity (153 ms) still completes in the 250 ms grace floor while Codex records deadline.
+    (claude_root / "projects" / "-Users-user-myapp" / "memory" / "role.md").write_text("updated")
+    costs["codex"] = 0.800
+    r_over = runner.invoke(app, ["autopush"])
+    assert r_over.exit_code == 0, (r_over.stdout, r_over.stderr)
+    crumb_over = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert crumb_over["outcome"] == "degraded", crumb_over
+    assert "codex deadline" in crumb_over.get("detail", "")
+    rows_over = [
+        json.loads(line)
+        for f in sorted((tmp_path / "mm-events" / "events").glob("*.jsonl"))
+        for line in f.read_text().splitlines()
+        if line.strip()
+    ]
+    host_row_over = [r for r in rows_over if r["type"] == "host-usage-snapshot"][-1]
+    assert host_row_over["token_sources"] == ["agy"]
+    assert host_row_over["degraded_sources"] == ["codex"]
 
 
 def test_autopush_breadcrumb_degraded_when_walk_budget_exceeded(tmp_path, monkeypatch):

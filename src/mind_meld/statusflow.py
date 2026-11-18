@@ -1792,7 +1792,7 @@ def _print_retro_capture_status(
         )
         if projected.get("discovery") == "partial":
             console.print("  Repository discovery is still catching up.")
-        console.print("  Continue capture on this Mac: [bold]mm push[/bold]")
+        console.print("  Continue capture on this machine: [bold]mm push[/bold]")
         console.print("  Details: [bold]mm diag[/bold]")
         return True
     if skipped == 1:
@@ -1808,11 +1808,13 @@ def _print_retro_capture_status(
     )
     if projected.get("discovery") == "partial":
         console.print(
-            f"  Finish repository discovery and recover this Mac's last {days} days: "
+            f"  Finish repository discovery and recover this machine's last {days} days: "
             f"[bold]mm recapture {days}d[/bold]"
         )
     else:
-        console.print(f"  Recover this Mac's last {days} days: [bold]mm recapture {days}d[/bold]")
+        console.print(
+            f"  Recover this machine's last {days} days: [bold]mm recapture {days}d[/bold]"
+        )
     console.print("  Check current repository failures: [bold]mm recapture --dry-run[/bold]")
     console.print("  Details: [bold]mm diag[/bold]")
     return True

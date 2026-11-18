@@ -3979,7 +3979,7 @@ def test_summary_data_at_risk_warnings_across_modes_and_dry_run(capsys, kind, mo
         )
         expected = (
             f"mm: warning: this device's manifest ({clean}) vanished during the read - "
-            "its deletion records were not applied, so files deleted on this Mac "
+            "its deletion records were not applied, so files deleted on this machine "
             "may have come back from peers. Check them before the next mm push."
         )
     elif kind == "newer_version":

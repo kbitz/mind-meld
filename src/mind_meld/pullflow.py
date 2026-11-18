@@ -811,7 +811,7 @@ def _warn_apply_failure(
                 if not collider.is_dir():
                     remedy = (
                         f"{safe(device_name or 'The peer')} published a folder named "
-                        f"'{safe(collider.name)}' where this Mac has a file; "
+                        f"'{safe(collider.name)}' where this machine has a file; "
                         "keep yours or move it aside, then run mm pull. "
                     )
             except OSError:
@@ -3366,7 +3366,7 @@ def _print_pull_summary(
         if peer.own_vanished:
             core._warning(
                 f"this device's manifest ({peer.device_id}) vanished during the read - "
-                "its deletion records were not applied, so files deleted on this Mac "
+                "its deletion records were not applied, so files deleted on this machine "
                 "may have come back from peers. Check them before the next mm push."
             )
             continue

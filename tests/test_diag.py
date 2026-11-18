@@ -785,6 +785,7 @@ def test_status_opens_each_day_once_even_without_host_rows(tmp_path, monkeypatch
     assert result.exit_code == 0, result.output
     assert sorted(opened) == sorted(paths)
     assert "Refresh on this Mac" not in result.output
+    assert "Refresh on this machine" not in result.output
 
 
 def test_diag_json_is_valid_json(tmp_path, monkeypatch):
@@ -1877,10 +1878,10 @@ class TestDiagGitCapture:
 @pytest.mark.parametrize(
     "case,total,margin",
     [
-        ("both", 215, "35 ms spare"),
-        ("over", 268, "over by 18 ms"),
-        ("codex-only", 197, "53 ms spare"),
-        ("muse-only", 18, "232 ms spare"),
+        ("both", 215, "535 ms spare"),
+        ("over", 768, "over by 18 ms"),
+        ("codex-only", 197, "553 ms spare"),
+        ("muse-only", 18, "732 ms spare"),
         ("missing-read", None, "a reader has no complete read"),
         ("none", None, "no reader enabled"),
     ],
@@ -1905,12 +1906,12 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
         sources.append({"name": "muse", "path": str(muse), "type": "muse"})
     config["sync"]["sources"] = sources
     config["retro"] = {
-        "host_usage_interactive_budget_ms": 500,
+        "host_usage_interactive_budget_ms": 1000,
     }
     save_config(config)
     _enable_capture_sources(tmp_path, readers=())
     at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(timespec="seconds")
-    for reader, ms in (("codex", 250 if case == "over" else 197), ("muse", 18)):
+    for reader, ms in (("codex", 750 if case == "over" else 197), ("muse", 18)):
         path = codex_host.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -1922,7 +1923,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
                     "last_complete_ms": None if case == "missing-read" and reader == "muse" else ms,
                     "last_complete_at": at,
                     "last_reason": "deadline",
-                    "last_deadline_allotted_ms": 250,
+                    "last_deadline_allotted_ms": 750,
                 }
             )
         )
@@ -1945,9 +1946,9 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["host_read_budgets"] == {
-        "autopush_ms": 250,
+        "autopush_ms": 750,
         "autopush_source": "default",
-        "interactive_ms": 500,
+        "interactive_ms": 1000,
         "interactive_source": "config",
         "capture_ms": 5000,
         "capture_source": "default",
@@ -1955,20 +1956,20 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     }
     assert tuple(payload["host_publication"]["readers"]) in selection
     assert payload["host_usage"]["codex"]["last_complete_at"] == at
-    assert payload["host_usage"]["codex"]["last_deadline_allotted_ms"] == 250
+    assert payload["host_usage"]["codex"]["last_deadline_allotted_ms"] == 750
     line = statusflow._host_read_sweep_line(payload)
     if total is None:
         assert line == f"unknown ({margin})"
     else:
         assert line == (
-            f"{total} ms of the 250 ms autopush budget, {margin} "
+            f"{total} ms of the 750 ms autopush budget, {margin} "
             "(excludes cache writes and the later-reader grace; not a publication check)"
         )
     result = runner.invoke(app, ["diag"])
     assert result.exit_code == 0, result.output
     plain = " ".join(result.output.split())
     assert (
-        "host read budgets: autopush 250 ms (default) · interactive 500 ms (config)"
+        "host read budgets: autopush 750 ms (default) · interactive 1000 ms (config)"
         " · capture 5000 ms (default)" in plain
     )
     assert "host read sweep estimate: " + line in plain
@@ -1978,11 +1979,11 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
         )
     assert "read it without that budget, then `mm diag`" not in plain
     if case in {"both", "codex-only"}:
-        assert "Last read allowed 250 ms; last complete read 197 ms" in plain
+        assert "Last read allowed 750 ms; last complete read 197 ms" in plain
     elif case == "over":
-        assert "Last read allowed 250 ms; last complete read 250 ms" in plain
+        assert "Last read allowed 750 ms; last complete read 750 ms" in plain
     elif case == "muse-only":
-        assert "Last read allowed 250 ms; last complete read 18 ms" in plain
+        assert "Last read allowed 750 ms; last complete read 18 ms" in plain
 
 
 @pytest.mark.parametrize("invalid", [False, True])

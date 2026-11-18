@@ -2686,10 +2686,14 @@ def test_invalid_host_read_budget(key, minimum, bad):
     [
         (HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS, HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS),
         (250, 500),
+        (750, 3000),
         (HOST_USAGE_BUDGET_MAX_MS, HOST_USAGE_BUDGET_MAX_MS),
     ],
 )
 def test_valid_host_read_budgets(auto, interactive):
+    from mind_meld import config as mm_config
+
+    assert mm_config.DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS == 750
     config = {
         "device": {"id": "dev", "name": "Mac"},
         "storage": {"path": "/tmp/mm"},
@@ -2699,6 +2703,31 @@ def test_valid_host_read_budgets(auto, interactive):
         },
     }
     _validate(config)
+
+
+def test_unset_autopush_budget_clamps_to_explicit_smaller_attended_ceiling():
+    from mind_meld import events_tail
+
+    assert events_tail.resolve_host_read_budget(_retro_config({}), interactive=False) == (
+        750,
+        "default",
+    )
+    assert events_tail.resolve_host_read_budget(
+        _retro_config({"host_usage_autopush_budget_ms": 750}), interactive=False
+    ) == (750, "config")
+    for retro, expected in (
+        ({"capture_budget_ms": 250}, 250),
+        ({"host_usage_interactive_budget_ms": 300}, 300),
+        ({"capture_budget_ms": 500, "host_usage_interactive_budget_ms": 300}, 300),
+        ({"capture_budget_ms": 400, "host_usage_interactive_budget_ms": 600}, 400),
+        ({"capture_budget_ms": 5000}, 750),
+    ):
+        cfg = _retro_config(retro)
+        _validate(cfg)
+        assert events_tail.resolve_host_read_budget(cfg, interactive=False) == (
+            expected,
+            "default",
+        )
 
 
 @pytest.mark.parametrize(

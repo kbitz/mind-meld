@@ -2770,7 +2770,8 @@ class TestMigrateConfigCommand:
         assert result.exit_code == 0, result.output
         output = " ".join(result.output.split())
         assert (
-            "per-run output (review-prep trees, loop state, gate diffs) stays on this Mac" in output
+            "per-run output (review-prep trees, loop state, gate diffs) stays on this machine"
+            in output
         )
         assert "Run mm push to publish the exclusions" in output
 
@@ -2859,12 +2860,12 @@ class TestMigrateConfigCommand:
         output = " ".join(result.output.split())
         assert "per-machine caches and generated output" in output
         assert "for gstack: virtualenvs, app bundles, archives and binaries, QA evidence" in output
-        assert "writes no tombstones, and every Mac keeps its copy" in output
+        assert "writes no tombstones, and every machine keeps its copy" in output
         assert "Removing a recommended glob later brings this prompt back" in output
         assert output.index("writes no tombstones") < output.index("+ config.yaml")
         assert "Run mm push to publish the exclusions" in output
         assert "mm status counts them as pending deletions" in output
-        assert "No Mac deletes its local copy" in output
+        assert "No machine deletes its local copy" in output
 
         loaded = config_module.load_config(config_path)
         gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
@@ -2883,7 +2884,7 @@ class TestMigrateConfigCommand:
         assert config_path.read_bytes() == before
         output = " ".join(result.output.split())
         assert "per-machine caches and generated output" in output
-        assert "writes no tombstones, and every Mac keeps its copy" in output
+        assert "writes no tombstones, and every machine keeps its copy" in output
         assert "Run mm push to publish the exclusions" not in output
         loaded = config_module.load_config(config_path)
         gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
@@ -2964,7 +2965,7 @@ class TestMigrateConfigCommand:
         output = " ".join(result.output.split())
         assert "Config is missing recommended exclude_patterns for source(s): gstack" in output
         assert "for gstack: virtualenvs, app bundles, archives and binaries, QA evidence" in output
-        assert "writes no tombstones, and every Mac keeps its copy" in output
+        assert "writes no tombstones, and every machine keeps its copy" in output
         assert "produce churn on every pull" not in output
         assert "Run mm push to publish the exclusions" not in output
         assert config_path.read_bytes() != before
@@ -9237,7 +9238,7 @@ class TestApplyRecovery53A:
         assert (fleet.memory / "aaa.txt").read_bytes() == b"a"
         assert (fleet.memory / "ccc.txt").read_bytes() == b"c"
         assert (fleet.memory / "bbb").read_bytes() == b"mine"
-        assert "Mac A published a folder named 'bbb' where this Mac has a file" in result.stderr
+        assert "Mac A published a folder named 'bbb' where this machine has a file" in result.stderr
         assert result.stderr.count("cannot create folder") == 1
         assert {(r["rel_path"], r["action"]) for r in fleet.records()} == {
             (fleet.prefix + "aaa.txt", "written"),
@@ -10846,7 +10847,7 @@ def test_recapture_source_advice62(preview62, disabled, configured, dry_run):
     result = env["audit"](argv) if dry_run else runner.invoke(app, argv)
     assert result.exit_code == 1, result.output
     assert (
-        f"but it is {'disabled' if disabled else 'not configured'} on this Mac."
+        f"but it is {'disabled' if disabled else 'not configured'} on this machine."
         in _preview_text(result)
     )
     assert "Run: mm enable-source mm-events" in result.stderr.splitlines()
@@ -11354,7 +11355,7 @@ def test_pull_preview_output62(preview62, monkeypatch, state):
         (
             "diff",
             [
-                "Compare this Mac's files with its last push",
+                "Compare this machine's files with its last push",
                 "Changes nothing, not even the lock file.",
                 "use mm pull --dry-run.",
             ],
@@ -11986,6 +11987,7 @@ class TestMmEventsOwnership59A:
         assert result.exit_code == 1, result.output
         assert "No recapture rows were written." in _preview_text(result)
         assert "disabled on this Mac" not in result.output
+        assert "disabled on this machine" not in result.output
         assert not env["events"].exists()
 
 
@@ -16232,7 +16234,7 @@ def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capt
     assert result.exit_code == 0, result.output
     assert result.stdout == "Push: 2 content changes published.\n"
     assert "usage published" not in result.output
-    assert result.stderr == ""
+    assert result.stderr == f"mm: notice: {events_tail._CURSOR_HOLD_DEGRADATION}\n"
     output = terminal.getvalue()
     assert "⠋ Unlocking storage" in output
     assert "━" not in output
@@ -17073,3 +17075,287 @@ def test_track_125a_attended_pushes_resume_stopped_scans_and_clear_catching_up(
     status2 = " ".join(runner.invoke(app, ["status"]).output.split())
     assert "catching up" not in status2
     assert "Retro capture:" not in status2
+
+
+def test_cursor_hold_recovers_on_complete_capture_and_preserves_held_interval_commits(
+    capture61, monkeypatch
+):
+    """Track 149A: after a partial-discovery push holds the cursor, an attended
+    `mm push` whose discovery and Git walk complete clears the hold without
+    recording `_CURSOR_HOLD_DEGRADATION` or printing a notice, and captures
+    commits made during the held interval."""
+    monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **k: ())
+    events_dir = capture61["dayfile"].parent
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    repo_a = capture61["path"].parent / "hold-repo-a"
+    repo_b = capture61["path"].parent / "hold-repo-b"
+    for repo in (repo_a, repo_b):
+        (repo / ".git" / "objects").mkdir(parents=True)
+        (repo / ".git" / "refs").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+
+    commits_by_repo: dict[Path, list[dict]] = {
+        repo_a.resolve(): [
+            {"sha": "aaa0001", "date": "2026-11-18T10:00:00+00:00", "subject": "a0"}
+        ],
+        repo_b.resolve(): [],
+    }
+
+    def fake_walk_one(root, since_iso, timeout_ms, author_emails=None):
+        resolved = Path(root).resolve()
+        since_dt = datetime.fromisoformat(since_iso)
+        commits = [
+            c
+            for c in commits_by_repo.get(resolved, [])
+            if datetime.fromisoformat(c["date"]) >= since_dt
+        ]
+        if not commits:
+            return None, None
+        return (
+            {
+                "name": resolved.name,
+                "path": str(resolved),
+                "remote": f"https://github.com/example/{resolved.name}.git",
+                "commits": commits,
+                "commit_count": len(commits),
+                "insertions": 1,
+                "deletions": 0,
+                "files_changed": 1,
+                "branches": ["main"],
+            },
+            None,
+        )
+
+    monkeypatch.setattr(_mm_events, "_walk_one_repo", fake_walk_one)
+
+    # 1. Baseline complete push establishes complete cursor t0.
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery(
+            (repo_a.resolve(), repo_b.resolve()), (), False, (), (), (), ("claude",)
+        ),
+    )
+    (memory / "hold0.md").write_text("baseline")
+    p0 = runner.invoke(app, ["push"])
+    assert p0.exit_code == 0, p0.output
+    c0 = _mm_events.resolve_push_cursor(events_dir, "dev-a")
+    assert c0.held is False
+
+    # 2. A commit happens in repo_b, while a partial-discovery push misses repo_b
+    # and holds the cursor at t0. Also prints the owner-action notice before Push:.
+    held_commit_ts = datetime.now(timezone.utc).isoformat()
+    commits_by_repo[repo_b.resolve()].append(
+        {"sha": "bbb0002", "date": held_commit_ts, "subject": "commit during held interval"}
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery(
+            (repo_a.resolve(),),
+            (_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR,),
+            True,
+            (),
+            (),
+            (),
+            ("claude",),
+        ),
+    )
+    (memory / "hold1.md").write_text("partial push")
+    p1 = runner.invoke(app, ["push"])
+    assert p1.exit_code == 0, p1.output
+    assert "mm: notice: git repository discovery hit its time budget" in p1.stderr
+    assert p1.output.index("mm: notice:") < p1.output.index("Push:")
+    c1 = _mm_events.resolve_push_cursor(events_dir, "dev-a")
+    assert c1.held is True
+
+    # 3. Next attended push completes discovery and Git walk: recovers the held
+    # cursor, records success (no _CURSOR_HOLD_DEGRADATION, no stderr notice),
+    # and captures repo_b's commit from the held interval.
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery(
+            (repo_a.resolve(), repo_b.resolve()), (), False, (), (), (), ("claude",)
+        ),
+    )
+    (memory / "hold2.md").write_text("recovery push")
+    p2 = runner.invoke(app, ["push"])
+    assert p2.exit_code == 0, p2.output
+    assert p2.stderr == ""
+    run2 = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert run2["outcome"] == "success", run2
+    assert run2["cause"] == "ok"
+    assert run2["degradations"] == []
+    c2 = _mm_events.resolve_push_cursor(events_dir, "dev-a")
+    assert c2.held is False
+
+    rows = [
+        json.loads(line)
+        for f in sorted(events_dir.glob("*.jsonl"))
+        for line in f.read_text().splitlines()
+        if line.strip()
+    ]
+    git_rows = [r for r in rows if r["type"] == "git-snapshot"]
+    captured_shas = {
+        c["sha"] for r in git_rows for p in r.get("projects", []) for c in p.get("commits", [])
+    }
+    assert "bbb0002" in captured_shas
+
+
+def test_attended_push_prints_owner_action_notice_before_outcome_and_skips_advisory_or_catching_up(
+    capture61, monkeypatch
+):
+    """Track 149A: attended `mm push` prints one `mm: notice:` line before `Push:`
+    when a degraded run names an owner action (without duplicating under `-v`),
+    and prints none for advisory 0-repo discovery or auto-continuing catch-up."""
+    monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **k: ())
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    repo_a = capture61["path"].parent / "notice-repo-a"
+    (repo_a / ".git" / "objects").mkdir(parents=True)
+    (repo_a / ".git" / "refs").mkdir(parents=True)
+    (repo_a / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+
+    # 1. Degraded run with owner action (unrecovered cursor hold when discovery is not-run):
+    # non-verbose prints exactly one `mm: notice:` before `Push:`; verbose prints it once.
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery((), ()),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "resolve_push_cursor",
+        lambda *a, **k: _mm_events.CursorResolution(
+            since=datetime(2026, 1, 1, tzinfo=timezone.utc), held=True
+        ),
+    )
+    (memory / "notice1.md").write_text("unrecovered hold")
+    res_quiet = runner.invoke(app, ["push"])
+    assert res_quiet.exit_code == 0, res_quiet.output
+    expected_notice = f"mm: notice: {events_tail._CURSOR_HOLD_DEGRADATION}"
+    assert res_quiet.stderr.splitlines() == [expected_notice]
+    assert res_quiet.output.index(expected_notice) < res_quiet.output.index("Push:")
+
+    (memory / "notice1v.md").write_text("unrecovered hold verbose")
+    res_verbose = runner.invoke(app, ["push", "--verbose"])
+    assert res_verbose.exit_code == 0, res_verbose.output
+    assert res_verbose.stderr.splitlines().count(expected_notice) == 1
+
+    # 2. Advisory 0-repo discovery prints no owner-action notice on non-verbose push.
+    monkeypatch.setattr(
+        _mm_events,
+        "resolve_push_cursor",
+        lambda *a, **k: _mm_events.CursorResolution(
+            since=datetime(2026, 1, 1, tzinfo=timezone.utc), held=False
+        ),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery((), (), False, (), (), (), ("claude",)),
+    )
+    (memory / "notice2.md").write_text("empty discovery")
+    res_empty = runner.invoke(app, ["push"])
+    assert res_empty.exit_code == 0, res_empty.output
+    assert res_empty.stderr == ""
+
+    # 3. Auto-continuing git catch-up prints no owner-action notice on non-verbose push.
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery(
+            (repo_a.resolve(),), (), False, (), (), (), ("claude",)
+        ),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "_walk_one_repo",
+        lambda root, *a, **kw: (None, _mm_events.WALK_SKIP_BUDGET_ABORT),
+    )
+    monkeypatch.setattr(_mm_events, "count_pending_repositories", lambda *a, **k: 1)
+    (memory / "notice3.md").write_text("catching up")
+    res_catchup = runner.invoke(app, ["push"])
+    assert res_catchup.exit_code == 0, res_catchup.output
+    assert res_catchup.stderr == ""
+
+
+def test_recapture_machine_neutral_wording_pins(capture61, monkeypatch):
+    """Track 149A: pin machine-neutral recapture lines for 0 discovered repos,
+    already-recorded commits (`another machine`), and host-usage notice."""
+    monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
+    events_dir = capture61["dayfile"].parent
+    # 1. Zero discovered repositories (dry-run and live).
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery((), (), False, (), (), (), ("claude",)),
+    )
+    dry_zero = runner.invoke(app, ["recapture", "--dry-run", "1d"])
+    assert dry_zero.exit_code == 1
+    assert (
+        "Recapture stopped: no Git repositories were discovered on this machine." in dry_zero.stderr
+    )
+    live_zero = runner.invoke(app, ["recapture", "1d"])
+    assert live_zero.exit_code == 1
+    assert (
+        "Recapture stopped: no Git repositories were discovered on this machine."
+        in live_zero.stderr
+    )
+
+    # 2. All commits already recorded (--verbose) + cold host reader bridge notice.
+    repo = capture61["path"].parent / "recap-repo"
+    (repo / ".git" / "objects").mkdir(parents=True)
+    (repo / ".git" / "refs").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    commit = {"sha": "ccc1111", "date": "2026-11-18T10:00:00+00:00", "subject": "recorded"}
+    project_row = {
+        "name": "recap-repo",
+        "path": str(repo.resolve()),
+        "remote": "https://github.com/example/recap-repo.git",
+        "commits": [commit],
+        "commit_count": 1,
+        "insertions": 1,
+        "deletions": 0,
+        "files_changed": 1,
+        "branches": ["main"],
+    }
+    git_row = {
+        "v": _mm_events.EVENTS_SCHEMA_VERSION,
+        "type": "git-snapshot",
+        "ts": "2026-11-18T10:05:00+00:00",
+        "device": "dev-a",
+        "origin": "recapture",
+        "projects": [project_row],
+        "skipped": [],
+    }
+    _mm_events.write_push_event(events_dir, "dev-a", [git_row])
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery(
+            (repo.resolve(),), (), False, (), (), (), ("claude",)
+        ),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "_walk_one_repo",
+        lambda *a, **k: (project_row, None),
+    )
+    from mind_meld import host_registry
+
+    monkeypatch.setattr(
+        host_registry,
+        "reader_usage_diag",
+        lambda *_a, **_kw: {"state": "cold", "last_reason": "deadline"},
+    )
+    monkeypatch.setattr(host_registry, "reader_cache_cold", lambda *_a, **_kw: True)
+    res_recap = runner.invoke(app, ["recapture", "--verbose", "1d"])
+    assert res_recap.exit_code == 0, res_recap.output
+    assert "If the retro is still short, the gap is on another machine" in res_recap.stdout
+    assert (
+        "mm: notice: Recapture covers Git history only. "
+        "Refresh host usage on this machine. Run: mm push" in res_recap.stderr
+    )

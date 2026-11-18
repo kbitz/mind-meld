@@ -289,11 +289,11 @@ def enable_source(name: str, *, force: bool = False) -> None:
     elif name == "muse":
         console.print(
             "[dim]Syncs ~/.local/share/muse memory/ only. "
-            "Session files are not synced. Prompts never leave the Mac.[/dim]"
+            "Session files are not synced. Prompts never leave this machine.[/dim]"
         )
         console.print(
             "[dim]Reads completed model-step token totals from local Muse session logs. "
-            "Session files are not synced. Prompts never leave the Mac.[/dim]"
+            "Session files are not synced. Prompts never leave this machine.[/dim]"
         )
         console.print(
             outputstyle._fix_line("mm disable-source muse"),

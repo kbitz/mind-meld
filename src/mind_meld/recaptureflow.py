@@ -45,7 +45,7 @@ def _notice_recapture_host_usage(config: dict, sources: list[dict]) -> None:
         cold = host_registry.reader_cache_cold(name, state)
         if cold or state.get("last_reason"):
             core._notice(
-                "Recapture covers Git history only. Refresh host usage on this Mac.",
+                "Recapture covers Git history only. Refresh host usage on this machine.",
                 fix="mm push",
             )
             return
@@ -147,7 +147,7 @@ def recapture(
                 if dry_run:
                     core._print_error(
                         f"recapture requires the 'mm-events' source, "
-                        f"but it is {state} on this Mac. "
+                        f"but it is {state} on this machine. "
                         f"Enabling it changes config; then preview again: "
                         f"mm recapture --dry-run {window}.",
                         fix="mm enable-source mm-events",
@@ -156,7 +156,7 @@ def recapture(
                 else:
                     core._print_error(
                         f"recapture requires the 'mm-events' source, "
-                        f"but it is {state} on this Mac. "
+                        f"but it is {state} on this machine. "
                         f"Enabling it changes config; then retry: mm recapture {window}.",
                         fix="mm enable-source mm-events",
                     )
@@ -199,7 +199,7 @@ def recapture(
                 console.print(f"  Estimated size:   {row_bytes} bytes")
                 if n_roots == 0:
                     core._print_error(
-                        "Recapture stopped: no Git repositories were discovered on this Mac. "
+                        "Recapture stopped: no Git repositories were discovered on this machine. "
                         "Add their absolute paths under [retro].repo_roots, verify with 'mm diag', "
                         f"then preview again: mm recapture --dry-run {window}.",
                         fix="mm diag",
@@ -229,7 +229,7 @@ def recapture(
 
             if n_roots == 0:
                 core._error(
-                    "Recapture stopped: no Git repositories were discovered on this Mac. "
+                    "Recapture stopped: no Git repositories were discovered on this machine. "
                     "Add their absolute paths under [retro].repo_roots, verify with 'mm diag', "
                     f"then retry: mm recapture {window}.",
                     fix="mm diag",
@@ -375,7 +375,7 @@ def recapture(
                     console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
                     console.print(f"  Commit records:   0 new ({len(records)} already recorded)")
                     console.print(
-                        "  If the retro is still short, the gap is on another Mac "
+                        "  If the retro is still short, the gap is on another machine "
                         "(mm devices) or in a repo discovery cannot see "
                         "(mm diag, then [retro] repo_roots)."
                     )

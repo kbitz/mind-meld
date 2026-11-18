@@ -473,7 +473,7 @@ def test_all_host_budget_sites_use_resolver(site, interactive, configured, tmp_p
             "host_usage_autopush_budget_ms": 350,
             "host_usage_interactive_budget_ms": 700,
         }
-    expected = (700 if interactive else 350) if configured else (3000 if interactive else 250)
+    expected = (700 if interactive else 350) if configured else (3000 if interactive else 750)
     assert events_tail.resolve_host_read_budget(config, interactive=interactive) == (
         expected,
         "config" if configured else "default",
@@ -1110,7 +1110,7 @@ class TestAttendedCaptureCap124A:
         assert deg_dry == []
         assert seen_calls == []
 
-        # 2. Autopush (quiet=True) keeps 250 ms walk, 50 ms discovery, 250 ms host, no warm.
+        # 2. Autopush (quiet=True) keeps 250 ms walk, 50 ms discovery, 750 ms host, no warm.
         events_tail._run_events_tail(
             cfg, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=False
         )
@@ -1122,7 +1122,7 @@ class TestAttendedCaptureCap124A:
             == _mm_events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
             == 50
         )
-        assert auto_kw["host_budget_ms"] == events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS == 250
+        assert auto_kw["host_budget_ms"] == events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS == 750
         assert auto_kw["warm_host_cache"] is None
         assert auto_kw["per_repo_cap_ms"] is None
 
