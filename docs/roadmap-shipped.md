@@ -1012,3 +1012,77 @@ _tombstone: 132_
 ### Track 132F: Stop an empty `.git` directory from freezing a synced folder (gstack-extend run history stopped syncing) ✓ Shipped (v1.12.50)
 - 2026-11-15: merged [PR #327](https://github.com/kbitz/mind-meld/pull/327) (commit `3289de2fd7468cbe4a42f847cd9969243f3f73b5`); verified land-time Track 132F (named in the PR body), original Group 132, factory branch `mmm/631b9cf6`. Introduction/lineage: carded by the 2026-11-15 regeneration (`54ab4cd`, PR #325) from that day's brief (encountered bug 1).
 - Approved-scope evidence: merged PR review/prep and ship receipts (release head `e89bb0f`, full `./bin/check` passed there), merged implementation/tests and the v1.12.50 release row. A `.git` directory counts as a nested checkout only when `lstat` finds `HEAD` in it, a `.git` file still counts, strict scans refuse a failed `HEAD` probe, fixtures build real markers through `tests.conftest.make_git_checkout`, and sync.md, README and SPEC.md state the rule; sync.md's resolution-ledger writers name only `(l)ocal`, `(r)emote` and `(m)erge`. Scope grew by an auto-chosen review fix recorded in the PR: push skips a `.git` path segment in any letter case. Two test gaps went to the inbox (deferred by the second 2026-11-15 regeneration).
+
+## Individual Track history
+
+_tombstone: 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148_
+
+Recorded by the 2026-11-17 regeneration at `c55d103`. Identity for each Track comes from its factory item: the PR's head branch `mmm/<item>` matches the item the factory's advance records for that Track (`adv-<track>-*.json`) and its review-and-prep receipts name the Track; PR #330 also names Track 135A in its body. Scope evidence is the merged PR's review-and-prep and ship receipts, the merged content and the release row in docs/PROGRESS.md. The literal dead-symbol acceptance lines of Tracks 141A to 147A were re-grepped at `c55d103`: every named symbol is gone from `src/`, `tests/` and `docs/invariants/` except live, differently scoped names (`events._read_gitconfig_user_emails`, `pullflow._print_preflight_conflicts`, the retro aggregator's own `_parse_aware_ts`) and tests that assert absence or rejection.
+
+### Track 135A: Quiet recapture's inner push, and give status, diag and recapture the push's Antigravity advice ✓ Shipped (v1.12.51)
+- 2026-11-15: merged [PR #330](https://github.com/kbitz/mind-meld/pull/330) (commit `c10aafe01b13e7dab9a74d06d487411dae73fb85`); verified land-time Track 135A (named in the PR body), original Group 135, factory branch `mmm/1f4ea780`. Introduction/lineage: carded by the 2026-11-15 regeneration (`54ab4cd`, PR #325), declared active by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: recapture's inner push is quiet unless `-v`, with a held file shown as `Push: N files held.` before `Recapture:`; the autopush breadcrumb, `mm diag`'s last autorun and the recapture and init notices follow the cached upgrade view; README and the sync, events/retro and auto-upgrade invariants state the rules; v1.12.51 release row. Two test gaps and one base issue went to the inbox (the gaps are deferred; the base issue was killed by the 2026-11-17 regeneration as unobserved).
+
+### Track 135B: Observe one automatic update on a real machine (Track 124B's post-merge check) ✓ Shipped
+- 2026-11-17: merged [PR #341](https://github.com/kbitz/mind-meld/pull/341) (commit `fa7f1c9e86882b5aa8c03f490e9c85377800a304`); verified land-time Track 135B, original Group 132 (as Track 132B), factory branch `mmm/49d7e2ab`. Introduction/lineage: carded as Track 132B by the 2026-11-13 regeneration (`fb2ef59`, PR #317), relabeled 135B by the second 2026-11-15 regeneration (`bad70b7`, PR #329). Documentation-only merge; no release version (VERSION stayed 1.12.61).
+- Approved-scope evidence: docs/invariants/auto-upgrade.md records Track 124B's criterion 9 on `linux-a`: a plain attended `mm push` on 1.12.53 upgraded mm to 1.12.60 at its tail with no `mm update` (`auto-update.log` and the `upgrade-state.json` fields before and after). Scope amendment recorded in the merged text: the machine was seven releases behind, not one, and no `mm --version` or `mm status` output was captured; the developer accepted it as criterion 9's observation. Track 124B has no open obligation left.
+
+### Track 135C: Warn on stderr for every pull apply failure, and recheck the file before the inline conflict prompt overwrites it ✓ Shipped (v1.12.52)
+- 2026-11-15: merged [PR #331](https://github.com/kbitz/mind-meld/pull/331) (commit `0e7ef2258a0a48ba3e7b0edb504c5714174715e9`); verified land-time Track 135C, original Group 135, factory branch `mmm/c448e589`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329) from /full-review findings C1 and C2.
+- Approved-scope evidence: every pull apply failure prints one `mm: warning:` line with its cause in attended and automatic pulls; inline keep-remote and merge recheck the canonical file after the prompt, so a concurrent edit survives with the peer's copy beside it; the prefetch-publication and late tidy-flush test gaps have tests; invariants updated; v1.12.52 release row.
+
+### Track 136A: Make gc's conflict reaper and the conflict commands' last two lines tell the truth in the shared style ✓ Shipped (v1.12.53)
+- 2026-11-16: merged [PR #332](https://github.com/kbitz/mind-meld/pull/332) (commit `fab4ef4266ad1bf5679672abbcf72c9d0a7f1775`); verified land-time Track 136A, original Group 136, factory branch `mmm/a5e88aa4`. Introduction/lineage: carded by the 2026-11-15 regeneration (`54ab4cd`, PR #325), kept as 136A by the second 2026-11-15 regeneration (`bad70b7`).
+- Approved-scope evidence: `mm gc --conflicts` stops calling kept copies a failure and always prints its `Gc:` line; an unmatched `mm resolve` path ends with `Run: mm conflicts` and `mm conflicts` with `Run: mm resolve`; an unreadable same-file copy gets a repair chosen from the original; v1.12.53 release row. Three test gaps went to the inbox (deferred by the 2026-11-17 regeneration).
+
+### Track 137A: Bring the migration, gc, backfill, init and source warnings to the shared style ✓ Shipped (v1.12.54)
+- 2026-11-16: merged [PR #333](https://github.com/kbitz/mind-meld/pull/333) (commit `37380a7d8b7092609da8617d5fe2b92f221cfba4`); verified land-time Track 137A, original Group 137, factory branch `mmm/609ffe81`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: migration and maintenance warnings use the shared stderr forms, gc refusals put the fix command last, malformed-blob summaries move to stderr, source outcomes name the verb once; README notes the script impact; v1.12.54 release row.
+
+### Track 138A: Bring mm update, mm log and the autorun breadcrumbs to the shared style ✓ Shipped (v1.12.56)
+- 2026-11-16: merged [PR #335](https://github.com/kbitz/mind-meld/pull/335) (commit `75680a27971aa72886d4a4b3fa41136cc593480a`); verified land-time Track 138A, original Group 138, factory branch `mmm/b042ec4e`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: `mm update` success is an `Update:` line and its errors end with `Run:` fixes; `mm log`, the autorun breadcrumbs and `mm status` share the maintenance-failure phrase; v1.12.56 release row. One test gap went to the inbox (deferred by the 2026-11-17 regeneration).
+
+### Track 138B: Give the Antigravity reader the shared failed-pass guard, and drop dead reader exceptions and fields ✓ Shipped (v1.12.55)
+- 2026-11-16: merged [PR #334](https://github.com/kbitz/mind-meld/pull/334) (commit `abe26d889c3cc0c21506306a83513aecd8bc9923`); verified land-time Track 138B, original Group 138, factory branch `mmm/cc18ddfd`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: an unchanged failed Antigravity pass skips its cache rewrite while keeping learned progress; `locked_json_durable_rmw`, `InvalidJsonCache` and `_utc_day` are gone (re-grepped at `c55d103`), with Grok's unread census field; v1.12.55 release row. Two test gaps went to the inbox (deferred by the 2026-11-17 regeneration).
+
+### Track 139A: Keep one opt-in host set, one diagnostic sink and one host reader list ✓ Shipped (v1.12.57)
+- 2026-11-16: merged [PR #336](https://github.com/kbitz/mind-meld/pull/336) (commit `4887e7cf16a1ca86e2b99eab1ecb8d5b53187757`); verified land-time Track 139A, original Group 139, factory branch `mmm/038ab664`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: one opt-in host set, one diagnostic sink and `ACTIVE_HOST_READERS` gone (re-grepped at `c55d103`), with the plan-approved Codex count retry; invariant docs name the owners; v1.12.57 release row. Three test gaps went to the inbox (deferred by the 2026-11-17 regeneration).
+
+### Track 140A: Print outcome lines through one helper, call the output builders directly, and record the leaf convention ✓ Shipped (v1.12.58)
+- 2026-11-16: merged [PR #337](https://github.com/kbitz/mind-meld/pull/337) (commit `e3a3a3bec1225bfc9e354363cff95c6bb2c2a5aa`); verified land-time Track 140A, original Group 140, factory branch `mmm/f217399b`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: one `core` printer that tolerates an `OSError` after completed work; no `console.print(core._outcome_line(` call and no `_error_line`, `_fix_line`, `_outcome_line` or `_fix_for` in `core` (re-grepped at `c55d103`); v1.12.58 release row. Two guard test gaps went to the inbox (deferred by the 2026-11-17 regeneration).
+
+### Track 141A: Delete dead events, devices and storage helpers ✓ Shipped (v1.12.59)
+- 2026-11-16: merged [PR #338](https://github.com/kbitz/mind-meld/pull/338) (commit `f4504023d3d8a0c03883fb46031e3c8a3f4856bc`); verified land-time Track 141A, original Group 141, factory branch `mmm/937b7cbf`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: the named helpers are gone and device listing goes through the existing inventory with sanitized drop warnings; v1.12.59 release row.
+
+### Track 142A: Delete dead pull and pull-plan helpers, and keep one content-hash check ✓ Shipped (v1.12.60)
+- 2026-11-17: merged [PR #339](https://github.com/kbitz/mind-meld/pull/339) (commit `95cbae07348c432a31d7e9968d7ba47b6335db8a`); verified land-time Track 142A, original Group 142, factory branch `mmm/7ba84812`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: the dead pull and planner helpers are gone, one lowercase SHA-256 shape check lives in the storage-key leaf, and the placed memory-index tidy-output test gap has tests; v1.12.60 release row.
+
+### Track 143A: Delete dead history and spool helpers, and drop state.db's unread tables ✓ Shipped (v1.12.61)
+- 2026-11-17: merged [PR #340](https://github.com/kbitz/mind-meld/pull/340) (commit `9573882317c2680aaae20b7b4cc11726586681eb`); verified land-time Track 143A, original Group 143, factory branch `mmm/06284e76`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: the history and spool helpers are gone; migration 5 drops the three unread tables while keeping history, cursors and compatibility version 1 (the owner's "143A -- B, no bump" for schema compatibility); v1.12.61 release row. One test gap went to the inbox (deferred by the 2026-11-17 regeneration).
+
+### Track 144A: Delete token-usage and skill-link compatibility leftovers ✓ Shipped (v1.12.62)
+- 2026-11-17: merged [PR #343](https://github.com/kbitz/mind-meld/pull/343) (commit `a64f598fff21c05475ac877a2a8c042f983e7121`); verified land-time Track 144A, original Group 144, factory branch `mmm/5d20637c`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: nine unused token-usage and skill-link symbols removed, tests moved to production APIs, invariant references updated; v1.12.62 release row.
+
+### Track 145A: Retire `retro-fleet --no-save`, and delete retro, seen-sources and test-helper leftovers ✓ Shipped (v1.12.63)
+- 2026-11-17: merged [PR #344](https://github.com/kbitz/mind-meld/pull/344) (commit `2442cb939d4b4640b50c552bd0589fb2aaa01f2f`); verified land-time Track 145A, original Group 145, factory branch `mmm/5822756d`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: `--no-save` is rejected by both parsers (`tests/test_retro_fleet_cli.py`, `tests/test_retro_fleet_aggregator.py`) and README's Upgrading section gives the remedy; the retro, seen-sources and test leftovers are gone; v1.12.63 release row.
+
+### Track 146A: Drop dead parameters and the test-only `anchor_pending`, and name the Track-named test files by topic ✓ Shipped (v1.12.64)
+- 2026-11-17: merged [PR #345](https://github.com/kbitz/mind-meld/pull/345) (commit `ad06efcd05a545cfd22ee9d5f47728f8798a63a0`); verified land-time Track 146A, original Group 146, factory branch `mmm/452eb1c1`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: the ignored parameters and `anchor_pending` are gone (`tests/test_push_anchors.py` asserts its absence), no test file is named after a Track or review, quiet-mode recovery warnings are kept and both placed test gaps have tests; v1.12.64 release row.
+
+### Track 147A: Delete cli's compatibility re-exports ✓ Shipped (v1.12.65)
+- 2026-11-17: merged [PR #346](https://github.com/kbitz/mind-meld/pull/346) (commit `93bf5203a96448a1958a0802a6af6a4c0e77ecd2`); verified land-time Track 147A, original Group 147, factory branch `mmm/1fed90d5`. Introduction/lineage: carded by the second 2026-11-15 regeneration (`bad70b7`, PR #329).
+- Approved-scope evidence: `cli.py` has no `noqa: F401` import and `_read_autorun_breadcrumbs` is gone (`tests/test_module_boundaries.py` guards both); tests reach names through their owning modules; v1.12.65 release row.
+
+### Track 148A: Show a pending Syncthing join request in mm status and an attended mm pull ✓ Shipped (v1.12.66)
+- 2026-11-17: merged [PR #347](https://github.com/kbitz/mind-meld/pull/347) (commit `c55d103c4360b99df303bce5fb2d77c40cdc2835`); verified land-time Track 148A, original Group 148, factory branch `mmm/75dc278f`. Introduction/lineage: carded by the 2026-11-17 inbox drain (`f87db09`, PR #342) on the developer's word on that PR.
+- Approved-scope evidence: on a machine where mm manages Syncthing, `mm status` and an attended `mm pull` report pending join requests by count with the `mm devices approve` command; pending IDs and names stay unprinted; previews, automatic commands and owner-managed machines stay quiet; v1.12.66 release row. Three test gaps went to the inbox (deferred by the 2026-11-17 regeneration).
