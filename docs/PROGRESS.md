@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.67 | 2026-11-18 | Warm host-usage reads during `mm autopush` now wait longer for later readers, attended `mm push` tells you what to do when capture needs an owner, and command output says machine rather than Mac. |
 | 1.12.66 | 2026-11-17 | Managed Syncthing machines now report pending join requests by count with a manual approval command, and malformed Syncthing header values are reported before a connection opens. |
 | 1.12.65 | 2026-11-17 | The removed-wrapper hint now points to autorun evidence, and compatibility re-exports are removed from the CLI module. |
 | 1.12.64 | 2026-11-17 | Invariant docs and the event-backfill contract now cover the full session inventory. |
