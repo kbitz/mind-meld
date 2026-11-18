@@ -17212,6 +17212,7 @@ def test_attended_push_prints_owner_action_notice_before_outcome_and_skips_advis
     and prints none for advisory 0-repo discovery or auto-continuing catch-up."""
     monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
     monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **k: ())
+    resolve_push_cursor = _mm_events.resolve_push_cursor
     memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
     repo_a = capture61["path"].parent / "notice-repo-a"
     (repo_a / ".git" / "objects").mkdir(parents=True)
@@ -17263,6 +17264,8 @@ def test_attended_push_prints_owner_action_notice_before_outcome_and_skips_advis
     assert res_empty.stderr == ""
 
     # 3. Auto-continuing git catch-up prints no owner-action notice on non-verbose push.
+    monkeypatch.setattr(_mm_events, "resolve_push_cursor", resolve_push_cursor)
+    assert resolve_push_cursor(capture61["dayfile"].parent, "dev-a").held
     monkeypatch.setattr(
         _mm_events,
         "discover_git_roots",
@@ -17280,6 +17283,9 @@ def test_attended_push_prints_owner_action_notice_before_outcome_and_skips_advis
     res_catchup = runner.invoke(app, ["push"])
     assert res_catchup.exit_code == 0, res_catchup.output
     assert res_catchup.stderr == ""
+    details = cli_module.attemptlog.read_runs()["runs"]["push"]["degradations"]
+    assert events_tail._CURSOR_HOLD_DEGRADATION in details
+    assert "git capture catching up (1 left) — the next attended mm push continues it" in details
 
 
 def test_recapture_machine_neutral_wording_pins(capture61, monkeypatch):

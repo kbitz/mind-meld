@@ -136,7 +136,9 @@ stdout for the first recorded degradation that names an owner command (`Run mm .
 discovery (`events_tail._ROOT_DISCOVERY_EMPTY_DEGRADATION`), missing `mm-events`
 folder warnings already emitted via `core._warning`, and auto-continuing or
 auto-retrying catch-up details (`the next attended mm push continues it` /
-`the next attended mm push retries automatically`). Actionable/data-at-risk warnings remain visible in
+`the next attended mm push retries automatically`). If the same run reports
+automatic Git catch-up, the held-cursor detail stays in the run record and its
+recapture notice stays quiet. Actionable/data-at-risk warnings remain visible in
 all modes before the outcome: growth, migration, missing custom events root,
 unsafe/corrupt peer skips, kept conflict copies, files deleted because a peer deleted them (autopull prints one `mm:` line), apply/fsync/recovery failures,
 unavailable history/run evidence, and piped/`--verbose` actionable update faults (on a terminal without `--verbose`, `_emit_update_lines` prints the update's `Updated mm <old> → <new>.` or `mm: notice: … Run: mm update` line after a successful sync's outcome line, and before a failed sync's failure lines so the sync's `Run:` line stays last; cancellation keeps its existing notice and reinstall remedy, while nudges for installs mm cannot update keep their prior ordering). Automatic successful changes and no-ops

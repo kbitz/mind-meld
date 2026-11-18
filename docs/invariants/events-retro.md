@@ -197,8 +197,8 @@ records `WALK_SKIP_BUDGET_ABORT` for discovered roots without spawning worker
 threads). With only the legacy interactive key configured, host
 sweep/warm and tail budgets keep their legacy behavior unchanged; with
 no key set the 30000 ms attended cap partitions both phases on attended push (and 5000 ms on `mm init` backfill), so the attended
-session walk is no longer capped at the legacy 500 ms; autopush always keeps
-its fixed 250 ms walk / 750 ms host / 50 ms discovery shares and never warms.
+session walk is no longer capped at the legacy 500 ms. Autopush uses separate
+walk and discovery budgets, defaults to a 750 ms host sweep, and never warms.
 Config validation checks an explicit `host_usage_autopush_budget_ms` against
 `capture_budget_ms` when set (never `attended_capture_cap_ms`) and against an explicitly set legacy interactive
 value (the legacy rule). When neither key is set, an explicit autopush budget still must not
@@ -1697,9 +1697,9 @@ probe). Together Codex + Antigravity cost 419 ms (439 ms with Grok), so 750 ms
 leaves 331 ms (311 ms) headroom while staying one quarter of the 3,000 ms attended
 sweep default, and 250 ms gives `linux-a`'s 153 ms Antigravity read 97 ms headroom
 even when an earlier reader exhausts the sweep while staying below
-`HOST_READER_RESERVE_MS` (300 ms). This is a
-cooperative grace floor, not a hard elapsed-time ceiling or a full second
-reader budget. Two halves remain load-bearing: capture begins
+`HOST_READER_RESERVE_MS` (300 ms). With multiple readers, each reader after the
+first can extend the unattended sweep by up to 250 ms, even with a smaller
+configured sweep budget. These deadlines are cooperative. Two halves remain load-bearing: capture begins
 AFTER the `walk_done` snapshot (invariant 4) so host time can never trip or
 redefine the session-walk notice, and the deadline is FRESH rather than the
 walk's leftovers — reusing `deadline` would make the row vanish exactly on the

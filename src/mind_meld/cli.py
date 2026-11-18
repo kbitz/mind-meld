@@ -1164,10 +1164,16 @@ def _owner_action_detail(record: Mapping[str, Any] | None) -> str | None:
     """First recorded degraded detail naming an owner action for non-verbose push."""
     if not isinstance(record, Mapping) or record.get("outcome") != "degraded":
         return None
-    for detail in record.get("degradations") or ():
+    details = record.get("degradations") or ()
+    for detail in details:
         if not isinstance(detail, str):
             continue
         if detail == events_tail._ROOT_DISCOVERY_EMPTY_DEGRADATION:
+            continue
+        if detail == events_tail._CURSOR_HOLD_DEGRADATION and any(
+            isinstance(other, str) and other.startswith("git capture catching up (")
+            for other in details
+        ):
             continue
         if detail.startswith("mm-events folder is missing;"):
             continue
