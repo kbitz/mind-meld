@@ -385,7 +385,7 @@ reports the number of ignored files as `ignored storage files`. See
 with one `<Verb>: <what happened>.` outcome line per thing that happened, and
 errors print `mm: error: <what broke>` on stderr followed by `Run: <command>` on
 its own last line (including CLI usage errors, which exit 2 with
-`Run: <command path> --help`). Capture, cache, budget, nested-repository, scan,
+`Run: <command path> --help`). Routine capture, cache, budget, nested-repository, scan,
 push `usage published` and pull `skipped` details live under `--verbose` (and in
 `mm status` / `mm diag`); an attended push that publishes only usage ends with
 `Push: no content changes.`, and a pull that only skips newer local files ends
@@ -915,14 +915,14 @@ How Grok memory sync works:
 
 `mm enable-source agy` does three things: it syncs `~/.gemini/config` (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`; session DBs, settings, hooks, and `agents/` stay local), maintains a `retro-fleet` skill link under `~/.gemini/config/skills/`, and opts this machine into reading completed step token totals from `~/.gemini/antigravity-cli/conversations/<cid>.db`. Prompts never leave this machine. The fleet retro gains an `Antigravity` row alongside Claude, Codex, and Muse.
 
-Upgrade is per Mac, and **upgrading is not enough**. On each Mac, first run
+Upgrade and enable the source on each machine. First run
 `mm update` to install the release with Antigravity support, verify with
 `mm --version`, then:
 
 1. `mm enable-source agy`
 2. Run **`mm push`**. It needs enabled, resolved `mm-events` and host consent, but no Git roots or content changes. With `--verbose`, each cold reader may print scanning progress; scanning is cooperative, not a hard ceiling. Autopush never warms.
-3. Verify on the **producing Mac** with `mm status`: a recent recorded capture, Antigravity contributed (or explicitly partial), and `Publication: published`. A prior successful scan or `agy usage read blocker: none` describes only the cache.
-4. Optionally verify end to end from a **second Mac** after the shared folder delivers the files. Run `mm devices --format=json` to find the producing Mac's id and substitute it for `<id>`:
+3. Verify on the **producing machine** with `mm status`: a recent recorded capture, Antigravity contributed (or explicitly partial), and `Publication: published`. A prior successful scan or `agy usage read blocker: none` describes only the cache.
+4. Optionally verify end to end from a **second machine** after the shared folder delivers the files. Run `mm devices --format=json` to find the producing machine's ID and substitute it for `<id>`:
 
 ```sh
 mm pull
@@ -1050,6 +1050,11 @@ usage publication with `mm push --verbose` (`Host usage published (manifest acce
 `mm status`, or `mm diag`. Other explicit outcomes include `Push: no content changes.`,
 `Push: no enabled sources.`, `Pull: no changes.`, `Pull: no peer devices.`
 and `Pull: no enabled sources.`
+
+When a successful `mm push` records a capture problem that needs your action,
+the default output shows the first remedy as an `mm: notice:` line on stderr
+before `Push:`. Automatically continuing Git catch-up stays quiet.
+
 Pull counts applications across selected peers/sources, not guaranteed unique
 paths. Skipped newer local files are omitted from the default `mm pull` outcome
 line (a pull that only skips newer local files prints `Pull: no changes.`);
@@ -1600,7 +1605,7 @@ The link is created on `mm init` and re-checked by each push **for agents author
 
 To filter to your own commits only, every machine publishes the identities it commits under (the global `git config user.email`, each captured repository's own `user.email`, your GitHub noreply address and any `[retro].author_emails` entries), and the retro counts commits by the union across the fleet, so a peer needs no entry of its own for an identity another machine publishes. Every push that captures activity, including autopush, publishes the current configured identities without waiting for the seven-day identity-cache refresh. When activity is captured, an attended `mm push` also refreshes that cache early after a change to `[retro].author_emails`, the global `user.email` or the set of discovered repositories; autopush keeps the TTL-only refresh policy. `mm refresh-identity` refreshes the cache on demand. `[retro].author_emails` stays additive: use it for an identity no Git configuration names, such as an ID a hosted service writes as the author email. Commits by `checkpointer@noreply`, or whose subject starts with `checkpoint:`, are never captured or counted, including under `--no-author-filter`, which otherwise renders every fleet commit. To override the events directory (custom `mm-events` path), set `MM_EVENTS_DIR=/path/to/events` before invoking.
 
-**Pin repositories this Mac should capture** with `[retro] repo_roots` in `~/.config/mind-meld/config.toml`. Paths must be absolute (or start with `~`). The setting is per-machine and is not synced. Manual roots are classified before automatic discovery, which reads the logs of every enabled provider (Claude Code, Codex, Muse and Antigravity) and, when installed, Paseo's project list and the mmm factory's items; `repo_roots` remains for repositories none of those names. Verify with `mm diag`, which labels each root with the source that found it:
+**Pin repositories this machine should capture** with `[retro] repo_roots` in `~/.config/mind-meld/config.toml`. Paths must be absolute (or start with `~`). The setting is per-machine and is not synced. Manual roots are classified before automatic discovery, which reads the logs of every enabled provider (Claude Code, Codex, Muse and Antigravity) and, when installed, Paseo's project list and the mmm factory's items; `repo_roots` remains for repositories none of those names. Verify with `mm diag`, which labels each root with the source that found it:
 
 ```toml
 [retro]
@@ -2064,7 +2069,7 @@ Use the real path from your filesystem: displayed nonprintable characters are vi
 
 A final `mm: error: Pull interrupted [interrupted]: ...` or `mm: error: Pull failed [unexpected-error]: ...` line followed by `Run: mm diag` (exit 1) means an interrupt or unexpected error stopped the batch; the line says completed changes remain. Its `Run:` command is `mm diag`. Then run `mm pull` to continue. Choosing `(a)bort` also keeps and records completed changes; pending keep-local mtime decisions are not broadcast. A `mm: notice:` saying a file was written, merged, or a conflict copy saved means publication completed and the named follow-up step encountered an error.
 
-**Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm` and `mm --version`; upgrade to v0.14.17+ before running `mm diag` and `mm push`. If `mm status` shows Git repositories catching up, run `mm push` on that Mac; it resumes pending Git capture even without file edits. Follow its `mm recapture` remedy for persistent failures or history beyond retention, then rerun the retro at a window that includes the recovered commit dates. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
+**Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm` and `mm --version`; upgrade to v0.14.17+ before running `mm diag` and `mm push`. If `mm status` shows Git repositories catching up, run `mm push` on that machine. It resumes pending Git capture even without file edits. Follow its `mm recapture` remedy for persistent failures or history beyond retention, then rerun the retro at a window that includes the recovered commit dates. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
 
 **Why is my host cost missing (`—` on the economics table)?** That Mac reported token counters in an older format (mm < v0.12.52), has not pushed per-model `tokens_by_day` yet (mm < v0.12.49), or its latest snapshot predates the requested window. On **that** Mac: `pipx upgrade mind-meld`, then `mm push`. Confirm capture and publication with `mm status`. Then re-run `mm retro-fleet 30d` here. An upgraded peer's retained 90 days generally **do** become priceable on repush. `—` is unavailable, not zero; do not add the other machines' figures to fill it in.
 
@@ -2096,9 +2101,9 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm status` says `stale — no autorun in Nh`.** Nothing has run `mm autopull` / `mm autopush` in 48 hours, so your agent's lifecycle hook is not firing. Check the `# Mind Meld` block is still in the global instructions file that agent actually reads.
 
-**`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means a file could not be applied (decrypt, write, permission) — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; a `corrupt peer manifest(s)` count can also mean this Mac's own manifest vanished during the pull ([waiting content](#waiting-content-is-not-a-failure)). Fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that Mac. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
+**`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means a file could not be applied (decrypt, write, permission) — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; a `corrupt peer manifest(s)` count can also mean this machine's own manifest vanished during the pull ([waiting content](#waiting-content-is-not-a-failure)). Fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that machine. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
 
-**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. While the last push recorded discovery `partial`, `mm status` names `mm push` until it advises recovery (for example after three incomplete captures), then names `mm recapture <window>` as the way to finish discovery in one run. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo none of the discovery sources (Claude Code, Codex, Muse and Antigravity logs; Paseo; the mmm factory) names, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
+**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each machine. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. While the last push recorded discovery `partial`, `mm status` names `mm push` until it advises recovery (for example after three incomplete captures), then names `mm recapture <window>` as the way to finish discovery in one run. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo none of the discovery sources (Claude Code, Codex, Muse and Antigravity logs; Paseo; the mmm factory) names, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
 
 **`mm push --verbose` prints `events tail budget exceeded` (or `mm status` reports the events walk exceeded its budget).** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
 
@@ -2491,8 +2496,8 @@ on the whole command: filesystem calls, cache writes and running Git workers can
 finish later. Each reader after the first keeps a reserve of
 up to 300 ms in the sweep and across the warm retries (at most half the sweep divided
 by the reader count), so one reader's overrun cannot take another's whole read. Setting either capture key selects the partition;
-`host_usage_interactive_budget_ms` remains the sweep preference within its host share. Autopush, `mm autopull`, `mm init` backfill, and `mm recapture` keep
-their own budgets regardless.
+`host_usage_interactive_budget_ms` remains the sweep preference within its host share.
+`attended_capture_cap_ms` applies only to attended pushes.
 
 Autopush defaults to **750 ms** (range **100–5,000**, with a **250 ms** later-reader grace floor; sized from measured warm reads of 266 ms for Codex over 7,536 rollouts, 104–153 ms for Antigravity over 500 conversation DBs, and 19–20 ms for Grok Build); interactive push and init default to **3,000 ms** (range **250–5,000**).
 All must be integers. An explicit `host_usage_autopush_budget_ms` must not exceed `capture_budget_ms`

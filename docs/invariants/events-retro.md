@@ -74,7 +74,9 @@ that names an owner command (`Run mm ...`, ``run `mm ...``, or `mm disable-sourc
 skipping advisory zero-repository discovery (`_ROOT_DISCOVERY_EMPTY_DEGRADATION`),
 missing `mm-events` folder details already emitted as `mm: warning:`, and
 auto-continuing/auto-retrying catch-up details (`the next attended mm push continues it` /
-`the next attended mm push retries automatically`). Append-size warnings, missing custom folders
+`the next attended mm push retries automatically`). When the run also records
+automatic Git catch-up, the held-cursor remedy stays in the run record and its
+notice stays quiet. Append-size warnings, missing custom folders
 and other actionable/data-at-risk warnings remain visible. No three-push
 escalation or total-budget redesign is delivered here. See sync.md for the
 terminal outcome and finalization order; auto-upgrade.md owns update eligibility.
