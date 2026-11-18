@@ -3065,7 +3065,9 @@ class TestApplyExceptionBoundary53A:
         assert captured.out == ""
         assert len(captured.err.splitlines()) == 1
         assert "Mac A/claude/" + blocked in captured.err
-        assert "Mac A published a folder named 'blocked' where this Mac has a file" in captured.err
+        assert (
+            "Mac A published a folder named 'blocked' where this machine has a file" in captured.err
+        )
 
     @pytest.mark.parametrize("error", [TypeError, ValueError, OverflowError, OSError])
     def test_gate_and_prediction_degrade(self, ordered_apply, monkeypatch, capsys, error):

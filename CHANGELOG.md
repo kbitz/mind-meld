@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.67] - 2026-11-18
+
+Warm host-usage reads during `mm autopush` now wait longer for later readers, attended `mm push` tells you what to do when capture needs an owner, and command output says machine rather than Mac.
+
+### Changed
+
+- `mm autopush` now allows 750 ms with a 250 ms later-reader floor for warm host-usage reads, `mm push` prints an `mm: notice:` line before its outcome when a degraded run needs an owner action (and clears a held retro cursor once capture completes), and command output and `retro-fleet` say machine rather than Mac.
+- The default `mm autopush` host-usage sweep is 750 ms with a 250 ms grace window for later readers.
+- Command output and `retro-fleet` now refer to machines across platforms.
+
+### Fixed
+
+- Attended `mm push` shows actionable capture remedies, clears recovered cursor warnings, and keeps automatic Git catch-up quiet.
+
+### Upgrade notes
+
+- An explicit `[retro] host_usage_autopush_budget_ms` below 750 in `config.toml` keeps that lower cap instead of using the new 750 ms default; remove the line unless you want the tighter limit.
+
 ## [1.12.66] - 2026-11-17
 
 Managed Syncthing machines now report pending join requests by count with a manual approval command, and malformed Syncthing header values are reported before a connection opens.

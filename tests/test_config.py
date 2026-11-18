@@ -12,6 +12,7 @@ from mind_meld.config import (
     _GSTACK_GENERATOR_GLOBS,
     _GSTACK_INCLUDE_PATTERNS,
     _GSTACK_INCLUDE_PATTERNS_1_11_6,
+    CAPTURE_BUDGET_MIN_MS,
     DEFAULT_GROK_DIR,
     DEFAULT_SOURCES,
     HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS,
@@ -2685,11 +2686,15 @@ def test_invalid_host_read_budget(key, minimum, bad):
     "auto,interactive",
     [
         (HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS, HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS),
-        (250, 500),
+        (350, 500),
+        (750, 3000),
         (HOST_USAGE_BUDGET_MAX_MS, HOST_USAGE_BUDGET_MAX_MS),
     ],
 )
 def test_valid_host_read_budgets(auto, interactive):
+    from mind_meld import config as mm_config
+
+    assert mm_config.DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS == 750
     config = {
         "device": {"id": "dev", "name": "Mac"},
         "storage": {"path": "/tmp/mm"},
@@ -2699,6 +2704,31 @@ def test_valid_host_read_budgets(auto, interactive):
         },
     }
     _validate(config)
+
+
+def test_unset_autopush_budget_clamps_to_explicit_smaller_attended_ceiling():
+    from mind_meld import events_tail
+
+    assert events_tail.resolve_host_read_budget(_retro_config({}), interactive=False) == (
+        750,
+        "default",
+    )
+    assert events_tail.resolve_host_read_budget(
+        _retro_config({"host_usage_autopush_budget_ms": 750}), interactive=False
+    ) == (750, "config")
+    for retro, expected in (
+        ({"capture_budget_ms": CAPTURE_BUDGET_MIN_MS}, CAPTURE_BUDGET_MIN_MS),
+        ({"host_usage_interactive_budget_ms": 300}, 300),
+        ({"capture_budget_ms": 500, "host_usage_interactive_budget_ms": 300}, 300),
+        ({"capture_budget_ms": 400, "host_usage_interactive_budget_ms": 600}, 400),
+        ({"capture_budget_ms": 5000}, 750),
+    ):
+        cfg = _retro_config(retro)
+        _validate(cfg)
+        assert events_tail.resolve_host_read_budget(cfg, interactive=False) == (
+            expected,
+            "default",
+        )
 
 
 @pytest.mark.parametrize(
@@ -2749,6 +2779,7 @@ def test_invalid_capture_budget(bad):
         _validate(_retro_config({"capture_budget_ms": bad}))
 
 
+# pregate-literal: DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS=250 capture budget's own lower bound
 @pytest.mark.parametrize("good", [250, 5000, 60000])
 def test_valid_capture_budget(good):
     _validate(_retro_config({"capture_budget_ms": good}))
@@ -2793,7 +2824,14 @@ def test_attended_capture_cap_respects_configured_capture_budget(tmp_path):
     _validate(_retro_config({}))
     _validate(_retro_config({"capture_budget_ms": 45000}))
     # Equal to capture_budget_ms accepted (including below 5000 when capture_budget_ms is lowered).
-    _validate(_retro_config({"capture_budget_ms": 250, "attended_capture_cap_ms": 250}))
+    _validate(
+        _retro_config(
+            {
+                "capture_budget_ms": CAPTURE_BUDGET_MIN_MS,
+                "attended_capture_cap_ms": CAPTURE_BUDGET_MIN_MS,
+            }
+        )
+    )
     _validate(_retro_config({"capture_budget_ms": 5000, "attended_capture_cap_ms": 5000}))
     _validate(_retro_config({"attended_capture_cap_ms": 30000}))
     _validate(_retro_config({"attended_capture_cap_ms": 60000}))

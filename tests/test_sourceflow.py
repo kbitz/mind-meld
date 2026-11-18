@@ -36,9 +36,9 @@ DETAIL_LINES = {
     ],
     "muse": [
         "Syncs ~/.local/share/muse memory/ only. "
-        "Session files are not synced. Prompts never leave the Mac.",
+        "Session files are not synced. Prompts never leave this machine.",
         "Reads completed model-step token totals from local Muse session logs. "
-        "Session files are not synced. Prompts never leave the Mac.",
+        "Session files are not synced. Prompts never leave this machine.",
         "Run: mm disable-source muse",
     ],
     "agy": [

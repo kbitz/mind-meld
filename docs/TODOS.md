@@ -44,6 +44,24 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/events_tail.py|tests/test_integration.py] Test gap: Pin the remaining gates for held Git cursor recovery
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The CLI test covers a clean recovery and a budget-aborted walk after a hold. It does not isolate recovery when the terminal append is unconfirmed, the discovery refresh window is pending, or the Git walk returns an error.
+- **Hypothesis (untested):** Extend the held-interval test to vary those conditions individually and check the recorded degradation and recovery notice.
+- **Evidence:** Track 149A coverage audit at `85c4284`. The success, advisory and automatic catch-up probes passed after repair.
+- **Revisit:** A track that changes held-cursor recovery or the recovery test fixture.
+- **Effort:** S
+
+### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Assert the missing custom events folder remedy appears once
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The missing-folder test counts warnings. A duplicate remedy in a trailing push notice would leave that count unchanged.
+- **Hypothesis (untested):** Extend the missing custom `mm-events` root test to count the remedy across warning and notice output.
+- **Evidence:** Track 149A coverage audit at `85c4284`. The recorded path-free detail is already skipped by the notice filter.
+- **Revisit:** A track that changes the attended push notice filter or custom events root handling.
+- **Effort:** S
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-17 (every planned Track shipped; empty plan)

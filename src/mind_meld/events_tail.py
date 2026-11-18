@@ -272,14 +272,27 @@ def resolve_host_read_budget(
             ),
             "default",
         )
-    return HOST_USAGE_READ_BUDGET_AUTOPUSH_MS, "default"
+    ceilings: list[int] = []
+    if isinstance(retro, dict):
+        if "capture_budget_ms" in retro:
+            ceilings.append(retro["capture_budget_ms"])
+        if "host_usage_interactive_budget_ms" in retro:
+            ceilings.append(retro["host_usage_interactive_budget_ms"])
+    ceiling = min(ceilings) if ceilings else HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
+    return min(HOST_USAGE_READ_BUDGET_AUTOPUSH_MS, ceiling), "default"
 
 
-HOST_READER_GRACE_MS = 50
+HOST_READER_GRACE_MS = 250
 """Minimum time for each reader after the first, beyond the sweep deadline.
-Track 57A evidence E16 measured warm Grok reads at 19–20 ms while Codex
-used 73–80% of the autopush budget. This floor gives Grok about 2.5x that
-read time. Deadlines are cooperative, not filesystem-interrupt ceilings."""
+Sized from measured warm reads: Codex 266 ms over 7,536 rollouts and
+Antigravity 104 ms over 500 conversation DBs on mac-a, Antigravity 153 ms over
+500 conversation DBs on linux-a, and Grok Build 19 to 20 ms (Track 57A E16).
+Together Codex + Antigravity cost 419 ms (439 ms with Grok), so the 750 ms
+autopush sweep default leaves 331 ms (311 ms) headroom while staying one
+quarter of the 3,000 ms interactive sweep default, and a 250 ms grace floor
+gives linux-a's 153 ms Antigravity read 97 ms headroom even when an earlier
+reader exhausts the sweep while staying below HOST_READER_RESERVE_MS (300 ms).
+Deadlines are cooperative, not filesystem-interrupt ceilings."""
 
 HOST_READER_RESERVE_MS = 300
 """Attended sweep: time held back for EACH later reader (Track 101A), so one
@@ -300,7 +313,7 @@ _ROOT_DISCOVERY_ERROR_DEGRADATION = (
 )
 _ROOT_DISCOVERY_EMPTY_DEGRADATION = (
     "git repository discovery completed and found 0 repositories — "
-    "no commits will be captured from this Mac. Run mm diag"
+    "no commits will be captured from this machine. Run mm diag"
 )
 _GIT_WALK_DEGRADATION = (
     "git walk dropped {n} repositories this push. "
@@ -1259,10 +1272,8 @@ def _host_skip_phrase(
                 f"last complete read {shown(evidence.last_complete_ms)} ms "
                 f"({host_read_age(evidence.last_complete_at)}); "
                 f"{progress}. "
-                "If the last complete read is over your autopush budget, raise "
-                "`[retro] host_usage_autopush_budget_ms`; attended mm push refreshes usage "
-                "and can warm cold readers. "
-                "If it is over what an attended push allows, raise "
+                "Run `mm push` to refresh usage and warm cold readers. "
+                "If the last complete read is over what an attended push allows, raise "
                 "`[retro] attended_capture_cap_ms`; keep it at least `capture_budget_ms`. "
                 "Host capture and warm retries get three fifths of that cap; "
                 f"see {HOST_USAGE_CAPTURE_URL}."
@@ -1969,9 +1980,21 @@ def _run_events_tail(
                     now=mm_event_ts,
                 )
 
+        cursor_hold_recovered = (
+            cursors_committed
+            and events.classify_discovery(capture.root_discovery) == "complete"
+            and not capture.walk_budget_aborts
+            and not capture.walk_errors
+            and events.read_git_capture_cache().get("pending_refresh_since") is None
+        )
         if cursor.held:
-            degradations.append(_CURSOR_HOLD_DEGRADATION)
-            token_usage._diagnostic(f"mm: notice: {_CURSOR_HOLD_DEGRADATION}\n")
+            if cursor_hold_recovered:
+                token_usage._diagnostic(
+                    "mm: notice: retro cursor recovered from last complete capture\n"
+                )
+            else:
+                degradations.append(_CURSOR_HOLD_DEGRADATION)
+                token_usage._diagnostic(f"mm: notice: {_CURSOR_HOLD_DEGRADATION}\n")
         elif cursor.floored_after_incomplete:
             degradations.append(_CURSOR_COVERAGE_DEGRADATION)
             token_usage._diagnostic(f"mm: notice: {_CURSOR_COVERAGE_DEGRADATION}\n")

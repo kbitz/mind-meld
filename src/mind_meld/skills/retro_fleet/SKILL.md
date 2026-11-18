@@ -1,14 +1,14 @@
 ---
 name: retro-fleet
 description: |
-  Fleet-aware engineering retrospective stitched across every Mac in the
+  Fleet-aware engineering retrospective stitched across every machine in the
   mind-meld fleet. Reads the synced mm-events log to dedup commits across
   machines (canonical remote URL + sha) and produce a glanceable, paste-
   able markdown retro mirroring the gstack /retro shape. Output is
   aggregate-accurate, not per-machine.
 
   Use when asked to "retro across machines", "fleet retro", "how active
-  has the fleet been", or "what shipped this week (across all my Macs)".
+  has the fleet been", or "what shipped this week (across all my machines)".
   Voice trigger aliases: "retro fleet", "fleet activity", "weekly retro
   across machines".
 triggers:
@@ -24,7 +24,7 @@ allowed-tools:
 # /retro-fleet
 
 Fleet-wide engineering retrospective for users of [mind-meld](https://github.com/kbitz/mind-meld).
-Stitches activity from every Mac in the fleet into one accurate picture, and
+Stitches activity from every machine in the fleet into one accurate picture, and
 hands you a screenshot-quality ASCII card up front for sharing.
 
 ## How it works
@@ -87,7 +87,7 @@ A partial or failed reader makes every agent's priced total conservative
 Do not guess ownership from the reader's name. Grok's inherent context-tier
 pricing uncertainty remains specific to its models. Missing or rejected price
 detail names its machine and the acceptor's `detail_reason` when available.
-Repeated hostnames carry short device IDs so remedies identify the right Mac.
+Repeated hostnames carry short device IDs so remedies identify the right machine.
 
 ### The duplicate-ledger detector
 
@@ -142,7 +142,7 @@ so it reloads this skill — a store refresh cannot change instructions already
 loaded in a session. Do not infer a fresh capture from exit 0; verify the
 recorded timestamp and publication with `mm status`.
 
-Peers may lag the rendering Mac. A machine needs **mm v0.14.17 or newer**
+Peers may lag the rendering machine. A machine needs **mm v0.14.17 or newer**
 for attended capture publication. Peer-binary upgrades needed for host capture
 target this floor; local pricing upgrades and diagnostics have their own remedies.
 

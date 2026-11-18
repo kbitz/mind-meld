@@ -1160,6 +1160,33 @@ def _emit_update_lines(display: upgrade.SyncUpdateDisplay | None) -> None:
             sys.stderr.flush()
 
 
+def _owner_action_detail(record: Mapping[str, Any] | None) -> str | None:
+    """First recorded degraded detail naming an owner action for non-verbose push."""
+    if not isinstance(record, Mapping) or record.get("outcome") != "degraded":
+        return None
+    details = record.get("degradations") or ()
+    for detail in details:
+        if not isinstance(detail, str):
+            continue
+        if detail == events_tail._ROOT_DISCOVERY_EMPTY_DEGRADATION:
+            continue
+        if detail == events_tail._CURSOR_HOLD_DEGRADATION and any(
+            isinstance(other, str) and other.startswith("git capture catching up (")
+            for other in details
+        ):
+            continue
+        if detail.startswith("mm-events folder is missing;"):
+            continue
+        if (
+            "the next attended mm push continues it" in detail.lower()
+            or "the next attended mm push retries automatically" in detail.lower()
+        ):
+            continue
+        if "Run mm " in detail or "run `mm " in detail or "mm disable-source " in detail:
+            return detail
+    return None
+
+
 @contextmanager
 def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     if dry_run:
@@ -1198,6 +1225,10 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
         _emit_update_lines(update)
         _emit_sync_outcome(_sync_failure(verb, state, error), failed=True)
     else:
+        if verb == "push" and not verbose:
+            notice = _owner_action_detail(state.get("record"))
+            if notice is not None:
+                core._notice(notice)
         _emit_sync_outcome(_sync_success(verb, result), failed=False)
         _emit_update_lines(update)
     if isinstance(error, typer.Exit) and error.exit_code == 3:
@@ -2767,10 +2798,10 @@ def pull(
         case_sensitive=False,
     ),
 ) -> None:
-    """Pull selected context from other Macs.
+    """Pull selected context from other machines.
 
     A file a peer deleted is deleted here too when it is exactly the version this
-    Mac last synced from that peer; the bytes are kept for 30 days (see README,
+    machine last synced from that peer; the bytes are kept for 30 days (see README,
     "Recovering a deleted file").
 
     keep-both preserves local files and saves divergent remote bytes in
@@ -3007,10 +3038,10 @@ def diff_cmd(
     from_device: str | None = typer.Option(None, "--from", help="Diff against a specific device"),
     source: str | None = typer.Option(None, "--source", help="Diff a specific source only"),
 ) -> None:
-    """Compare this Mac's files with its last push (or with --from DEVICE's manifest).
+    """Compare this machine's files with its last push (or with --from DEVICE's manifest).
 
     Changes nothing, not even the lock file. For incoming changes from other
-    Macs, use mm pull --dry-run.
+    machines, use mm pull --dry-run.
     """
     diffflow.diff_cmd(from_device=from_device, source=source)
 
@@ -3161,7 +3192,7 @@ def migrate_config(
     if core._migrate_config_core(yes=yes, dry_run=dry_run):
         console.print(
             "Run [bold]mm push[/bold] to publish the exclusions; until then [bold]mm status[/bold] "
-            "counts them as pending deletions. No Mac deletes its local copy."
+            "counts them as pending deletions. No machine deletes its local copy."
         )
 
 
@@ -3464,7 +3495,7 @@ def recapture(
     window: str = typer.Argument(
         events.RECAPTURE_WINDOW_DEFAULT,
         help=(
-            "Redo this Mac's git capture for WINDOW (default 30d, same as mm init). "
+            "Redo this machine's git capture for WINDOW (default 30d, same as mm init). "
             "Safe to re-run — commits dedup fleet-wide on (remote, sha). "
             "Retros window by the COMMIT's date, not by when mm captured it, "
             "so mm recapture 90d then mm retro-fleet 7d will not show June commits."
@@ -3560,7 +3591,7 @@ def update() -> None:
 
     Runs pipx for you: an in-place pipx upgrade when this install tracks the
     release branch, or the @latest reinstall when it is pinned to an old tag.
-    Needs no config and no passphrase, so it works on a Mac where sync is
+    Needs no config and no passphrase, so it works on a machine where sync is
     refusing. pull and push do this on their own unless the
     upgrade.auto_install setting is false.
 

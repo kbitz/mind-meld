@@ -6,7 +6,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/syncthing.py` — `SyncthingState` / `read_state` / `PENDING_JOIN_FIX` / `pending_join_message`
 - `src/mind_meld/statusflow.py` — `status` / `_managed_syncthing_record` / `_syncthing_status_lines`
 - `src/mind_meld/cli.py` — `_push_core`
-- `src/mind_meld/cli.py` — `_sync_success` / `_sync_failure` / `_emit_sync_outcome`
+- `src/mind_meld/cli.py` — `_sync_success` / `_sync_failure` / `_emit_sync_outcome` / `_owner_action_detail`
 - `src/mind_meld/core.py` — `_SyncProgress` / `_start_sync_progress`
 - `src/mind_meld/core.py` — `_pause_sync_progress` / `_fetch_remote_manifest`
 - `src/mind_meld/core.py` — `_recover_prior_manifest`
@@ -127,7 +127,18 @@ no-source attended push ends `Push: no enabled sources.` and records run cause
 Presentation never changes quiet/attended execution, budgets, warming, locks,
 encryption or schemas. In a real terminal (`not verbose and not dry_run and core._console_is_terminal()`), attended `mm push` and `mm pull` render a transient Rich spinner (`_SyncProgress`) with phase labels and measured batch counters (`updateprogress.UpdateProgress`; pull counts per source batch), animated by a 100 ms daemon ticker thread that joins with a bounded timeout on shutdown (`_stop_sync_progress`), repainting per-file advances at ticker rate (phase changes and first/final files paint at once; synchronous refreshes can still wait on terminal output), pauses around mid-run warnings or interactive conflict prompts on the push/pull paths (`_pause_sync_progress`; leaf-module warnings cannot pause it), and clears before the final outcome lines; `mm update` and a foreground automatic update during an attended terminal `mm push` or `mm pull` run through the same `_SyncProgress` (`_installer_progress`). Progress/capture/cache/budget/nested notices are verbose;
 actual degradations reach existing status/diag evidence, including failures
-without a returned result. Actionable/data-at-risk warnings remain visible in
+without a returned result. When a non-verbose attended `mm push` succeeds with a
+recorded `degraded` run, `cli._sync_outcome` inspects `state.get("record")` via
+`cli._owner_action_detail` and emits one `mm: notice: <detail>` line on stderr
+via `core._notice` immediately before `_emit_sync_outcome` writes `Push: ...` to
+stdout for the first recorded degradation that names an owner command (`Run mm ...`,
+``run `mm ...``, or `mm disable-source ...`), while skipping advisory zero-repository
+discovery (`events_tail._ROOT_DISCOVERY_EMPTY_DEGRADATION`), missing `mm-events`
+folder warnings already emitted via `core._warning`, and auto-continuing or
+auto-retrying catch-up details (`the next attended mm push continues it` /
+`the next attended mm push retries automatically`). If the same run reports
+automatic Git catch-up, the held-cursor detail stays in the run record and its
+recapture notice stays quiet. Actionable/data-at-risk warnings remain visible in
 all modes before the outcome: growth, migration, missing custom events root,
 unsafe/corrupt peer skips, kept conflict copies, files deleted because a peer deleted them (autopull prints one `mm:` line), apply/fsync/recovery failures,
 unavailable history/run evidence, and piped/`--verbose` actionable update faults (on a terminal without `--verbose`, `_emit_update_lines` prints the update's `Updated mm <old> → <new>.` or `mm: notice: … Run: mm update` line after a successful sync's outcome line, and before a failed sync's failure lines so the sync's `Run:` line stays last; cancellation keeps its existing notice and reinstall remedy, while nudges for installs mm cannot update keep their prior ordering). Automatic successful changes and no-ops

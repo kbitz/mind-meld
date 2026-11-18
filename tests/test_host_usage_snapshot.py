@@ -562,7 +562,7 @@ class TestHostDeadline:
         assert log == []
 
     def test_later_readers_get_grace_after_codex_spends_the_sweep_budget(self):
-        """Every later reader gets 50 ms even when the sweep has expired."""
+        """Every later reader gets 250 ms even when the sweep has expired."""
         log: list = []
         clock = {"t": 0.0}
         names = ["codex", "grok", SYNTH]
@@ -723,8 +723,8 @@ class TestHostDeadline:
         assert clock["t"] <= 3.0
 
     def test_without_a_reserve_the_same_overrun_costs_agy_its_read(self):
-        """The base behaviour the reserve fixes: with only the 50 ms grace, a
-        codex read that spends the whole sweep leaves agy 50 ms for 236 ms."""
+        """The base behaviour the reserve fixes: with only the 250 ms grace, a
+        codex read that spends the whole sweep leaves agy 250 ms for 270 ms."""
         clock = {"t": 0.0}
 
         def codex(*, deadline):
@@ -732,11 +732,55 @@ class TestHostDeadline:
             return _incomplete("deadline")
 
         capture = events_tail._capture_host_usage(
-            _readers(("codex", codex), ("agy", self._clocked_reader(clock, "agy", 0.236))),
+            _readers(("codex", codex), ("agy", self._clocked_reader(clock, "agy", 0.270))),
             deadline=3.0,
             now=lambda: clock["t"],
         )
         assert capture.dropped == (("codex", "deadline"), ("agy", "deadline"))
+
+    def test_autopush_default_budget_and_grace_fit_measured_warm_reads(self):
+        """Track 149A: measured warm reads (Codex 266 ms, Antigravity 153 ms)
+        both complete inside the 750 ms default autopush sweep, and Antigravity
+        (153 ms) still completes inside the 250 ms grace floor when Codex
+        exhausts the sweep."""
+        clock = {"t": 0.0}
+        sweep_s = events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS / 1000.0
+        assert sweep_s == pytest.approx(0.75)
+        assert events_tail.HOST_READER_GRACE_MS == 250
+
+        capture = events_tail._capture_host_usage(
+            _readers(
+                ("codex", self._clocked_reader(clock, "codex", 0.266)),
+                ("agy", self._clocked_reader(clock, "agy", 0.153)),
+            ),
+            deadline=sweep_s,
+            now=lambda: clock["t"],
+        )
+        assert capture.complete is True
+        assert capture.token_sources == ("codex", "agy")
+        assert capture.dropped == ()
+        assert clock["t"] == pytest.approx(0.419)
+
+        # Even if Codex exhausts the 750 ms sweep, Antigravity's 153 ms warm
+        # read finishes inside the 250 ms later-reader grace floor.
+        clock_grace = {"t": 0.0}
+
+        def codex_exhausts(*, deadline):
+            clock_grace["t"] = sweep_s
+            return _incomplete("deadline")
+
+        capture_grace = events_tail._capture_host_usage(
+            _readers(
+                ("codex", codex_exhausts),
+                ("agy", self._clocked_reader(clock_grace, "agy", 0.153)),
+            ),
+            deadline=sweep_s,
+            now=lambda: clock_grace["t"],
+        )
+        assert capture_grace.complete is True
+        assert capture_grace.token_sources == ("agy",)
+        assert capture_grace.dropped == (("codex", "deadline"),)
+        assert clock_grace["t"] == pytest.approx(0.75 + 0.153)
 
     def test_attended_reserve_fits_measured_warm_reads(self):
         """The slowest reads measured on the owner's Mac (Codex 1.812 s, Grok
@@ -775,7 +819,8 @@ class TestHostDeadline:
     def test_budgets_are_separate_from_the_walk_budget(self):
         """Deliberately its own pair of constants: reusing the walk budget
         would let a busy host store redefine the session-walk notice."""
-        assert events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS == 250
+        assert events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS == 750
+        assert events_tail.HOST_READER_GRACE_MS == 250
         assert events_tail.HOST_USAGE_READ_BUDGET_INTERACTIVE_MS == 3000
         assert (
             events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS != _mm_host_usage.DEFAULT_READ_BUDGET_S
@@ -803,7 +848,7 @@ class TestHostDeadline:
             "dev-a",
             since=datetime.now(timezone.utc),
             budget_ms=500,
-            host_budget_ms=250,
+            host_budget_ms=750,
             prepare_token_cache=lambda: None,
             host_readers=events_tail._default_host_readers(
                 [{"name": n, "type": "generic"} for n in _mm_events.HOST_USAGE_TOKEN_SOURCES],
@@ -813,7 +858,7 @@ class TestHostDeadline:
 
         assert len(seen) == 2
         assert len(set(seen)) == 1, "cheap reads with ample time retain the sweep deadline"
-        assert before + 0.25 <= seen[0] <= after + 0.25
+        assert before + 0.75 <= seen[0] <= after + 0.75
 
 
 # ---------------------------------------------------------------------------
@@ -1855,8 +1900,8 @@ class TestColdCacheWarmAndRetry:
         assert degradations[0].startswith("host-usage snapshot skipped (codex deadline)")
 
     def test_autopush_sweep_keeps_grace_and_never_warms(self, tmp_path, monkeypatch):
-        """Track 101A: the reserve is attended-only. An autopush sweep keeps its
-        fixed 250 ms and the 50 ms later-reader grace, and nothing warms."""
+        """Track 101A / Track 149A: the reserve is attended-only. An autopush sweep keeps its
+        fixed 750 ms and the 250 ms later-reader grace, and nothing warms."""
         clock = {"t": 100.0}
         monkeypatch.setattr(events_tail.time, "monotonic", lambda: clock["t"])
         real_capture = events_tail._capture_host_usage
@@ -1878,9 +1923,9 @@ class TestColdCacheWarmAndRetry:
 
             return read
 
-        # Codex overruns the 250 ms sweep by 20 ms; the others are instant.
+        # Codex overruns the 750 ms sweep by 20 ms; the others are instant.
         readers = tuple(
-            (name, reader(name, 0.27 if name == "codex" else 0.0))
+            (name, reader(name, 0.77 if name == "codex" else 0.0))
             for name in ("codex", "grok", "muse", "agy")
         )
         monkeypatch.setattr(events_tail, "_default_host_readers", lambda *_a, **_kw: readers)
@@ -1897,10 +1942,10 @@ class TestColdCacheWarmAndRetry:
 
         assert [name for name, _start, _deadline in seen] == ["codex", "grok", "muse", "agy"]
         _name, first_start, sweep = seen[0]
-        assert sweep - first_start == pytest.approx(0.25)
+        assert sweep - first_start == pytest.approx(0.75)
         for _name, start, deadline in seen[1:]:
-            assert deadline == pytest.approx(max(sweep, start + 0.05))
-        assert seen[1][2] > sweep, "the overrun leaves the next reader exactly the 50 ms grace"
+            assert deadline == pytest.approx(max(sweep, start + 0.25))
+        assert seen[1][2] > sweep, "the overrun leaves the next reader exactly the 250 ms grace"
         assert warmed == [], "autopush never warms"
 
     def test_healthy_capture_never_pays_for_a_warm(self, tmp_path, monkeypatch, capsys):
@@ -2366,9 +2411,9 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
     if evidence_state != "absent":
         evidence = events_tail.HostReadEvidence()
     if evidence_state == "known_converged":
-        evidence = events_tail.HostReadEvidence(250, 300, "2999-01-01T00:00:00+00:00", 51, 51)
+        evidence = events_tail.HostReadEvidence(640, 690, "2999-01-01T00:00:00+00:00", 51, 51)
     elif evidence_state == "known":
-        evidence = events_tail.HostReadEvidence(250, 300, "2999-01-01T00:00:00+00:00", 50, 51)
+        evidence = events_tail.HostReadEvidence(640, 690, "2999-01-01T00:00:00+00:00", 51, 52)
     phrase = events_tail._host_skip_phrase(
         reader, "deadline", readiness="ready", verb=verb, evidence=evidence, in_diag=in_diag
     )
@@ -2390,12 +2435,10 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
         assert "An attended mm push can warm cold readers" in phrase
     else:
         unit = "session logs" if reader == "muse" else "rollouts"
-        assert (
-            "raise `[retro] host_usage_autopush_budget_ms`; attended mm push refreshes usage"
-            in phrase
-        )
+        assert "Run `mm push` to refresh usage and warm cold readers." in phrase
+        assert "host_usage_autopush_budget_ms" not in phrase
         if evidence_state == "known_converged":
-            assert "Last read allowed 250 ms; last complete read 300 ms (in the future)" in phrase
+            assert "Last read allowed 640 ms; last complete read 690 ms (in the future)" in phrase
             assert f"51 of 51 {unit} cached" in phrase
         else:
             assert "Last read allowed unknown ms; last complete read unknown ms (unknown)" in phrase
@@ -2405,8 +2448,9 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
 
 
 def test_deadline_remedy_names_the_attended_lever():
-    """Track 101A: the remedy named only the autopush lever, which cannot help
-    an attended push that overran its own share."""
+    """Track 101A / Track 149A: the remedy directs the owner to run `mm push`
+    and names `attended_capture_cap_ms` without recommending raising
+    `host_usage_autopush_budget_ms`."""
     import mind_meld.statusflow as statusflow
 
     stamp = "2999-01-01T00:00:00+00:00"
@@ -2414,7 +2458,8 @@ def test_deadline_remedy_names_the_attended_lever():
     phrase = events_tail._host_skip_phrase(
         "codex", "deadline", readiness="ready", verb="push", evidence=evidence
     )
-    assert "raise `[retro] host_usage_autopush_budget_ms`" in phrase
+    assert "Run `mm push` to refresh usage and warm cold readers." in phrase
+    assert "host_usage_autopush_budget_ms" not in phrase
     assert "raise `[retro] attended_capture_cap_ms`" in phrase
     assert "Host capture and warm retries get three fifths of that cap" in phrase
     assert "keep it at least `capture_budget_ms`" in phrase
@@ -2432,6 +2477,8 @@ def test_deadline_remedy_names_the_attended_lever():
     }
     blocker = statusflow._host_usage_blocker("codex", state, readiness="ready")
     # `safe_str` escapes the Rich markup bracket, so the display form is `\[retro]`.
+    assert "Run `mm push` to refresh usage and warm cold readers." in blocker
+    assert "host_usage_autopush_budget_ms" not in blocker
     assert "raise `\\[retro] attended_capture_cap_ms`" in blocker
     assert blocker.endswith("(first observed 2026-11-01 UTC)")
     # The push-time notice passes no evidence and stays as it was.
@@ -2808,7 +2855,7 @@ class TestCaptureBudget85A:
     def test_autopush_budget_unaffected_by_capture_budget(self):
         config = {"retro": {"capture_budget_ms": 4000, "attended_capture_cap_ms": 20000}}
         assert events_tail.resolve_host_read_budget(config, interactive=False) == (
-            250,
+            750,
             "default",
         )
         config["retro"]["host_usage_autopush_budget_ms"] = 400
@@ -3313,7 +3360,7 @@ class TestCaptureBudget85A:
             "dev-a",
             since=datetime.now(timezone.utc),
             walk_budget_ms=500,
-            root_discovery_budget_ms=50,
+            root_discovery_budget_ms=_mm_events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS,
             deadline_monotonic=_time.monotonic() - 0.1,
         )
         assert len(rows) == 1
@@ -3750,7 +3797,7 @@ def test_track_125a_progress_scope_receives_host_and_git_counts_and_isolates_fau
             "dev-a",
             since=datetime(2026, 10, 1, tzinfo=timezone.utc),
             walk_budget_ms=500,
-            root_discovery_budget_ms=50,
+            root_discovery_budget_ms=_mm_events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS,
         )
     assert calls == [
         ("Recording activity", 0, 2, "repositories"),
@@ -3769,7 +3816,7 @@ def test_track_125a_progress_scope_receives_host_and_git_counts_and_isolates_fau
             "dev-a",
             since=datetime(2026, 10, 1, tzinfo=timezone.utc),
             walk_budget_ms=500,
-            root_discovery_budget_ms=50,
+            root_discovery_budget_ms=_mm_events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS,
         )
     assert actual_usage == expected_usage
     assert {p["project"] for p in git_rows[0]["projects"]} == {"r1", "r2"}

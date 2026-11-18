@@ -745,7 +745,9 @@ class TestParseGitLogNumstat:
 
 class TestWalkGitProjects:
     def test_empty_roots_returns_empty_snapshot(self):
-        out = events.walk_git_projects([], datetime.now(timezone.utc), 250)
+        out = events.walk_git_projects(
+            [], datetime.now(timezone.utc), events.WALK_TIME_BUDGET_AUTOPUSH_MS
+        )
         assert len(out) == 1
         assert out[0]["type"] == "git-snapshot"
         assert out[0].get("projects") == []
@@ -836,8 +838,10 @@ class TestWalkGitProjects:
 
         monkeypatch.setattr(events, "_walk_one_repo", _capture)
         roots = [Path(f"/tmp/r{i}") for i in range(30)]
-        events.walk_git_projects(roots, datetime.now(timezone.utc), 250)
-        # 30 repos, budget 250, workers 8 → (250 * 8) // 30 = 66 → floored to 200
+        events.walk_git_projects(
+            roots, datetime.now(timezone.utc), events.WALK_TIME_BUDGET_AUTOPUSH_MS
+        )
+        # With 30 repositories the timeout formula hits the floor.
         assert all(t == events.PER_REPO_TIMEOUT_FLOOR_MS for t in captured)
 
     @pytest.mark.parametrize("n_roots", [1, 40])
@@ -896,14 +900,15 @@ class TestWalkGitProjects:
             return None, None
 
         monkeypatch.setattr(events, "_walk_one_repo", _capture)
-        events.walk_git_projects(discovered, datetime.now(timezone.utc), 250)
-        # n=1, budget 250 → (250 * 8) // 1 = 2000 → cap
+        walk_budget_ms = events.WALK_TIME_BUDGET_AUTOPUSH_MS
+        events.walk_git_projects(discovered, datetime.now(timezone.utc), walk_budget_ms)
+        # One repository receives the full per-repo cap.
         assert captured == [events.PER_REPO_TIMEOUT_CAP_MS]
         # Contrast: 41 admitted roots would floor at 200.
         n_if_junk_admitted = 41
         would_be = max(
             events.PER_REPO_TIMEOUT_FLOOR_MS,
-            (250 * events.MAX_GIT_WORKERS) // n_if_junk_admitted,
+            (walk_budget_ms * events.MAX_GIT_WORKERS) // n_if_junk_admitted,
         )
         assert would_be == events.PER_REPO_TIMEOUT_FLOOR_MS
 
@@ -1033,7 +1038,7 @@ class TestWalkSessionMetadata:
         proj.mkdir(parents=True)
         (proj / "session.jsonl").write_text(
             # Many lines, none with a `cwd` field.
-            "\n".join(json.dumps({"type": "user", "msg": f"x{i}"}) for i in range(2 * 250))
+            "\n".join(json.dumps({"type": "user", "msg": f"x{i}"}) for i in range(500))
         )
         out = events.walk_session_metadata(tmp_path)
         assert len(out[0]["projects"]) == 1
@@ -4088,8 +4093,10 @@ def test_recapture_walks_with_its_own_budget(tmp_path, monkeypatch, argv):
 def test_push_and_autopush_walk_budgets_and_cap_are_unchanged(tmp_path, monkeypatch):
     from mind_meld import events_tail
 
-    assert events.WALK_TIME_BUDGET_AUTOPUSH_MS == 250
-    assert events.WALK_TIME_BUDGET_INTERACTIVE_MS == 2 * 250
+    # pregate-literal: DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS=250 independent Git walk default
+    autopush_walk_ms = 250
+    assert events.WALK_TIME_BUDGET_AUTOPUSH_MS == autopush_walk_ms
+    assert events.WALK_TIME_BUDGET_INTERACTIVE_MS == 500
     assert events.PER_REPO_TIMEOUT_FLOOR_MS == 200
     assert events.PER_REPO_TIMEOUT_CAP_MS == 2000
 
@@ -4098,7 +4105,7 @@ def test_push_and_autopush_walk_budgets_and_cap_are_unchanged(tmp_path, monkeypa
     _init_git_repo(repo)
     _seed_commit(repo)
     _stub_discovery_to(monkeypatch, repo)
-    # A one-hour-old interval keeps autopush at 250 ms; it escalates past one day.
+    # A one-hour-old interval keeps the default walk budget.
     monkeypatch.setattr(
         events,
         "effective_capture_since",
@@ -4113,11 +4120,13 @@ def test_push_and_autopush_walk_budgets_and_cap_are_unchanged(tmp_path, monkeypa
 
     monkeypatch.setattr(events, "_walk_one_repo", _capture)
 
-    # Autopush (quiet=True) keeps 250 ms walk budget and 2000 ms per-repo cap.
+    # Autopush (quiet=True) keeps its walk budget and per-repo cap.
     events_tail._run_events_tail(
         {}, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
     )
-    assert [(budget, "per_repo_timeout_ms" in kw) for budget, kw in walks] == [(250, False)]
+    assert [(budget, "per_repo_timeout_ms" in kw) for budget, kw in walks] == [
+        (autopush_walk_ms, False)
+    ]
     assert timeouts == [2000]
 
     # Equality config (cap == capture) reproduces the 500 ms walk budget and 2000 ms per-repo cap.
@@ -4127,7 +4136,7 @@ def test_push_and_autopush_walk_budgets_and_cap_are_unchanged(tmp_path, monkeypa
     events_tail._run_events_tail(
         eq_cfg, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
     )
-    assert [(budget, "per_repo_timeout_ms" in kw) for budget, kw in walks] == [(2 * 250, False)]
+    assert [(budget, "per_repo_timeout_ms" in kw) for budget, kw in walks] == [(500, False)]
     assert timeouts == [2000]
 
     # Default attended cap (30 s) extends the attended walk budget by E = 25000 ms (25500 ms)
