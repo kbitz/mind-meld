@@ -830,7 +830,6 @@ class TestFetchTagsGitAdapter124B:
         monkeypatch.setattr(upgrade, "CHECK_TIMEOUT_SECONDS", 1)
         pid_file = tmp_path / "grandchild.pid"
         pid_tmp = tmp_path / "grandchild.pid.tmp"
-        popen_extra = ", preexec_fn=os.setsid" if detach_grandchild else ""
         fake_git = tmp_path / "fake-git-sleep"
         fake_git.write_text(
             f"#!{sys.executable}\n"
@@ -839,12 +838,19 @@ class TestFetchTagsGitAdapter124B:
                 import os, subprocess, sys, time
                 if sys.argv[1:2] == ["config"]:
                     sys.exit(1)
-                child = subprocess.Popen(
-                    [{sys.executable!r}, "-c", "import time; time.sleep(60)"]{popen_extra}
+
+                def publish_pid():
+                    with open({str(pid_tmp)!r}, "w", encoding="utf-8") as fh:
+                        fh.write(str(os.getpid()))
+                    os.replace({str(pid_tmp)!r}, {str(pid_file)!r})
+                    # Publish before the child can escape the parent's group.
+                    if {detach_grandchild!r}:
+                        os.setsid()
+
+                subprocess.Popen(
+                    [{sys.executable!r}, "-c", "import time; time.sleep(60)"],
+                    preexec_fn=publish_pid,
                 )
-                with open({str(pid_tmp)!r}, "w", encoding="utf-8") as fh:
-                    fh.write(str(child.pid))
-                os.replace({str(pid_tmp)!r}, {str(pid_file)!r})
                 time.sleep(60)
                 """
             ).lstrip(),
