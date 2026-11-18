@@ -243,8 +243,8 @@ def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monke
             {
                 "version": 1,
                 "last_reason": "deadline",
-                "last_deadline_allotted_ms": 750,
-                "last_complete_ms": 800,
+                "last_deadline_allotted_ms": 640,
+                "last_complete_ms": 690,
                 "last_complete_at": "2999-01-01T00:00:00+00:00",
                 "files": {"warm": {"states": []}},
             }
@@ -255,7 +255,7 @@ def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monke
     assert result.exit_code == 0, result.output
     text = " ".join(result.output.split())
     assert "(codex deadline)" in text
-    assert "Last read allowed 750 ms; last complete read 800 ms (in the future)" in text
+    assert "Last read allowed 640 ms; last complete read 690 ms (in the future)" in text
     assert "Run `mm push` to refresh usage and warm cold readers." in text
     assert "host_usage_autopush_budget_ms" not in text
     assert "not yet scanned" not in text

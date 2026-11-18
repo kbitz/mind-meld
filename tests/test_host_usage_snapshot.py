@@ -2411,9 +2411,9 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
     if evidence_state != "absent":
         evidence = events_tail.HostReadEvidence()
     if evidence_state == "known_converged":
-        evidence = events_tail.HostReadEvidence(750, 800, "2999-01-01T00:00:00+00:00", 51, 51)
+        evidence = events_tail.HostReadEvidence(640, 690, "2999-01-01T00:00:00+00:00", 51, 51)
     elif evidence_state == "known":
-        evidence = events_tail.HostReadEvidence(750, 800, "2999-01-01T00:00:00+00:00", 51, 52)
+        evidence = events_tail.HostReadEvidence(640, 690, "2999-01-01T00:00:00+00:00", 51, 52)
     phrase = events_tail._host_skip_phrase(
         reader, "deadline", readiness="ready", verb=verb, evidence=evidence, in_diag=in_diag
     )
@@ -2438,7 +2438,7 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
         assert "Run `mm push` to refresh usage and warm cold readers." in phrase
         assert "host_usage_autopush_budget_ms" not in phrase
         if evidence_state == "known_converged":
-            assert "Last read allowed 750 ms; last complete read 800 ms (in the future)" in phrase
+            assert "Last read allowed 640 ms; last complete read 690 ms (in the future)" in phrase
             assert f"51 of 51 {unit} cached" in phrase
         else:
             assert "Last read allowed unknown ms; last complete read unknown ms (unknown)" in phrase
