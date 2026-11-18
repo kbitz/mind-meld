@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import venv
 from pathlib import Path
 
 import pytest
@@ -1291,7 +1292,7 @@ class TestAffectedSelection:
         assert ei.value.code == "cache-unowned"
 
     def test_unrecorded_green_refresh_fails_assertion_and_unlinks_stale_record(
-        self, proj: Path, tmp_path: Path, monkeypatch, capsys
+        self, proj: Path, tmp_path: Path
     ) -> None:
         doc = proj / "README.md"
         doc.write_text("dirty at refresh\n")
@@ -1321,40 +1322,71 @@ class TestAffectedSelection:
         assert ran(proj) == ALL_TESTS
         assert record_path.is_file()
 
-        # Post-suite SelectError in seed_record and pre-suite SelectError fallback on --refresh
-        # both remove any pre-existing record.json rather than leaving a stale baseline.
+    def test_post_suite_selection_error_does_not_run_pytest_twice(
+        self, proj: Path, monkeypatch, capsys
+    ) -> None:
         mod = load_check()
-        calls = 0
+        record = proj / mod.SELECT_DIR / mod.SELECT_RECORD
+        assert record.is_file()
+        changes = 0
+        runs = 0
 
         def fail_second_changed_since(_root: Path, _mb: str) -> dict[str, str]:
-            nonlocal calls
-            calls += 1
-            if calls >= 2:
+            nonlocal changes
+            changes += 1
+            if changes == 2:
                 raise mod.SelectError("untracked files", "git timed out", "git-unavailable", "fix")
             return {}
 
-        monkeypatch.setattr(mod, "changed_since", fail_second_changed_since)
-        monkeypatch.setattr(mod, "run_owned", lambda *_a, **_kw: 0)
-        args = mod.parse_argv(["--affected", "--refresh", "--serial"])
-        sel = proj / ".mm-test-selection"
-        assert (
-            mod.seed_record(args, proj, sel, Path(sys.executable), [], {"fp": "x"}, "cfg", "mb")
-            == 0
-        )
-        assert "record not updated:" in capsys.readouterr().err
-        assert not record_path.exists()
+        def green_pytest(*_args, **_kwargs):
+            nonlocal runs
+            runs += 1
+            return 0
 
-        record_path.write_text('{"stale": true}', encoding="utf-8")
-        monkeypatch.setattr(
-            mod,
-            "resolve_merge_base",
-            lambda *_a: (_ for _ in ()).throw(
-                mod.SelectError("merge base", "git timed out", "git-unavailable", "fix")
-            ),
-        )
-        monkeypatch.setattr(mod, "fallback_pytest", lambda *_a: 0)
+        monkeypatch.setattr(mod, "changed_since", fail_second_changed_since)
+        monkeypatch.setattr(mod, "run_owned", green_pytest)
+        args = mod.parse_argv(["--affected", "--refresh", "--serial"])
         assert mod.run_affected(args, proj, Path(sys.executable), []) == 0
-        assert not record_path.exists()
+        assert changes == 2
+        assert runs == 1
+        assert "record not updated: untracked files: git timed out" in capsys.readouterr().err
+        assert not record.exists()
+
+    @pytest.mark.parametrize("cache_change", ["unchanged", "replaced", "inaccessible"])
+    def test_green_refresh_fallback_only_removes_its_stale_record(
+        self, proj: Path, monkeypatch, cache_change: str
+    ) -> None:
+        mod = load_check()
+        sel = proj / mod.SELECT_DIR
+        record = sel / mod.SELECT_RECORD
+        prior = record.read_bytes()
+        is_file = Path.is_file
+
+        def fail_resolve(*_args):
+            raise mod.SelectError("merge base", "git timed out", "git-unavailable", "fix")
+
+        def check_owner(path):
+            if path == sel / mod.SELECT_OWNER:
+                raise PermissionError(path)
+            return is_file(path)
+
+        def green_fallback(*_args):
+            if cache_change == "replaced":
+                mod.atomic_write_json(record, {"generation": "new"})
+            if cache_change == "inaccessible":
+                monkeypatch.setattr(Path, "is_file", check_owner)
+            return 0
+
+        monkeypatch.setattr(mod, "resolve_merge_base", fail_resolve)
+        monkeypatch.setattr(mod, "fallback_pytest", green_fallback)
+        args = mod.parse_argv(["--affected", "--refresh", "--serial"])
+        assert mod.run_affected(args, proj, Path(sys.executable), []) == 0
+        if cache_change == "replaced":
+            assert json.loads(record.read_bytes()) == {"generation": "new"}
+        elif cache_change == "inaccessible":
+            assert record.read_bytes() == prior
+        else:
+            assert not record.exists()
 
     def test_merge_parts_ignores_empty_worker_collection_and_rejects_disagreement(
         self, proj: Path, tmp_path: Path
@@ -1443,6 +1475,7 @@ class TestAffectedSelection:
         monkeypatch.setenv("MM_CHECK_ROOT", str(proj))
         monkeypatch.setenv("MM_PYTHON", sys.executable)
         monkeypatch.setenv("RAN_LOG", str(ran_log(proj)))
+        monkeypatch.chdir(proj)
         doc = proj / "README.md"
         doc.write_text("dirty at refresh\n")
         assert mod.main(["--no-bootstrap", "--tests", "--affected", "--refresh", "--serial"]) == 0
@@ -1454,6 +1487,26 @@ class TestAffectedSelection:
         doc.unlink()
         assert mod.main(["--no-bootstrap", "--tests", "--affected", "--serial"]) == 0
         assert ran(proj) == ALL_TESTS
+
+    def test_probe_env_distinguishes_venvs_that_share_a_python_binary(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        mod = load_check()
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+        separate_venv = tmp_path / "separate-venv"
+        venv.create(separate_venv, with_pip=False, symlinks=True)
+        tool = separate_venv / "bin" / "python"
+        assert tool.resolve() == Path(sys.executable).resolve()
+
+        expected = json.loads(
+            subprocess.check_output(
+                [str(tool), "-c", mod.ENV_PROBE],
+                text=True,
+                timeout=mod.SELECT_SUBPROCESS_TIMEOUT_S,
+            )
+        )
+        assert expected["coverage"] is False
+        assert mod.probe_env(tool) == expected
 
 
 class TestSkeleton:

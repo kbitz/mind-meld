@@ -1236,8 +1236,12 @@ print(json.dumps({"fp": fp, "coverage": cov}))
 
 def probe_env(tool: Path) -> dict:
     try:
-        same_interpreter = tool.is_file() and os.path.realpath(tool) == os.path.realpath(
-            sys.executable
+        # Different virtualenvs can link to the same executable. The invocation
+        # directory determines which pyvenv.cfg and site-packages Python uses.
+        same_interpreter = (
+            os.path.abspath(tool.parent) == os.path.dirname(sys.executable)
+            and tool.is_file()
+            and os.path.realpath(tool) == os.path.realpath(sys.executable)
         )
     except OSError:
         same_interpreter = False
@@ -1605,8 +1609,11 @@ def run_affected(args: Args, root: Path, tool: Path, n_args: list[str]) -> int:
     """--affected: returns the pytest result; selector trouble means a full run."""
     base = args.base or SELECT_DEFAULT_BASE
     sel = root / SELECT_DIR
+    prior_record = None
     try:
         sel = ensure_select_dir(root)
+        if args.refresh:
+            prior_record = _record_identity(sel / SELECT_RECORD)
         merge_base = resolve_merge_base(root, base)
         env = probe_env(tool)
         config = config_digest(root)
@@ -1625,18 +1632,16 @@ def run_affected(args: Args, root: Path, tool: Path, n_args: list[str]) -> int:
             return seed_record(args, root, sel, tool, n_args, env, config, merge_base)
         failed = _load_failed(sel)
         plan = plan_selection(root, record, merge_base, changed_since(root, merge_base), failed)
-    except SelectError as err:
-        select_error_report(err, base, sel)
-        result = fallback_pytest(args, sel, tool, n_args)
-        if args.refresh and result == 0:
-            _drop_stale_refresh_record(sel)
-        return result
     except Exception as exc:
-        err = SelectError("select tests", f"{type(exc).__name__}: {exc}", "unexpected", "report it")
+        err = exc
+        if not isinstance(exc, SelectError):
+            err = SelectError(
+                "select tests", f"{type(exc).__name__}: {exc}", "unexpected", "report it"
+            )
         select_error_report(err, base, sel)
         result = fallback_pytest(args, sel, tool, n_args)
-        if args.refresh and result == 0:
-            _drop_stale_refresh_record(sel)
+        if result == 0 and prior_record is not None:
+            _drop_stale_refresh_record(sel, prior_record)
         return result
     if plan.full:
         log(f"affected: {plan.full}; running the full suite")
@@ -1668,20 +1673,29 @@ def _clean_failed_on_green(sel: Path, result: int) -> int:
     return result
 
 
-def _drop_stale_refresh_record(sel: Path) -> None:
-    if not sel.is_dir() or sel.is_symlink() or not (sel / SELECT_OWNER).is_file():
-        return
+def _record_identity(path: Path) -> tuple[int, int, int, int] | None:
     try:
-        fd = os.open(sel / SELECT_LOCK, os.O_CREAT | os.O_RDWR, 0o644)
+        info = path.lstat()
     except OSError:
-        return
+        return None
+    return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _drop_stale_refresh_record(sel: Path, prior_record: tuple[int, int, int, int]) -> None:
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        (sel / SELECT_RECORD).unlink(missing_ok=True)
+        if sel.is_symlink() or not (sel / SELECT_OWNER).is_file():
+            return
+        fd = os.open(sel / SELECT_LOCK, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            record = sel / SELECT_RECORD
+            # A different recorder may have published while our fallback ran.
+            if _record_identity(record) == prior_record:
+                record.unlink(missing_ok=True)
+        finally:
+            os.close(fd)
     except OSError:
         pass
-    finally:
-        os.close(fd)
 
 
 def select_run(args: Args, sel: Path, tool: Path, n_args: list[str], plan: Plan) -> int:
