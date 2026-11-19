@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.71] - 2026-11-19
+
+Mind Meld now publishes encrypted Syncthing device IDs, pairs vouched pending peers on managed machines during sync, and reports how that pairing went.
+
+### Added
+
+- Mind Meld publishes encrypted Syncthing device IDs and pairs vouched pending peers on mm-managed machines during sync.
+
+### Changed
+
+- `mm status` reports pairing outcomes and degradations from sync hooks.
+
+### Fixed
+
+- An interrupted Syncthing mesh write is reconciled safely.
+
 ## [1.12.70] - 2026-11-19
 
 Plain `mm init` now asks whether to start a fleet or join one, waits in the same run for approval, and resumes a stopped join from its saved answers.

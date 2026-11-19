@@ -34,6 +34,8 @@ def _call_op(writer: syncthing.SyncthingWriter, op_name: str, peer_id: str, fold
         return writer.pending_devices()
     if op_name == "approval_state":
         return writer.approval_state("mind-meld", peer_id)
+    if op_name == "mesh_snapshot":
+        return writer.mesh_snapshot("mind-meld")
     if op_name == "mark_introducer":
         return writer.mark_introducer(peer_id)
     if op_name == "remove_default_folder":
@@ -48,6 +50,7 @@ _ALL_OPS = (
     "share_folder",
     "pending_devices",
     "approval_state",
+    "mesh_snapshot",
     "mark_introducer",
     "remove_default_folder",
 )
@@ -926,3 +929,173 @@ def test_standin_drops_pending_device_on_add_and_stop_after_restarts(fake_syncth
     assert state.configured is True
     assert state.writer_shape is True
     assert state.introducer is False
+
+
+def test_mesh_snapshot_shapes_no_names_and_errors(fake_syncthing, isolated_home, monkeypatch):
+    writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(fake_syncthing.my_id))
+    target = isolated_home / "Sync" / "mind-meld"
+
+    # Bad folder ID refused after identity gate
+    assert writer.mesh_snapshot("../bad") == syncthing.MeshSnapshot("refused", "bad-folder-id")
+    assert fake_syncthing.bodies == []
+
+    # Hostile peer names in pending, configured devices, introducedBy and folder label
+    hostile_pending_name = "pending-\x1b[31msecret"
+    hostile_config_name = "configured-\x1b]52;c;Y2xpcA==\x07secret"
+    hostile_intro_by = "intro-\x1b[2Jsecret"
+    hostile_label = "label-\x1b[31msecret"
+
+    dev_writer = {
+        "deviceID": fake_syncthing.peer_id,
+        "name": hostile_config_name,
+        "addresses": ["dynamic"],
+        "introducer": True,
+        "autoAcceptFolders": False,
+        "paused": False,
+        "introducedBy": "",
+    }
+    dev_paused = {
+        "deviceID": fake_syncthing.peer2_id,
+        "name": hostile_config_name,
+        "addresses": ["dynamic"],
+        "introducer": False,
+        "autoAcceptFolders": False,
+        "paused": True,
+        "introducedBy": hostile_intro_by,
+    }
+    ok_folder = {
+        **fake_syncthing.stock_folder(target, shared_with=[fake_syncthing.peer_id]),
+        "id": "mind-meld",
+        "label": hostile_label,
+    }
+    fake_syncthing.set_config(devices=[dev_writer, dev_paused], folders=[ok_folder])
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        fake_syncthing.peer2_id: {"name": hostile_pending_name, "address": "192.0.2.2:22000"},
+        fake_syncthing.my_id: {"name": hostile_pending_name},
+        "not-a-device-id": {"name": hostile_pending_name},
+    }
+    fake_syncthing.requests.clear()
+
+    snap = writer.mesh_snapshot("mind-meld")
+    assert snap.outcome == "ok"
+    assert snap.cause is None
+    assert snap.my_id == fake_syncthing.my_id
+    assert snap.pending_ids == (fake_syncthing.peer2_id,)
+    assert snap.folder_present is True
+    assert snap.folder_path == target.resolve(strict=False)
+    assert snap.folder_problems == ()
+    assert snap.folder_device_ids == frozenset({fake_syncthing.my_id, fake_syncthing.peer_id})
+    assert snap.devices == {
+        fake_syncthing.peer_id: syncthing.ConfiguredDevice(
+            device_id=fake_syncthing.peer_id,
+            writer_shape=True,
+            introducer=True,
+            introduced_by="",
+            paused=False,
+        ),
+        fake_syncthing.peer2_id: syncthing.ConfiguredDevice(
+            device_id=fake_syncthing.peer2_id,
+            writer_shape=False,
+            introducer=False,
+            introduced_by="<non-empty>",
+            paused=True,
+        ),
+    }
+    # Steady state is 4 GETs and 0 non-GETs; no peer-controlled name is stored
+    assert [r[0] for r in fake_syncthing.requests] == ["GET", "GET", "GET", "GET"]
+    assert fake_syncthing.bodies == []
+    snap_repr = repr(snap)
+    for forbidden in (
+        hostile_pending_name,
+        hostile_config_name,
+        hostile_intro_by,
+        hostile_label,
+        "secret",
+    ):
+        assert forbidden not in snap_repr
+
+    # Missing folder and bad option problems
+    fake_syncthing.set_config(devices=[], folders=[])
+    snap_no_folder = writer.mesh_snapshot("mind-meld")
+    assert snap_no_folder.outcome == "ok"
+    assert snap_no_folder.folder_present is False
+    assert snap_no_folder.folder_path is None
+
+    bad_opt_folder = {**ok_folder, "order": "random"}
+    fake_syncthing.set_config(devices=[], folders=[bad_opt_folder])
+    snap_bad_opt = writer.mesh_snapshot("mind-meld")
+    assert snap_bad_opt.outcome == "ok"
+    assert snap_bad_opt.folder_present is True
+    assert snap_bad_opt.folder_problems == ("order",)
+
+    # Malformed responses on each route return error / bad-response
+    fake_syncthing.set_config(devices=[], folders=[{**ok_folder, "devices": [123]}])
+    assert writer.mesh_snapshot("mind-meld") == syncthing.MeshSnapshot("error", "bad-response")
+
+    fake_syncthing.set_config(devices=[], folders=[{**ok_folder, "path": ""}])
+    assert writer.mesh_snapshot("mind-meld") == syncthing.MeshSnapshot("error", "bad-response")
+
+    fake_syncthing.set_config(devices=[], folders=[ok_folder])
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = ["not-a-dict"]
+    assert writer.mesh_snapshot("mind-meld") == syncthing.MeshSnapshot("error", "bad-response")
+
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = 403
+    assert writer.mesh_snapshot("mind-meld") == syncthing.MeshSnapshot("unauthorized", "http-403")
+
+
+def test_writer_absolute_deadline_honored_across_calls(fake_syncthing, isolated_home, monkeypatch):
+    target = isolated_home / "Sync" / "mind-meld"
+    ok_folder = {**fake_syncthing.stock_folder(target), "id": "mind-meld"}
+    fake_syncthing.set_config(devices=[], folders=[ok_folder])
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {}
+
+    clock = [100.0]
+
+    def fake_monotonic() -> float:
+        clock[0] += 0.35
+        return clock[0]
+
+    monkeypatch.setattr(syncthing.time, "monotonic", fake_monotonic)
+    writer = syncthing.SyncthingWriter(
+        syncthing.ManagedRecord(fake_syncthing.my_id),
+        timeout=0.5,
+        budget=5.0,
+        deadline=102.0,
+    )
+    # Call 1 (mesh_snapshot) uses ~5 monotonic reads (100.35 -> 102.10), exhausting the deadline
+    snap = writer.mesh_snapshot("mind-meld")
+    assert snap.outcome == "unreachable"
+    assert snap.cause == "timeout"
+
+    # Subsequent calls on the same deadline stop immediately before sending a request
+    reqs_before = len(fake_syncthing.requests)
+    res = writer.add_device(fake_syncthing.peer_id)
+    assert res == syncthing.WriteResult("unreachable", "timeout")
+    assert len(fake_syncthing.requests) == reqs_before
+    assert fake_syncthing.bodies == []
+
+
+def test_local_device_id_offline_reads_cert_and_handles_missing_or_bad_cert(
+    fake_syncthing, isolated_home, monkeypatch
+):
+    from tests.syncthing_folder import make_syncthing_like_certificate
+
+    cert_file = fake_syncthing.config_dir / "cert.pem"
+    cert_file.unlink(missing_ok=True)
+    assert syncthing.local_device_id_offline() is None
+
+    make_syncthing_like_certificate(fake_syncthing.config_dir)
+    derived = syncthing.local_device_id_offline()
+    assert derived is not None
+    assert syncthing.is_device_id(derived)
+    assert syncthing.has_valid_device_id_check_digits(derived)
+    assert derived == syncthing._device_id_from_cert(fake_syncthing.config_dir)
+
+    cert_file.write_text("not a cert", encoding="utf-8")
+    old_config_dir = isolated_home / "old-syncthing"
+    old_config_dir.mkdir()
+    make_syncthing_like_certificate(old_config_dir)
+    monkeypatch.setattr(
+        syncthing, "config_dirs", lambda: [fake_syncthing.config_dir, old_config_dir]
+    )
+    assert syncthing.local_device_id_offline() is None

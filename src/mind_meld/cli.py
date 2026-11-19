@@ -42,6 +42,7 @@ from mind_meld import (
     identity,
     initflow,
     manifest,
+    meshflow,
     outputstyle,
     projectid,
     pullflow,
@@ -55,6 +56,7 @@ from mind_meld import (
     statedb,
     statusflow,
     syncdiag,
+    syncthing,
     token_usage,
     upgrade,
 )
@@ -1238,7 +1240,10 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
             notice = _owner_action_detail(state.get("record"))
             if notice is not None:
                 core._notice(notice)
-        _emit_sync_outcome(_sync_success(verb, result), failed=False)
+        lines = _sync_success(verb, result)
+        if mesh_clause := state.get("mesh_outcome"):
+            lines.append(outputstyle._outcome_line(verb, mesh_clause))
+        _emit_sync_outcome(lines, failed=False)
         _emit_update_lines(update)
     if isinstance(error, typer.Exit) and error.exit_code == 3:
         raise typer.Exit(3)
@@ -1565,6 +1570,17 @@ def push(
                     except (OSError, MindMeldError) as e:
                         result.maintenance_failures += 1
                         core._warning(f"GC skipped ({e}). Run: mm gc")
+                if not dry_run:
+                    meshflow.run(
+                        config,
+                        passphrase,
+                        memory_kb,
+                        verb="push",
+                        attended=True,
+                        verbose=verbose,
+                        backend=backend,
+                        trace_formatter=_compact_sync_trace,
+                    )
             except (KeyboardInterrupt, typer.Abort):
                 # Only a storage-error record may carry errno.
                 stop_cause, stop_errno = "interrupted", None
@@ -2872,6 +2888,7 @@ def _attended_pull(
             if passphrase is None:
                 passphrase = core._get_passphrase_or_exit()
             run["stage"] = "command-refused"
+            mesh_res = None
 
             try:
                 acquire_lock()
@@ -2907,6 +2924,17 @@ def _attended_pull(
                     result_observer=lambda result: run.__setitem__("result", result),
                 )
                 run["result"] = pulled
+                if not dry_run:
+                    mesh_res = meshflow.run(
+                        config,
+                        passphrase,
+                        memory_kb,
+                        verb="pull",
+                        attended=True,
+                        verbose=verbose,
+                        backend=backend,
+                        trace_formatter=_compact_sync_trace,
+                    )
                 if join and (not_placed := pullflow.not_placed_line(pulled)):
                     # A join adds the line once, ahead of its one outcome line.
                     console.print(safe_str(not_placed))
@@ -2926,7 +2954,11 @@ def _attended_pull(
             # progress and the update can take the lock for itself.
             if not dry_run:
                 if not join:
-                    pullflow.notice_pending_syncthing_join(config)
+                    if mesh_res is not None and mesh_res.snapshot_taken:
+                        if msg := syncthing.pending_join_message(mesh_res.unvouched_pending):
+                            core._notice(msg, fix=syncthing.PENDING_JOIN_FIX)
+                    else:
+                        pullflow.notice_pending_syncthing_join(config)
                 _sync_update(config, verbose=verbose)
 
 
@@ -4696,25 +4728,24 @@ def autopull() -> None:
             if result.ledger_cause:
                 degradations.append(f"pull ledger unavailable ({result.ledger_cause})")
 
-            if degradations:
-                _write_autorun_breadcrumb("pull", "degraded", "; ".join(degradations))
-            else:
-                # Undelivered content is waiting, not degraded: the sync tool
-                # is still delivering it and the next pull picks it up.
-                _write_autorun_breadcrumb(
-                    "pull",
-                    "success",
-                    "; ".join(
-                        d
-                        for d in (
-                            pullflow.deleted_detail(result),
-                            pullflow.older_clause(result),
-                            pullflow.waiting_detail(result),
-                            pullflow.old_form_detail(result),
-                        )
-                        if d
-                    ),
-                )
+            mesh_res = meshflow.run(
+                setup.config,
+                setup.passphrase,
+                setup.memory_kb,
+                verb="pull",
+                attended=False,
+                log_unexpected=_log_unexpected,
+            )
+            outcome, detail = mesh_res.compose_breadcrumb(
+                degradations,
+                extra_success=(
+                    pullflow.deleted_detail(result),
+                    pullflow.older_clause(result),
+                    pullflow.waiting_detail(result),
+                    pullflow.old_form_detail(result),
+                ),
+            )
+            _write_autorun_breadcrumb("pull", outcome, detail)
 
             # Seam 2 — self-update or nudge at the TAIL. Runs AFTER the main work
             # + breadcrumb so the cold-cache HTTP fetch latency (~500ms 1x/24h)
@@ -4769,12 +4800,22 @@ def autopush() -> None:
                 bounded.total = min(2**53, getattr(bounded, "total", 0) + extra)
                 bounded.omitted = min(2**53, getattr(bounded, "omitted", 0) + extra)
 
+            mesh_res = meshflow.run(
+                setup.config,
+                setup.passphrase,
+                setup.memory_kb,
+                verb="push",
+                attended=False,
+                log_unexpected=_log_unexpected,
+            )
+
             if result is None and not get_sources(setup.config):
                 # Distinguish "broken config no-op" from "nothing to push" no-op
                 # in the breadcrumb. _push_core already printed the stderr warning;
                 # if `mm status` only sees "success" forever, monitoring never
                 # catches the wedge.
-                _write_autorun_breadcrumb("push", "no-sources")
+                _, detail = mesh_res.compose_breadcrumb(())
+                _write_autorun_breadcrumb("push", "no-sources", detail)
                 return
 
             # Persist events-tail degradation the same way autopull persists its
@@ -4815,19 +4856,18 @@ def autopush() -> None:
                 details.extend(result.anchor_warnings)
             # The first publish in the shared form leaves a trail (O8.3).
             switched = bool(result and result.wire_names_published)
-            only_switched = switched and not details
-            if switched:
+            has_push_degradations = bool(details or held or mesh_res.degradations)
+            if switched and has_push_degradations:
                 details.append("published under shared names")
             if held:
                 used = len("; ".join(details)) + (2 if details else 0)
                 budget = max(_HELD_BREADCRUMB_BUDGET - used, 0)
                 details.append(_held_breadcrumb_detail(held, budget))
-            if only_switched and not held:
-                _write_autorun_breadcrumb("push", "success", details[0])
-            elif details:
-                _write_autorun_breadcrumb("push", "degraded", "; ".join(details))
-            else:
-                _write_autorun_breadcrumb("push", "success")
+            outcome, crumb_detail = mesh_res.compose_breadcrumb(
+                details,
+                extra_success=("published under shared names",) if switched else (),
+            )
+            _write_autorun_breadcrumb("push", outcome, crumb_detail)
 
             # Seam 2 — self-update or nudge at the TAIL (mirrors autopull).
             upgrade.update_or_nudge(setup.config, attended=False)

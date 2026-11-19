@@ -2093,18 +2093,7 @@ def _syncthing_start_command(platform: str | None = None) -> str:
 
 def _has_valid_device_id_check_digits(device_id: str) -> bool:
     """Return True when every 14-char group of ``device_id`` passes Luhn-32."""
-    compact = "".join(device_id.split("-"))
-    if len(compact) != 56:
-        return False
-    for offset in range(0, 56, 14):
-        chunk = compact[offset : offset + 14]
-        try:
-            expected = syncthing._luhn32(chunk[:13])
-        except ValueError:
-            return False
-        if chunk[13] != expected:
-            return False
-    return True
+    return syncthing.has_valid_device_id_check_digits(device_id)
 
 
 def _normalize_device_id(raw: str) -> str:

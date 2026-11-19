@@ -132,6 +132,46 @@ here by hand, use the H3 form.
 - **Hypothesis** Exercise one peer and source with multiple held files. Check the plural count and when `Up to date with` appears alongside other outcomes.
 - **Evidence** Track 151B coverage audit. Revisit when a Track changes held-edit accounting or output.
 
+### [review:files=src/mind_meld/devices.py|tests/test_mesh.py] Test gap: Syncthing record labels when two registrations claim one ID
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The encrypted record reader chooses a label by registry rank. Current fixtures supply one valid registration per Syncthing ID.
+- **Hypothesis (untested):** Authenticate two records for one Syncthing identity and check which registered label is rendered.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/devices.py:read_fleet_records`
+- **Evidence:** Track 152A coverage audit. The current reader tests pass.
+- **Context:** Filed during [PR #357](https://github.com/kbitz/mind-meld/pull/357). Revisit when the next Track changes the reader or its tests.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/devices.py|src/mind_meld/meshflow.py|tests/test_mesh.py] Test gap: Syncthing record filesystem read failures
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Vanished, malformed and oversized record fixtures exercise different branches from listing and read errors.
+- **Hypothesis (untested):** Exercise a record read error and a directory listing error. Check that the first leaves other records usable and the second reaches sync diagnostics.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/devices.py:read_fleet_records` and `src/mind_meld/meshflow.py:_run_inner`.
+- **Evidence:** Track 152A coverage audit. No failure was reproduced.
+- **Context:** Filed during [PR #357](https://github.com/kbitz/mind-meld/pull/357). Revisit when the next Track changes record storage or its diagnostics.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/syncthing.py|src/mind_meld/meshflow.py|tests/test_mesh.py] Test gap: Syncthing device state changes during a mesh pass
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The paused-device fixture starts with the device paused. The writer also checks for a pause after the initial snapshot.
+- **Hypothesis (untested):** Pause a candidate in the local fixture after the snapshot and check that the remaining writes skip it.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/syncthing.py:mark_introducer` and `src/mind_meld/syncthing.py:share_folder`.
+- **Evidence:** Track 152A coverage audit. No failure was reproduced.
+- **Context:** Filed during [PR #357](https://github.com/kbitz/mind-meld/pull/357). Revisit when the next Track changes pairing or its tests.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/meshflow.py|tests/test_mesh.py] Test gap: Mesh breadcrumbs with several omitted details
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The fixtures cover a single omitted diagnostic and a mix of one share and one degradation.
+- **Hypothesis (untested):** Add several complete diagnostic clauses and long device names to check detail priority and how status displays omissions.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/meshflow.py:compose_hook_breadcrumb`
+- **Evidence:** Track 152A coverage audit. No failure was reproduced.
+- **Context:** Filed during [PR #357](https://github.com/kbitz/mind-meld/pull/357). Revisit when the next Track changes mesh diagnostics or tests.
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap card run — 2026-11-19 (Syncthing device names carded as Track 153A; Tracks 151A and 151B recorded)

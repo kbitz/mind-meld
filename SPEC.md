@@ -99,6 +99,9 @@ claude-sync.com runs an API that brokers auth, generates presigned URLs, and sto
 ├── devices/
 │   ├── {device_id}.json                   # device metadata (unencrypted)
 │   └── ...
+├── syncthing/
+│   ├── {device_id}.enc                    # encrypted Syncthing device-ID record (read by devices.read_fleet_records for meshflow)
+│   └── ...
 ├── manifests/
 │   ├── {device_id}/
 │   │   └── manifest.json.enc             # encrypted manifest
@@ -401,9 +404,10 @@ mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump;
                             # maintain_links is enabled | disabled (...) | unknown (config invalid: ...) | unknown (policy not resolved)
 mm devices [--format table|json]   # list registered devices (json: stable schema for scripts / retro-fleet)
 mm devices approve <device-id>     # on a fleet machine where mm manages Syncthing: add the exact pending device, mark it introducer, share the fleet folder
+                                   # (once a registered peer's encrypted syncthing/<id>.enc record has arrived, a managed machine can add that knocking peer on its next push or pull);
                                    # a rerun finishes a half-finished approval (a configured device in add_device's shape not yet sharing the folder);
                                    # a device that already shares the folder (a repeat, or one another fleet machine introduced) reports already approved (exit 0);
-                                   # any other non-pending, malformed or near-match ID changes nothing (exit 1); never automatic
+                                   # any other non-pending, malformed or near-match ID changes nothing (exit 1)
 mm diff [--from DEVICE] [--source NAME]   # compare local files with this Mac's last push (or --from DEVICE); changes nothing, not even the lock file
                                              # annotates each modified file with its predicted pull outcome; for incoming changes from other Macs use mm pull --dry-run (v0.14.15)
 mm gc [--dry-run] [--conflicts]
@@ -470,7 +474,7 @@ receipt or proof that another Mac has received a row. See
 5. Fetch `mm-crypto-init`. On a managed join with an accepted share where `mm-crypto-init` is missing, poll for about two minutes (`HEADER_WAIT_SECONDS = 120`, `HEADER_POLL_SECONDS = 1`). A timeout in an empty folder or one with only bookkeeping or in-flight files, or Ctrl-C during the wait, exits 1 with an `Init: waiting for ... Run: mm init` outcome. A timeout with fleet files, other files or an unreadable folder prints a folder-specific diagnostic. These stops write no device entry, `config.toml`, keyring item, key header or `.stignore`. Any other missing-header join stops with exit 1. If `mm-crypto-init` is corrupt or newer, refuse. Under `--new-fleet`, refuse if a header is already present.
 6. Joining: run the re-init orphan guard (`_init_storage_guard`) when this machine already had a configured device ID. Generate a unique short device ID. (Under `--new-fleet`, prompt for the device name here.)
 7. Prompt for the encryption passphrase (twice under `--new-fleet`). Under `--new-fleet`, set up the managed Syncthing folder if applicable, write `.stignore`, create `mm-crypto-init`, and prompt for sources. Joining: verify the passphrase against `mm-crypto-init` and write `.stignore` when managed.
-8. Register the device in storage, write `config.toml`, store the passphrase in the OS keyring (or instruct to set `MINDMELD_PASSPHRASE` if no keyring), and try to delete `join.toml`. If cleanup fails, warn and name the file.
+8. Register the device in storage, write `config.toml`, store the passphrase in the OS keyring (or instruct to set `MINDMELD_PASSPHRASE` if no keyring), and try to publish its encrypted `syncthing/<id>.enc` record when its Syncthing device ID is known. If publication fails, report a notice and retry on the next push. Try to delete `join.toml` and warn with its filename if cleanup fails.
 9. Plain `mm init` (joining) ends by pulling with the passphrase it just verified; `--new-fleet` (and an interactive `new` answer) returns `None` and does not pull.
 
 ### `mm push`
@@ -508,7 +512,7 @@ attended push's conditional activity tail and exit contract, read
 11. For conflict-copy decisions, leave local at the canonical path and write remote to `<stem>.sync-conflict-<ts>-v1-<device>.<ext>`. Publish a replacement before cleaning up prior copies for that same file and peer; a failed replacement preserves them. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight via `pullplan` and exit **3** before applying any file if a conflict or local failure is predicted (mergeable changes from multiple peers no longer cause a false conflict); combine with `--dry-run` for a write-free CI gate. (Exit 3, not 2 — see Conflict mode below for why the distinction from typer's usage-error exit is load-bearing.)
 12. **Propagated deletions.** A local file absent from a remote manifest is never deleted just because it is absent. Only a peer's own, active, hash-carrying tombstone deletes it, and only when this machine's last-synced base for that peer equals the hash and the local bytes hash to it (and the guards in sync invariants hold). The file is moved into `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>` and kept at least 30 days; a record without a hash, or a file whose bytes differ, is never deleted. The deleting machine holds the only record; a machine that followed it mints none.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
-14. Release lockfile.
+14. For a real pull, run the [Syncthing mesh pass](docs/invariants/init-devices.md#approving-a-joining-machine-track-119a-load-bearing) before releasing the lockfile. It shares the fleet folder with eligible peers.
 15. Print one final outcome line per thing that happened, including applied, deleted, older-edit and waiting counts; omit skipped counts from these lines. Real failures still make attended pull incomplete. Verbose output retains written / merged / skipped / conflicted / failed / waiting detail; `mm status` and `mm diag` also retain skipped counts.
 
 ### `mm gc`

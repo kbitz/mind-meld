@@ -1,8 +1,9 @@
 """CLI-free init contract for Track 88A, extended for Track 89A.
 
-Drives `initflow.init` through a test-local Typer app, so exit codes are real
-and `mind_meld.cli` is never imported. The folder state (empty versus a
-bootstrapped fleet) is built with the crypto/devices/storage leaves; no init
+Most tests drive `initflow.init` through a test-local Typer app with real exit
+codes. The managed mesh join test uses the real CLI to run the first pull.
+The folder state (empty versus a bootstrapped fleet) is built with the
+crypto/devices/storage leaves; no init
 decision is mocked. Stubbed because they act outside the storage folder:
 `events_tail._run_events_backfill` and `skill_link._ensure_retro_skill_links`
 (history walk and skill symlinks), and Argon2 drops to 1024 KiB for speed
@@ -14,8 +15,7 @@ Plain init offers saved answers or asks whether to start a fleet or join.
 For a fresh join, the path, fleet device ID when needed, device name and sources
 come before either wait and the passphrase. New fleets ask for the passphrase
 before the sources and create the key header. The `pauses` fixture replaces
-the poll delays. The join's pull lives in `cli.init` and is covered in
-tests/test_integration.py.
+the poll delays. Other join pull contracts are covered in tests/test_integration.py.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from __future__ import annotations
 import errno
 import fnmatch
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2407,3 +2408,130 @@ def test_join_checks_populated_target_before_asking_for_missing_fleet_id(
     assert text.endswith("Run: mm init")
     assert config.load_join_record() == saved
     assert fake_syncthing.bodies == []
+
+
+# Value: protects=the join publishes its record and shares with a vouched peer in its first pull;
+# fails_when=the CLI join skips the mesh step or runs it before the fleet is ready;
+# why_new=the publication test used a test-local app with no pull; seam=none;
+# no_claim=live Syncthing approval, introductions, or delivery timing (loopback stand-in).
+def test_new_fleet_and_join_publish_encrypted_syncthing_record_and_keep_devices_json_unchanged(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    import json
+
+    from mind_meld.cli import app
+    from mind_meld.storage.keys import device_key, syncthing_record_key
+
+    _storage, _backend = env
+    stock_root, my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fleet_storage = stock_root / "mind-meld"
+    fleet_backend = LocalBackend(fleet_storage)
+
+    # 1. --new-fleet publishes encrypted syncthing/<id>.enc; devices/<id>.json is unchanged
+    res_new, text_new = _new_fleet(
+        f"{fleet_storage}\nMac A\n{PASSPHRASE}\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}"
+    )
+    assert res_new.exit_code == 0, text_new
+    cfg_a = config.load_config()
+    dev_a = cfg_a["device"]["id"]
+    dev_a_json = json.loads(fleet_backend.get(device_key(dev_a)).decode("utf-8"))
+    assert set(dev_a_json) == {"device_id", "device_name", "registered"}
+    assert my_id not in fleet_backend.get(device_key(dev_a)).decode("utf-8")
+
+    raw_enc_a = fleet_backend.get(syncthing_record_key(dev_a))
+    assert my_id.encode("utf-8") not in raw_enc_a
+    read_a = devices.read_fleet_records(fleet_backend, PASSPHRASE, MEMORY_KB, own_device_id=dev_a)
+    assert read_a.own_syncthing_id == my_id
+    assert read_a.vouched == {my_id: (dev_a, "Mac A")}
+
+    # syncthing/ is recognized as a fleet directory by _classify_folder
+    syncthing_only = tmp_path / "syncthing-only"
+    (syncthing_only / "syncthing").mkdir(parents=True)
+    classified = initflow._classify_folder(syncthing_only)
+    assert classified.fleet == ("syncthing",)
+    assert not classified.accepts_new_fleet
+
+    # 2. A freshly managed second machine receives the fleet during its join.
+    join_storage = tmp_path / "joining" / "mind-meld"
+    join_backend = LocalBackend(join_storage)
+    joiner_id = _valid_syncthing_id("D")
+    third_id = _valid_syncthing_id("E")
+    devices.register_device(fleet_backend, "peer-e", "Linux E")
+    devices.publish_record(fleet_backend, "peer-e", third_id, PASSPHRASE, MEMORY_KB)
+
+    config.CONFIG_PATH.unlink(missing_ok=True)
+    config.syncthing_record_path().unlink(missing_ok=True)
+    fake_syncthing.my_id = joiner_id
+    fake_syncthing.set_shape()
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {third_id: {"name": "peer-e"}}
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={my_id}"] = {
+        "mind-meld": {
+            "offeredBy": {
+                my_id: {
+                    "time": "2026-11-19T00:00:00Z",
+                    "label": "Mind Meld",
+                    "receiveEncrypted": False,
+                    "remoteEncrypted": False,
+                }
+            }
+        }
+    }
+
+    def deliver_fleet(method, path, _body):
+        if (method, path) == ("POST", "/rest/config/folders"):
+            shutil.copytree(fleet_storage, join_storage, dirs_exist_ok=True)
+
+    fake_syncthing.on_write = deliver_fleet
+    res_join = CliRunner().invoke(
+        app,
+        ["init"],
+        input=f"join\n{join_storage}\n{my_id}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n",
+    )
+    assert res_join.exit_code == 0, res_join.output
+    share_line = (
+        "Pull: Syncthing now shares the fleet folder with 1 fleet machine: "
+        f"Linux E ({third_id[:7]})."
+    )
+    assert share_line in res_join.stdout.splitlines()
+    folder = fake_syncthing.responses["/rest/config/folders"][0]
+    assert folder["id"] == "mind-meld"
+    assert {device["deviceID"] for device in folder["devices"]} == {joiner_id, my_id, third_id}
+    cfg_b = config.load_config()
+    dev_b = cfg_b["device"]["id"]
+    dev_b_json = json.loads(join_backend.get(device_key(dev_b)).decode("utf-8"))
+    assert set(dev_b_json) == {"device_id", "device_name", "registered"}
+    assert joiner_id not in join_backend.get(device_key(dev_b)).decode("utf-8")
+
+    read_b = devices.read_fleet_records(join_backend, PASSPHRASE, MEMORY_KB, own_device_id=dev_b)
+    assert read_b.own_syncthing_id == joiner_id
+    assert read_b.vouched[joiner_id] == (dev_b, "Mac B")
+
+
+@pytest.mark.parametrize("cause", ["ENOSPC", "CryptoError"])
+def test_init_publish_record_failure_prints_notice_and_still_exits_zero(
+    env, fake_syncthing, tmp_path, monkeypatch, cause
+):
+    from mind_meld import devices
+    from mind_meld.errors import CryptoError
+
+    _storage, _backend = env
+    stock_root, _my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fleet_storage = stock_root / "mind-meld"
+
+    def fail_publish(*args, **kwargs):
+        if cause == "CryptoError":
+            raise CryptoError("synthetic publication error")
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(initflow, "publish_record", fail_publish)
+    monkeypatch.setattr(devices, "publish_record", fail_publish)
+
+    res, text = _new_fleet(
+        f"{fleet_storage}\nMac A\n{PASSPHRASE}\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}"
+    )
+    assert res.exit_code == 0, text
+    assert (
+        f"mm: notice: could not publish this machine's Syncthing ID ({cause}); "
+        "the next mm push retries it. Run: mm push"
+    ) in text
+    assert config.CONFIG_PATH.is_file()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import fcntl
 import json
 from pathlib import Path
 
@@ -751,11 +752,154 @@ def test_devices_table_and_json_still_dispatch_through_group(tmp_path, monkeypat
     ]
 
 
+def _scan_pairing_reach(
+    rel: str,
+    source: str,
+    *,
+    pairing_methods: set[str],
+    raw_writes: set[str],
+    entry_points: set[tuple[str, str]],
+) -> tuple[set[tuple[str, str]], set[tuple[str, str, str]]]:
+    """Scan ``source`` for pairing-method references and flow entry-point reach.
+
+    Follows module aliases (``import ... as``, ``from ... import ... as``,
+    variable assignments), ``from``-imported symbols, and attribute chains
+    (``mind_meld.devicesflow.approve``, ``self.meshflow.run``).
+    """
+    flow_modules = {mod for mod, _ in entry_points}
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+    def scope_of(node: ast.AST) -> str:
+        scope: list[str] = []
+        cur = node
+        while cur in parents:
+            cur = parents[cur]
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                scope.append(cur.name)
+        return ".".join(reversed(scope)) or "<module>"
+
+    module_aliases: dict[str, str] = {m: m for m in flow_modules}
+    symbol_aliases: dict[str, str] = {}
+    stem = Path(rel).stem
+    for mod, func in entry_points:
+        if stem == mod:
+            symbol_aliases[func] = f"{mod}.{func}"
+
+    def _attr_chain(node: ast.AST) -> list[str]:
+        parts: list[str] = []
+        cur = node
+        while isinstance(cur, ast.Attribute):
+            parts.append(cur.attr)
+            cur = cur.value
+        if isinstance(cur, ast.Name):
+            parts.append(cur.id)
+        parts.reverse()
+        return parts
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                for mod in flow_modules:
+                    if alias.name in (mod, f"mind_meld.{mod}"):
+                        if alias.asname:
+                            module_aliases[alias.asname] = mod
+        elif isinstance(node, ast.ImportFrom):
+            mod_name = node.module or ""
+            if mod_name in ("mind_meld", ""):
+                for alias in node.names:
+                    if alias.name in flow_modules:
+                        module_aliases[alias.asname or alias.name] = alias.name
+            for mod in flow_modules:
+                if mod_name in (mod, f"mind_meld.{mod}"):
+                    for alias in node.names:
+                        symbol_aliases[alias.asname or alias.name] = f"{mod}.{alias.name}"
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            val = node.value
+            if val is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            target_names = [t.id for t in targets if isinstance(t, ast.Name)]
+            if not target_names:
+                continue
+            chain = _attr_chain(val)
+            if len(chain) == 1 and chain[0] in module_aliases:
+                for tname in target_names:
+                    module_aliases[tname] = module_aliases[chain[0]]
+            elif len(chain) >= 2:
+                for idx in range(len(chain) - 1):
+                    seg, nxt = chain[idx], chain[idx + 1]
+                    canon_mod = module_aliases.get(seg, seg if seg in flow_modules else None)
+                    if canon_mod in flow_modules:
+                        for tname in target_names:
+                            symbol_aliases[tname] = f"{canon_mod}.{nxt}"
+
+    call_sites: set[tuple[str, str]] = set()
+    entry_refs: set[tuple[str, str, str]] = set()
+
+    for node in ast.walk(tree):
+        where = scope_of(node)
+        if where == "<module>":
+            def_scope = (
+                node.name
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                else "<module>"
+            )
+        else:
+            def_scope = where
+        pairing = (isinstance(node, ast.Attribute) and node.attr in pairing_methods) or (
+            isinstance(node, ast.Constant) and node.value in pairing_methods
+        )
+        raw = (isinstance(node, ast.Name) and node.id in raw_writes) or (
+            isinstance(node, ast.Attribute) and node.attr in raw_writes
+        )
+        if pairing or raw:
+            if rel == "syncthing.py" and (raw or def_scope.split(".")[0] == "SyncthingWriter"):
+                continue
+            call_sites.add((rel, where))
+
+        if isinstance(node, ast.Attribute):
+            chain = _attr_chain(node)
+            for idx in range(len(chain) - 1):
+                seg, nxt = chain[idx], chain[idx + 1]
+                canon_mod = module_aliases.get(seg, seg if seg in flow_modules else None)
+                if canon_mod is not None and (
+                    (canon_mod, nxt) in entry_points or canon_mod == "meshflow"
+                ):
+                    if (
+                        rel == "meshflow.py"
+                        and canon_mod == "meshflow"
+                        and (canon_mod, nxt) not in entry_points
+                    ):
+                        continue
+                    entry_refs.add((rel, where, f"{canon_mod}.{nxt}"))
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            parent = parents.get(node)
+            if isinstance(parent, ast.Attribute) and parent.value is node:
+                continue
+            canon = symbol_aliases.get(node.id)
+            if canon is not None:
+                c_mod, c_fn = canon.split(".", 1)
+                if (c_mod, c_fn) in entry_points or c_mod == "meshflow":
+                    entry_refs.add((rel, where, canon))
+
+    return call_sites, entry_refs
+
+
+# Value: protects=the same vouched knock stays pending in pull preview and pairs under lock in sync;
+# fails_when=preview touches Syncthing or a real mutation moves outside the sync lock;
+# why_new=older preview and lock tests do not observe eligible peers and mesh writes; seam=none;
+# no_claim=serialization with manual approval or Syncthing's own introductions (loopback stand-in).
 def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_path, monkeypatch):
+    from mind_meld import crypto, devices
+
     src_root = Path(__file__).resolve().parents[1] / "src" / "mind_meld"
     pairing_methods = {
         "pending_devices",
         "approval_state",
+        "mesh_snapshot",
         "add_device",
         "mark_introducer",
         "share_folder",
@@ -766,59 +910,62 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
         ("devicesflow", "approve"),
         ("initflow", "_managed_join"),
         ("initflow", "init"),
+        ("meshflow", "run"),
+        ("meshflow", "_run_inner"),
     }
     call_sites: set[tuple[str, str]] = set()
     entry_refs: set[tuple[str, str, str]] = set()
     for path in sorted(src_root.rglob("*.py")):
         rel = str(path.relative_to(src_root))
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-
-        def scope_of(node, parents=parents):
-            scope: list[str] = []
-            cur = node
-            while cur in parents:
-                cur = parents[cur]
-                if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    scope.append(cur.name)
-            return ".".join(reversed(scope)) or "<module>"
-
-        for node in ast.walk(tree):
-            # Every reference, not only a direct call, anywhere in the module
-            # (class methods and module scope included): an alias such as
-            # `m = writer.add_device` or `getattr(writer, "add_device")` counts.
-            pairing = (isinstance(node, ast.Attribute) and node.attr in pairing_methods) or (
-                isinstance(node, ast.Constant) and node.value in pairing_methods
-            )
-            raw = (isinstance(node, ast.Name) and node.id in raw_writes) or (
-                isinstance(node, ast.Attribute) and node.attr in raw_writes
-            )
-            if pairing or raw:
-                where = scope_of(node)
-                # Inside the writer module only SyncthingWriter's own methods may
-                # name a pairing operation; its send helpers own the raw routes.
-                if rel == "syncthing.py" and (raw or where.split(".")[0] == "SyncthingWriter"):
-                    continue
-                call_sites.add((rel, where))
-            if (
-                isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name)
-                and (node.value.id, node.attr) in entry_points
-            ):
-                entry_refs.add((rel, scope_of(node), f"{node.value.id}.{node.attr}"))
-            elif isinstance(node, ast.Name) and node.id == "_managed_join":
-                entry_refs.add((rel, scope_of(node), "initflow._managed_join"))
+        sites, refs = _scan_pairing_reach(
+            rel,
+            path.read_text(encoding="utf-8"),
+            pairing_methods=pairing_methods,
+            raw_writes=raw_writes,
+            entry_points=entry_points,
+        )
+        call_sites.update(sites)
+        entry_refs.update(refs)
 
     assert call_sites == {
         ("devicesflow.py", "approve"),
         ("initflow.py", "_managed_join"),
+        ("meshflow.py", "_run_inner"),
     }
-    # The two pairing paths are reachable only from their own commands.
+    # The three pairing paths are reachable only from their authorized callers.
     assert entry_refs == {
         ("cli.py", "devices_approve", "devicesflow.approve"),
         ("cli.py", "init", "initflow.init"),
         ("initflow.py", "init", "initflow._managed_join"),
+        ("cli.py", "push", "meshflow.run"),
+        ("cli.py", "_attended_pull", "meshflow.run"),
+        ("cli.py", "autopush", "meshflow.run"),
+        ("cli.py", "autopull", "meshflow.run"),
+        ("meshflow.py", "run", "meshflow._run_inner"),
     }
+
+    # Prove the widened AST reach detector catches aliases, from-imports and attribute chains.
+    for snippet, expected_ref in (
+        ("from mind_meld import meshflow as mf\ndef rogue(): mf.run()", "meshflow.run"),
+        (
+            "from mind_meld.devicesflow import approve as ap\ndef rogue(): ap()",
+            "devicesflow.approve",
+        ),
+        (
+            "import mind_meld.devicesflow\ndef rogue(): mind_meld.devicesflow.approve()",
+            "devicesflow.approve",
+        ),
+        ("def rogue(holder): holder.meshflow.run()", "meshflow.run"),
+        ("from mind_meld import meshflow\ndef rogue():\n f = meshflow.run\n f()", "meshflow.run"),
+    ):
+        _, syn_refs = _scan_pairing_reach(
+            "rogue.py",
+            snippet,
+            pairing_methods=pairing_methods,
+            raw_writes=raw_writes,
+            entry_points=entry_points,
+        )
+        assert ("rogue.py", "rogue", expected_ref) in syn_refs, snippet
 
     cli_tree = ast.parse((src_root / "cli.py").read_text(encoding="utf-8"))
     sync_funcs = {"push", "pull", "autopull", "autopush", "_push_core", "_auto_command_setup"}
@@ -840,11 +987,11 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
                 )
     assert found == sync_funcs
 
-    # Behavioral check: autopull and autopush with a managed record, a pending
-    # device and no mm config send no Syncthing write request.
-    _my_id, _peer_id, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    # Behavioral check 1: uninitialized autopull and autopush send no write request.
+    my_id, vouched_id, unvouched_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {
-        joining_id: {"name": "joining-box"}
+        vouched_id: {"name": "mac-b"},
+        unvouched_id: {"name": "stranger-box"},
     }
     assert not config.CONFIG_PATH.exists()
 
@@ -852,6 +999,104 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
         res = runner.invoke(app, [cmd])
         assert res.exit_code == 0, res.output
     assert fake_syncthing.bodies == []
+
+    # Behavioral check 2: on an initialized fleet with a managed record and two
+    # pending devices (one named by a fleet record, one not), push, pull,
+    # autopush and autopull each add, mark introducer and share the folder with
+    # the first and leave the second pending with no write.
+    storage_dir = tmp_path / "sync"
+    claude_dir = tmp_path / "claude"
+    (claude_dir / "projects").mkdir(parents=True, exist_ok=True)
+    events_dir = tmp_path / "mm-events"
+    (events_dir / "events").mkdir(parents=True, exist_ok=True)
+    backend = LocalBackend(str(storage_dir))
+    passphrase = "test-fleet-passphrase"
+    memory_kb = 1024
+    init_fetch = crypto.bootstrap_crypto_init(backend, passphrase, memory_kb)
+    root_salt = init_fetch.root_salt
+    assert root_salt is not None
+    crypto.set_crypto_session(root_salt, memory_kb)
+    register_device(backend, "dev-a", "mac-a")
+    register_device(backend, "dev-b", "mac-b")
+    devices.publish_record(backend, "dev-a", my_id, passphrase, memory_kb)
+    devices.publish_record(backend, "dev-b", vouched_id, passphrase, memory_kb)
+    config.save_config(
+        {
+            "device": {"id": "dev-a", "name": "mac-a"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "sources": [
+                    {"name": "claude", "type": "claude", "path": str(claude_dir)},
+                    {"name": "mm-events", "type": "generic", "path": str(events_dir)},
+                ],
+                "max_file_size": 10 * 1024 * 1024,
+            },
+            "crypto": {
+                "argon2_memory_kb": memory_kb,
+                "root_salt_fp": crypto.root_salt_fingerprint(root_salt),
+            },
+        }
+    )
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", passphrase)
+
+    lock_held_during_writes: list[bool] = []
+
+    def observe_sync_lock(_method, _path, _body):
+        with config.LOCK_PATH.open("r+b") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_held_during_writes.append(True)
+            else:
+                lock_held_during_writes.append(False)
+
+    fake_syncthing.on_write = observe_sync_lock
+    for cmd in ("push", "pull", "autopush", "autopull"):
+        fake_syncthing.set_folder(storage_dir, peers=[])
+        fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+            vouched_id: {"name": "vouched-peer"},
+            unvouched_id: {"name": "unvouched-stranger"},
+        }
+        fake_syncthing.requests.clear()
+        fake_syncthing.bodies.clear()
+        lock_held_during_writes.clear()
+
+        if cmd == "pull":
+            preview = runner.invoke(app, ["pull", "--dry-run"])
+            assert preview.exit_code == 0, preview.output
+            assert fake_syncthing.requests == []
+            assert vouched_id in fake_syncthing.responses["/rest/cluster/pending/devices"]
+
+        res = runner.invoke(app, [cmd])
+        assert res.exit_code == 0, f"{cmd} failed: {res.output}"
+        assert fake_syncthing.bodies == [
+            (
+                "POST",
+                "/rest/config/devices",
+                {
+                    "deviceID": vouched_id,
+                    "name": "",
+                    "addresses": ["dynamic"],
+                    "introducer": False,
+                    "autoAcceptFolders": False,
+                    "paused": False,
+                },
+            ),
+            ("PATCH", f"/rest/config/devices/{vouched_id}", {"introducer": True}),
+            (
+                "PATCH",
+                "/rest/config/folders/mind-meld",
+                {
+                    "devices": [
+                        {"deviceID": my_id},
+                        {"deviceID": vouched_id},
+                    ]
+                },
+            ),
+        ], f"{cmd} bodies mismatch"
+        assert lock_held_during_writes == [True, True, True], cmd
+        assert unvouched_id in fake_syncthing.responses["/rest/cluster/pending/devices"]
+        assert vouched_id not in fake_syncthing.responses["/rest/cluster/pending/devices"]
 
 
 def test_approve_outcome_lines_emit_no_ansi_under_forced_terminal(
