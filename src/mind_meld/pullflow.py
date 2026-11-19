@@ -3460,8 +3460,9 @@ def _print_pull_summary(
                 )
             if not parts:
                 continue
-            label = f"{safe_str(r.device_name)}/{safe_str(r.src_name)}"
-            console.print(f"  [bold]{label}:[/bold] {' '.join(parts)}")
+            peer_name = safe_str(safety.safe_terminal_str(r.device_name))
+            source_name = safe_str(safety.safe_terminal_str(r.src_name))
+            console.print(f"  [bold]{peer_name}/{source_name}:[/bold] {' '.join(parts)}")
             # Task 2: inline conflicted/failed path list under per-source
             # line. 4-space indent keeps the device→source→file hierarchy
             # readable when multiple devices share a source name (D10).

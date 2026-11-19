@@ -258,6 +258,23 @@ def test_two_device_pull_counts_and_summary(fleet, monkeypatch, mode, scenario):
     assert summaries == [(stdout, stderr)]
 
 
+def test_attended_pull_summary_keeps_a_multiline_peer_name_on_one_line(fleet, monkeypatch):
+    entry_key = device_key(PEER)
+    entry = json.loads(fleet.backend.get(entry_key))
+    entry["device_name"] = "Peer B\nLab"
+    fleet.backend.put(entry_key, json.dumps(entry).encode())
+    _seed(fleet, {"note.md": b"peer content\n"})
+    _put_local(fleet, "note.md", b"local content\n", 1_600_000_000)
+
+    result, summaries, _ = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_conflicted == 1
+    lines = summaries[0][0].splitlines()
+    assert len(lines) == 2
+    assert lines[0].endswith("notes: 1 conflicts")
+    assert lines[1] == "    - note.md"
+
+
 @pytest.mark.parametrize("mode", ("attended", "quiet"))
 def test_no_peers_returns_without_summary(fleet, monkeypatch, mode):
     fleet.backend.delete(device_key(PEER))
