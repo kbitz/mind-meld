@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.68] - 2026-11-18
+
+A passing `./bin/check --affected --refresh` that cannot save new coverage now clears the stale baseline when it can do so safely.
+
+### Fixed
+
+- When `./bin/check --affected --refresh` passes but cannot save new coverage, it clears the stale baseline when it can do so safely.
+
 ## [1.12.67] - 2026-11-18
 
 Warm host-usage reads during `mm autopush` now wait longer for later readers, attended `mm push` tells you what to do when capture needs an owner, and command output says machine rather than Mac.

@@ -745,10 +745,18 @@ class TestPipxSeams:
             upgrade._run_pipx([sys.executable, "-c", code, str(ready)])
         child_pid = int(caught.value.output.splitlines()[0])
         try:
-            state = subprocess.run(
-                ["ps", "-p", str(child_pid), "-o", "stat="], capture_output=True, text=True
-            ).stdout.strip()
-            assert not state or state.startswith("Z"), f"installer child still running: {state}"
+            # SIGKILL delivery and reaping can finish after the parent returns.
+            # The deadline is well before the child's 30-second sleep ends.
+            deadline = time.monotonic() + 5.0
+            while True:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() >= deadline:
+                    pytest.fail(f"installer child {child_pid} still present after cleanup")
+                # gstack-timing-ok: bounded poll for the killed child to be reaped
+                time.sleep(0.02)
         finally:
             try:
                 os.kill(child_pid, signal.SIGKILL)
