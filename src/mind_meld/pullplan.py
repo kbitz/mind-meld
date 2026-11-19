@@ -379,9 +379,10 @@ def decide(
 
     ``write`` (absent here), ``held`` (absent here on purpose), ``matched``,
     ``skip`` (remote equals this peer's base without a fresh successor), ``fast-forward``, ``older``
-    (a fast-forward whose remote mtime is older than the local file),
-    ``stale`` (a version this machine already moved past), ``fallback``
-    (no base and no ancestry: today's rule) and ``both`` (both sides changed).
+    (a fast-forward whose remote mtime is older than the local file, for a file
+    ``should_merge`` does not cover), ``stale`` (a version this machine already
+    moved past), ``fallback`` (no base and no ancestry: today's rule) and
+    ``both`` (both sides changed, or an older peer edit to a mergeable file).
     """
     if not local.exists:
         if ledger is not None and ledger.readable:
@@ -409,7 +410,9 @@ def decide(
             return "skip"
 
     def forward() -> str:
-        return "older" if _remote_is_older(local, remote_mtime) else "fast-forward"
+        if _remote_is_older(local, remote_mtime):
+            return "both" if should_merge(path) else "older"
+        return "fast-forward"
 
     if built_on_local:
         return forward()

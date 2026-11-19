@@ -643,11 +643,27 @@ quiet-gated) and adds `N files deleted by <origin>; copies in <folder>` to its
 breadcrumb. History gains the `deleted` action (`mm log --action deleted`; the row's
 `extra` holds the folder) and `.mind-meld-log.md` lists deleted files.
 `mm pull --dry-run` predicts `delete` (`totals`: `N would be deleted`) and never
-reaps. `older` (a fast-forward whose remote mtime is older than the local file) prints
-`Pull: N older peer edits not applied (mm pull --verbose).` on its own outcome line; `mm pull --verbose` lists
-each `older peer edit not applied: <peer>/<source>/<path>`, and `--dry-run` predicts
-it.
-To accept such an edit, compare both versions, then `touch <file>` and `mm push` on
+reaps. The pull rule decides `older` (a fast-forward whose remote mtime is older
+than the local file) only for a file `should_merge` does not cover: a `.jsonl` or
+`MEMORY.md` edit that would be `older` under rows 4 or 6 unions first as row 8
+(`both`). Why: a pulled file's mtime cannot prove a peer edit is older, because
+`_apply_merge` stamps the pull's write time (only `_apply_write` and
+`_apply_fast_forward` call `_restore_mtime_best_effort`) and peers' clocks or
+republished mtimes can disagree — confirmed on HEAD before Track 151B, where a
+two-peer pull that merged Peer B's V1 (stamping the pull's write time, while the
+planner already predicted `merge` for Peer C) or wrote Peer B's V1 with an ahead
+mtime held Peer C's V2 (built on V1 with an older mtime) as `older` and left the
+file at V1. A no-op union (such as a restored machine's subset) settles the older
+remote version as this machine's newest `held` version until its next push, so the
+local file is not clean until then and a peer fast-forward meanwhile unions
+(existing row-8 semantics). Every per-source summary line in `_print_pull_summary`
+is labeled `<peer>/<source>:` and prints only when it carries at least one count;
+`older` prints `Pull: N older peer edits not applied (mm pull --verbose).` on its
+own outcome line; `mm pull --verbose` keeps `Up to date with <peer>/<source>.`
+when a source holds only older edits, prints `<peer>/<source>: N older peer
+edit(s) held` on the per-source summary line, and lists each `older peer edit not
+applied: <peer>/<source>/<path>`; and `--dry-run` predicts it.
+To accept such an edit on a non-merged file, compare both versions, then `touch <file>` and `mm push` on
 the machine whose version should win: the mtime-only republish makes it newer. `mm
 diag` and `--json` gain a read-only `fast_forward` section (ledger state,
 `peer_base` rows per peer, `seen_version` rows, each scan root's token state; a
@@ -743,8 +759,8 @@ mints nothing.
 **More limits (Track 91A).**
 
 - A fast-forward overwrites local bytes with no recovery copy (an owner-accepted limit).
-- A line deleted on one side returns when both sides changed the file (an owner-accepted limit).
-- The mtime gate survives only as the `older` guard and the no-base fallback.
+- A line deleted on one side returns when both sides changed the file, or when a peer's `.jsonl` or `MEMORY.md` edit carries an older mtime than the local file it built on (which unions as row 8 instead of fast-forwarding or holding as `older`; an owner-accepted limit).
+- The mtime gate survives only as the `older` guard on non-mergeable files (rows 4 and 6; `.jsonl` and `MEMORY.md` union first) and the no-base fallback (row 7).
 - `mm-events` tombstones stay suppress-only (see events-retro.md).
 - A machine that catches up and deletes before its next push uses its newest held
   version's full hash from the peer bases. If no full hash identifies that version,
