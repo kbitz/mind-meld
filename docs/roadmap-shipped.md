@@ -1096,3 +1096,13 @@ Recorded by the 2026-11-18 inbox drain at `6431854`. Identity: PR #350's body na
 ### Track 149A: Size autopush host reads from measured reads, print attended owner actions, and name machines rather than Macs ✓ Shipped (v1.12.67)
 - 2026-11-18: merged [PR #350](https://github.com/kbitz/mind-meld/pull/350) (commit `6431854452e48ed045dac5e53131b743a7dd499c`); verified land-time Track 149A, original Group 149, factory branch `mmm/2ddc7a0f`. Introduction/lineage: carded by the 2026-11-18 drain (`c4bb3d8`, PR #349) from that day's acceptance-check bugs on `mac-a` and `linux-a`.
 - Approved-scope evidence: merged PR review/prep and ship receipts (release head `9fdf6fe`, full `./bin/check` passed there; CI passed on its rerun and on `main`), merged implementation/tests and the v1.12.67 release row. The autopush sweep default is 750 ms with a 250 ms later-reader grace (`config.DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS`, `events_tail.HOST_READER_GRACE_MS`), and `tests/test_host_usage_snapshot.py` completes the measured Codex 266 ms and Antigravity 153 ms reads under it; an attended push prints a recorded owner action as a `mm: notice:` line, and a held cursor whose run records automatic Git catch-up omits the recapture remedy (an auto-chosen review decision recorded in the PR); `rg -n "this Mac|other Macs|every Mac|another Mac" src/` finds only code comments and internal docstrings (re-grepped at `6431854`). Two test gaps went to the inbox (deferred by the 2026-11-18 drain).
+
+## Individual Track history
+
+_tombstone: 150_
+
+Recorded by the 2026-11-18 regeneration at `8bf0020`. Identity: PR #352's body names Track 150A, and its head branch `mmm/73235cfa` is the factory item for 150A. Scope evidence is the merged PR's review-and-prep and ship receipts, the merged content and the release row in docs/PROGRESS.md.
+
+### Track 150A: Make the `--affected` refresh test and the release check's grandchild-kill test deterministic ✓ Shipped (v1.12.68)
+- 2026-11-18: merged [PR #352](https://github.com/kbitz/mind-meld/pull/352) (commit `8bf002047cf1b3c37b99cba6ad839f6f3f11308b`); verified land-time Track 150A, original Group 150, factory branch `mmm/73235cfa`. Introduction/lineage: carded by the 2026-11-18 inbox drain (`3e18673`, PR #351) from the two tests that failed intermittently that day.
+- Approved-scope evidence: merged PR review/prep and ship receipts (release head `13cc848`, full `./bin/check` passed there), merged changes to `bin/_check.py`, `tests/test_bin_check.py` and `tests/test_upgrade.py` (plus a matching installer timeout test in `tests/test_self_update.py`), no change to `src/mind_meld/upgrade.py`, and the v1.12.68 release row. Four test gaps went to the inbox (deferred by this regeneration).
