@@ -3,6 +3,7 @@
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -3313,14 +3314,14 @@ class TestJoinRecord151A:
 
         cfg_dir = tmp_path / "uncreated"
         monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_dir / "config.toml")
-        base = {
+        base: dict[str, Any] = {
             "storage_path": "~/Sync/mind-meld",
             "fleet_device_id": self.VALID_ID,
             "device_name": "Mac B",
             "sources": ("claude",),
         }
         base.update(bad_kwargs)
-        record = config_module.JoinRecord(**base)  # type: ignore[arg-type]
+        record = config_module.JoinRecord(**base)
         with pytest.raises(ConfigError):
             config_module.save_join_record(record)
         assert not cfg_dir.exists()

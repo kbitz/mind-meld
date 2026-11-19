@@ -10,14 +10,12 @@ decision is mocked. Stubbed because they act outside the storage folder:
 `_isolate_keyring` and the `PYTEST_CURRENT_TEST` guard on
 `crypto.store_passphrase_in_keyring`. PASSPHRASE is a synthetic test credential.
 
-Input order follows `initflow.init`: storage path, then (on the managed join
-before the fleet folder is accepted) a fleet machine's Syncthing device ID,
-then the re-init confirm if a device is already configured, device name,
-passphrase(s), then seven source prompts. `--new-fleet` is the only flow that
-creates the key header; plain `mm init` waits up to `HEADER_WAIT_SECONDS` after
-a managed share is accepted (replaced by the `pauses` autouse fixture here) and
-stops when the header still has not arrived. The join's pull lives in the
-`cli.init` shell and is covered in tests/test_integration.py.
+Plain init offers saved answers or asks whether to start a fleet or join.
+For a fresh join, the path, fleet device ID when needed, device name and sources
+come before either wait and the passphrase. New fleets ask for the passphrase
+before the sources and create the key header. The `pauses` fixture replaces
+the poll delays. The join's pull lives in `cli.init` and is covered in
+tests/test_integration.py.
 """
 
 from __future__ import annotations
@@ -245,7 +243,7 @@ def test_a_file_at_the_storage_path_is_reported_on_both_flows(env, tmp_path, fla
 @pytest.mark.parametrize("flags", [(), ("--new-fleet",)])
 @pytest.mark.parametrize("mode", [0o000, 0o444])
 def test_an_unreadable_folder_is_reported_on_both_flows(env, flags, mode):
-    # Value: protects=both init modes report inaccessible storage without writes;
+    # Value: protects=both init modes report inaccessible storage without writing to it;
     # fails_when=the header probe leaks PermissionError; why_new=listable folders
     # bypass the scandir error; seam=none; no_claim=Syncthing delivery behavior.
     storage, _backend = env
@@ -257,7 +255,10 @@ def test_an_unreadable_folder_is_reported_on_both_flows(env, flags, mode):
         storage.chmod(0o755)
     assert result.exit_code == 1, result.output
     assert "cannot read the storage folder" in text
-    assert "Nothing was written" in text
+    saved_answers = not flags and mode == 0o444
+    message = "Your join answers are saved" if saved_answers else "Nothing was written"
+    assert message in text
+    assert config.join_record_path().is_file() == saved_answers
     assert list(storage.iterdir()) == []
     assert not config.CONFIG_PATH.exists()
 
@@ -564,8 +565,10 @@ def test_plain_init_on_an_absent_folder_stops_and_creates_nothing(env, tmp_path)
     result, text = _run(f"join\n{target}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     assert "does not exist" in text
-    assert "Nothing was written" in text
+    assert "Your join answers are saved" in text
     assert "Accept the shared folder in Syncthing" in text
+    assert "decline 'Continue joining?'" in text
+    assert config.join_record_path().is_file()
     assert not target.exists()
     assert not config.CONFIG_PATH.exists()
 
@@ -577,7 +580,8 @@ def test_plain_init_on_a_bookkeeping_only_folder_reserves_new_fleet(env):
     result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     assert "not in" in text and "yet" in text
-    assert "Nothing was written" in text
+    assert "Your join answers are saved" in text
+    assert config.join_record_path().is_file()
     assert "wait for Syncthing to deliver it, then run 'mm init' again" in text
     assert "Only the fleet's first machine runs 'mm init --new-fleet'" in text
     assert text.rstrip().endswith("then run 'mm init' again.")
@@ -2238,3 +2242,130 @@ def test_completed_join_warns_when_join_record_deletion_fails(env, monkeypatch):
     assert "could not remove saved join answers" in text
     assert "delete that file by hand" in text
     assert config.CONFIG_PATH.is_file()
+
+
+def test_managed_join_refuses_folder_populated_during_approval(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    _, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage, backend = env
+    notes = storage / "notes.txt"
+
+    def populate_target_and_deliver_offer(_seconds):
+        notes.write_text("synthetic local file")
+        fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+            "mind-meld": {"offeredBy": {peer_id: {}}}
+        }
+
+    monkeypatch.setattr(initflow, "_pause", populate_target_and_deliver_offer)
+    result, text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 1, result.output
+    assert "Your join answers are saved" in text
+    assert "notes.txt" in text
+    assert text.endswith("Run: mm init")
+    assert notes.read_text() == "synthetic local file"
+    assert config.load_syncthing_record() == my_id
+    assert config.load_join_record().fleet_device_id == peer_id
+    assert not any(path == "/rest/config/folders" for _, path, _ in fake_syncthing.bodies)
+    assert not _device_keys(backend)
+    assert not config.CONFIG_PATH.exists()
+
+
+def test_declining_resume_stops_when_answers_cannot_be_removed(env, monkeypatch):
+    storage, _ = env
+    saved = config.JoinRecord(str(storage), None, "Mac B", ("claude",))
+    config.save_join_record(saved)
+
+    def fail_delete():
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(config, "delete_join_record", fail_delete)
+    result, text = _run("n\n")
+
+    assert result.exit_code == 1
+    assert "could not remove saved join answers" in text
+    assert "Start a new fleet or join an existing one?" not in text
+    assert text.endswith("Run: mm init")
+    assert config.load_join_record() == saved
+    assert not config.CONFIG_PATH.exists()
+
+
+def test_relative_join_path_resumes_from_another_directory(env, tmp_path, monkeypatch):
+    storage, backend = env
+    monkeypatch.chdir(tmp_path)
+    first, text = _run(f"join\n{storage.name}\nMac B\n{SOURCES_CLAUDE_ONLY}")
+    assert first.exit_code == 1
+    assert "Your join answers are saved" in text
+    assert config.load_join_record().storage_path == str(storage)
+
+    _populate(backend)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    result, text = _run(f"y\n{PASSPHRASE}\n")
+
+    assert result.exit_code == 0, text
+    assert not config.join_record_path().exists()
+    assert config.load_config()["storage"]["path"] == str(storage)
+    assert not (elsewhere / storage.name).exists()
+
+
+def test_join_saves_fleet_id_collected_on_resume(env, fake_syncthing, tmp_path, monkeypatch):
+    storage, _ = env
+    config.save_join_record(config.JoinRecord(str(storage), None, "Mac B", ("claude",)))
+    _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+
+    def stop_waiting(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(initflow, "_pause", stop_waiting)
+    result, text = _run(f"y\n{peer_id}\n")
+    assert result.exit_code == 1
+    assert text.endswith("Run: mm init")
+    assert config.load_join_record().fleet_device_id == peer_id
+
+    rerun, text = _run("y\n")
+    assert rerun.exit_code == 1
+    assert f"fleet machine {peer_id}" in text
+    assert "your answers are saved" in text
+
+
+def test_join_refuses_to_save_local_answers_inside_storage(env, tmp_path, monkeypatch):
+    target = tmp_path / "state"
+    monkeypatch.setattr(config, "CONFIG_PATH", target / "config.toml")
+    result, text = _run(f"join\n{target}\n")
+
+    assert result.exit_code == 1
+    assert "the storage folder would include local Mind Meld config files" in text
+    assert text.endswith("Run: mm init")
+    assert not target.exists()
+
+
+def test_interactive_new_confirms_fleet_identity_before_overwrite(env):
+    storage, _ = env
+    first, _ = _new_fleet(f"{storage}\nMac B\n{PASSPHRASE}\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}")
+    assert first.exit_code == 0
+    before = config.CONFIG_PATH.read_bytes()
+    fingerprint = tomllib.loads(before.decode())["crypto"]["root_salt_fp"]
+
+    result, text = _run("y\nnew\nn\n")
+
+    assert result.exit_code == 0, text
+    assert f"storage {storage}, root_salt fp {fingerprint}" in text
+    assert "starts a separate fleet" in text
+    assert config.CONFIG_PATH.read_bytes() == before
+
+
+def test_join_revalidates_saved_fleet_id_before_writing(env, fake_syncthing, tmp_path, monkeypatch):
+    storage, _ = env
+    _, my_id, _ = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    config.save_join_record(config.JoinRecord(str(storage), my_id, "Mac B", ("claude",)))
+    result, text = _run("y\n")
+
+    assert result.exit_code == 1
+    assert "saved fleet device ID is invalid" in text
+    assert "this machine's own device ID" in text
+    assert text.endswith("Run: mm init")
+    assert not config.syncthing_record_path().exists()
+    assert fake_syncthing.bodies == []
