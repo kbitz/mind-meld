@@ -28,7 +28,7 @@ _PATH_CHAR_TRANS = str.maketrans({"/": "_", "~": "_"})
 
 
 def _safe_detail_token(raw: object) -> str:
-    """Sanitize a token for single-line stderr and path-free run details."""
+    """Sanitize a diagnostic cause for single-line stderr and path-free run details."""
     text = safety.safe_terminal_str(str(raw)).translate(_PATH_CHAR_TRANS).strip()
     return text or "unknown"
 
@@ -218,15 +218,15 @@ def _publish_via_classify(
         return None
     if check.reach == "unreachable":
         return "timeout" if check.cause == "timeout" else "unreachable"
-    token = None
+    diagnostic_cause = None
     if check.reach in ("unauthorized", "config-unreadable"):
-        token = check.reach
+        diagnostic_cause = check.reach
     elif live_response or (check.reach == "error" and check.cause == "bad-response"):
-        token = "bad-response"
-    if own_syncthing_id is None and token is not None:
+        diagnostic_cause = "bad-response"
+    if own_syncthing_id is None and diagnostic_cause is not None:
         _record_degradation(
             result,
-            f"Syncthing ID not published ({token}). Run: mm diag",
+            f"Syncthing ID not published ({diagnostic_cause}). Run: mm diag",
             attended=attended,
             notice=True,
         )
@@ -442,19 +442,19 @@ def _run_inner(
                 )
             return result
         if snap.outcome in ("unreachable", "not-found"):
-            token = "timeout" if snap.cause == "timeout" else "unreachable"
-            _stop_pass(result, token, 0, len(other_vouched), attended=attended)
+            diagnostic_cause = "timeout" if snap.cause == "timeout" else "unreachable"
+            _stop_pass(result, diagnostic_cause, 0, len(other_vouched), attended=attended)
             return result
-        token = (
+        diagnostic_cause = (
             snap.outcome
             if snap.outcome in ("unauthorized", "config-unreadable", "address-unsupported")
             else _safe_detail_token(snap.cause or "bad-response")
         )
-        result.stop_cause = token
-        result.stops.append(token)
+        result.stop_cause = diagnostic_cause
+        result.stops.append(diagnostic_cause)
         _record_degradation(
             result,
-            f"Syncthing mesh step stopped ({token}). Run: mm diag",
+            f"Syncthing mesh step stopped ({diagnostic_cause}). Run: mm diag",
             attended=attended,
             notice=True,
         )
@@ -577,10 +577,10 @@ def _run_inner(
                 _record_degradation(result, detail, attended=attended, notice=False)
 
             if w_res.outcome in ("unreachable", "not-found"):
-                token = "timeout" if w_res.cause == "timeout" else "unreachable"
+                diagnostic_cause = "timeout" if w_res.cause == "timeout" else "unreachable"
                 _stop_pass(
                     result,
-                    token,
+                    diagnostic_cause,
                     completed_steps,
                     total_steps,
                     attended=attended,
@@ -589,13 +589,15 @@ def _run_inner(
                 return result
 
             env_stop = w_res.outcome in ("unauthorized", "config-unreadable", "address-unsupported")
-            token = w_res.outcome if env_stop else _safe_detail_token(w_res.cause or w_res.outcome)
-            result.stop_cause = token
-            result.stops.append(token)
+            diagnostic_cause = (
+                w_res.outcome if env_stop else _safe_detail_token(w_res.cause or w_res.outcome)
+            )
+            result.stop_cause = diagnostic_cause
+            result.stops.append(diagnostic_cause)
             if env_stop or not w_res.write_attempted:
                 _record_degradation(
                     result,
-                    f"Syncthing mesh step stopped ({token}). Run: mm diag",
+                    f"Syncthing mesh step stopped ({diagnostic_cause}). Run: mm diag",
                     attended=attended,
                     notice=True,
                 )
