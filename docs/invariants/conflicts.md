@@ -69,7 +69,12 @@ First match wins. `older` compares file mtimes; an unparseable mtime is never ol
 | 8 | otherwise | both changed: union if `should_merge`, else conflict copy |
 
 Rows 4 and 6 end in `older`, not a write, when the remote mtime is strictly older
-than the local mtime: a restored machine's older bytes must not roll this one back.
+than the local mtime and the file is not mergeable (`not should_merge(path)`): a
+restored machine's older bytes must not roll this one back, while a `.jsonl` or
+`MEMORY.md` peer edit with an older mtime returns `both` (row 8) and is
+line-merged instead of held (Track 151B; `_apply_merge` stamps the pull's write
+time without restoring the peer's mtime, and peer clocks can disagree, so an
+older remote mtime on a pulled mergeable file is not proof of a rollback).
 The row 3 exception and row 4 before row 5 let an exact revert with a fresh mtime
 propagate, including when this machine missed the peer's intermediate publication.
 The same-base exception requires a strictly newer comparable mtime: older, equal,
@@ -93,16 +98,20 @@ one machine spreads to the others by design. This is a named limit, not a bug.
 **Both changed** (row 8) unions a mergeable file (`.jsonl`, `MEMORY.md`) and writes a
 conflict copy for anything else. It no longer skips because the local file is
 newer. **The mtime gate survives in two places only**: the `older` guard on rows 4
-and 6, and row 7, the no-base fallback, where the old rule runs unchanged (union,
+and 6 for non-mergeable files (mergeable files union as `both` when the remote
+mtime is older), and row 7, the no-base fallback, where the old rule runs unchanged (union,
 then skip when the local mtime is newer, then conflict copy). A file with no base for
 that peer whose peer publishes no ancestry (a peer on an older release, a lost
 database, a file never synced) falls to row 7. The future-clamp in
 `_restore_mtime_best_effort` still matters for both.
 
-**Line-deletion limit.** A line deleted on one machine stays deleted on the others
-when they did not change that file (rows 4 and 6 overwrite, no union). When both
-sides changed the file (or on a row-7 no-base union), the union has no base bytes
-to tell a deleted line from an added one. What still returns: a deleted line with no
+**Line-deletion limit.** A fast-forward propagates a line deletion by writing the
+peer's bytes. A union has no base bytes to tell a deleted line from an added one.
+This applies when both sides changed, on a row-7 no-base union, and when a peer
+edit to a mergeable file carries an older mtime than the local version it built
+on (rows 4 and 6 returning `both`). Publishing unioned bytes can carry the retained
+line back to peers. A no-op union keeps the local bytes and can leave peers with
+different versions. The union retains a deleted line with no
 relative `.md` link (including every `.jsonl` line), a deleted `MEMORY.md` line whose
 linked file still exists here or was left `waiting` or `failed` by this pull, and the
 local wording when the two sides word one file's line differently (`merge_lines` keeps

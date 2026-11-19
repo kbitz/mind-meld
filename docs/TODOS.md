@@ -44,6 +44,34 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: mtime changes between classification and apply
+
+- **Test gap** No demonstrated defect.
+- **Description** The two-peer test sets mtimes before the pull. It leaves the apply-time recheck after a timestamp-only local change untested.
+- **Hypothesis** Change only the canonical mtime after classification and assert the apply recheck unions the incoming lines.
+- **Evidence** Track 151B coverage audit. Revisit when a Track touches classification or apply-time rechecks.
+
+### [review:files=src/mind_meld/diffflow.py|tests/test_integration.py] Test gap: predict an older line merge in diff from one peer
+
+- **Test gap** No demonstrated defect.
+- **Description** The rule tests and pull planner exercise the older merge. The `mm diff --from` invocation has no direct assertion for this ledger-backed case.
+- **Hypothesis** Seed an older `.jsonl` successor to a clean local file and assert `mm diff --from` predicts `merge` without writing.
+- **Evidence** Track 151B coverage audit. Revisit when a Track touches peer-specific diff predictions.
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: summary counts across peers and deletion-only pulls
+
+- **Test gap** No demonstrated defect.
+- **Description** Existing fixtures assert apply counts and the deletion outcome. They lack exact written and merged summary fragments across peers with the same source name and a check for an empty header on deletion-only results.
+- **Hypothesis** Extend the two-peer and deletion fixtures to pin count-bearing labels and check that a deletion-only result produces no source header.
+- **Evidence** Track 151B coverage audit. Revisit when a Track changes per-source summary rendering.
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: plural held counts and mixed source outcomes
+
+- **Test gap** No demonstrated defect.
+- **Description** The held-only test covers one held file. It leaves multiple holds and a hold alongside active or unchanged outcomes untested.
+- **Hypothesis** Exercise one peer and source with multiple held files. Check the plural count and when `Up to date with` appears alongside other outcomes.
+- **Evidence** Track 151B coverage audit. Revisit when a Track changes held-edit accounting or output.
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-18 (SPEC O2 amended: one-run join and one-approval mesh; Track 150A recorded)

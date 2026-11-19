@@ -11,9 +11,9 @@ The rule table (docs/invariants/conflicts.md), in order:
   1. local missing        -> held (removed here on purpose) or write
   2. local == remote      -> matched
   3. remote == peer base  -> skip, except a clean, strictly newer successor (row 4)
-  4. local clean and in remote.from -> fast-forward (older when the remote mtime is older)
+  4. local clean and in remote.from -> fast-forward (when older: both if mergeable, else older)
   5. remote in ancestry   -> stale
-  6. local clean and == peer base   -> fast-forward (older)
+  6. local clean and == peer base   -> fast-forward (when older: both if mergeable, else older)
   7. no base, no from     -> fallback (today's rule)
   8. otherwise            -> both (union when mergeable, else conflict)
 """
@@ -653,6 +653,38 @@ def test_a_fast_forward_whose_remote_is_older_than_local_is_held_as_older(row):
     assert verdict(ledger, newer_local, V1, remote_mtime=hours(11), **kw) == "fast-forward"
 
 
+@pytest.mark.parametrize("row", ["row4", "row6"])
+def test_an_older_peer_edit_to_a_mergeable_file_returns_both_instead_of_older(row):
+    kw = {"remote_from": [P0]} if row == "row4" else {}
+    newer_local = local(V0, hours(10))
+    for path, older_verdict in (
+        (MEMORY, "both"),
+        ("events.jsonl", "both"),
+        (REL, "older"),
+    ):
+        ledger = make_ledger(bases=base(V0, path=path), rows=[held(P0)], path=path)
+        assert (
+            verdict(ledger, newer_local, V1, path=path, remote_mtime=hours(2), **kw)
+            == older_verdict
+        )
+        # Equal, missing and newer mtimes still fast-forward for both kinds.
+        assert (
+            verdict(ledger, newer_local, V1, path=path, remote_mtime=hours(10), **kw)
+            == "fast-forward"
+        )
+        assert (
+            verdict(ledger, newer_local, V1, path=path, remote_mtime=None, **kw) == "fast-forward"
+        )
+        assert (
+            verdict(ledger, local(V0, None), V1, path=path, remote_mtime=hours(2), **kw)
+            == "fast-forward"
+        )
+        assert (
+            verdict(ledger, newer_local, V1, path=path, remote_mtime=hours(11), **kw)
+            == "fast-forward"
+        )
+
+
 def test_a_naive_mtime_is_never_older():
     ledger = make_ledger(bases=base(V0), rows=[held(P0)])
     naive = datetime(2026, 1, 1)  # comparing with an aware datetime raises TypeError
@@ -999,9 +1031,15 @@ def test_a_restored_machine_republishing_older_bytes_is_held_as_older(rel):
     # C is restored from a backup: its file is V0 again, with V0's old mtime.
     c.edit(X_Y, hours(1))
     c.push()
-    assert a.pull(c) == "older"
-    assert a.data == X_Y_Z and a.older == [X_Y]
-    assert a.conflicts == []
+    if should_merge(rel):
+        assert a.pull(c) == "union"
+        assert a.data == X_Y_Z and a.older == []
+        assert a.conflicts == []
+        assert a.pull(c) == "skip"
+    else:
+        assert a.pull(c) == "older"
+        assert a.data == X_Y_Z and a.older == [X_Y]
+        assert a.conflicts == []
 
 
 @KINDS
@@ -1332,6 +1370,20 @@ def test_planner_holds_an_older_peer_edit(tmp_path):
     remote = info(b"v1", hours(2), **{"from": [pullplan.prefix(digest(b"v0"))]})
     p = predict(planner_for(ledger), tmp_path, REL, remote)
     assert (p.outcome, p.reason) == ("older", "peer edit has an older timestamp")
+
+
+def test_planner_merges_an_older_peer_edit_to_a_mergeable_file(tmp_path):
+    rel = "events.jsonl"
+    put(tmp_path / rel, b'{"seq":1}\n', hours(10))
+    v0 = digest(b'{"seq":1}\n')
+    ledger = make_ledger(
+        bases=base(v0, path=rel),
+        rows=[held(pullplan.prefix(v0))],
+        path=rel,
+    )
+    remote = info(b'{"seq":1}\n{"seq":2}\n', hours(2), **{"from": [pullplan.prefix(v0)]})
+    p = predict(planner_for(ledger), tmp_path, rel, remote)
+    assert (p.outcome, p.reason) == ("merge", "")
 
 
 def test_planner_fallback_follows_todays_rule(tmp_path):

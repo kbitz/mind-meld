@@ -645,9 +645,10 @@ def _prompt_conflict_choice(
 #   local hash == remote hash               -> UNCHANGED (settles the base)
 #   remote == this peer's base              -> SKIP      (silent, no download)
 #   clean local, peer built on it           -> FAST-FORWARD (write remote, no
-#                                              union, no recovery copy); OLDER
-#                                              (not applied) if remote mtime <
-#                                              local mtime
+#                                              union, no recovery copy)
+#                                              Older peer mtime: use the union
+#                                              below for mergeable files and
+#                                              hold the rest as OLDER.
 #   remote already seen/held here           -> STALE     (silent)
 #   no base and no peer ancestry            -> FALLBACK  (today's rule below)
 #   otherwise both changed:
@@ -2586,6 +2587,13 @@ class _PerSourceResult:
             self.outcomes[k] for k in self.outcomes if k not in ("unchanged", "kept")
         )
 
+    @property
+    def held_only(self) -> bool:
+        """True when this source held older peer edits and had no other outcome."""
+        return bool(self.older) and not any(
+            self.outcomes[k] for k in self.outcomes if k not in ("unchanged", "kept")
+        )
+
 
 def _check_fleet_version_or_refuse(
     backend: LocalBackend,
@@ -3431,21 +3439,30 @@ def _print_pull_summary(
         src_conflicted = len(r.outcomes["conflicted"])
         src_failed = len(r.outcomes["failed"])
         src_waiting = len(r.outcomes.get("waiting", ()))
+        src_older = len(r.older)
         if src_conflicted or src_failed or verbose:
-            line = f"  [bold]{r.src_name}:[/bold]"
+            parts: list[str] = []
             if src_written:
-                line += f" [green]{src_written} written[/green]"
+                parts.append(f"[green]{src_written} written[/green]")
             if src_merged:
-                line += f" [cyan]{src_merged} merged[/cyan]"
+                parts.append(f"[cyan]{src_merged} merged[/cyan]")
             if src_skipped:
-                line += f" [dim]{src_skipped} skipped (local newer)[/dim]"
+                parts.append(f"[dim]{src_skipped} skipped (local newer)[/dim]")
             if src_conflicted:
-                line += f" [yellow]{src_conflicted} conflicts[/yellow]"
+                parts.append(f"[yellow]{src_conflicted} conflicts[/yellow]")
             if src_failed:
-                line += f" {src_failed} failed"
+                parts.append(f"{src_failed} failed")
             if src_waiting:
-                line += f" [yellow]{src_waiting} waiting[/yellow]"
-            console.print(line)
+                parts.append(f"[yellow]{src_waiting} waiting[/yellow]")
+            if src_older:
+                parts.append(
+                    core._count(src_older, "older peer edit held", "older peer edits held")
+                )
+            if not parts:
+                continue
+            peer_name = safe_str(safety.safe_terminal_str(r.device_name))
+            source_name = safe_str(safety.safe_terminal_str(r.src_name))
+            console.print(f"  [bold]{peer_name}/{source_name}:[/bold] {' '.join(parts)}")
             # Task 2: inline conflicted/failed path list under per-source
             # line. 4-space indent keeps the device→source→file hierarchy
             # readable when multiple devices share a source name (D10).
@@ -4186,6 +4203,11 @@ def _pull_core(
                                 f"{safe_str(dname)}/{safe_str(src_name)}.[/green]"
                             )
                         continue
+                    if per_source.held_only and verbose and not quiet:
+                        console.print(
+                            f"  [green]Up to date with "
+                            f"{safe_str(dname)}/{safe_str(src_name)}.[/green]"
+                        )
 
                     _account_source(per_source)
                     accounted = True

@@ -175,11 +175,13 @@ time, in any order.
 - **Conflict copies that exist today do not clear by themselves.** `mm pull` stops
   reporting a copy it already holds, but `mm conflicts` keeps listing it until you run
   `mm resolve` on each one (it needs a terminal).
-- **A peer edit with an older timestamp is held.** When a peer's version was built on
-  yours but carries an older mtime (a machine restored from backup), pull leaves your file
-  alone and the line says `N older peer edits not applied`; `mm pull --verbose` lists them.
-  `mm diag` shows the last pull's observations, including both mtimes, labeled as possibly
-  stale; it does not fetch the peer's current files.
+- **Pull line-merges older peer edits to `.jsonl` files and `MEMORY.md`.** For other
+  files, pull holds a peer edit built on your version with an older mtime. It says
+  `N older peer edits not applied`. Per-source pull summaries now use
+  `<peer>/<source>` labels. `mm pull --verbose` counts holds by that label and
+  lists the held paths.
+  `mm diag` shows the last pull's observations, including both mtimes, labeled as
+  possibly stale.
   Compare both versions, then run `touch <file>` and `mm push` on the machine whose version
   should win.
 - **`.mind-meld-anchor`.** mm keeps this small file (a random token) in each folder it
@@ -673,8 +675,8 @@ A project's Claude memory lands only where mm can place it: in a Claude project 
 
 Push and pull on each machine to exchange changes according to each file's sync rules:
 
-- **`.jsonl` files** deep-merge by line-union (deduped) when both sides changed or the no-base fallback applies; fast-forward takes the peer's bytes directly. Records with a string `ts` sort first by that string, then by the full line; every other line follows in lexical order. **`MEMORY.md`** is a plain lexical line-union and does not consult `ts`. Entries from all machines accumulate through these merges — this is why telemetry, learnings, and timeline files stay coherent across devices.
-- **Other files** follow what each Mac last synced. If only the peer changed a file, pull applies the peer's version (no merge, no conflict copy, no recovery copy of the bytes it replaces). If you changed it and the peer did not, pull leaves yours. If both changed it, with the default `keep-both` mode your local file stays at the canonical path and the remote version is saved as `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` sitting next to it (Syncthing convention). A Mac with no record of the last sync for a path (a fresh install, a lost `state.db`, a peer on an older release) falls back to the older rule, where a local file newer than the remote is left alone. See [Handling conflicts](#handling-conflicts) below.
+- **`.jsonl` files and `MEMORY.md`** merge by deduplicating and combining lines when both sides changed, when a peer edit built on your version has an older mtime, or when the no-base fallback applies. Fast-forward takes the peer's bytes directly. In `.jsonl`, records with a string `ts` sort first by that string, then by the full line. Every other line follows in lexical order. `MEMORY.md` sorts by line and ignores `ts`. Entries from all machines accumulate through these merges, keeping telemetry, learnings, and timeline files coherent across devices.
+- **Other files** follow what each Mac last synced. If only the peer changed a file, pull fast-forwards to the peer's bytes without a recovery copy. It holds the edit if the peer's mtime is older. If you changed it and the peer did not, pull leaves yours. If both changed it, with the default `keep-both` mode your local file stays at the canonical path and the remote version is saved as `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` sitting next to it (Syncthing convention). If this machine has no base for the peer and the peer publishes no ancestry, pull uses the older rule, where a local file newer than the remote is left alone. See [Handling conflicts](#handling-conflicts) below.
 - **Deletions** propagate. A tombstone in the manifest carries the sha256 of the version that was deleted: it stops a missing file from being restored from an older peer snapshot, and a receiving Mac whose copy has exactly those bytes, last synced from the deleting Mac, moves it into `~/.config/mind-meld/deleted/` for at least 30 days instead of keeping it. A file you changed, or a record from a release before 91A (no hash), is never deleted. See [Recovering a deleted file](#recovering-a-deleted-file).
 
 After the first successful `mm push` on Machine A, open Machine B and `mm pull`, then confirm one selected file you edited on A is present on B.
@@ -1064,6 +1066,10 @@ show the skipped count. A deletion a peer made prints its own outcome line
 copies in ~/.config/mind-meld/deleted/<stamp> for 30 days; see ...#recovering-a-deleted-file.`
 (`peers` replaces the name when several machines deleted); `mm pull --verbose`
 lists the paths. A peer edit held back as `older` prints `Pull: 1 older peer edit not applied (mm pull --verbose).`
+Verbose pull summaries use `<peer>/<source>` labels with counts such as
+`<peer>/<source>: 1 older peer edit held` and list the held paths. If the source
+has held edits and no other changes, verbose output also shows
+`Up to date with <peer>/<source>.`
 A push whose scan folder was recreated prints `Push: metadata updated.` followed by
 `Push: 12 files left out because /home/user/.claude/projects is new; run mm pull to restore them.`
 Conflict copies are already included in applied files; skipped and failed
@@ -1316,7 +1322,7 @@ content-changing push's GC. [Measurement and matching caveats](docs/invariants/s
 Those directory names are skipped at any depth inside a project; removing a
 default glob brings back the migration prompt. [Existing installs: v1.8.0 steps](#v180-scope-trim).
 
-This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** divergent additions on pull (deduped; string `ts` first, then full-line lexical fallback), or fast-forward when only the peer changed them. Append-only telemetry from 3 machines converges cleanly into one timeline.
+This covers the common cross-machine cases. In particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** additions on pull. Pull deduplicates lines and sorts by string `ts` first, then by full line. The union includes edits from an older-mtime peer that built on your version. Append-only telemetry from 3 machines converges into one timeline. [Handling conflicts](#handling-conflicts).
 
 **Browser profiles are skipped:** a directory holding a regular, non-symlink Chromium or Electron `Local State` file (a `chrome-profile`, a signed-in test profile, an Electron `user-data` directory) is never synced. That includes an include that starts inside the profile, and a file selected when the source has no `include_dirs`. See [Upgrading](#upgrading) for removing copies that synced before.
 
@@ -1623,9 +1629,9 @@ Discovery is local. Track 29A's live gap was one repo (8 commits, 15%), not "10 
 
 ## Handling conflicts
 
-A conflict means **both machines changed the file** since they last synced it. If only the peer changed it, `mm pull` applies the peer's version as it is (a fast-forward: no union, no conflict copy, and no recovery copy of the bytes it replaces, so a bad edit on one Mac spreads to the others). If only you changed it, pull leaves yours and your next push shares it. For a both-changed file that cannot auto-merge, the default `mm pull --conflict-mode keep-both` leaves your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it, whichever file is newer. `.jsonl` files and `MEMORY.md` are line-unioned instead, and because mm keeps the last-synced hash and not the old text, **a line one Mac deleted comes back when both Macs changed the file** (delete it again; in `MEMORY.md`, pointers to missing files not left waiting or failed, and duplicate pointers for the same file, are dropped). A Mac with no record of the last sync for a path (a fresh install, a lost `state.db`, a peer on an older release) uses the older rule for it: a local file newer than the remote (by mtime) is left alone and convergence happens on the next push.
+A conflict means **both machines changed the file** since they last synced it. If only the peer changed it, `mm pull` normally fast-forwards to the peer's bytes, without a recovery copy, so a bad edit on one Mac can spread to the others. See the older-mtime case below. If only you changed it, pull leaves yours and your next push shares it. For a both-changed file that cannot auto-merge, the default `mm pull --conflict-mode keep-both` leaves your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it, whichever file is newer. `.jsonl` files and `MEMORY.md` are line-unioned instead, and because mm keeps the last-synced hash and not the old text, **a line one Mac deleted comes back when both Macs changed the file** (delete it again; in `MEMORY.md`, pointers to missing files not left waiting or failed, and duplicate pointers for the same file, are dropped). If this machine has no base for the peer and the peer publishes no ancestry, pull falls back to a line merge for `.jsonl` files and `MEMORY.md`. For other files, it leaves the local file alone if its mtime is newer and otherwise writes a conflict copy.
 
-A peer edit that was built on your version but carries an **older mtime** than your file, as a machine restored from a backup publishes, is *not applied*. The pull line says `N older peer edits not applied` and `mm pull --verbose` lists them; compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
+A peer edit built on your version with an **older mtime** is line-merged for `.jsonl` files and `MEMORY.md`. A union can retain lines the peer deleted and keep your wording when both `MEMORY.md` entries link to the same file. If the union leaves your file unchanged, `mm pull --verbose` shows a merge no-op. For other files, pull holds the edit and says `N older peer edits not applied`. Use `mm pull --verbose` to list the held paths, compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
 
 **Conflict copies that exist when you upgrade do not clear by themselves.** A pull on the new release no longer counts or reports a copy it already holds, but `mm conflicts` keeps listing it until you run `mm resolve` on each one; it needs a terminal. After `(l)ocal`, `(r)emote` or `(m)erge` the file stops conflicting.
 
@@ -2113,7 +2119,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **A push says `N files left out because <folder> is new` (or `missing`, or `cannot be read`).** The scan folder was recreated, restored from a backup, removed or cannot be read, so mm cannot tell "deleted" from "the folder is not what it was": that push publishes without those files and records **no** deletion for them. Run `mm pull` to bring them back from your other Macs (for `cannot be read`, restore read access first). Nothing was deleted anywhere. The first push after updating is silent about this by design. `mm: notice: deletions under <folder> will not propagate; restore write access, then mm push` means mm could not write the `.mind-meld-anchor` token there, so deletions under that folder will not propagate until it can.
 
-**A peer's edit shows `N older peer edits not applied`.** That peer's version was built on yours but its file has an older mtime than yours (a machine restored from a backup). `mm pull --verbose` lists the paths. Compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
+**A peer's edit shows `N older peer edits not applied`.** That peer's version was built on yours but its file has an older mtime than yours, as can happen after a backup restore. `.jsonl` files and `MEMORY.md` take the line-merge path. `mm pull --verbose` lists the held paths. Compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
 
 **Conflicts you didn't expect.** `mm conflicts` lists them, `mm pull --dry-run` predicts incoming changes; `mm diff` compares against a stored snapshot, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
 
