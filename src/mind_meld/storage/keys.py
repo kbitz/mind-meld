@@ -9,6 +9,7 @@ Key shapes:
     manifests/{device_id}/manifest.json.enc   — per-device manifest blob
     data/{device_id}/{sha256}.enc             — content-addressed encrypted blob
     devices/{device_id}.json                  — per-device metadata JSON
+    syncthing/{device_id}.enc                 — per-device encrypted Syncthing device ID
     mm-crypto-init                            — storage-root bootstrap blob
 """
 
@@ -19,6 +20,7 @@ import re
 MANIFESTS_PREFIX = "manifests/"
 DATA_PREFIX = "data/"
 DEVICES_PREFIX = "devices/"
+SYNCTHING_PREFIX = "syncthing/"
 
 # Storage-root bootstrap blob (not device-scoped). Plaintext root_salt +
 # keycheck blob. See crypto.py for the byte layout.
@@ -112,6 +114,27 @@ def parse_device_key(key: str) -> str | None:
     try:
         _validate_component(device_id, "device_id")
     except ValueError:
+        return None
+    return device_id
+
+
+def syncthing_record_key(device_id: str) -> str:
+    """Key for a device's encrypted Syncthing device-ID record."""
+    _validate_component(device_id, "device_id")
+    return f"{SYNCTHING_PREFIX}{device_id}.enc"
+
+
+def parse_syncthing_record_key(key: str) -> str | None:
+    """Parse ``syncthing/<id>.enc`` into its device id. None unless it is
+    exactly that shape, so a conflict copy or stray file never reads as a record."""
+    if not isinstance(key, str) or not key.startswith(SYNCTHING_PREFIX) or not key.endswith(".enc"):
+        return None
+    device_id = key[len(SYNCTHING_PREFIX) : -len(".enc")]
+    try:
+        _validate_component(device_id, "device_id")
+    except ValueError:
+        return None
+    if ".sync-conflict-" in device_id or any(ch.isspace() for ch in device_id):
         return None
     return device_id
 

@@ -74,7 +74,12 @@ from mind_meld.crypto import (
     store_passphrase_in_keyring,
     verify_passphrase,
 )
-from mind_meld.devices import generate_unique_short_device_id, list_devices, register_device
+from mind_meld.devices import (
+    generate_unique_short_device_id,
+    list_devices,
+    publish_record,
+    register_device,
+)
 from mind_meld.errors import (
     KEY_HEADER_COPIES_URL,
     NEWER_STORAGE_URL,
@@ -96,7 +101,7 @@ STIGNORE_LINE = f"(?d){STIGNORE_PATTERN}"
 
 # Top-level names a folder may hold and still be "empty" for `--new-fleet`.
 _BOOKKEEPING_NAMES = frozenset({".stfolder", ".stignore", ".stversions", ".DS_Store"})
-_FLEET_DIRS = frozenset({"data", "manifests", "devices"})
+_FLEET_DIRS = frozenset({"data", "manifests", "devices", "syncthing"})
 _IN_FLIGHT_PREFIXES = (".syncthing.", "~syncthing~")
 _HEADER_STEM = "mm-crypto-init"
 # Bounded waits during a managed join: approval wait for the fleet machine to
@@ -1286,6 +1291,13 @@ def init(new_fleet: bool = False) -> str | None:
     }
 
     _register_and_save(config, backend, device_id, device_name, passphrase)
+    _publish_syncthing_record_best_effort(
+        backend,
+        device_id,
+        setup.local_id,
+        passphrase,
+        argon2_memory_kb,
+    )
     _forget_join_record()
 
     # Seam 1 — transition detection (init path). Seeds the
@@ -1345,6 +1357,31 @@ def init(new_fleet: bool = False) -> str | None:
         )
     )
     return passphrase
+
+
+def _publish_syncthing_record_best_effort(
+    backend: LocalBackend,
+    device_id: str,
+    local_syncthing_id: str | None,
+    passphrase: str,
+    memory_kb: int,
+) -> None:
+    """Publish this machine's encrypted Syncthing ID record at init if known."""
+    if not (
+        isinstance(local_syncthing_id, str)
+        and syncthing.is_device_id(local_syncthing_id)
+        and syncthing.has_valid_device_id_check_digits(local_syncthing_id)
+    ):
+        return
+    try:
+        publish_record(backend, device_id, local_syncthing_id, passphrase, memory_kb)
+    except (OSError, StorageError) as e:
+        cause = attemptlog.storage_errno(e) or os_error_cause(e)
+        core._notice(
+            f"could not publish this machine's Syncthing ID ({cause}); "
+            "the next mm push retries it.",
+            fix="mm push",
+        )
 
 
 def _default_device_name() -> str:

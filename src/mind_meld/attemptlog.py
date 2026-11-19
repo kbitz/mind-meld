@@ -283,6 +283,23 @@ RUN_COUNTS = frozenset(
 _MAX_COUNT = 2**53
 _MAX_DETAILS = 8
 _MAX_DETAIL_CHARS = 384
+_MESH_DETAIL_RE = re.compile(
+    r"Syncthing mesh step stopped \([a-z0-9_-]+\) after [0-9]+ of [1-9][0-9]* steps; "
+    r"nothing else changed; retries on the next push or pull|"
+    r"Syncthing mesh step stopped \([a-z0-9_-]+\)\. Run: mm diag|"
+    r"Syncthing did not confirm (?:adding device|marking as introducer|sharing the fleet folder) "
+    r"for [^/~]{1,128} \([A-Z2-7]{7}\); it may have applied; "
+    r"the next push or pull reconciles(?: and finishes)? it|"
+    r"the Syncthing record of device [A-Za-z0-9._-]{1,64} is from a newer mm\. Run: mm update|"
+    r"the Syncthing record of device [A-Za-z0-9._-]{1,64} is unreadable\. Run: mm diag|"
+    r"could not publish this machine's Syncthing ID \([A-Za-z0-9._ -]{1,64}\); "
+    r"the next push retries|"
+    r"could not list Syncthing records \([A-Za-z0-9._ -]{1,64}\); "
+    r"the next push or pull retries|"
+    r"Syncthing ID not published \([a-z0-9:_-]+(?: [a-z0-9:_-]+)*\)\. Run: mm diag|"
+    r"Syncthing mesh step failed \([A-Za-z][A-Za-z0-9_]*(?:, see auto(?:push|pull)\.log)?\)"
+    r"(?:\. Run: mm diag)?"
+)
 
 
 def runs_path() -> Path:
@@ -413,9 +430,16 @@ def run_details(details: list[str]) -> tuple[list[str], int]:
                 "mm-events folder is missing; restore it or run mm disable-source mm-events. "
                 "Skipping mm-events for this sync."
             )
+        if detail.startswith("Syncthing ID not published (") and "/" in detail:
+            detail = re.sub(
+                r"^Syncthing ID not published \(([a-z0-9_-]+)/([a-z0-9_-]+)\)",
+                r"Syncthing ID not published (\1: \2)",
+                detail,
+            )
         known = (
             detail in literals
             or detail in host_phrases
+            or bool(_MESH_DETAIL_RE.fullmatch(detail))
             or bool(
                 re.fullmatch(
                     r"events walk exceeded its [0-9]+ms budget|"

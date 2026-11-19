@@ -772,3 +772,47 @@ def test_generated_bound_clamps_existing_expensive_detail_with_honest_omissions(
     runs = attemptlog.read_runs()["runs"]
     assert len(runs["push"]["degradations"]) + runs["push"]["omitted_details"] == 8
     assert set(runs) == {"push", "pull"}
+
+
+def test_mesh_vocabulary_retained_and_path_free():
+    valid_mesh_details = [
+        "Syncthing mesh step stopped (timeout) after 1 of 3 steps; "
+        "nothing else changed; retries on the next push or pull",
+        "Syncthing mesh step stopped (unreachable) after 0 of 2 steps; "
+        "nothing else changed; retries on the next push or pull",
+        "Syncthing mesh step stopped (unauthorized). Run: mm diag",
+        "Syncthing mesh step stopped (config-unreadable). Run: mm diag",
+        "Syncthing mesh step stopped (no-folder). Run: mm diag",
+        "Syncthing mesh step stopped (not-mm-folder). Run: mm diag",
+        "Syncthing did not confirm adding device for mac-b (BBBBBBB); "
+        "it may have applied; the next push or pull reconciles and finishes it",
+        "Syncthing did not confirm sharing the fleet folder for linux-a (CCCCCCC); "
+        "it may have applied; the next push or pull reconciles it",
+        "the Syncthing record of device peer1 is from a newer mm. Run: mm update",
+        "the Syncthing record of device peer2 is unreadable. Run: mm diag",
+        "could not publish this machine's Syncthing ID (ENOSPC); the next push retries",
+        "Syncthing ID not published (unauthorized). Run: mm diag",
+        "Syncthing ID not published (unauthorized/http-403). Run: mm diag",
+        "Syncthing mesh step failed (RuntimeError). Run: mm diag",
+        "Syncthing mesh step failed (RuntimeError, see autopush.log)",
+        "could not list Syncthing records (EACCES); the next push or pull retries",
+    ]
+    retained, omitted = attemptlog.run_details(valid_mesh_details[:8])
+    assert omitted == 0
+    assert len(retained) == 8
+    assert all("/" not in item and "~" not in item for item in retained)
+
+    retained2, omitted2 = attemptlog.run_details(valid_mesh_details[8:])
+    assert omitted2 == 0
+    assert len(retained2) == len(valid_mesh_details) - 8
+    assert "Syncthing ID not published (unauthorized: http-403). Run: mm diag" in retained2
+
+    # Path-bearing or unknown strings are rejected
+    bad_details = [
+        "fleet record syncthing/peer1.enc is unreadable; Run: mm diag",
+        "the Syncthing record of device /Users/user/peer1 is unreadable. Run: mm diag",
+        "Syncthing mesh step failed (RuntimeError: /private/secret)",
+    ]
+    bad_retained, bad_omitted = attemptlog.run_details(bad_details)
+    assert bad_retained == []
+    assert bad_omitted == len(bad_details)

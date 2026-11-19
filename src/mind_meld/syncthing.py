@@ -816,6 +816,24 @@ def is_device_id(value: object) -> bool:
     return isinstance(value, str) and bool(_DEVICE_ID_RE.fullmatch(value))
 
 
+def has_valid_device_id_check_digits(device_id: str) -> bool:
+    """Return True when every 14-char group of ``device_id`` passes Luhn-32."""
+    if not isinstance(device_id, str):
+        return False
+    compact = "".join(device_id.split("-"))
+    if len(compact) != 56:
+        return False
+    for offset in range(0, 56, 14):
+        chunk = compact[offset : offset + 14]
+        try:
+            expected = _luhn32(chunk[:13])
+        except ValueError:
+            return False
+        if chunk[13] != expected:
+            return False
+    return True
+
+
 def stock_default_folder_path() -> Path:
     """Return Syncthing's stock Default Folder path (``~/Sync``) at call time."""
     return Path.home() / "Sync"
@@ -1054,6 +1072,20 @@ def _device_id_from_cert(config_dir: Path) -> str | None:
         return "-".join(with_check[idx : idx + 7] for idx in range(0, 56, 7))
     except Exception:
         return None
+
+
+def local_device_id_offline() -> str | None:
+    """Derive this machine's Syncthing device ID from public ``cert.pem`` offline."""
+    _, cfg_dir, _, _, _, _ = _load_config()
+    candidates: list[Path] = [cfg_dir] if cfg_dir is not None else []
+    for cand_dir in config_dirs():
+        if cand_dir not in candidates:
+            candidates.append(cand_dir)
+    for cand_dir in candidates:
+        dev_id = _device_id_from_cert(cand_dir)
+        if dev_id is not None and is_device_id(dev_id):
+            return dev_id
+    return None
 
 
 def _identity_files_present() -> bool:
@@ -1371,6 +1403,32 @@ class ApprovalState:
     writer_shape: bool = False
 
 
+@dataclass(frozen=True)
+class ConfiguredDevice:
+    """Configured device entry from ``/rest/config/devices`` without peer-controlled names."""
+
+    device_id: str
+    writer_shape: bool
+    introducer: bool
+    introduced_by: str
+    paused: bool
+
+
+@dataclass(frozen=True)
+class MeshSnapshot:
+    """GET-only snapshot of pending devices, configured devices and the fleet folder."""
+
+    outcome: str
+    cause: str | None = None
+    my_id: str | None = None
+    pending_ids: tuple[str, ...] = ()
+    devices: dict[str, ConfiguredDevice] = field(default_factory=dict)
+    folder_present: bool = False
+    folder_path: Path | None = None
+    folder_problems: tuple[str, ...] = ()
+    folder_device_ids: frozenset[str] = frozenset()
+
+
 def _writer_path(path: str | Path) -> Path | None:
     """Resolve a writer path without exposing filesystem errors to its caller."""
     try:
@@ -1414,15 +1472,21 @@ class SyncthingWriter:
         *,
         timeout: float = 2.0,
         budget: float = 5.0,
+        deadline: float | None = None,
     ) -> None:
         self._record = record
         self._timeout = timeout
         self._budget = budget
+        self._deadline = float(deadline) if deadline is not None else None
 
     def _begin(
         self,
     ) -> tuple[_Endpoint | None, str | None, float, float, WriteResult | None]:
-        deadline = time.monotonic() + max(0.0, float(self._budget))
+        deadline = (
+            self._deadline
+            if self._deadline is not None
+            else time.monotonic() + max(0.0, float(self._budget))
+        )
         per_req_timeout = max(0.01, float(self._timeout))
         if not isinstance(self._record, ManagedRecord) or not is_device_id(self._record.device_id):
             return (
@@ -1431,6 +1495,14 @@ class SyncthingWriter:
                 per_req_timeout,
                 deadline,
                 WriteResult("refused", "not-managed"),
+            )
+        if deadline - time.monotonic() <= 0:
+            return (
+                None,
+                None,
+                per_req_timeout,
+                deadline,
+                WriteResult("unreachable", "timeout"),
             )
         endpoint, reach, cause, _, _ = _open_endpoint()
         if endpoint is None:
@@ -1849,6 +1921,111 @@ class SyncthingWriter:
             introducer=introducer,
             shared=shared,
             writer_shape=writer_shape,
+        )
+
+    def mesh_snapshot(self, folder_id: str) -> MeshSnapshot:
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            res = err or WriteResult("refused", "not-managed")
+            return MeshSnapshot(res.outcome, res.cause)
+        if not isinstance(folder_id, str) or not _FOLDER_ID_RE.fullmatch(folder_id):
+            return MeshSnapshot("refused", "bad-folder-id")
+
+        devices, dev_err = self._get_list(
+            endpoint, "/rest/config/devices", timeout=per_req_timeout, deadline=deadline
+        )
+        if dev_err is not None or devices is None:
+            res = dev_err or WriteResult("error", "bad-response")
+            return MeshSnapshot(res.outcome, res.cause)
+
+        folders, fld_err = self._get_list(
+            endpoint, "/rest/config/folders", timeout=per_req_timeout, deadline=deadline
+        )
+        if fld_err is not None or folders is None:
+            res = fld_err or WriteResult("error", "bad-response")
+            return MeshSnapshot(res.outcome, res.cause)
+
+        out, pending_data, cause = _get_json(
+            endpoint.norm_addr,
+            "/rest/cluster/pending/devices",
+            header_val=endpoint.header_val,
+            tls_context=endpoint.tls_context,
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        if out in ("unreachable", "unauthorized", "error"):
+            return MeshSnapshot(out, cause)
+        if out != "ok" or not isinstance(pending_data, dict):
+            return MeshSnapshot("error", cause or "bad-response")
+
+        pending_ids = tuple(
+            sorted(
+                dev_id
+                for dev_id, info in pending_data.items()
+                if is_device_id(dev_id) and dev_id != my_id and isinstance(info, dict)
+            )
+        )
+
+        configured: dict[str, ConfiguredDevice] = {}
+        for entry in devices:
+            dev_id = entry.get("deviceID")
+            if not is_device_id(dev_id) or dev_id == my_id:
+                continue
+            introducer = entry.get("introducer") is True
+            raw_intro_by = entry.get("introducedBy")
+            if raw_intro_by is None or raw_intro_by == "":
+                introduced_by = ""
+            elif isinstance(raw_intro_by, str):
+                trimmed_intro = raw_intro_by.strip()
+                introduced_by = trimmed_intro if is_device_id(trimmed_intro) else "<non-empty>"
+            else:
+                introduced_by = "<non-empty>"
+            paused = entry.get("paused") is True
+            writer_shape = (
+                entry.get("addresses") == ["dynamic"]
+                and entry.get("autoAcceptFolders") is False
+                and entry.get("paused") is False
+                and (raw_intro_by is None or raw_intro_by == "")
+            )
+            configured[dev_id] = ConfiguredDevice(
+                device_id=dev_id,
+                writer_shape=writer_shape,
+                introducer=introducer,
+                introduced_by=introduced_by,
+                paused=paused,
+            )
+
+        target_folder = next((f for f in folders if f.get("id") == folder_id), None)
+        if target_folder is None:
+            folder_present = False
+            folder_path: Path | None = None
+            folder_problems: tuple[str, ...] = ()
+            folder_device_ids: frozenset[str] = frozenset()
+        else:
+            folder_present = True
+            device_ids = _folder_device_ids(target_folder)
+            if device_ids is None:
+                return MeshSnapshot("error", "bad-response")
+            raw_path = target_folder.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                return MeshSnapshot("error", "bad-response")
+            folder_path = _writer_path(raw_path.strip())
+            if folder_path is None:
+                return MeshSnapshot("error", "path-unreadable")
+            _, opt_problems = _extract_options(target_folder)
+            folder_problems = tuple(opt_problems)
+            folder_device_ids = frozenset(device_ids)
+
+        return MeshSnapshot(
+            outcome="ok",
+            cause=None,
+            my_id=my_id,
+            pending_ids=pending_ids,
+            devices=configured,
+            folder_present=folder_present,
+            folder_path=folder_path,
+            folder_problems=folder_problems,
+            folder_device_ids=folder_device_ids,
         )
 
     def mark_introducer(self, device_id: str) -> WriteResult:

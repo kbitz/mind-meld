@@ -99,6 +99,9 @@ claude-sync.com runs an API that brokers auth, generates presigned URLs, and sto
 ├── devices/
 │   ├── {device_id}.json                   # device metadata (unencrypted)
 │   └── ...
+├── syncthing/
+│   ├── {device_id}.enc                    # encrypted Syncthing device-ID record (v=1 JSON, read by meshflow.py)
+│   └── ...
 ├── manifests/
 │   ├── {device_id}/
 │   │   └── manifest.json.enc             # encrypted manifest
@@ -401,9 +404,10 @@ mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump;
                             # maintain_links is enabled | disabled (...) | unknown (config invalid: ...) | unknown (policy not resolved)
 mm devices [--format table|json]   # list registered devices (json: stable schema for scripts / retro-fleet)
 mm devices approve <device-id>     # on a fleet machine where mm manages Syncthing: add the exact pending device, mark it introducer, share the fleet folder
+                                   # (knocking devices already vouched by a registered peer's encrypted syncthing/<id>.enc record are added on the next push or pull);
                                    # a rerun finishes a half-finished approval (a configured device in add_device's shape not yet sharing the folder);
                                    # a device that already shares the folder (a repeat, or one another fleet machine introduced) reports already approved (exit 0);
-                                   # any other non-pending, malformed or near-match ID changes nothing (exit 1); never automatic
+                                   # any other non-pending, malformed or near-match ID changes nothing (exit 1)
 mm diff [--from DEVICE] [--source NAME]   # compare local files with this Mac's last push (or --from DEVICE); changes nothing, not even the lock file
                                              # annotates each modified file with its predicted pull outcome; for incoming changes from other Macs use mm pull --dry-run (v0.14.15)
 mm gc [--dry-run] [--conflicts]

@@ -14,9 +14,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from mind_meld import __version__, fsutil
-from mind_meld.errors import StorageError, StorageNotFound
-from mind_meld.storage.keys import DEVICES_PREFIX, device_key, parse_device_key
+from mind_meld import __version__, crypto, fsutil, syncthing
+from mind_meld.config import DEFAULT_ARGON2_MEMORY_KB
+from mind_meld.errors import CryptoError, NewerFormatError, StorageError, StorageNotFound
+from mind_meld.storage.keys import (
+    DEVICES_PREFIX,
+    SYNCTHING_PREFIX,
+    device_key,
+    parse_device_key,
+    parse_syncthing_record_key,
+    syncthing_record_key,
+)
 from mind_meld.storage.local import LocalBackend, is_conflict_name
 
 # Local sentinel for serializing read-modify-write of devices/<id>.json
@@ -335,3 +343,143 @@ def inventory_devices(backend: LocalBackend) -> DeviceInventory:
             continue
         inventory.valid.append(raw)
     return inventory
+
+
+MAX_SYNCTHING_RECORD_BYTES = 4096
+
+
+@dataclass
+class FleetSyncthingRecords:
+    """Result of reading ``syncthing/*.enc`` records against the device registry."""
+
+    vouched: dict[str, tuple[str, str]] = field(default_factory=dict)
+    by_mm_id: dict[str, str] = field(default_factory=dict)
+    own_syncthing_id: str | None = None
+    newer_format: list[str] = field(default_factory=list)
+    unreadable: list[str] = field(default_factory=list)
+    vanished: list[str] = field(default_factory=list)
+    skipped_unregistered: list[str] = field(default_factory=list)
+
+
+def publish_record(
+    backend: LocalBackend,
+    device_id: str,
+    syncthing_device_id: str,
+    passphrase: str,
+    memory_kb: int = DEFAULT_ARGON2_MEMORY_KB,
+) -> bool:
+    """Write ``syncthing/<device_id>.enc`` when ``syncthing_device_id`` is valid.
+
+    Never touches ``devices/<device_id>.json``. Returns True when written,
+    False when ``syncthing_device_id`` is not a valid canonical device ID.
+    """
+    if not (
+        isinstance(syncthing_device_id, str)
+        and syncthing.is_device_id(syncthing_device_id)
+        and syncthing.has_valid_device_id_check_digits(syncthing_device_id)
+    ):
+        return False
+    key = syncthing_record_key(device_id)
+    payload = {
+        "mm_device_id": device_id,
+        "syncthing_device_id": syncthing_device_id,
+    }
+    plaintext = json.dumps(payload, sort_keys=True).encode("utf-8")
+    encrypted = crypto.encrypt(plaintext, passphrase, memory_kb)
+    backend.put(key, encrypted)
+    return True
+
+
+def read_fleet_records(
+    backend: LocalBackend,
+    passphrase: str,
+    memory_kb: int = DEFAULT_ARGON2_MEMORY_KB,
+    *,
+    own_device_id: str | None = None,
+) -> FleetSyncthingRecords:
+    """Read and authenticate ``syncthing/*.enc`` records under the fleet key.
+
+    Never reads a Syncthing ID from ``devices/<id>.json``; the plaintext
+    registry is used only to filter out records of unregistered (retired)
+    devices without degradation and to associate each vouched ID with its
+    registry device name.
+    """
+    records = FleetSyncthingRecords()
+    inventory = inventory_devices(backend)
+    registered: dict[str, dict[str, Any]] = {d["device_id"]: d for d in inventory.valid}
+    best_rank: dict[str, tuple[str, str, str]] = {}
+
+    for key in backend.list_keys(SYNCTHING_PREFIX):
+        leaf = key.rsplit("/", 1)[-1]
+        if is_conflict_name(leaf):
+            continue
+        key_id = parse_syncthing_record_key(key)
+        if key_id is None:
+            continue
+        path = backend.root / key
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            st = None
+        except OSError:
+            records.unreadable.append(key_id)
+            continue
+        if st is not None and st.st_size > MAX_SYNCTHING_RECORD_BYTES:
+            records.unreadable.append(key_id)
+            continue
+        try:
+            raw = backend.get(key, expected=True)
+        except StorageNotFound:
+            records.vanished.append(key_id)
+            continue
+        except (StorageError, OSError):
+            records.unreadable.append(key_id)
+            continue
+        if len(raw) > MAX_SYNCTHING_RECORD_BYTES:
+            records.unreadable.append(key_id)
+            continue
+        try:
+            plaintext = crypto.decrypt(raw, passphrase, memory_kb)
+        except NewerFormatError:
+            records.newer_format.append(key_id)
+            continue
+        except CryptoError:
+            records.unreadable.append(key_id)
+            continue
+        try:
+            payload = json.loads(plaintext.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            records.unreadable.append(key_id)
+            continue
+        if not isinstance(payload, dict):
+            records.unreadable.append(key_id)
+            continue
+        mm_id = payload.get("mm_device_id")
+        st_id = payload.get("syncthing_device_id")
+        if (
+            not isinstance(mm_id, str)
+            or mm_id != key_id
+            or not isinstance(st_id, str)
+            or not syncthing.is_device_id(st_id)
+            or not syncthing.has_valid_device_id_check_digits(st_id)
+        ):
+            records.unreadable.append(key_id)
+            continue
+        if own_device_id is not None and key_id == own_device_id:
+            records.own_syncthing_id = st_id
+        reg_entry = registered.get(key_id)
+        if reg_entry is None:
+            records.skipped_unregistered.append(key_id)
+            continue
+        records.by_mm_id[key_id] = st_id
+        dev_name = reg_entry.get("device_name") or key_id
+        rank = (
+            str(reg_entry.get("last_seen") or ""),
+            str(reg_entry.get("registered") or ""),
+            key_id,
+        )
+        prior = best_rank.get(st_id)
+        if prior is None or rank >= prior:
+            best_rank[st_id] = rank
+            records.vouched[st_id] = (key_id, dev_name)
+    return records

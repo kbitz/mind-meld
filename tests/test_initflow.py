@@ -2407,3 +2407,104 @@ def test_join_checks_populated_target_before_asking_for_missing_fleet_id(
     assert text.endswith("Run: mm init")
     assert config.load_join_record() == saved
     assert fake_syncthing.bodies == []
+
+
+def test_new_fleet_and_join_publish_encrypted_syncthing_record_and_keep_devices_json_unchanged(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    import json
+
+    from mind_meld.storage.keys import device_key, syncthing_record_key
+
+    _storage, _backend = env
+    stock_root, my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fleet_storage = stock_root / "mind-meld"
+    fleet_backend = LocalBackend(fleet_storage)
+
+    # 1. --new-fleet publishes encrypted syncthing/<id>.enc; devices/<id>.json is unchanged
+    res_new, text_new = _new_fleet(
+        f"{fleet_storage}\nMac A\n{PASSPHRASE}\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}"
+    )
+    assert res_new.exit_code == 0, text_new
+    cfg_a = config.load_config()
+    dev_a = cfg_a["device"]["id"]
+    dev_a_json = json.loads(fleet_backend.get(device_key(dev_a)).decode("utf-8"))
+    assert set(dev_a_json) == {"device_id", "device_name", "registered"}
+    assert my_id not in fleet_backend.get(device_key(dev_a)).decode("utf-8")
+
+    raw_enc_a = fleet_backend.get(syncthing_record_key(dev_a))
+    assert my_id.encode("utf-8") not in raw_enc_a
+    read_a = devices.read_fleet_records(fleet_backend, PASSPHRASE, MEMORY_KB, own_device_id=dev_a)
+    assert read_a.own_syncthing_id == my_id
+    assert read_a.vouched == {my_id: (dev_a, "Mac A")}
+
+    # syncthing/ is recognized as a fleet directory by _classify_folder
+    syncthing_only = tmp_path / "syncthing-only"
+    (syncthing_only / "syncthing").mkdir(parents=True)
+    classified = initflow._classify_folder(syncthing_only)
+    assert classified.fleet == ("syncthing",)
+    assert not classified.accepts_new_fleet
+
+    # 2. Join on a second machine publishes its own encrypted syncthing/<id>.enc record
+    joiner_id = _valid_syncthing_id("D")
+    third_id = _valid_syncthing_id("E")
+    devices.register_device(fleet_backend, "peer-e", "Linux E")
+    devices.publish_record(fleet_backend, "peer-e", third_id, PASSPHRASE, MEMORY_KB)
+
+    config.CONFIG_PATH.unlink(missing_ok=True)
+    config.syncthing_record_path().unlink(missing_ok=True)
+    fake_syncthing.my_id = joiner_id
+    fake_syncthing.set_shape(
+        devices=[],
+        folders=[fake_syncthing.stock_folder(stock_root)],
+    )
+    fake_syncthing.responses[f"/rest/cluster/pending/folders?device={my_id}"] = {
+        "mind-meld": {
+            "offeredBy": {
+                my_id: {
+                    "time": "2026-11-19T00:00:00Z",
+                    "label": "Mind Meld",
+                    "receiveEncrypted": False,
+                    "remoteEncrypted": False,
+                }
+            }
+        }
+    }
+
+    res_join, text_join = _run(f"join\n{fleet_storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
+    assert res_join.exit_code == 0, text_join
+    cfg_b = config.load_config()
+    dev_b = cfg_b["device"]["id"]
+    dev_b_json = json.loads(fleet_backend.get(device_key(dev_b)).decode("utf-8"))
+    assert set(dev_b_json) == {"device_id", "device_name", "registered"}
+    assert joiner_id not in fleet_backend.get(device_key(dev_b)).decode("utf-8")
+
+    read_b = devices.read_fleet_records(fleet_backend, PASSPHRASE, MEMORY_KB, own_device_id=dev_b)
+    assert read_b.own_syncthing_id == joiner_id
+    assert read_b.vouched[joiner_id] == (dev_b, "Mac B")
+
+
+def test_init_publish_record_failure_prints_notice_and_still_exits_zero(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    from mind_meld import devices
+
+    _storage, _backend = env
+    stock_root, _my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    fleet_storage = stock_root / "mind-meld"
+
+    def fail_publish(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(initflow, "publish_record", fail_publish)
+    monkeypatch.setattr(devices, "publish_record", fail_publish)
+
+    res, text = _new_fleet(
+        f"{fleet_storage}\nMac A\n{PASSPHRASE}\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}"
+    )
+    assert res.exit_code == 0, text
+    assert (
+        "mm: notice: could not publish this machine's Syncthing ID (ENOSPC); "
+        "the next mm push retries it. Run: mm push"
+    ) in text
+    assert config.CONFIG_PATH.is_file()
