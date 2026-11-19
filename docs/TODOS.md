@@ -44,6 +44,66 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Preserve spaces in the chosen Syncthing name
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The name writer tests case differences and refuses all-whitespace input. It does not pin spaces around a nonblank name.
+- **Hypothesis (untested):** Assert the exact PATCH body for a padded name.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/syncthing.py:2059`
+- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
+- **Context:** Revisit when a Track changes the named path or its test.
+- **Effort:** ? (owner triages in /roadmap)
+
+### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Stop naming after a failed device-list read
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The own-name writer covers an empty device list and a failed PATCH. Its failed and malformed GET outcomes are covered through the shared reader.
+- **Hypothesis (untested):** Exercise the shared device-list error through the name writer and assert no PATCH.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/syncthing.py:2068`
+- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
+- **Context:** Revisit when a Track changes the named path or its test.
+- **Effort:** ? (owner triages in /roadmap)
+
+### [review:files=src/mind_meld/meshflow.py|tests/test_mesh.py] Test gap: Keep newer and vanished records out of the unpublished notice
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The encrypted reader tests classify both states. The notice test covers the unreadable, readable and absent cases.
+- **Hypothesis (untested):** Add newer and vanished peers to the mesh notice fixture and assert that both stay out of the sentence.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/meshflow.py:388`
+- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
+- **Context:** Revisit when a Track changes the named path or its test.
+- **Effort:** ? (owner triages in /roadmap)
+
+### [review:files=src/mind_meld/meshflow.py|tests/test_pullflow.py] Test gap: Keep a pending count when the optional registry is unavailable
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The no-record pull fixture has a readable registry. The optional registry failure path preserves the successful empty vouched set.
+- **Hypothesis (untested):** Fail only the supplemental inventory read and assert that the count-only notice survives.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/meshflow.py:380`
+- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
+- **Context:** Revisit when a Track changes the named path or its test.
+- **Effort:** ? (owner triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Stop new-fleet setup after a failed name write
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The named failure test verifies that a managed join stops before pairing. New-fleet uses the same helper before the folder writes.
+- **Hypothesis (untested):** Fail the initial name PATCH in the new-fleet command and assert that no folder was changed.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/initflow.py:278`
+- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
+- **Context:** Revisit when a Track changes the named path or its test.
+- **Effort:** ? (owner triages in /roadmap)
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Report the raw pull count when fleet records cannot be read
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The fallback integration fixture loses the mesh snapshot after successfully reading the encrypted records.
+- **Hypothesis (untested):** Fail the encrypted record scan while leaving the pending GET available. Assert the unfiltered count and no publisher names.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/cli.py:2964`
+- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
+- **Context:** Revisit when a Track changes the named path or its test.
+- **Effort:** ? (owner triages in /roadmap)
+
 ### [review:files=src/mind_meld/initflow.py|tests/test_integration.py] Test gap: A blank fleet choice starts a join
 - **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
 - **Description:** The existing blank-input test checks the storage path and exit code. It can pass with either fleet choice.
