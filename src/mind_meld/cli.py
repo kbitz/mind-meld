@@ -4814,7 +4814,8 @@ def autopush() -> None:
                 # in the breadcrumb. _push_core already printed the stderr warning;
                 # if `mm status` only sees "success" forever, monitoring never
                 # catches the wedge.
-                _write_autorun_breadcrumb("push", "no-sources")
+                _, detail = mesh_res.compose_breadcrumb(())
+                _write_autorun_breadcrumb("push", "no-sources", detail)
                 return
 
             # Persist events-tail degradation the same way autopull persists its

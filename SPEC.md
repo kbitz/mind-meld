@@ -100,7 +100,7 @@ claude-sync.com runs an API that brokers auth, generates presigned URLs, and sto
 │   ├── {device_id}.json                   # device metadata (unencrypted)
 │   └── ...
 ├── syncthing/
-│   ├── {device_id}.enc                    # encrypted Syncthing device-ID record (v=1 JSON, read by meshflow.py)
+│   ├── {device_id}.enc                    # encrypted Syncthing device-ID record (read by devices.read_fleet_records for meshflow)
 │   └── ...
 ├── manifests/
 │   ├── {device_id}/

@@ -285,11 +285,13 @@ _MAX_DETAILS = 8
 _MAX_DETAIL_CHARS = 384
 _MESH_DETAIL_RE = re.compile(
     r"Syncthing mesh step stopped \([a-z0-9_-]+\) after [0-9]+ of [1-9][0-9]* steps; "
-    r"nothing else changed; retries on the next push or pull|"
+    r"(?:nothing else changed|a write may have applied); retries on the next push or pull|"
     r"Syncthing mesh step stopped \([a-z0-9_-]+\)\. Run: mm diag|"
     r"Syncthing did not confirm (?:adding device|marking as introducer|sharing the fleet folder) "
     r"for [^/~]{1,128} \([A-Z2-7]{7}\); it may have applied; "
     r"the next push or pull reconciles(?: and finishes)? it|"
+    r"Syncthing mesh step did not finish for [^/~]{1,128} \([A-Z2-7]{7}\); "
+    r"the next push or pull reconciles it|"
     r"the Syncthing record of device [A-Za-z0-9._-]{1,64} is from a newer mm\. Run: mm update|"
     r"the Syncthing record of device [A-Za-z0-9._-]{1,64} is unreadable\. Run: mm diag|"
     r"could not publish this machine's Syncthing ID \([A-Za-z0-9._ -]{1,64}\); "

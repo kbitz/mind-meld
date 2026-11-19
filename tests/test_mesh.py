@@ -49,7 +49,6 @@ def _setup_fleet(
 ) -> tuple[Path, LocalBackend, str]:
     cfg_path = tmp_path / "cfg" / "config.toml"
     monkeypatch.setattr(config, "CONFIG_PATH", cfg_path)
-    monkeypatch.setattr(crypto, " MIN_ARGON2_MEMORY_KB", TEST_MEMORY_KB, raising=False)
     monkeypatch.setattr(crypto, "MIN_ARGON2_MEMORY_KB", TEST_MEMORY_KB, raising=False)
 
     my_id = _valid_syncthing_id("A")
@@ -160,6 +159,8 @@ def test_read_fleet_records_classifications_and_size_cap(tmp_path, monkeypatch):
 
     # 2. Unregistered (retired) device record -> skipped with zero degradation
     devices.publish_record(backend, "dev-retired", id_retired, PASSPHRASE, TEST_MEMORY_KB)
+    retired_bad = syncthing_record_key("dev-retired-bad")
+    backend.put(retired_bad, b"unreadable retired record")
 
     # 3. Tampered record (GCM tag failure)
     devices.publish_record(backend, "dev-tampered", id_valid, PASSPHRASE, TEST_MEMORY_KB)
@@ -228,10 +229,11 @@ def test_read_fleet_records_classifications_and_size_cap(tmp_path, monkeypatch):
         "dev-oversized",
         "dev-tampered",
     ]
-    assert records.skipped_unregistered == ["dev-retired"]
+    assert set(records.skipped_unregistered) == {"dev-retired", "dev-retired-bad"}
     assert records.vanished == ["dev-vanished"]
     # Oversized file was rejected by stat() before backend.get()
     assert syncthing_record_key("dev-oversized") not in get_calls
+    assert retired_bad not in get_calls
 
 
 def test_push_publishes_missing_and_stale_skips_equal_and_autopush_no_change_publishes(
@@ -284,6 +286,18 @@ def test_push_publishes_missing_and_stale_skips_equal_and_autopush_no_change_pub
         "device_name",
         "registered",
     }
+
+    # A new local certificate changes the identity even before peers publish.
+    make_syncthing_like_certificate(fake_syncthing.config_dir)
+    new_id = syncthing.local_device_id_offline()
+    assert new_id is not None and new_id != my_id
+    fake_syncthing.my_id = new_id
+    fake_syncthing.set_folder(storage_dir, peers=[])
+    refreshed = runner.invoke(app, ["push"])
+    assert refreshed.exit_code == 0, refreshed.output
+    records = devices.read_fleet_records(backend, PASSPHRASE, TEST_MEMORY_KB, own_device_id="dev-a")
+    assert records.own_syncthing_id == new_id
+    assert fake_syncthing.bodies == []
 
 
 def test_owner_managed_machine_sends_zero_writes_and_zero_requests_when_record_is_current(
@@ -347,6 +361,13 @@ def test_publish_check_skips_no_syncthing_and_records_unauthorized_or_write_fail
     crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["push"]
     assert crumb["outcome"] == "degraded"
     assert "Syncthing ID not published (unauthorized). Run: mm diag" in crumb["detail"]
+
+    # A malformed live identity is a bad response even when HTTP succeeded.
+    fake_syncthing.responses["/rest/system/status"] = {"myID": "invalid"}
+    res_bad = runner.invoke(app, ["push"])
+    assert res_bad.exit_code == 0, res_bad.output
+    assert "Syncthing ID not published (bad-response). Run: mm diag" in res_bad.output
+    assert not backend.exists(syncthing_record_key("dev-a"))
 
     # 3. Publish write failure on push -> notice + degraded detail, exit 0
     fake_syncthing.responses["/rest/system/status"] = {"myID": fake_syncthing.my_id}
@@ -417,6 +438,7 @@ def test_mesh_pass_steady_state_request_ceiling_and_unvouched_or_own_or_paused_s
     )
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {
         my_id: {"name": "self"},
+        vouched_paused: {"name": "stale pending entry"},
         unvouched_pending: {"name": "stranger"},
         tampered_pending: {"name": "tampered"},
         retired_pending: {"name": "retired"},
@@ -480,8 +502,81 @@ def test_mesh_pass_folder_binding_and_managed_id_mismatch_gates(
     assert [(r[0], r[1]) for r in fake_syncthing.requests] == [("GET", "/rest/system/status")]
 
 
+def test_mesh_rechecks_folder_path_when_sharing(fake_syncthing, tmp_path, monkeypatch):
+    _, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    peer = _valid_syncthing_id("B")
+    register_device(backend, "dev-b", "mac-b")
+    devices.publish_record(backend, "dev-b", peer, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {peer: {}}
+
+    def move_folder_after_add(method, path, body):
+        if method == "POST" and path == "/rest/config/devices":
+            fake_syncthing.responses["/rest/config/folders"][0]["path"] = str(
+                tmp_path / "another-folder"
+            )
+
+    fake_syncthing.on_write = move_folder_after_add
+    res = runner.invoke(app, ["pull"])
+    assert res.exit_code == 0, res.output
+    assert "Syncthing mesh step stopped (not-mm-folder). Run: mm diag" in res.output
+    assert [path for _, path, _ in fake_syncthing.bodies] == [
+        "/rest/config/devices",
+        f"/rest/config/devices/{peer}",
+    ]
+
+
+def test_publish_timeout_stops_before_mesh_snapshot(fake_syncthing, tmp_path, monkeypatch):
+    _, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch, publish_own=False)
+    peer = _valid_syncthing_id("B")
+    register_device(backend, "dev-b", "mac-b")
+    devices.publish_record(backend, "dev-b", peer, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {peer: {}}
+    requested = []
+
+    def timeout_get(address, path, **kwargs):
+        requested.append(path)
+        return "unreachable", None, "timeout"
+
+    monkeypatch.setattr(syncthing, "_get_json", timeout_get)
+    res = runner.invoke(app, ["autopush"])
+    assert res.exit_code == 0
+    assert res.output == ""
+    assert requested == ["/rest/system/status"]
+    crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["push"]
+    assert crumb["outcome"] == "degraded"
+    assert "Syncthing mesh step stopped (timeout)" in crumb["detail"]
+
+
+def test_no_sources_autopush_retains_mesh_result(fake_syncthing, tmp_path, monkeypatch):
+    _, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    cfg = config.load_config()
+    cfg["sync"]["sources"] = []
+    config.save_config(cfg)
+    peer = _valid_syncthing_id("B")
+    register_device(backend, "dev-b", "mac-b")
+    devices.publish_record(backend, "dev-b", peer, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {peer: {}}
+
+    res = runner.invoke(app, ["autopush"])
+    assert res.exit_code == 0
+    crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["push"]
+    assert crumb["outcome"] == "no-sources"
+    assert "Syncthing now shares the fleet folder with 1 fleet machine" in crumb["detail"]
+
+
+def test_breadcrumb_uses_only_remaining_space_for_complete_mesh_details():
+    detail = "Syncthing mesh step stopped (unauthorized). Run: mm diag"
+    result = meshflow.MeshResult(degradations=[detail])
+    for existing in ("x" * 300, "x" * 298):
+        assert result.compose_breadcrumb([existing]) == ("degraded", existing)
+    existing = "x" * 280
+    assert result.compose_breadcrumb([existing]) == ("degraded", f"{existing}; +1 more")
+    assert result.compose_breadcrumb(()) == ("degraded", detail)
+
+
+@pytest.mark.parametrize("lost_step", [0, 1, 2], ids=["add", "introducer", "share"])
 def test_mesh_pass_resume_lost_response_late_record_and_outage_convergence(
-    fake_syncthing, tmp_path, monkeypatch
+    fake_syncthing, tmp_path, monkeypatch, lost_step
 ):
     storage_dir, backend, my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
     peer_b = _valid_syncthing_id("B")
@@ -508,32 +603,45 @@ def test_mesh_pass_resume_lost_response_late_record_and_outage_convergence(
         "nothing else changed; retries on the next push or pull"
     ) in crumb_outage["detail"]
 
-    # 2. Syncthing recovers, but drops connection right after POST /rest/config/devices applies
+    # 2. One write applies, but its response is lost.
     fake_syncthing.start()
-    fake_syncthing.stop_after("POST", "/rest/config/devices")
-    res_partial = runner.invoke(app, ["autopull"])
-    assert res_partial.exit_code == 0
-    assert res_partial.output == ""
-    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [("POST", "/rest/config/devices")]
-    crumb_partial = json.loads(cli.core._autorun_breadcrumb_path().read_text())["pull"]
-    assert crumb_partial["outcome"] == "degraded"
-    assert (
-        f"Syncthing did not confirm marking as introducer for mac-b ({peer_b[:7]}); "
-        "it may have applied; the next push or pull reconciles and finishes it"
-    ) in crumb_partial["detail"]
-
-    # 3. Next run resumes the half-finished add (mark_introducer -> share_folder, no second add)
-    fake_syncthing.start()
-    fake_syncthing.bodies.clear()
-    res_healed = runner.invoke(app, ["pull"])
-    assert res_healed.exit_code == 0, res_healed.output
-    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+    real_send = syncthing._send_json
+    writes = [
+        ("POST", "/rest/config/devices"),
         ("PATCH", f"/rest/config/devices/{peer_b}"),
         ("PATCH", "/rest/config/folders/mind-meld"),
     ]
+    step_names = ("adding device", "marking as introducer", "sharing the fleet folder")
+
+    def lose_response(endpoint, method, path, body, **kwargs):
+        outcome, cause = real_send(endpoint, method, path, body, **kwargs)
+        if (method, path) == writes[lost_step]:
+            assert outcome == "ok"
+            return "unreachable", "timeout"
+        return outcome, cause
+
+    monkeypatch.setattr(syncthing, "_send_json", lose_response)
+    res_partial = runner.invoke(app, ["autopull"])
+    assert res_partial.exit_code == 0
+    assert res_partial.output == ""
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == writes[: lost_step + 1]
+    crumb_partial = json.loads(cli.core._autorun_breadcrumb_path().read_text())["pull"]
+    assert crumb_partial["outcome"] == "degraded"
     assert (
-        f"Pull: Syncthing now shares the fleet folder with 1 fleet machine: mac-b ({peer_b[:7]})."
-    ) in res_healed.output
+        f"Syncthing did not confirm {step_names[lost_step]} for mac-b ({peer_b[:7]}); "
+        "it may have applied; the next push or pull reconciles it"
+    ) in crumb_partial["detail"]
+    assert "a write may have applied" in crumb_partial["detail"]
+
+    # 3. The next run does only the steps still needed.
+    fake_syncthing.bodies.clear()
+    res_healed = runner.invoke(app, ["pull"])
+    assert res_healed.exit_code == 0, res_healed.output
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == writes[lost_step + 1 :]
+    folder = fake_syncthing.responses["/rest/config/folders"][0]
+    assert peer_b in {device["deviceID"] for device in folder["devices"]}
+    shared = "Pull: Syncthing now shares the fleet folder with 1 fleet machine"
+    assert (shared in res_healed.output) == (lost_step < len(writes) - 1)
     assert "hostile-" not in res_healed.output
 
 
@@ -560,8 +668,6 @@ def test_mesh_pass_deadline_stops_and_repeated_slow_passes_converge(
     def fake_monotonic() -> float:
         return clock[0]
 
-    orig_on_write = fake_syncthing.on_write
-
     def advance_on_request():
         clock[0] += 0.18
 
@@ -579,8 +685,6 @@ def test_mesh_pass_deadline_stops_and_repeated_slow_passes_converge(
     monkeypatch.setattr(syncthing.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(syncthing, "_get_json", slow_get_json)
     monkeypatch.setattr(syncthing, "_send_json", slow_send_json)
-    fake_syncthing.on_write = orig_on_write
-
     cfg = config.load_config()
     pass1 = meshflow.run(
         cfg, PASSPHRASE, TEST_MEMORY_KB, verb="pull", attended=False, backend=backend

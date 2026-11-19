@@ -2484,16 +2484,20 @@ def test_new_fleet_and_join_publish_encrypted_syncthing_record_and_keep_devices_
     assert read_b.vouched[joiner_id] == (dev_b, "Mac B")
 
 
+@pytest.mark.parametrize("cause", ["ENOSPC", "CryptoError"])
 def test_init_publish_record_failure_prints_notice_and_still_exits_zero(
-    env, fake_syncthing, tmp_path, monkeypatch
+    env, fake_syncthing, tmp_path, monkeypatch, cause
 ):
     from mind_meld import devices
+    from mind_meld.errors import CryptoError
 
     _storage, _backend = env
     stock_root, _my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
     fleet_storage = stock_root / "mind-meld"
 
     def fail_publish(*args, **kwargs):
+        if cause == "CryptoError":
+            raise CryptoError("synthetic publication error")
         raise OSError(errno.ENOSPC, "No space left on device")
 
     monkeypatch.setattr(initflow, "publish_record", fail_publish)
@@ -2504,7 +2508,7 @@ def test_init_publish_record_failure_prints_notice_and_still_exits_zero(
     )
     assert res.exit_code == 0, text
     assert (
-        "mm: notice: could not publish this machine's Syncthing ID (ENOSPC); "
+        f"mm: notice: could not publish this machine's Syncthing ID ({cause}); "
         "the next mm push retries it. Run: mm push"
     ) in text
     assert config.CONFIG_PATH.is_file()

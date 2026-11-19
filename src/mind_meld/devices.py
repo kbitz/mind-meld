@@ -405,16 +405,23 @@ def read_fleet_records(
     registry device name.
     """
     records = FleetSyncthingRecords()
+    keys = backend.list_keys(SYNCTHING_PREFIX)
+    if not keys:
+        return records
     inventory = inventory_devices(backend)
     registered: dict[str, dict[str, Any]] = {d["device_id"]: d for d in inventory.valid}
     best_rank: dict[str, tuple[str, str, str]] = {}
 
-    for key in backend.list_keys(SYNCTHING_PREFIX):
+    for key in keys:
         leaf = key.rsplit("/", 1)[-1]
         if is_conflict_name(leaf):
             continue
         key_id = parse_syncthing_record_key(key)
         if key_id is None:
+            continue
+        reg_entry = registered.get(key_id)
+        if reg_entry is None:
+            records.skipped_unregistered.append(key_id)
             continue
         path = backend.root / key
         try:
@@ -467,10 +474,6 @@ def read_fleet_records(
             continue
         if own_device_id is not None and key_id == own_device_id:
             records.own_syncthing_id = st_id
-        reg_entry = registered.get(key_id)
-        if reg_entry is None:
-            records.skipped_unregistered.append(key_id)
-            continue
         records.by_mm_id[key_id] = st_id
         dev_name = reg_entry.get("device_name") or key_id
         rank = (

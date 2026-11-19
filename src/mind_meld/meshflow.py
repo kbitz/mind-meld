@@ -16,13 +16,12 @@ from mind_meld import config as _config_module
 from mind_meld.errors import ConfigError, StorageError, os_error_cause
 from mind_meld.storage.local import LocalBackend
 
-ATTENDED_REQ_TIMEOUT_S = 2.0
-ATTENDED_REQUEST_TIMEOUT_S = ATTENDED_REQ_TIMEOUT_S
+ATTENDED_REQUEST_TIMEOUT_S = 2.0
 ATTENDED_PASS_BUDGET_S = 10.0
-HOOK_REQ_TIMEOUT_S = 0.5
-HOOK_REQUEST_TIMEOUT_S = HOOK_REQ_TIMEOUT_S
+HOOK_REQUEST_TIMEOUT_S = 0.5
 HOOK_PASS_BUDGET_S = 2.0
 BREADCRUMB_BUDGET_CHARS = 300
+_MAX_PEER_NAME_CHARS = 128
 
 
 _PATH_CHAR_TRANS = str.maketrans({"/": "_", "~": "_"})
@@ -37,7 +36,7 @@ def _safe_detail_token(raw: object) -> str:
 def _safe_peer_name(raw_name: object, fallback_id: str) -> str:
     """Sanitize a registry device name for path-free outcome and degradation lines."""
     text = safety.safe_terminal_str(str(raw_name or "")).translate(_PATH_CHAR_TRANS).strip()
-    return text or _safe_detail_token(fallback_id)
+    return (text or _safe_detail_token(fallback_id))[:_MAX_PEER_NAME_CHARS]
 
 
 def format_share_summary(
@@ -63,7 +62,8 @@ def format_share_summary(
     short = f"{lead} (+{len(entries)} more)"
     if len(short) <= budget:
         return short
-    return lead[:budget]
+    counts = f"{len(entries)} Syncthing share" + ("s" if len(entries) != 1 else "")
+    return counts if len(counts) <= budget else ""
 
 
 def compose_hook_breadcrumb(
@@ -76,76 +76,29 @@ def compose_hook_breadcrumb(
     """Compose a hook breadcrumb ``(outcome, detail)`` within ``budget`` characters.
 
     Existing non-mesh sync/capture degradations are preserved intact; mesh
-    degradations come before the mesh share summary within the 300-character
+    degradations come before the mesh share summary within the remaining
     budget with ``+N more``; any degradation makes the outcome ``degraded``.
     """
-    existing_clean = [safety.safe_terminal_str(d) for d in existing_degradations if d]
-    mesh_degs = [safety.safe_terminal_str(d) for d in mesh_result.degradations if d]
-    if not mesh_degs and not mesh_result.shared:
-        if existing_clean:
-            return ("degraded", "; ".join(existing_clean))
-        success_clean = [safety.safe_terminal_str(p) for p in extra_success if p]
-        return ("success", "; ".join(success_clean))
-
-    has_degradation = bool(existing_clean or mesh_degs)
-    if has_degradation:
-        existing_prefix = "; ".join(existing_clean)
-        used = (len(existing_prefix) + 2) if existing_prefix else 0
-        mesh_budget = max(0, budget - used) if existing_prefix else budget
-        share_text = format_share_summary(mesh_result.shared)
-        if not share_text:
-            mesh_part = _join_within_budget(mesh_degs, mesh_budget or budget)
-            if existing_prefix and mesh_part:
-                return ("degraded", f"{existing_prefix}; {mesh_part}")
-            return ("degraded", existing_prefix or mesh_part)
-
-        if not mesh_degs:
-            min_lead = len("Syncthing now shares the fleet folder with 1 fleet machine")
-            bounded_share = format_share_summary(
-                mesh_result.shared,
-                budget=mesh_budget or min_lead,
-            )
-            if existing_prefix and bounded_share:
-                return ("degraded", f"{existing_prefix}; {bounded_share}")
-            return ("degraded", existing_prefix or bounded_share)
-
-        eff_budget = mesh_budget or budget
-        deg_text = _join_within_budget(mesh_degs, eff_budget)
-        remaining = eff_budget - len(deg_text) - 2
-        if remaining >= len("Syncthing now shares the fleet folder with 1 fleet machine"):
-            bounded_share = format_share_summary(mesh_result.shared, budget=remaining)
-            if bounded_share and len(deg_text) + 2 + len(bounded_share) <= eff_budget:
-                combined = f"{deg_text}; {bounded_share}"
-                return (
-                    "degraded",
-                    f"{existing_prefix}; {combined}" if existing_prefix else combined,
-                )
-        min_share = format_share_summary(mesh_result.shared, budget=min(120, eff_budget // 2))
-        deg_budget = max(0, eff_budget - len(min_share) - 2)
-        deg_trimmed = _join_within_budget(mesh_degs, deg_budget)
-        if deg_trimmed and min_share and len(deg_trimmed) + 2 + len(min_share) <= eff_budget:
-            combined = f"{deg_trimmed}; {min_share}"
-            return (
-                "degraded",
-                f"{existing_prefix}; {combined}" if existing_prefix else combined,
-            )
-        return ("degraded", f"{existing_prefix}; {deg_text}" if existing_prefix else deg_text)
-
-    success_parts = [safety.safe_terminal_str(p) for p in extra_success if p]
-    if mesh_result.shared:
-        used = len("; ".join(success_parts)) + (2 if success_parts else 0)
-        rem = max(0, budget - used)
-        share_budget = rem if success_parts else budget
-        share_part = format_share_summary(mesh_result.shared, budget=share_budget)
-        if share_part:
-            success_parts.append(share_part)
-    return ("success", _join_within_budget(success_parts, budget))
+    degraded = any(existing_degradations) or bool(mesh_result.degradations)
+    parts = [
+        safety.safe_terminal_str(d)
+        for d in (existing_degradations if degraded else extra_success)
+        if d
+    ]
+    remaining = budget - sum(len(part) + 2 for part in parts)
+    mesh_detail = _join_within_budget(mesh_result.degradations, remaining)
+    if mesh_detail:
+        parts.append(mesh_detail)
+        remaining -= len(mesh_detail) + 2
+    if share_summary := format_share_summary(mesh_result.shared, budget=remaining):
+        parts.append(share_summary)
+    return ("degraded" if degraded else "success", "; ".join(parts))
 
 
 def _join_within_budget(items: Sequence[str], budget: int) -> str:
     """Join ``items`` with ``'; '`` within ``budget`` characters, using ``+N more``."""
     cleaned = [safety.safe_terminal_str(x) for x in items if x]
-    if not cleaned:
+    if not cleaned or budget <= 0:
         return ""
     full = "; ".join(cleaned)
     if len(full) <= budget:
@@ -157,10 +110,10 @@ def _join_within_budget(items: Sequence[str], budget: int) -> str:
         candidate = f"{head}{tail}"
         if len(candidate) <= budget:
             return candidate
-    more = len(cleaned) - 1
-    tail = f" (+{more} more)" if more else ""
-    avail = max(1, budget - len(tail))
-    return cleaned[0][:avail] + tail
+    omitted = f"+{len(cleaned)} more"
+    if len(cleaned[0]) <= budget:
+        return cleaned[0]
+    return omitted if len(omitted) <= budget else ""
 
 
 @dataclass
@@ -226,28 +179,33 @@ def _publish_via_classify(
     deadline: float,
     attended: bool,
 ) -> str | None:
-    """Query ``classify_config`` for live REST ``myID`` and publish if missing or changed."""
+    """Publish live REST ``myID`` if needed, returning a transport stop cause."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        return own_syncthing_id
+        return "timeout"
     check = syncthing.classify_config(
         sanitize=safety.safe_terminal_str,
         timeout=min(req_timeout, remaining),
         budget=remaining,
+        deadline=deadline,
     )
-    if check.reach == "ok" and check.source == "rest" and check.local_device_id:
-        live_id = check.local_device_id
+    live_id = check.local_device_id
+    live_response = check.reach == "ok" and check.source == "rest"
+    if (
+        live_response
+        and live_id is not None
+        and syncthing.is_device_id(live_id)
+        and syncthing.has_valid_device_id_check_digits(live_id)
+    ):
         if live_id != own_syncthing_id:
             try:
-                if devices.publish_record(
+                result.published = devices.publish_record(
                     backend,
                     own_mm_id,
                     live_id,
                     passphrase,
                     memory_kb,
-                ):
-                    result.published = True
-                    return live_id
+                )
             except (OSError, StorageError) as exc:
                 cause = _safe_detail_token(attemptlog.storage_errno(exc) or os_error_cause(exc))
                 _record_degradation(
@@ -257,21 +215,43 @@ def _publish_via_classify(
                     attended=attended,
                     notice=True,
                 )
-        return own_syncthing_id
-    if own_syncthing_id is None and (
-        check.reach in ("unauthorized", "config-unreadable")
-        or (check.reach == "error" and check.cause == "bad-response")
-    ):
-        token = (
-            check.reach if check.reach in ("unauthorized", "config-unreadable") else "bad-response"
-        )
+        return None
+    if check.reach == "unreachable":
+        return "timeout" if check.cause == "timeout" else "unreachable"
+    token = None
+    if check.reach in ("unauthorized", "config-unreadable"):
+        token = check.reach
+    elif live_response or (check.reach == "error" and check.cause == "bad-response"):
+        token = "bad-response"
+    if own_syncthing_id is None and token is not None:
         _record_degradation(
             result,
             f"Syncthing ID not published ({token}). Run: mm diag",
             attended=attended,
             notice=True,
         )
-    return own_syncthing_id
+    return None
+
+
+def _stop_pass(
+    result: MeshResult,
+    cause: str,
+    completed: int,
+    total: int,
+    *,
+    attended: bool,
+    write_uncertain: bool = False,
+) -> None:
+    result.stop_cause = cause
+    result.stops.append(cause)
+    effect = "a write may have applied" if write_uncertain else "nothing else changed"
+    _record_degradation(
+        result,
+        f"Syncthing mesh step stopped ({cause}) after {completed} of {total} steps; "
+        f"{effect}; retries on the next push or pull",
+        attended=attended,
+        notice=False,
+    )
 
 
 def run(
@@ -329,7 +309,7 @@ def _run_inner(
     attended: bool,
     backend: LocalBackend | None,
 ) -> MeshResult:
-    req_timeout = ATTENDED_REQ_TIMEOUT_S if attended else HOOK_REQ_TIMEOUT_S
+    req_timeout = ATTENDED_REQUEST_TIMEOUT_S if attended else HOOK_REQUEST_TIMEOUT_S
     pass_budget = ATTENDED_PASS_BUDGET_S if attended else HOOK_PASS_BUDGET_S
     deadline = time.monotonic() + pass_budget
 
@@ -393,19 +373,16 @@ def _run_inner(
         )
 
     need_classify = False
+    publish_stop = None
     if verb == "push":
-        local_expected_id = (
-            recorded_id
-            if isinstance(recorded_id, str) and recorded_id
-            else syncthing.local_device_id_offline()
-        )
+        local_expected_id = syncthing.local_device_id_offline() or recorded_id
         need_classify = (
             records.own_syncthing_id is None
             or local_expected_id is None
             or records.own_syncthing_id != local_expected_id
         )
         if need_classify:
-            records.own_syncthing_id = _publish_via_classify(
+            publish_stop = _publish_via_classify(
                 result,
                 backend=backend,
                 own_mm_id=own_mm_id,
@@ -430,15 +407,13 @@ def _run_inner(
 
     result.ran = True
     remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        result.stop_cause = "timeout"
-        result.stops.append("timeout")
-        _record_degradation(
+    if publish_stop or remaining <= 0:
+        _stop_pass(
             result,
-            f"Syncthing mesh step stopped (timeout) after 0 of {len(other_vouched)} steps; "
-            "nothing else changed; retries on the next push or pull",
+            publish_stop or "timeout",
+            0,
+            len(other_vouched),
             attended=attended,
-            notice=False,
         )
         return result
 
@@ -454,7 +429,7 @@ def _run_inner(
         if snap.outcome == "refused" and snap.cause == "not-managed":
             result.stop_cause = "not-managed"
             if verb == "push" and not need_classify:
-                records.own_syncthing_id = _publish_via_classify(
+                _publish_via_classify(
                     result,
                     backend=backend,
                     own_mm_id=own_mm_id,
@@ -468,15 +443,7 @@ def _run_inner(
             return result
         if snap.outcome in ("unreachable", "not-found"):
             token = "timeout" if snap.cause == "timeout" else "unreachable"
-            result.stop_cause = token
-            result.stops.append(token)
-            _record_degradation(
-                result,
-                f"Syncthing mesh step stopped ({token}) after 0 of {len(other_vouched)} steps; "
-                "nothing else changed; retries on the next push or pull",
-                attended=attended,
-                notice=False,
-            )
+            _stop_pass(result, token, 0, len(other_vouched), attended=attended)
             return result
         token = (
             snap.outcome
@@ -520,9 +487,8 @@ def _run_inner(
         return result
 
     candidates: list[tuple[str, list[tuple[str, str]]]] = []
-    pending_set = set(snap.pending_ids)
     for dev_id in snap.pending_ids:
-        if dev_id in other_vouched and dev_id != snap.my_id:
+        if dev_id in other_vouched and dev_id != snap.my_id and dev_id not in snap.devices:
             candidates.append(
                 (
                     dev_id,
@@ -534,7 +500,7 @@ def _run_inner(
                 )
             )
     for dev_id in sorted(other_vouched):
-        if dev_id in pending_set or dev_id == snap.my_id or dev_id in snap.folder_device_ids:
+        if dev_id == snap.my_id or dev_id in snap.folder_device_ids:
             continue
         cdev = snap.devices.get(dev_id)
         if cdev is None or not cdev.writer_shape or cdev.paused:
@@ -563,20 +529,12 @@ def _run_inner(
                     result.partial.append((safe_name, dev_id, step_label))
                     _record_degradation(
                         result,
-                        f"Syncthing did not confirm {step_label} for {peer_label}; "
-                        "it may have applied; the next push or pull reconciles and finishes it",
+                        f"Syncthing mesh step did not finish for {peer_label}; "
+                        "the next push or pull reconciles it",
                         attended=attended,
                         notice=False,
                     )
-                result.stop_cause = "timeout"
-                result.stops.append("timeout")
-                _record_degradation(
-                    result,
-                    f"Syncthing mesh step stopped (timeout) after {completed_steps} of "
-                    f"{total_steps} steps; nothing else changed; retries on the next push or pull",
-                    attended=attended,
-                    notice=False,
-                )
+                _stop_pass(result, "timeout", completed_steps, total_steps, attended=attended)
                 return result
 
             step_writer = syncthing.SyncthingWriter(
@@ -588,52 +546,53 @@ def _run_inner(
             if op_name == "add_device":
                 w_res = step_writer.add_device(dev_id, name="")
             elif op_name == "mark_introducer":
-                w_res = step_writer.mark_introducer(dev_id)
+                w_res = step_writer.mark_introducer(dev_id, require_writer_shape=True)
             else:
-                w_res = step_writer.share_folder(_config_module.SYNCTHING_FOLDER_ID, dev_id)
+                w_res = step_writer.share_folder(
+                    _config_module.SYNCTHING_FOLDER_ID, dev_id, expected_path=storage_root
+                )
 
             if w_res.outcome in ("ok", "unchanged"):
                 completed_steps += 1
                 device_started = True
-                if op_name == "share_folder":
+                if op_name == "share_folder" and w_res.outcome == "ok":
                     result.shared.append((safe_name, dev_id))
                 continue
+            if w_res.outcome == "refused" and w_res.cause == "device-changed":
+                # The owner changed or paused this device after the snapshot.
+                break
+
+            if w_res.write_attempted or device_started:
+                result.partial.append((safe_name, dev_id, step_label))
+                if w_res.write_attempted:
+                    detail = (
+                        f"Syncthing did not confirm {step_label} for {peer_label}; "
+                        "it may have applied; the next push or pull reconciles it"
+                    )
+                else:
+                    detail = (
+                        f"Syncthing mesh step did not finish for {peer_label}; "
+                        "the next push or pull reconciles it"
+                    )
+                _record_degradation(result, detail, attended=attended, notice=False)
 
             if w_res.outcome in ("unreachable", "not-found"):
                 token = "timeout" if w_res.cause == "timeout" else "unreachable"
-                if device_started:
-                    result.partial.append((safe_name, dev_id, step_label))
-                    _record_degradation(
-                        result,
-                        f"Syncthing did not confirm {step_label} for {peer_label}; "
-                        "it may have applied; the next push or pull reconciles and finishes it",
-                        attended=attended,
-                        notice=False,
-                    )
-                result.stop_cause = token
-                result.stops.append(token)
-                _record_degradation(
+                _stop_pass(
                     result,
-                    f"Syncthing mesh step stopped ({token}) after {completed_steps} of "
-                    f"{total_steps} steps; nothing else changed; retries on the next push or pull",
+                    token,
+                    completed_steps,
+                    total_steps,
                     attended=attended,
-                    notice=False,
+                    write_uncertain=w_res.write_attempted,
                 )
                 return result
 
-            if w_res.outcome in ("unauthorized", "config-unreadable", "address-unsupported"):
-                token = w_res.outcome
-                if device_started:
-                    result.partial.append((safe_name, dev_id, step_label))
-                    _record_degradation(
-                        result,
-                        f"Syncthing did not confirm {step_label} for {peer_label}; "
-                        "it may have applied; the next push or pull reconciles and finishes it",
-                        attended=attended,
-                        notice=False,
-                    )
-                result.stop_cause = token
-                result.stops.append(token)
+            env_stop = w_res.outcome in ("unauthorized", "config-unreadable", "address-unsupported")
+            token = w_res.outcome if env_stop else _safe_detail_token(w_res.cause or w_res.outcome)
+            result.stop_cause = token
+            result.stops.append(token)
+            if env_stop or not w_res.write_attempted:
                 _record_degradation(
                     result,
                     f"Syncthing mesh step stopped ({token}). Run: mm diag",
@@ -642,16 +601,6 @@ def _run_inner(
                 )
                 return result
 
-            result.partial.append((safe_name, dev_id, step_label))
-            result.stop_cause = _safe_detail_token(w_res.cause or w_res.outcome)
-            result.stops.append(result.stop_cause)
-            _record_degradation(
-                result,
-                f"Syncthing did not confirm {step_label} for {peer_label}; "
-                "it may have applied; the next push or pull reconciles and finishes it",
-                attended=attended,
-                notice=False,
-            )
             return result
 
     return result

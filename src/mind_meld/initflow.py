@@ -1375,8 +1375,8 @@ def _publish_syncthing_record_best_effort(
         return
     try:
         publish_record(backend, device_id, local_syncthing_id, passphrase, memory_kb)
-    except (OSError, StorageError) as e:
-        cause = attemptlog.storage_errno(e) or os_error_cause(e)
+    except (MindMeldError, OSError, ValueError) as e:
+        cause = attemptlog.storage_errno(e) or type(e).__name__
         core._notice(
             f"could not publish this machine's Syncthing ID ({cause}); "
             "the next mm push retries it.",

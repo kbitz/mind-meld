@@ -1075,17 +1075,9 @@ def _device_id_from_cert(config_dir: Path) -> str | None:
 
 
 def local_device_id_offline() -> str | None:
-    """Derive this machine's Syncthing device ID from public ``cert.pem`` offline."""
+    """Derive the selected Syncthing configuration's ID from its public certificate."""
     _, cfg_dir, _, _, _, _ = _load_config()
-    candidates: list[Path] = [cfg_dir] if cfg_dir is not None else []
-    for cand_dir in config_dirs():
-        if cand_dir not in candidates:
-            candidates.append(cand_dir)
-    for cand_dir in candidates:
-        dev_id = _device_id_from_cert(cand_dir)
-        if dev_id is not None and is_device_id(dev_id):
-            return dev_id
-    return None
+    return _device_id_from_cert(cfg_dir) if cfg_dir is not None else None
 
 
 def _identity_files_present() -> bool:
@@ -1105,10 +1097,13 @@ def classify_config(
     sanitize: Callable[[str], str],
     timeout: float = 2.0,
     budget: float = 5.0,
+    deadline: float | None = None,
 ) -> ConfigCheck:
     """Classify local Syncthing configuration over REST or offline ``config.xml``."""
     try:
-        return _classify_config_inner(sanitize=sanitize, timeout=timeout, budget=budget)
+        return _classify_config_inner(
+            sanitize=sanitize, timeout=timeout, budget=budget, deadline=deadline
+        )
     except Exception:
         return ConfigCheck(state="unknown", source=None, reach="error", cause="bad-response")
 
@@ -1118,7 +1113,10 @@ def _classify_config_inner(
     sanitize: Callable[[str], str],
     timeout: float,
     budget: float,
+    deadline: float | None,
 ) -> ConfigCheck:
+    operation_deadline = time.monotonic() + max(0.0, float(budget))
+    deadline = operation_deadline if deadline is None else min(operation_deadline, deadline)
     endpoint, reach, cause, cfg_dir, root = _open_endpoint()
     if reach == "not-found":
         if _identity_files_present():
@@ -1138,7 +1136,6 @@ def _classify_config_inner(
         )
 
     if endpoint is not None:
-        deadline = time.monotonic() + max(0.0, float(budget))
         per_req_timeout = max(0.01, float(timeout))
 
         out1, sys_status, cause1 = _get_json(
@@ -1249,11 +1246,14 @@ def _classify_config_inner(
                     )
 
     # Offline fallback when REST is unreachable or GUI address is unsupported
-    if root is None:
-        return ConfigCheck(state="unknown", source=None, reach=reach, cause="bad-config")
-    shapes = _config_shapes(root)
+    shapes = _config_shapes(root) if root is not None else None
     if shapes is None:
-        return ConfigCheck(state="unknown", source=None, reach=reach, cause="bad-config")
+        return ConfigCheck(
+            state="unknown",
+            source=None,
+            reach=reach,
+            cause="timeout" if cause == "timeout" else "bad-config",
+        )
     devices, folders = shapes
     if len(devices) == 1:
         offline_local_id: str | None = devices[0]["deviceID"]
@@ -1369,6 +1369,8 @@ class WriteResult:
 
     outcome: str
     cause: str | None = None
+    # A failed send can leave a mutation applied despite the missing response.
+    write_attempted: bool = field(default=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -1429,6 +1431,15 @@ class MeshSnapshot:
     folder_device_ids: frozenset[str] = frozenset()
 
 
+def _has_writer_shape(device: dict[str, Any]) -> bool:
+    return (
+        device.get("addresses") == ["dynamic"]
+        and device.get("autoAcceptFolders") is False
+        and device.get("paused") is False
+        and device.get("introducedBy") in (None, "")
+    )
+
+
 def _writer_path(path: str | Path) -> Path | None:
     """Resolve a writer path without exposing filesystem errors to its caller."""
     try:
@@ -1482,11 +1493,10 @@ class SyncthingWriter:
     def _begin(
         self,
     ) -> tuple[_Endpoint | None, str | None, float, float, WriteResult | None]:
-        deadline = (
-            self._deadline
-            if self._deadline is not None
-            else time.monotonic() + max(0.0, float(self._budget))
-        )
+        now = time.monotonic()
+        deadline = now + max(0.0, float(self._budget))
+        if self._deadline is not None:
+            deadline = min(self._deadline, deadline)
         per_req_timeout = max(0.01, float(self._timeout))
         if not isinstance(self._record, ManagedRecord) or not is_device_id(self._record.device_id):
             return (
@@ -1496,7 +1506,7 @@ class SyncthingWriter:
                 deadline,
                 WriteResult("refused", "not-managed"),
             )
-        if deadline - time.monotonic() <= 0:
+        if deadline <= now:
             return (
                 None,
                 None,
@@ -1770,9 +1780,11 @@ class SyncthingWriter:
             timeout=per_req_timeout,
             deadline=deadline,
         )
-        return WriteResult(w_out, w_cause)
+        return WriteResult(w_out, w_cause, write_attempted=True)
 
-    def share_folder(self, folder_id: str, device_id: str) -> WriteResult:
+    def share_folder(
+        self, folder_id: str, device_id: str, *, expected_path: Path | None = None
+    ) -> WriteResult:
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()
         if err is not None or endpoint is None or my_id is None:
             return err or WriteResult("refused", "not-managed")
@@ -1794,14 +1806,26 @@ class SyncthingWriter:
         _, opt_problems = _extract_options(target_folder)
         if opt_problems:
             return WriteResult("refused", "not-mm-folder")
+        if expected_path is not None:
+            raw_path = target_folder.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                return WriteResult("error", "bad-response")
+            folder_path = _writer_path(raw_path.strip())
+            if folder_path is None:
+                return WriteResult("error", "path-unreadable")
+            if folder_path != expected_path:
+                return WriteResult("refused", "not-mm-folder")
 
         devices, dev_err = self._get_list(
             endpoint, "/rest/config/devices", timeout=per_req_timeout, deadline=deadline
         )
         if dev_err is not None or devices is None:
             return dev_err or WriteResult("error", "bad-response")
-        if not any(d.get("deviceID") == device_id for d in devices):
+        target_device = next((d for d in devices if d.get("deviceID") == device_id), None)
+        if target_device is None:
             return WriteResult("refused", "device-not-configured")
+        if expected_path is not None and not _has_writer_shape(target_device):
+            return WriteResult("refused", "device-changed")
 
         device_ids = _folder_device_ids(target_folder)
         if device_ids is None:
@@ -1822,7 +1846,7 @@ class SyncthingWriter:
             timeout=per_req_timeout,
             deadline=deadline,
         )
-        return WriteResult(w_out, w_cause)
+        return WriteResult(w_out, w_cause, write_attempted=True)
 
     def pending_devices(self) -> PendingDevices:
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()
@@ -1906,13 +1930,7 @@ class SyncthingWriter:
         else:
             configured = True
             introducer = target_dev.get("introducer") is True
-            introduced_by = target_dev.get("introducedBy")
-            writer_shape = (
-                target_dev.get("addresses") == ["dynamic"]
-                and target_dev.get("autoAcceptFolders") is False
-                and target_dev.get("paused") is False
-                and (introduced_by is None or introduced_by == "")
-            )
+            writer_shape = _has_writer_shape(target_dev)
         return ApprovalState(
             outcome="ok",
             cause=None,
@@ -1981,15 +1999,9 @@ class SyncthingWriter:
             else:
                 introduced_by = "<non-empty>"
             paused = entry.get("paused") is True
-            writer_shape = (
-                entry.get("addresses") == ["dynamic"]
-                and entry.get("autoAcceptFolders") is False
-                and entry.get("paused") is False
-                and (raw_intro_by is None or raw_intro_by == "")
-            )
             configured[dev_id] = ConfiguredDevice(
                 device_id=dev_id,
-                writer_shape=writer_shape,
+                writer_shape=_has_writer_shape(entry),
                 introducer=introducer,
                 introduced_by=introduced_by,
                 paused=paused,
@@ -2028,7 +2040,7 @@ class SyncthingWriter:
             folder_device_ids=folder_device_ids,
         )
 
-    def mark_introducer(self, device_id: str) -> WriteResult:
+    def mark_introducer(self, device_id: str, *, require_writer_shape: bool = False) -> WriteResult:
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()
         if err is not None or endpoint is None or my_id is None:
             return err or WriteResult("refused", "not-managed")
@@ -2045,6 +2057,8 @@ class SyncthingWriter:
         target_dev = next((d for d in devices if d.get("deviceID") == device_id), None)
         if target_dev is None:
             return WriteResult("refused", "device-not-configured")
+        if require_writer_shape and not _has_writer_shape(target_dev):
+            return WriteResult("refused", "device-changed")
         if target_dev.get("introducer") is True:
             return WriteResult("unchanged", None)
 
@@ -2056,7 +2070,7 @@ class SyncthingWriter:
             timeout=per_req_timeout,
             deadline=deadline,
         )
-        return WriteResult(w_out, w_cause)
+        return WriteResult(w_out, w_cause, write_attempted=True)
 
     def remove_default_folder(self) -> WriteResult:
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()

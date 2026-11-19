@@ -1076,7 +1076,7 @@ def test_writer_absolute_deadline_honored_across_calls(fake_syncthing, isolated_
 
 
 def test_local_device_id_offline_reads_cert_and_handles_missing_or_bad_cert(
-    fake_syncthing, isolated_home
+    fake_syncthing, isolated_home, monkeypatch
 ):
     from tests.syncthing_folder import make_syncthing_like_certificate
 
@@ -1092,4 +1092,10 @@ def test_local_device_id_offline_reads_cert_and_handles_missing_or_bad_cert(
     assert derived == syncthing._device_id_from_cert(fake_syncthing.config_dir)
 
     cert_file.write_text("not a cert", encoding="utf-8")
+    old_config_dir = isolated_home / "old-syncthing"
+    old_config_dir.mkdir()
+    make_syncthing_like_certificate(old_config_dir)
+    monkeypatch.setattr(
+        syncthing, "config_dirs", lambda: [fake_syncthing.config_dir, old_config_dir]
+    )
     assert syncthing.local_device_id_offline() is None
