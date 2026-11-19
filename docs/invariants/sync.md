@@ -858,6 +858,14 @@ Adding own-device GC to autopush or a status nudge is deferred work.
 
 **`autopush` writes a `no-sources` breadcrumb (v0.8.1)** when `get_sources(config)` returns empty, distinguishing "broken config no-op" from "nothing to push" no-op. Without this, `mm status` only sees `outcome: "success"` forever and monitoring on top of it never catches the wedge.
 
+**Syncthing mesh evidence (Track 152A).** Hooks retain existing sync details
+and use the remaining space in a 300-character budget for mesh degradations
+followed by the share summary. A mesh degradation makes the breadcrumb
+`degraded`. An `autopush` with no sources keeps `no-sources` and includes the
+mesh detail. Attended runs pass mesh degradations through `attemptlog.run_details`
+for path-free run records. Share summaries use sanitized registry names and
+seven-character Syncthing ID prefixes.
+
 **Keyring skips (Track 73A).** `_auto_command_setup` catches `KeyringUnavailableError` before `CryptoError`: one `mm: <verb> skipped - <remedy>` stderr line in every mode (same shape as `no-passphrase`), exit 0, no `auto<verb>.log` entry, and a `keyring-locked` breadcrumb (detail `locked` or `denied`) or `keyring-no-collection` (no detail). `mm status` prints a post-hoc hint after the `Last auto-<verb>` line for both outcomes, with or without a detail. The reader contract — why the keyring cannot answer, the chainer walk, env fallback and residuals — lives in [init-devices.md "Non-interactive keyring reads (Track 73A)"](init-devices.md#non-interactive-keyring-reads-track-73a). The pre-existing `keyring-error` arm (unexpected exception kinds) and `no-passphrase` outcome name are unchanged; the no-passphrase message now names the backend after its pinned prefix, and its breadcrumb detail records the module-qualified backend the hook process saw (`crypto._keyring_backend_label()`; readers: `mm status`, `mm diag` `last_autorun`), because hooks run in the agent's environment, which a terminal `mm diag` may not share.
 
 ## Atomic write publication failures
@@ -1905,11 +1913,12 @@ or empty) rewrite to loopback. Unix sockets and malformed addresses return
 `classify_config` send only `GET` requests directly, ignoring proxy environment
 variables, with `X-API-Key` from `config.xml`, refuse HTTP redirects, verify
 HTTPS against `https-cert.pem` in the config directory (`cause="tls"` when
-missing or mismatched), bound each request to `2 s` within a `5 s` REST budget,
+missing or mismatched), default to `2 s` per request within a `5 s` REST budget,
 and cap each response at 4 MiB. Mutations go only through the gated writer
 described under **Default configuration and the gated writer (Track 117A)**
-below, and `syncthing.py` never exposes the API key or Syncthing device IDs in
-`SyncthingState`, `mm status` or `mm diag`.
+below. The API key stays internal to the REST client. `SyncthingState` omits
+device IDs. The mesh diagnostics in `mm status` and `mm diag` can show
+seven-character Syncthing ID prefixes.
 Missing or unreachable Syncthing is reported (`not-found`, `config-unreadable`,
 `address-unsupported`, `unreachable`, `unauthorized`, `error`), never a command
 error.
@@ -1928,11 +1937,10 @@ machine with positive `pending_device_count` (Track 148A), a count-only
 `Syncthing: <N> device(s) ... Run: mm devices approve <device-id>` line
 (`syncthing.pending_join_message`, `syncthing.PENDING_JOIN_FIX`); an attended
 non-preview, non-join `mm pull` emits the same text as an `mm: notice:` stderr
-line after releasing `mind-meld.lock` for any remaining unvouched knocking
-devices (`meshflow.run`'s `unvouched_pending`, or `pullflow.notice_pending_syncthing_join`
-when the mesh snapshot did not complete),
-while `mm diag` prints and emits in `--json` each option's value and whether it
-matches.
+line after releasing `mind-meld.lock`. It uses `meshflow.run`'s `unvouched_pending`
+when the mesh snapshot completed and the unfiltered count from
+`pullflow.notice_pending_syncthing_join` otherwise. `mm diag` prints and emits
+in `--json` each option's value and whether it matches.
 Needed files do not imply active syncing: status preserves the reported folder
 state (or paused), appends the needed count independently, and reports positive
 pull errors with `mm diag` as the fixing command. Only idle with known zero
