@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.72] - 2026-11-19
+
+Mind Meld now names a managed Syncthing device during setup and only asks you to approve join requests that no fleet machine vouches for.
+
+### Added
+
+- On a machine where `mm` manages Syncthing, `mm init` now gives Syncthing the device name you chose, and `mm status` and `mm pull` only ask you to approve join requests no fleet machine vouches for.
+- Managed `mm init` sets Syncthing's local device name before pairing and defaults to the macOS local hostname when available.
+
+### Changed
+
+- `mm status` and attended `mm pull` count only unvouched pending join requests when fleet records are readable.
+- Attended `mm pull` identifies fleet machines whose Syncthing records are absent locally and suggests `mm update` and `mm push` there.
+
+### Upgrade notes
+
+- A machine set up before this change keeps its existing Syncthing device name, because `mm` writes the name only during `mm init` setup.
+
 ## [1.12.71] - 2026-11-19
 
 Mind Meld now publishes encrypted Syncthing device IDs, pairs vouched pending peers on managed machines during sync, and reports how that pairing went.
