@@ -29,13 +29,14 @@ plain `mm init` now asks whether to start a new fleet or join an existing one
 (`Start a new fleet or join an existing one? (new/join)`, default `join`;
 `mm init --new-fleet` skips that question), asks every joining question before
 it waits (storage path, the fleet machine's Syncthing device ID on a default
-Syncthing configuration, device name, and sources), saves those answers locally
-in `~/.config/mind-meld/join.toml` (never the passphrase), waits up to 10
-minutes in the same run for the fleet machine's approval, and resumes a stopped
-join from the saved answers after one `Continue joining? [Y/n]` confirmation.
-Any script or test that pipes answers into plain `mm init` must answer the new
-start-or-join question first (`join`) and supply the device name and source
-answers before the passphrase.
+Syncthing configuration, device name, and sources), and saves those answers
+locally in `~/.config/mind-meld/join.toml` (never the passphrase). On managed
+Syncthing, the same run waits for approval for about 10 minutes plus local
+Syncthing request time. A stopped join offers to resume from the saved answers
+with `Continue joining? [Y/n]`.
+Scripts and tests that supply input for a fresh join must enter `join` before
+the storage path and supply the device name and source answers before the
+passphrase.
 
 **`mm retro-fleet --no-save` removed (Track 145A):** `mm retro-fleet --no-save` is
 removed and now exits 2 as an unknown option (`mm: error: No such option: --no-save`).
@@ -313,15 +314,14 @@ mm pull                        # places the Mac's memory into the folder Claude 
 ls ~/.claude/projects/*widgets*/memory
 ```
 
-**`mm init --new-fleet` and the new default storage path (Track 89A):** only
-`mm init --new-fleet` creates the fleet's key header (`mm-crypto-init`), and only
-in an empty folder; plain `mm init` joins, and when the header has not arrived
-it stops before registering the mm device or writing to the Mind Meld store.
-Managed Syncthing setup and its local record may already be saved, but a
-machine joining before delivery can no longer start a second fleet. On a join,
-`mm init` now also runs the first `mm pull` with the passphrase you just typed.
-The first machine of a brand-new fleet therefore needs `--new-fleet`; the
-typed `BRICK` override is gone. The default storage path is now
+**`mm init --new-fleet` and the new default storage path (Track 89A).** Starting
+a fleet creates its key header (`mm-crypto-init`) in an empty folder. Use
+`mm init --new-fleet` or answer `new` at the prompt on the first machine.
+A joining machine requires the existing header before it registers the device
+or writes to the Mind Meld store. Managed Syncthing setup and its local record
+may already be saved while waiting. On a join, `mm init` also runs the first
+`mm pull` with the passphrase you just typed. The typed `BRICK` override is
+gone. The default storage path is now
 `~/Sync/mind-meld`. It does not move an existing store or change a configured
 `storage.path`, and configured Macs still on iCloud Drive keep syncing. New or restored
 machines now use the Syncthing setup described in Quick Start; `mm init` requires
@@ -651,7 +651,7 @@ mm push    # upload configured agent context
 
 ```bash
 # Every other machine:
-mm init    # asks new or join (default join), storage path, the fleet machine's Syncthing device ID (on default config), device name and sources, saves those answers, pairs, prints this machine's ID and the approval command, waits up to 10 minutes for that approval, accepts the folder offer and waits up to 2 minutes for the key header (Ctrl-C stops either wait and keeps your answers), then asks the passphrase, writes .stignore, registers this device and pulls
+mm init    # choose join, enter the requested details, then follow the approval and passphrase prompts below
 mm push    # publishes this machine's own files
 ```
 
@@ -662,7 +662,11 @@ mm pull --dry-run   # preview: changes nothing except the lock file
 mm pull    # download from another device, any time
 ```
 
-Plain `mm init` asks whether to start a new fleet or join an existing one (`mm init --new-fleet` skips that question) and never creates a key header when joining. Joining asks every question except the passphrase first and saves those answers in `~/.config/mind-meld/join.toml` (never the passphrase). On a machine where `mm` manages Syncthing, it pairs with the fleet machine, prints the `mm devices approve <device-id>` command to run there, waits up to 10 minutes for that approval, accepts the folder offer, and waits up to two minutes for Syncthing to deliver `mm-crypto-init` (if the folder is already shared with a peer, it goes straight to the header wait; other missing-header cases stop immediately). Once `mm-crypto-init` is present, it asks for and verifies the passphrase and joins. Ctrl-C stops either wait. A timeout or Ctrl-C prints a waiting outcome ending `Run: mm init`, exits non-zero, and writes no device entry, `config.toml` or key header while keeping your saved join answers; rerunning `mm init` shows those saved answers and asks `Continue joining? [Y/n]` (`y` resumes without asking them again; `n` forgets them and starts over, leaving Syncthing's pairing unchanged).
+Plain `mm init` asks whether to start a new fleet or join an existing one (`mm init --new-fleet` skips that question). Joining requires the fleet's existing key header. It asks for the storage path, device name, sources and, if managed Syncthing needs pairing, a fleet machine's Syncthing device ID. It saves those answers in `~/.config/mind-meld/join.toml` and asks for the passphrase only after the header arrives.
+
+When managed Syncthing needs pairing, `mm init` prints the `mm devices approve <device-id>` command to run on the fleet machine and waits about 10 minutes for approval, plus time for local Syncthing requests. After accepting the folder offer, or when the folder already shares with a peer, it waits about two minutes if the key header is still missing. It then verifies the passphrase and joins once the header is present.
+
+Ctrl-C during either wait and an approval timeout print a waiting outcome ending `Run: mm init`. A header timeout prints the same outcome if the folder is empty or holds only Syncthing bookkeeping or in-flight files. If the folder holds other files or is unreadable, `mm init` gives a folder-specific remedy. These stops exit non-zero and keep your answers without writing a device entry, `config.toml` or key header. Syncthing continues syncing any accepted share. Rerun `mm init` and answer `y` at `Continue joining? [Y/n]` to resume. Answer `n` to forget the answers and start over with the existing pairing.
 
 Config lives at `~/.config/mind-meld/config.toml` — not tied to your current directory. Install `mm` anywhere, run from anywhere; it always syncs the sources configured in your global config.
 
@@ -676,7 +680,7 @@ To add another Mac or an Arch-based Linux machine to a Syncthing fleet (for a Ma
 2. On Linux, install `libsecret` and `gnome-keyring` and unlock the login keyring in your desktop session before hooks run (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)).
 3. Run Claude Code once so `~/.claude` exists.
 4. Run `mm init` on the new machine:
-   - **Default Syncthing configuration (managed by `mm`):** answer `join` (the default), choose an empty storage folder (normally `~/Sync/mind-meld`), paste the Syncthing device ID of a machine already in the fleet (printed by `mm init --new-fleet` on the first machine, or shown in Syncthing's **Actions > Show ID**), and enter the device name and sources. `mm init` saves those answers locally (never the passphrase), adds that fleet machine as an introducer, prints this machine's Syncthing device ID and the copyable `mm devices approve <device-id>` line to run on a fleet machine where `mm` manages Syncthing (on an owner-managed fleet machine `mm devices approve` changes nothing and points to [Configuring Syncthing yourself](#configuring-syncthing-yourself)), removes the unshared empty stock Default Folder at `~/Sync` when `~/Sync/mind-meld` sits inside it, and waits up to 10 minutes in the same run for that approval. While it waits, run `mm devices approve <device-id>` on the fleet machine (or approve by hand): the waiting `mm init` accepts the folder offer with mm's options, waits up to two minutes for Syncthing to deliver the key header (`mm-crypto-init`), prompts for and verifies the **same passphrase**, writes `(?d)tmp*.tmp` to `.stignore`, registers the new device, removes the saved join answers, and pulls. Ctrl-C stops either wait; a timeout or Ctrl-C prints an `Init: waiting for ... Run: mm init` outcome and writes no device entry, `config.toml` or key header, and a rerun shows the saved answers and asks `Continue joining? [Y/n]` to resume without re-entering them.
+   - **Default Syncthing configuration (managed by `mm`).** Answer `join` (the default), choose an empty storage folder (normally `~/Sync/mind-meld`), paste the Syncthing device ID of a machine already in the fleet (printed when the first machine starts the fleet, or shown in Syncthing's **Actions > Show ID**), and enter the device name and sources. `mm init` saves those answers locally (never the passphrase), adds that fleet machine as an introducer, prints this machine's Syncthing device ID and a copyable `mm devices approve <device-id>` command, and removes the unshared empty stock Default Folder at `~/Sync` when the target is inside it. While it waits, run the printed command on the fleet machine if `mm` manages Syncthing there. On an owner-managed fleet machine, approve by hand as described in [Configuring Syncthing yourself](#configuring-syncthing-yourself). The waiting `mm init` accepts the folder offer with mm's options, waits for Syncthing to deliver the key header (`mm-crypto-init`), verifies the **same passphrase**, writes `(?d)tmp*.tmp` to `.stignore`, registers the new device, removes the saved join answers, and pulls. If a wait stops before the join finishes, rerun `mm init` and confirm `Continue joining? [Y/n]`.
    - **Pre-existing Syncthing configuration (owner-managed):** `mm init` changes nothing in Syncthing and names [Configuring Syncthing yourself](#configuring-syncthing-yourself). Answer `join`, the storage path, the device name and the sources (`mm init` saves those answers locally so a rerun can confirm `Continue joining? [Y/n]` without asking them again). Pair the machines, share the `mind-meld` folder at `~/Sync/mind-meld` with the [Syncthing folder options](#syncthing-folder-options), add `(?d)tmp*.tmp` to `~/Sync/mind-meld/.stignore`, wait for Syncthing to deliver `mm-crypto-init`, and run `mm init` to verify the passphrase and finish joining.
 5. If the folder is still syncing blobs after `mm init` finishes, run `mm pull` again when delivery finishes.
 6. `mm push` — publishes anything this machine has that the others don't; push is what shares this machine's own files.
@@ -738,7 +742,7 @@ On a moving Mac, close all agent sessions and keep them closed through the final
 2. Run `pipx uninstall mind-meld`.
 3. Move this machine's iCloud-era usage log (`~/.local/share/mind-meld/events`) out of the `mm-events` source before `mm init`, for example `mv ~/.local/share/mind-meld/events ~/mind-meld-icloud-events`, so the Syncthing fleet never receives the iCloud store's usage records (the iCloud folder still holds them).
 4. Run the bootstrap script from [Install](#install).
-5. Run `mm init --new-fleet` (if this Mac is the first machine in the Syncthing fleet) or `mm init` (if joining an existing one: answer yes when it asks to overwrite the existing config, answer `join` when asked whether to start or join a fleet, enter the storage path, fleet device ID if managed, device name and sources — declining any sources that were disabled in the old config — and answer yes when the orphan prompt asks to create a new device entry; the old entry stays in the iCloud store).
+5. Run `mm init --new-fleet` if this Mac is the first machine in the Syncthing fleet, or `mm init` if it is joining an existing one. In both cases, approve overwriting the existing config and decline any sources disabled in the old config. For a join, choose `join`, follow [Setting up another machine](#setting-up-another-machine) from step 4, and confirm when asked to create a new device entry. The old entry stays in the iCloud store.
 6. Re-apply any hand-set settings from the copied config, restore any excluded local files from their backup after restoring the exclusions, then run `mm push`.
 
 If init stops while waiting for the share or after saving the new config, resume at step 5, then step 6. Do not repeat steps 1–3: keep the original iCloud config and event-log backup, and leave any newly captured Syncthing events in place.
@@ -974,7 +978,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 |---------|-------------|
 | `mm --version` | Print the installed version and exit |
 | `mm update` | Update mm to the latest release through pipx. Needs no config or passphrase. Exit 0 means mm is on the latest release; exit 1 means the update did not complete, or `mm update` leaves this install alone (a source-tree build, a non-pipx install, a `pipx pin` or a fork; the message names the fix). `pull` and `push` do this on their own — see [Automatic updates](#automatic-updates) |
-| `mm init` | Check Syncthing, offer to resume any saved join answers (`Continue joining?`), or ask whether to start or join a fleet. When joining, ask the storage path, fleet device ID (on a default Syncthing configuration), device name and sources first and save them in `~/.config/mind-meld/join.toml` (never the passphrase); pair, print `mm devices approve <id>`, wait up to 10 minutes for approval, accept the folder and wait up to 2 minutes for `mm-crypto-init`, then verify the passphrase, register this device, save config and pull. A timeout or Ctrl-C prints a waiting outcome ending `Run: mm init` and writes no mm device entry, config or key header |
+| `mm init` | Check Syncthing and offer to resume a saved join or ask whether to start or join a fleet. When joining, save the storage path, device name, sources and fleet device ID if pairing is needed in `~/.config/mind-meld/join.toml`. On managed Syncthing, pair as needed, print `mm devices approve <id>`, wait for approval, and accept the folder offer. When `mm-crypto-init` arrives, verify the passphrase, register this device, save config and pull. See [Quick Start](#quick-start) for wait times and recovery |
 | `mm init --new-fleet` | First machine of a new fleet only: set up default Syncthing, create the key header (`mm-crypto-init`) and `.stignore` in an empty folder, and print this machine's Syncthing device ID. Refuses a managed folder already shared with peers |
 | `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture) |
 | `mm push --dry-run` | Preview publication and deletions (files a recreated scan folder hides are not counted as deletions); changes nothing except the local lock file |
