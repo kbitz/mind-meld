@@ -212,7 +212,7 @@ def test_machine_with_icloud_history_joins_fresh_fleet_without_losing_files(
     join_res = runner.invoke(
         app,
         ["init"],
-        input=f"y\n{sync_dir}\ny\nMac A\n{PASSPHRASE}\n",
+        input=f"y\njoin\n{sync_dir}\nMac A\ny\n{PASSPHRASE}\n",
     )
 
     # 1. Join succeeded, orphan prompt fired, config points at the new store with a new id.

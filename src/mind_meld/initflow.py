@@ -1,20 +1,25 @@
 """`mm init`'s body and its init-only helpers, independent of command registration.
 
-Two flows. Plain `mm init` joins a fleet: it needs the fleet's key header
-(mm-crypto-init) in the storage folder, verifies the passphrase against it and
-registers this device. `mm init --new-fleet` is the only path that creates the
-key header, and only in an empty folder. When a managed join accepts the folder
-offer (or the folder is already shared with a peer) and the header has not
-arrived yet, `init` waits up to `HEADER_WAIT_SECONDS` (`HEADER_POLL_SECONDS` per
-step); a plain init that still finds no header stops without writing anything.
+Two flows. Plain `mm init` asks whether to start a new fleet or join one (or
+offers to resume from saved join answers in `join.toml`), while
+`mm init --new-fleet` skips the question and is the only path that creates the
+key header (mm-crypto-init) in an empty folder. Joining asks every question
+except the passphrase first (storage path, fleet machine's Syncthing device ID
+when pairing is needed, device name, sources), saves those answers in
+`join.toml` (never the passphrase), waits up to `APPROVAL_WAIT_SECONDS`
+(`APPROVAL_POLL_SECONDS` per step) for the fleet machine's approval, accepts
+the folder offer, and waits up to `HEADER_WAIT_SECONDS` (`HEADER_POLL_SECONDS`
+per step) for the key header. Once the header arrives, it verifies the
+passphrase against it and registers this device.
 
 Raise surface for direct callers of `init`:
 - returns the verified passphrase after a join, so the `cli.init` shell can
-  pull with it, and None after `--new-fleet`.
+  pull with it, and None after `--new-fleet` or an interactive `new` answer.
 - typer.Exit() (code 0): the user declined to overwrite an existing config or
-  declined the re-init confirm; nothing local or remote changed.
-- typer.Exit(1): a core._error refusal (no key header yet, Ctrl-C while waiting
-  for the key header, a folder that `--new-fleet` will not accept, corrupt or
+  declined device registration. Any saved join answers remain available.
+- typer.Exit(1): a waiting outcome (timeout or Ctrl-C while waiting for the
+  fleet machine's approval or for the key header) or a core._error refusal
+  (no key header yet, a folder that `--new-fleet` will not accept, corrupt or
   newer mm-crypto-init, wrong passphrase, a header that arrived during the
   prompts, no sync sources enabled); each prints its own remedy.
 - typer.Abort (exit 1): stdin closed during a prompt; the shell turns it into
@@ -94,9 +99,11 @@ _BOOKKEEPING_NAMES = frozenset({".stfolder", ".stignore", ".stversions", ".DS_St
 _FLEET_DIRS = frozenset({"data", "manifests", "devices"})
 _IN_FLIGHT_PREFIXES = (".syncthing.", "~syncthing~")
 _HEADER_STEM = "mm-crypto-init"
-# Bounded wait after a managed join accepts the folder offer (or finds the
-# folder already shared with a peer) before Syncthing has delivered the header
-# file. Named without forbidden credential words (AGENTS.md).
+# Bounded waits during a managed join: approval wait for the fleet machine to
+# share the `mind-meld` folder, then header wait for Syncthing to deliver
+# mm-crypto-init. Named without forbidden credential words (AGENTS.md).
+APPROVAL_WAIT_SECONDS = 600
+APPROVAL_POLL_SECONDS = 2
 HEADER_WAIT_SECONDS = 120
 HEADER_POLL_SECONDS = 1
 
@@ -294,8 +301,72 @@ def _read_fleet_device_id(local_id: str | None) -> str:
     return candidate
 
 
-def _managed_join(setup: _SyncthingSetup, full_path: Path) -> bool | None:
-    """Accept the fleet folder and report whether it has peers, when known."""
+def _load_join_record_or_stop() -> _config_module.JoinRecord | None:
+    """Read saved join answers from `join.toml`, or stop on a malformed file."""
+    try:
+        return _config_module.load_join_record()
+    except ConfigError as e:
+        core._error(
+            f"{safe_terminal_str(e)} Nothing was written. Fix or remove that file, "
+            "then run 'mm init' again.",
+            fix="mm init",
+        )
+
+
+def _save_join_record_or_stop(record: _config_module.JoinRecord) -> None:
+    """Persist the user's join answers before pairing or waiting."""
+    try:
+        _config_module.save_join_record(record)
+    except (OSError, StorageError, ConfigError) as e:
+        cause = (
+            os_error_cause(e) if isinstance(e, (OSError, StorageError)) else safe_terminal_str(e)
+        )
+        core._error(
+            f"init: could not save your join answers ({cause}). "
+            "Nothing else was written. Fix that, then run 'mm init' again."
+        )
+
+
+def _forget_join_record(*, required: bool = False) -> None:
+    """Remove saved answers. A restart requires removal before prompting again."""
+    try:
+        _config_module.delete_join_record()
+    except OSError as e:
+        path = safe_terminal_str(_config_module.join_record_path())
+        message = f"could not remove saved join answers at {path} ({os_error_cause(e)})"
+        if required:
+            core._error(f"init: {message}. Remove that file to start over.", fix="mm init")
+        core._warning(f"{message}; delete that file by hand.")
+
+
+def _ask_start_or_join() -> str:
+    """Ask whether to start a new fleet or join an existing one."""
+    while True:
+        raw = typer.prompt(
+            "Start a new fleet or join an existing one? (new/join)",
+            default="join",
+        )
+        choice = raw.strip().lower()
+        if choice in ("new", "join"):
+            return choice
+        console.print("  Answer 'new' or 'join'.")
+
+
+def _sources_from_names(names: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Rebuild enabled source dicts in `DEFAULT_SOURCES` order from saved names."""
+    chosen = frozenset(names)
+    enabled: list[dict[str, Any]] = []
+    for default in DEFAULT_SOURCES:
+        name = default["name"]
+        if name in MM_INTERNAL_SOURCE_NAMES or name in chosen:
+            src = get_default_source(name)
+            if src is not None:
+                enabled.append(src)
+    return enabled
+
+
+def _managed_folder_ready(setup: _SyncthingSetup, full_path: Path) -> tuple[bool, bool | None]:
+    """Check whether Syncthing already has the exact `mind-meld` folder configured."""
     assert setup.record is not None
     resolved_target = full_path.expanduser().resolve()
     st = _read_syncthing_state_or_stop(full_path)
@@ -311,28 +382,60 @@ def _managed_join(setup: _SyncthingSetup, full_path: Path) -> bool | None:
             _require_syncthing(
                 syncthing.WriteResult("refused", "folder-exists"), "reuse the fleet folder"
             )
-        return st.total_peers > 0 if st.total_peers is not None else None
-    fleet_id = _read_fleet_device_id(setup.local_id)
-    # Accepting the offer starts bidirectional sync immediately. A new target
-    # must not publish unrelated plaintext or combine two fleets before the
-    # arriving header can be verified. Already-configured reruns return above.
+        return True, (st.total_peers > 0 if st.total_peers is not None else None)
+    return False, None
+
+
+def _require_shareable_folder(full_path: Path, *, join_saved: bool = False) -> None:
+    """Refuse to use a populated folder as a new Syncthing target."""
     folder = _classify_folder(full_path)
     if folder.error is not None:
-        _unreadable_folder(full_path, folder.error)
+        _unreadable_folder(full_path, folder.error, join_saved=join_saved)
     if not folder.accepts_new_fleet:
+        if join_saved:
+            core._error(
+                f"init: cannot share {safe_terminal_str(full_path)} in Syncthing because "
+                f"it contains {_entry_names(folder.blockers)}. Your join answers are saved. "
+                "Clear the folder or decline 'Continue joining?' to choose another path.",
+                fix="mm init",
+            )
         core._error(
             f"init: cannot share {safe_terminal_str(full_path)} with the fleet because "
             f"it already contains {_entry_names(folder.blockers)}. Nothing was written. "
             "Choose an empty storage folder, then run 'mm init' again."
         )
+
+
+def _stop_waiting(what: str) -> None:
+    """Exit 1 with a waiting outcome line when an approval or header wait stops."""
+    core._print_outcome(
+        outputstyle._outcome_line(
+            "init",
+            f"waiting for {what}; your answers are saved, and no device entry, "
+            "config or key header was written",
+        )
+        + f" {outputstyle._fix_line('mm init')}"
+    )
+    raise typer.Exit(1)
+
+
+def _managed_join(setup: _SyncthingSetup, full_path: Path, fleet_id: str) -> bool:
+    """Pair with the fleet peer and accept the fleet folder offer once approved."""
+    assert setup.record is not None
     _save_syncthing_record_or_stop(setup)
     writer = syncthing.SyncthingWriter(setup.record)
     _require_syncthing(writer.add_device(fleet_id), "add the fleet device")
     _require_syncthing(writer.mark_introducer(fleet_id), "mark the fleet device as introducer")
     local_id = setup.local_id or setup.record.device_id
-    console.print(f"  This machine's Syncthing device ID: {safe_str(local_id)}")
+    safe_local_id = safe_str(local_id)
+    console.print(f"  This machine's Syncthing device ID: {safe_local_id}")
+    console.print("  On a machine already in the fleet, approve this one by running:")
+    console.print(f"    mm devices approve {safe_local_id}", soft_wrap=True)
     if _is_inside_stock_default_folder(full_path):
         _require_syncthing(writer.remove_default_folder(), "remove the Default Folder")
+    # Accepting starts bidirectional sync. Recheck the target before the first
+    # attempt and after each pause, since local files can arrive while we wait.
+    _require_shareable_folder(full_path, join_saved=True)
     offer_res = writer.accept_folder_offer(
         _config_module.SYNCTHING_FOLDER_ID,
         fleet_id,
@@ -340,15 +443,32 @@ def _managed_join(setup: _SyncthingSetup, full_path: Path) -> bool | None:
         full_path,
     )
     if offer_res.outcome == "refused" and offer_res.cause == "no-offer":
-        core._error(
-            "init: the fleet machine has not shared mm's folder "
-            f"('{_config_module.SYNCTHING_FOLDER_ID}') with this machine yet. "
-            "No device entry, config or key header was written. On the fleet "
-            "machine, approve this machine with "
-            f"'mm devices approve {safe_terminal_str(local_id)}' "
-            f'(or by hand, README "{core.SYNCTHING_GUIDE_HEADING}"), wait for '
-            "Syncthing, then run 'mm init' here again."
+        console.print(
+            "  Waiting up to 10 minutes for that approval; "
+            "Ctrl-C stops the wait and keeps your answers."
         )
+        rounds = max(1, APPROVAL_WAIT_SECONDS // APPROVAL_POLL_SECONDS)
+        approval_what = (
+            f"a fleet machine to approve this one "
+            f"('mm devices approve {safe_terminal_str(local_id)}')"
+        )
+        try:
+            with core._installer_progress("Waiting for the fleet machine's approval"):
+                for _ in range(rounds):
+                    _pause(APPROVAL_POLL_SECONDS)
+                    _require_shareable_folder(full_path, join_saved=True)
+                    offer_res = writer.accept_folder_offer(
+                        _config_module.SYNCTHING_FOLDER_ID,
+                        fleet_id,
+                        _config_module.SYNCTHING_FOLDER_LABEL,
+                        full_path,
+                    )
+                    if not (offer_res.outcome == "refused" and offer_res.cause == "no-offer"):
+                        break
+        except KeyboardInterrupt:
+            _stop_waiting(approval_what)
+        if offer_res.outcome == "refused" and offer_res.cause == "no-offer":
+            _stop_waiting(approval_what)
     _require_syncthing(offer_res, "accept the fleet folder offer")
     return True
 
@@ -402,10 +522,11 @@ def _entry_names(names: tuple[str, ...]) -> str:
     return shown + (f" and {len(names) - 5} more" if len(names) > 5 else "")
 
 
-def _unreadable_folder(path: Path, error: OSError) -> None:
+def _unreadable_folder(path: Path, error: OSError, *, join_saved: bool = False) -> None:
+    state = "Your join answers are saved." if join_saved else "Nothing was written."
     core._error(
         f"init: cannot read the storage folder {safe_terminal_str(path)}: "
-        f"{os_error_cause(error)}. Nothing was written. Fix the path or its "
+        f"{os_error_cause(error)}. {state} Fix the path or its "
         "permissions, then run 'mm init' again."
     )
 
@@ -435,10 +556,8 @@ def _refuse_new_fleet(path: Path, folder: _Folder) -> None:
     )
 
 
-def _stop_for_missing_header(
-    path: Path, folder: _Folder, *, accepted: bool = False, local_only: bool = False
-) -> None:
-    """Plain `mm init` found no key header: say why and what to do; write nothing."""
+def _stop_for_missing_header(path: Path, folder: _Folder, *, local_only: bool = False) -> None:
+    """Stop a join with saved answers when its target has no key header."""
     where = safe_terminal_str(path)
     first_machine = (
         " Only the fleet's first machine runs 'mm init --new-fleet', in an empty folder."
@@ -446,38 +565,31 @@ def _stop_for_missing_header(
         else ""
     )
     if folder.error is not None:
-        _unreadable_folder(path, folder.error)
+        _unreadable_folder(path, folder.error, join_saved=True)
     if local_only and folder.accepts_new_fleet:
         what = (
             f"Syncthing's folder at {where} has no peer and no key header "
-            "(mm-crypto-init), so nothing can deliver one. Nothing was written. "
+            "(mm-crypto-init), so nothing can deliver one. Your join answers are saved. "
             "To finish starting this fleet, Run: mm init --new-fleet"
-        )
-    elif accepted and not folder.in_flight and not folder.fleet and not folder.other:
-        what = (
-            f"Syncthing has accepted the fleet folder at {where}, but the key header "
-            "(mm-crypto-init) has not arrived yet. No device entry, config or key "
-            "header was written. Wait for Syncthing to deliver it, then run "
-            "'mm init' again."
         )
     elif not folder.exists:
         what = (
             f"{where} does not exist, so there is no key header (mm-crypto-init) to join. "
-            "Nothing was written. Accept the shared folder in Syncthing at this path, or "
-            "run 'mm init' again and enter the path Syncthing uses; once delivery "
-            "finishes, run 'mm init' again."
+            "Your join answers are saved. Accept the shared folder in Syncthing at this "
+            "path, or decline 'Continue joining?' to enter the path Syncthing uses. "
+            "Once delivery finishes, run 'mm init' again."
         )
     elif folder.in_flight:
         what = (
             f"{where} is still receiving files from Syncthing "
             f"({_entry_names(folder.in_flight)}) and the key header (mm-crypto-init) has "
-            "not arrived. Nothing was written. Wait for delivery to finish, then run "
+            "not arrived. Your join answers are saved. Wait for delivery to finish, then run "
             "'mm init' again."
         )
     elif folder.fleet:
         what = (
             f"{where} holds fleet files ({_entry_names(folder.fleet)}) but no key header "
-            "(mm-crypto-init). Nothing was written. Wait for Syncthing to finish "
+            "(mm-crypto-init). Your join answers are saved. Wait for Syncthing to finish "
             "delivering it, then run 'mm init' again. If the folder is up to date and "
             "the header never arrives, restore it from another machine; "
             f"see {KEY_HEADER_COPIES_URL}."
@@ -485,12 +597,12 @@ def _stop_for_missing_header(
     elif folder.other:
         what = (
             f"{where} holds {_entry_names(folder.other)} but no key header (mm-crypto-init). "
-            "Nothing was written. If this folder should join an existing fleet, wait for "
+            "Your join answers are saved. If this folder should join an existing fleet, wait for "
             "Syncthing to deliver the header, then run 'mm init' again."
         )
     else:
         what = (
-            f"the key header (mm-crypto-init) is not in {where} yet. Nothing was written. "
+            f"the key header (mm-crypto-init) is not in {where} yet. Your join answers are saved. "
             f"{first_machine.strip()} "
             "If another machine already has this fleet, wait for Syncthing to deliver "
             "it, then run 'mm init' again."
@@ -915,12 +1027,14 @@ def _pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _fetch_header_or_stop(backend: LocalBackend, full_path: Path) -> CryptoInitFetch:
+def _fetch_header_or_stop(
+    backend: LocalBackend, full_path: Path, *, join_saved: bool = False
+) -> CryptoInitFetch:
     """Probe storage for mm-crypto-init and stop on unreadable, newer or corrupt headers."""
     try:
         fetch = fetch_crypto_init(backend)
     except OSError as e:
-        _unreadable_folder(full_path, e)
+        _unreadable_folder(full_path, e, join_saved=join_saved)
     if fetch.newer_version is not None:
         core._error(core._newer_format_message(fetch.newer_version))
     if fetch.status == "corrupt":
@@ -940,28 +1054,29 @@ def _wait_for_header(backend: LocalBackend, full_path: Path) -> CryptoInitFetch:
         "(mm-crypto-init); Ctrl-C stops the wait without writing Mind Meld data."
     )
     rounds = max(1, HEADER_WAIT_SECONDS // HEADER_POLL_SECONDS)
+    header_what = (
+        "Syncthing to deliver the fleet's key header (mm-crypto-init) to "
+        f"{safe_terminal_str(full_path)}"
+    )
     try:
-        for _ in range(rounds):
-            _pause(HEADER_POLL_SECONDS)
-            fetch = _fetch_header_or_stop(backend, full_path)
-            if fetch.status != "missing":
-                return fetch
+        with core._installer_progress("Waiting for the key header"):
+            for _ in range(rounds):
+                _pause(HEADER_POLL_SECONDS)
+                fetch = _fetch_header_or_stop(backend, full_path, join_saved=True)
+                if fetch.status != "missing":
+                    return fetch
     except KeyboardInterrupt:
-        core._error(
-            "init: stopped while waiting for the key header. "
-            "No device entry, config.toml or key header was written. "
-            "Syncthing keeps syncing the accepted folder; once it delivers the header, "
-            "run 'mm init' again."
-        )
+        _stop_waiting(header_what)
     return CryptoInitFetch(status="missing")
 
 
 def init(new_fleet: bool = False) -> str | None:
-    """Run init; return the verified passphrase after a join, None after --new-fleet."""
+    """Run init; return the verified passphrase after a join, otherwise None."""
     # Capture prior device metadata BEFORE any prompt so the orphan-case
     # warning can name the device about to be left behind.
     existing_device_id, existing_device_name = _load_prior_device_metadata()
-    if _config_module.CONFIG_PATH.exists():
+    has_prior_config = _config_module.CONFIG_PATH.exists()
+    if has_prior_config:
         if not typer.confirm(_overwrite_prompt(new_fleet)):
             raise typer.Exit()
 
@@ -969,41 +1084,129 @@ def init(new_fleet: bool = False) -> str | None:
 
     setup = _check_syncthing()
 
+    saved: _config_module.JoinRecord | None = None
+    if not new_fleet:
+        saved = _load_join_record_or_stop()
+        if saved is not None:
+            fleet_part = (
+                f"fleet machine {safe_str(saved.fleet_device_id)}, "
+                if saved.fleet_device_id is not None
+                else ""
+            )
+            sources_s = ", ".join(safe_str(name) for name in saved.sources)
+            console.print(
+                f"  Saved join answers: storage {safe_str(saved.storage_path)}, "
+                f"{fleet_part}device name {safe_str(saved.device_name)}, "
+                f"sources {sources_s}.",
+                soft_wrap=True,
+            )
+            if not typer.confirm("Continue joining?", default=True):
+                _forget_join_record(required=True)
+                saved = None
+        if saved is None and _ask_start_or_join() == "new":
+            if has_prior_config and not typer.confirm(_overwrite_prompt(True)):
+                raise typer.Exit()
+            new_fleet = True
+
     # Storage path first: we need a backend to probe mm-crypto-init.
-    storage_path = typer.prompt("Storage folder path", default=DEFAULT_STORAGE_PATH)
+    if saved is not None:
+        storage_path = saved.storage_path
+    else:
+        storage_path = typer.prompt("Storage folder path", default=DEFAULT_STORAGE_PATH)
     full_path = Path(storage_path).expanduser()
-    console.print(f"  Storage: {full_path}")
+    if not new_fleet and not full_path.is_absolute():
+        full_path = full_path.absolute()
+        storage_path = str(full_path)
+    console.print(f"  Storage: {safe_str(full_path)}")
 
     # Read-only first look: nothing is created, not even the folder, until a
     # path is known to be the right one.
     folder = _classify_folder(full_path)
     if folder.error is not None:
-        _unreadable_folder(full_path, folder.error)
+        _unreadable_folder(full_path, folder.error, join_saved=saved is not None)
     if new_fleet and not folder.accepts_new_fleet:
         _refuse_new_fleet(full_path, folder)
+
     accepted_share = None
-    if not new_fleet and setup.record is not None:
-        accepted_share = _managed_join(setup, full_path)
-        folder = _classify_folder(full_path)
-        if folder.error is not None:
-            _unreadable_folder(full_path, folder.error)
+    device_name = ""
+    sources: list[dict[str, Any]] = []
+    if not new_fleet:
+        if _config_module.join_record_path().parent.resolve().is_relative_to(full_path.resolve()):
+            core._error(
+                "init: the storage folder would include local Mind Meld config files. "
+                "Choose a separate folder so saved join answers stay local.",
+                fix="mm init",
+            )
+        needs_pairing = False
+        fleet_id: str | None = None
+        save_answers = saved is None
+        if setup.record is not None:
+            ready, accepted_share = _managed_folder_ready(setup, full_path)
+            if not ready:
+                needs_pairing = True
+                if saved is not None and saved.fleet_device_id is not None:
+                    fleet_id = saved.fleet_device_id
+                    problem = core._device_id_problem(fleet_id, setup.local_id)
+                    if problem is not None:
+                        core._error(
+                            f"init: saved fleet device ID is invalid ({problem}). "
+                            "Decline 'Continue joining?' to enter a different ID.",
+                            fix="mm init",
+                        )
+                else:
+                    if saved is not None:
+                        _require_shareable_folder(full_path, join_saved=True)
+                    fleet_id = _read_fleet_device_id(setup.local_id)
+                    save_answers = True
+        if saved is not None:
+            device_name = saved.device_name
+            sources = _sources_from_names(saved.sources)
+        else:
+            device_name = typer.prompt("Device name", default=_default_device_name())
+            sources = _prompt_sources()
+        user_facing_sources = [s for s in sources if s["name"] not in MM_INTERNAL_SOURCE_NAMES]
+        if not user_facing_sources:
+            core._error(
+                "init: no sync sources enabled. Re-run 'mm init' and accept at least one source."
+            )
+        if needs_pairing:
+            _require_shareable_folder(full_path, join_saved=saved is not None)
+        if save_answers:
+            _save_join_record_or_stop(
+                _config_module.JoinRecord(
+                    storage_path=storage_path,
+                    fleet_device_id=fleet_id,
+                    device_name=device_name,
+                    sources=tuple(s["name"] for s in user_facing_sources),
+                )
+            )
+        if needs_pairing:
+            assert fleet_id is not None
+            accepted_share = _managed_join(setup, full_path, fleet_id)
+            folder = _classify_folder(full_path)
+            if folder.error is not None:
+                _unreadable_folder(full_path, folder.error, join_saved=True)
 
     # Lightweight backend (config is not yet written; instantiate directly).
     backend = LocalBackend(str(full_path))
 
     # Probe storage for mm-crypto-init BEFORE committing any local state.
-    fetch = _fetch_header_or_stop(backend, full_path)
+    fetch = _fetch_header_or_stop(backend, full_path, join_saved=not new_fleet)
     if not new_fleet and fetch.status == "missing":
         if accepted_share is True:
             fetch = _wait_for_header(backend, full_path)
         if fetch.status == "missing":
             folder = _classify_folder(full_path)
             if folder.error is not None:
-                _unreadable_folder(full_path, folder.error)
+                _unreadable_folder(full_path, folder.error, join_saved=True)
+            if accepted_share is True and not folder.fleet and not folder.other:
+                _stop_waiting(
+                    "Syncthing to deliver the fleet's key header (mm-crypto-init) to "
+                    f"{safe_terminal_str(full_path)}"
+                )
             _stop_for_missing_header(
                 full_path,
                 folder,
-                accepted=accepted_share is True,
                 local_only=accepted_share is False,
             )
     if new_fleet and fetch.status != "missing":
@@ -1016,7 +1219,7 @@ def init(new_fleet: bool = False) -> str | None:
         try:
             occupancy = _probe_storage_occupancy(backend)
         except OSError as e:
-            _unreadable_folder(full_path, e)
+            _unreadable_folder(full_path, e, join_saved=True)
         _init_storage_guard(
             occupancy,
             existing_device_id=existing_device_id,
@@ -1031,7 +1234,8 @@ def init(new_fleet: bool = False) -> str | None:
     # handles a stray collision if we exhaust the retry budget.
     existing_devices = [] if new_fleet else list_devices(backend)
     device_id = generate_unique_short_device_id(existing_devices)
-    device_name = typer.prompt("Device name", default=_default_device_name())
+    if new_fleet:
+        device_name = typer.prompt("Device name", default=_default_device_name())
 
     passphrase = _prompt_passphrase(new_fleet)
     if new_fleet:
@@ -1040,6 +1244,22 @@ def init(new_fleet: bool = False) -> str | None:
         root_salt, argon2_memory_kb, _keycheck_blob = _bootstrap_new_fleet(
             backend, passphrase, full_path
         )
+        # All crypto passed; it's safe to prompt for sources and write state.
+        # Refuse if no sources enabled — a config with zero sources leaves
+        # push/pull silently no-op'ing.
+        #
+        # Ordering note: on --new-fleet, source prompt runs AFTER crypto so a
+        # wrong passphrase surfaces BEFORE we ask about sources. Consequence:
+        # on a --new-fleet refuse-all, mm-crypto-init is already written to
+        # storage and orphaned. This is benign: running plain `mm init` now
+        # joins the header this machine wrote, the same passphrase verifies
+        # against it, and the second attempt finishes cleanly.
+        sources = _prompt_sources()
+        user_facing_sources = [s for s in sources if s["name"] not in MM_INTERNAL_SOURCE_NAMES]
+        if not user_facing_sources:
+            core._error(
+                "init: no sync sources enabled. Re-run 'mm init' and accept at least one source."
+            )
     else:
         root_salt, argon2_memory_kb, _keycheck_blob = _verify_join(backend, passphrase, fetch)
         if setup.record is not None:
@@ -1051,30 +1271,6 @@ def init(new_fleet: bool = False) -> str | None:
                     f"{os_error_cause(e)}. This device was not registered. Make the folder "
                     "writable, then run 'mm init' again."
                 )
-
-    # All crypto passed; it's safe to prompt for sources and write state.
-    # Refuse if no sources enabled — a config with zero sources leaves
-    # push/pull silently no-op'ing.
-    #
-    # Ordering note: source prompt runs AFTER crypto so a wrong passphrase
-    # surfaces BEFORE we ask about sources, not after. Consequence: on a
-    # --new-fleet refuse-all, mm-crypto-init is already written to storage
-    # and orphaned. This is benign: running plain `mm init` now joins the
-    # header this machine wrote, the same passphrase verifies against it, and
-    # the second attempt finishes cleanly. No data loss, just a storage-side
-    # breadcrumb. See tests/test_initflow.py::
-    # test_new_fleet_every_source_declined_is_recoverable_by_plain_init.
-    sources = _prompt_sources()
-    # mm-internal sources (mm-events) auto-include and don't count toward
-    # the user-intent guard — a config with only mm-internal sources is
-    # effectively "user wanted nothing synced," same as the pre-Group-7
-    # zero-sources case. Push/pull would silently no-op for the user's
-    # own data; better to refuse and let them re-run.
-    user_facing_sources = [s for s in sources if s["name"] not in MM_INTERNAL_SOURCE_NAMES]
-    if not user_facing_sources:
-        core._error(
-            "init: no sync sources enabled. Re-run 'mm init' and accept at least one source."
-        )
 
     config: dict = {
         "device": {"id": device_id, "name": device_name},
@@ -1090,6 +1286,7 @@ def init(new_fleet: bool = False) -> str | None:
     }
 
     _register_and_save(config, backend, device_id, device_name, passphrase)
+    _forget_join_record()
 
     # Seam 1 — transition detection (init path). Seeds the
     # last_seen_self_version cache so any subsequent upgrade transition is

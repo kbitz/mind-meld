@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.70] - 2026-11-19
+
+Plain `mm init` now asks whether to start a fleet or join one, waits in the same run for approval, and resumes a stopped join from its saved answers.
+
+### Changed
+
+- Plain `mm init` now asks whether to start a new fleet or join one, asks every joining question before it waits, waits up to 10 minutes in the same run for the fleet machine's approval, and a stopped join resumes from its saved answers after one "Continue joining?" question.
+- Plain `mm init` asks whether to start or join a fleet, and a managed join waits for approval in the same run and can resume from saved answers.
+
+### Upgrade notes
+
+- Anything that pipes answers into plain `mm init` must answer the new start-or-join question first and give the device name and sources before the passphrase.
+- Scripts that pipe answers into a fresh `mm init` join must supply the fleet choice first and the device name and sources before the passphrase.
+
 ## [1.12.69] - 2026-11-19
 
 `mm pull` now line-merges a peer's older `.jsonl` or `MEMORY.md` edit that was built on the local version, and each pull line names its peer and source.

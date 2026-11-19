@@ -629,10 +629,11 @@ manifests, below). Future blob bytes must also stay in that window. Write new cr
 manifest/blob. The newer-side fleet gate must refuse while any registered
 peer runs an older format.
 
-In 1.0+, any observed newer crypto-init copy refuses selection and repair;
-repair re-fetches before it unlinks anything (it never writes or replaces
-canonical; only `mm init --new-fleet` creates the file). Files can arrive out of order: with an older init still
-visible, a manifest byte in 0x04–0x0F is unreadable even beside an older
+In 1.0+, any observed newer crypto-init copy refuses selection and repair.
+Repair re-fetches before unlinking eligible conflict copies and leaves the
+canonical file untouched. Init creates the file only when starting a new fleet.
+Files can arrive out of order. With an older init still visible, a manifest
+byte in 0x04–0x0F is unreadable even beside an older
 sibling, so pull skips that peer and GC leaves its namespace untouched. GC
 refuses only on this device's own manifest, when it is unreadable (including a
 late newer-format recheck) or held only by conflict copies; the shared
