@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from dataclasses import replace as replace_dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -54,13 +55,14 @@ from mind_meld.crypto import (
     fetch_crypto_init,
     root_salt_fingerprint,
 )
-from mind_meld.devices import inventory_devices
+from mind_meld.devices import inventory_devices, read_fleet_records
 from mind_meld.errors import (
     KEYRING_UNAVAILABLE_URL,
     RETIRE_MACHINE_URL,
     ConfigError,
     MindMeldError,
     SnapshotError,
+    StorageError,
 )
 from mind_meld.manifest import (
     build_manifest_v2,
@@ -876,11 +878,37 @@ def status(
         except (statedb.StateDBError, OSError) as exc:
             cursors = exc
         storage_root = _backend_storage_path(backend, config)
+        managed_record = _managed_syncthing_record()
         syncthing_state = syncthing.read_state(
             storage_root,
             stignore_line=initflow.STIGNORE_LINE,
-            managed=_managed_syncthing_record(),
+            managed=managed_record,
         )
+        if (
+            syncthing_state.state == "ok"
+            and managed_record is not None
+            and syncthing_state.pending_device_ids
+        ):
+            try:
+                fleet_records = read_fleet_records(
+                    backend,
+                    passphrase,
+                    memory_kb,
+                    own_device_id=device_id,
+                )
+            except (OSError, StorageError):
+                pass
+            else:
+                syncthing_state = replace_dataclass(
+                    syncthing_state,
+                    pending_device_count=len(
+                        syncthing.unvouched_pending_ids(
+                            syncthing_state.pending_device_ids,
+                            fleet_records.vouched,
+                            own_id=managed_record.device_id,
+                        )
+                    ),
+                )
         peer_states = _peer_states(
             devices,
             device_id,

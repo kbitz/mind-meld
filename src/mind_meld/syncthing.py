@@ -23,7 +23,7 @@ import sys
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Container, Iterable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -89,9 +89,20 @@ class SyncthingState:
     problems: tuple[str, ...] = ()
     stignore: str | None = None
     pending_device_count: int | None = None
+    pending_device_ids: tuple[str, ...] = field(default=(), repr=False)
 
 
 PENDING_JOIN_FIX = "mm devices approve <device-id>"
+
+
+def unvouched_pending_ids(
+    pending_ids: Iterable[str],
+    vouched_ids: Container[str],
+    *,
+    own_id: str | None = None,
+) -> tuple[str, ...]:
+    """Return pending device IDs that are neither vouched nor ``own_id``."""
+    return tuple(pid for pid in pending_ids if pid != own_id and pid not in vouched_ids)
 
 
 def pending_join_message(count: int | None) -> str | None:
@@ -732,6 +743,7 @@ def _read_state_inner(
 
     # 6. /rest/cluster/pending/devices
     pending_device_count: int | None = None
+    pending_device_ids: tuple[str, ...] = ()
     if (
         isinstance(managed, ManagedRecord)
         and is_device_id(managed.device_id)
@@ -746,11 +758,14 @@ def _read_state_inner(
             deadline=deadline,
         )
         if out6 == "ok" and isinstance(pending_data, dict):
-            pending_device_count = sum(
-                1
-                for dev_id, info in pending_data.items()
-                if is_device_id(dev_id) and dev_id != my_id and isinstance(info, dict)
+            pending_device_ids = tuple(
+                sorted(
+                    dev_id
+                    for dev_id, info in pending_data.items()
+                    if is_device_id(dev_id) and dev_id != my_id and isinstance(info, dict)
+                )
             )
+            pending_device_count = len(pending_device_ids)
 
     return SyncthingState(
         state="ok",
@@ -772,6 +787,7 @@ def _read_state_inner(
         problems=tuple(problems),
         stignore=st_state,
         pending_device_count=pending_device_count,
+        pending_device_ids=pending_device_ids,
     )
 
 
@@ -2039,6 +2055,36 @@ class SyncthingWriter:
             folder_problems=folder_problems,
             folder_device_ids=folder_device_ids,
         )
+
+    def set_own_device_name(self, name: str) -> WriteResult:
+        if not isinstance(self._record, ManagedRecord) or not is_device_id(self._record.device_id):
+            return WriteResult("refused", "not-managed")
+        if not isinstance(name, str) or not name.strip():
+            return WriteResult("refused", "bad-device-name")
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            return err or WriteResult("refused", "not-managed")
+
+        devices, dev_err = self._get_list(
+            endpoint, "/rest/config/devices", timeout=per_req_timeout, deadline=deadline
+        )
+        if dev_err is not None or devices is None:
+            return dev_err or WriteResult("error", "bad-response")
+        target_dev = next((d for d in devices if d.get("deviceID") == my_id), None)
+        if target_dev is None:
+            return WriteResult("refused", "device-not-configured")
+        if target_dev.get("name") == name:
+            return WriteResult("unchanged", None)
+
+        w_out, w_cause = _send_json(
+            endpoint,
+            "PATCH",
+            f"/rest/config/devices/{my_id}",
+            {"name": name},
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        return WriteResult(w_out, w_cause, write_attempted=True)
 
     def mark_introducer(self, device_id: str, *, require_writer_shape: bool = False) -> WriteResult:
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()

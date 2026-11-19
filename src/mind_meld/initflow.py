@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -260,7 +262,7 @@ def _read_syncthing_state_or_stop(full_path: Path) -> syncthing.SyncthingState:
     return state
 
 
-def _managed_new_fleet_folder(setup: _SyncthingSetup, full_path: Path) -> None:
+def _managed_new_fleet_folder(setup: _SyncthingSetup, full_path: Path, device_name: str) -> None:
     """Create mm's Syncthing folder on the managed `--new-fleet` path."""
     assert setup.record is not None
     state = _read_syncthing_state_or_stop(full_path)
@@ -273,6 +275,11 @@ def _managed_new_fleet_folder(setup: _SyncthingSetup, full_path: Path) -> None:
         )
     _save_syncthing_record_or_stop(setup)
     writer = syncthing.SyncthingWriter(setup.record)
+    _require_syncthing(
+        writer.set_own_device_name(device_name),
+        "name this device in Syncthing",
+        new_fleet=True,
+    )
     if _is_inside_stock_default_folder(full_path):
         _require_syncthing(
             writer.remove_default_folder(),
@@ -424,11 +431,15 @@ def _stop_waiting(what: str) -> None:
     raise typer.Exit(1)
 
 
-def _managed_join(setup: _SyncthingSetup, full_path: Path, fleet_id: str) -> bool:
+def _managed_join(setup: _SyncthingSetup, full_path: Path, fleet_id: str, device_name: str) -> bool:
     """Pair with the fleet peer and accept the fleet folder offer once approved."""
     assert setup.record is not None
     _save_syncthing_record_or_stop(setup)
     writer = syncthing.SyncthingWriter(setup.record)
+    _require_syncthing(
+        writer.set_own_device_name(device_name),
+        "name this device in Syncthing",
+    )
     _require_syncthing(writer.add_device(fleet_id), "add the fleet device")
     _require_syncthing(writer.mark_introducer(fleet_id), "mark the fleet device as introducer")
     local_id = setup.local_id or setup.record.device_id
@@ -1187,7 +1198,7 @@ def init(new_fleet: bool = False) -> str | None:
             )
         if needs_pairing:
             assert fleet_id is not None
-            accepted_share = _managed_join(setup, full_path, fleet_id)
+            accepted_share = _managed_join(setup, full_path, fleet_id, device_name)
             folder = _classify_folder(full_path)
             if folder.error is not None:
                 _unreadable_folder(full_path, folder.error, join_saved=True)
@@ -1245,7 +1256,7 @@ def init(new_fleet: bool = False) -> str | None:
     passphrase = _prompt_passphrase(new_fleet)
     if new_fleet:
         if setup.record is not None:
-            _managed_new_fleet_folder(setup, full_path)
+            _managed_new_fleet_folder(setup, full_path, device_name)
         root_salt, argon2_memory_kb, _keycheck_blob = _bootstrap_new_fleet(
             backend, passphrase, full_path
         )
@@ -1385,5 +1396,22 @@ def _publish_syncthing_record_best_effort(
 
 
 def _default_device_name() -> str:
-    """Generate a default device name from hostname."""
+    """Generate a default device name (macOS LocalHostName, else hostname)."""
+    if sys.platform == "darwin":
+        try:
+            proc = subprocess.run(
+                ["scutil", "--get", "LocalHostName"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        else:
+            if proc.returncode == 0 and isinstance(proc.stdout, str):
+                lines = proc.stdout.splitlines()
+                first = lines[0].strip() if lines else ""
+                if first:
+                    return first
     return socket.gethostname()

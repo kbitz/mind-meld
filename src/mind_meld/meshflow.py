@@ -126,6 +126,8 @@ class MeshResult:
     unreadable: list[str] = field(default_factory=list)
     degradations: list[str] = field(default_factory=list)
     unvouched_pending: int | None = None
+    unpublished_names: tuple[str, ...] = ()
+    vouched_ids: frozenset[str] | None = None
     ran: bool = False
     snapshot_taken: bool = False
     published: bool = False
@@ -372,6 +374,26 @@ def _run_inner(
             notice=True,
         )
 
+    if attended and verb == "pull" and recorded_id:
+        result.vouched_ids = frozenset(records.vouched)
+        inventory = records.inventory
+        if inventory is None:
+            # An empty record directory needs no registry read for pairing.
+            # Read it only to name unpublished machines in the pull notice.
+            try:
+                inventory = devices.inventory_devices(backend)
+            except (OSError, StorageError):
+                pass
+        if inventory is not None:
+            published_mm_ids = set(records.by_mm_id).union(
+                records.unreadable, records.newer_format, records.vanished
+            )
+            result.unpublished_names = tuple(
+                _safe_peer_name(entry["device_name"], entry["device_id"])
+                for entry in sorted(inventory.valid, key=lambda entry: entry["device_id"])
+                if entry["device_id"] != own_mm_id and entry["device_id"] not in published_mm_ids
+            )
+
     need_classify = False
     publish_stop = None
     if verb == "push":
@@ -461,8 +483,8 @@ def _run_inner(
         return result
 
     result.snapshot_taken = True
-    result.unvouched_pending = sum(
-        1 for pid in snap.pending_ids if pid != snap.my_id and pid not in other_vouched
+    result.unvouched_pending = len(
+        syncthing.unvouched_pending_ids(snap.pending_ids, other_vouched, own_id=snap.my_id)
     )
 
     if not snap.folder_present:

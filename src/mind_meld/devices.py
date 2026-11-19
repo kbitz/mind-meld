@@ -350,7 +350,7 @@ MAX_SYNCTHING_RECORD_BYTES = 4096
 
 @dataclass
 class FleetSyncthingRecords:
-    """Result of reading ``syncthing/*.enc`` records against the device registry."""
+    """Syncthing records and the registry snapshot used to validate them."""
 
     vouched: dict[str, tuple[str, str]] = field(default_factory=dict)
     by_mm_id: dict[str, str] = field(default_factory=dict)
@@ -359,6 +359,7 @@ class FleetSyncthingRecords:
     unreadable: list[str] = field(default_factory=list)
     vanished: list[str] = field(default_factory=list)
     skipped_unregistered: list[str] = field(default_factory=list)
+    inventory: DeviceInventory | None = field(default=None, repr=False, compare=False)
 
 
 def publish_record(
@@ -409,6 +410,7 @@ def read_fleet_records(
     if not keys:
         return records
     inventory = inventory_devices(backend)
+    records.inventory = inventory
     registered: dict[str, dict[str, Any]] = {d["device_id"]: d for d in inventory.valid}
     best_rank: dict[str, tuple[str, str, str]] = {}
 

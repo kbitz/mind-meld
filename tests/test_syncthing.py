@@ -1362,6 +1362,11 @@ def test_pending_join_message_handles_all_count_shapes():
     assert syncthing.pending_join_message(2) == (
         "Syncthing: 2 devices are asking to join; use the ID each new machine printed."
     )
+    assert syncthing.unvouched_pending_ids(
+        ("ID-A", "ID-B", "ID-OWN"),
+        {"ID-A"},
+        own_id="ID-OWN",
+    ) == ("ID-B",)
 
 
 @pytest.mark.parametrize("suffix", ["\ninvalid", "\rinvalid", "\u2603"])
@@ -1377,14 +1382,15 @@ def test_read_state_malformed_header_returns_config_unreadable_without_requests(
     assert state.state == "config-unreadable"
     assert state.config_dir == fake_syncthing.config_dir
     assert state.pending_device_count is None
+    assert state.pending_device_ids == ()
     assert fake_syncthing.requests == []
 
 
 def test_read_state_pending_device_count_gated_by_managed_record(fake_syncthing):
     hostile_name = "peer-[red]markup[/red]-\x1b]52;c;ZHVtbXk=\x07-\x1b[2J"
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {
-        fake_syncthing.peer_id: {"name": hostile_name, "address": "192.0.2.10:22000"},
         fake_syncthing.peer2_id: {"name": "linux-b"},
+        fake_syncthing.peer_id: {"name": hostile_name, "address": "192.0.2.10:22000"},
         fake_syncthing.my_id: {"name": "mac-a"},
         "not-a-device-id": {"name": "ignored"},
         "PEERDDD-DDDDDDD-DDDDDDD-DDDDDDD-DDDDDDD-DDDDDDD-DDDDDDD-DDDDDDD": "not-a-dict",
@@ -1396,6 +1402,7 @@ def test_read_state_pending_device_count_gated_by_managed_record(fake_syncthing)
     )
     assert state_default.state == "ok"
     assert state_default.pending_device_count is None
+    assert state_default.pending_device_ids == ()
     assert [req[1] for req in fake_syncthing.requests] == [
         "/rest/system/status",
         "/rest/system/connections",
@@ -1418,6 +1425,7 @@ def test_read_state_pending_device_count_gated_by_managed_record(fake_syncthing)
         )
         assert state_unmatched.state == "ok"
         assert state_unmatched.pending_device_count is None
+        assert state_unmatched.pending_device_ids == ()
         assert "/rest/cluster/pending/devices" not in [req[1] for req in fake_syncthing.requests]
 
     # 3. Matching ManagedRecord reads 2, 1, and 0 pending devices and keeps repr free of IDs/names
@@ -1430,6 +1438,9 @@ def test_read_state_pending_device_count_gated_by_managed_record(fake_syncthing)
     )
     assert state_two.state == "ok"
     assert state_two.pending_device_count == 2
+    assert state_two.pending_device_ids == tuple(
+        sorted((fake_syncthing.peer_id, fake_syncthing.peer2_id))
+    )
     assert [req[0] for req in fake_syncthing.requests] == ["GET"] * 6
     assert fake_syncthing.requests[-1][1] == "/rest/cluster/pending/devices"
     assert fake_syncthing.peer_id not in repr(state_two)
@@ -1447,6 +1458,7 @@ def test_read_state_pending_device_count_gated_by_managed_record(fake_syncthing)
     )
     assert state_one.state == "ok"
     assert state_one.pending_device_count == 1
+    assert state_one.pending_device_ids == (fake_syncthing.peer_id,)
     assert fake_syncthing.peer_id not in repr(state_one)
     assert hostile_name not in repr(state_one)
 
@@ -1458,6 +1470,7 @@ def test_read_state_pending_device_count_gated_by_managed_record(fake_syncthing)
     )
     assert state_zero.state == "ok"
     assert state_zero.pending_device_count == 0
+    assert state_zero.pending_device_ids == ()
 
 
 def test_read_state_pending_device_failures_do_not_degrade_syncthing_state(fake_syncthing):
@@ -1472,6 +1485,7 @@ def test_read_state_pending_device_failures_do_not_degrade_syncthing_state(fake_
         assert state.state == "ok"
         assert state.cause is None
         assert state.pending_device_count is None
+        assert state.pending_device_ids == ()
         assert state.folder_id == "mind-meld"
         assert state.folder_state == "idle"
         assert state.connected_peers == 2
@@ -1497,5 +1511,6 @@ def test_read_state_pending_device_failures_do_not_degrade_syncthing_state(fake_
     assert state_timeout.state == "ok"
     assert state_timeout.cause is None
     assert state_timeout.pending_device_count is None
+    assert state_timeout.pending_device_ids == ()
     assert state_timeout.folder_id == "mind-meld"
     assert state_timeout.folder_state == "idle"
