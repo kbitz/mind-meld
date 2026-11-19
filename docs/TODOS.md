@@ -44,6 +44,56 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Help covers the init join flow
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Pin the start-or-join choice, saved-answer resume, approval wait and retry text in the real help output.
+- **Hypothesis (untested):** Extend the existing init help test. Its current assertions cover the flag and the key-header wait.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/cli.py:init`
+- **Evidence:** Track 151A coverage audit; review of existing assertions showed no defect.
+- **Context:** Filed by /review-and-prep for Track 151A at `be00305`. Revisit when a Track touches these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Declining every source stops a managed join before pairing
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The new join path refuses an empty source selection before writing answers or starting setup.
+- **Hypothesis (untested):** Drive a managed join with an available offer and decline every source. Assert no Syncthing writes and no join record.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/initflow.py:init (source selection)`
+- **Evidence:** Track 151A coverage audit; review of existing assertions showed no defect.
+- **Context:** Filed by /review-and-prep for Track 151A at `be00305`. Revisit when a Track touches these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Recheck the storage folder before the first acceptance attempt
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The existing regression test covers a file that arrives during a poll delay.
+- **Hypothesis (untested):** Have the stand-in create a local file just before the first offer can be accepted and verify the folder is not shared.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/initflow.py:_managed_join`
+- **Evidence:** Track 151A coverage audit; review of existing assertions showed no defect.
+- **Context:** Filed by /review-and-prep for Track 151A at `be00305`. Revisit when a Track touches these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Init waits clear terminal progress before reporting a stop
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The current wait tests assert final output in non-terminal mode.
+- **Hypothesis (untested):** Exercise both waits in the terminal console fixture and verify the transient display exits before the final outcome.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/initflow.py:_managed_join and _wait_for_header`
+- **Evidence:** Track 151A coverage audit; review of existing assertions showed no defect.
+- **Context:** Filed by /review-and-prep for Track 151A at `be00305`. Revisit when a Track touches these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/cli.py|src/mind_meld/initflow.py|tests/test_integration.py] Test gap: Closed stdin after saving join answers gives the resume remedy
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The terminal recovery message mentions resuming saved answers.
+- **Hypothesis (untested):** Run the real CLI until EOF at the passphrase prompt and then resume with the saved record.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/cli.py:_init_needs_terminal`
+- **Evidence:** Track 151A coverage audit; review of existing assertions showed no defect.
+- **Context:** Filed by /review-and-prep for Track 151A at `be00305`. Revisit when a Track touches these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-18 (SPEC O2 amended: one-run join and one-approval mesh; Track 150A recorded)
