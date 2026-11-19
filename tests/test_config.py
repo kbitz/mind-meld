@@ -3174,3 +3174,198 @@ class TestSyncthingRecord118A:
             config_module.save_syncthing_record(self.VALID_ID)
         assert calls == []
         assert not root.exists()
+
+
+class TestJoinRecord151A:
+    """Track 151A: saved join answers in join.toml."""
+
+    VALID_ID = "AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA"
+
+    def test_record_path_follows_patched_config_path_and_absent_returns_none(
+        self, tmp_path, monkeypatch
+    ):
+        from mind_meld import config as config_module
+
+        custom_cfg = tmp_path / "custom-dir" / "config.toml"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", custom_cfg)
+        assert config_module.join_record_path() == custom_cfg.parent / "join.toml"
+        assert config_module.load_join_record() is None
+
+    def test_round_trip_with_and_without_fleet_device_id_writes_0600_and_ignores_extra_keys(
+        self, tmp_path, monkeypatch
+    ):
+        import stat
+        import tomllib
+
+        from mind_meld import config as config_module
+
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "cfg" / "config.toml")
+        rec_path = config_module.join_record_path()
+
+        managed = config_module.JoinRecord(
+            storage_path="~/Sync/mind-meld",
+            fleet_device_id=self.VALID_ID,
+            device_name="Mac B",
+            sources=("claude", "gstack"),
+        )
+        config_module.save_join_record(managed)
+        assert rec_path.is_file()
+        assert stat.S_IMODE(rec_path.stat().st_mode) == 0o600
+        assert config_module.load_join_record() == managed
+
+        owner_managed = config_module.JoinRecord(
+            storage_path="~/Sync/mind-meld",
+            fleet_device_id=None,
+            device_name="Mac B",
+            sources=("claude",),
+        )
+        config_module.save_join_record(owner_managed)
+        on_disk = tomllib.loads(rec_path.read_text(encoding="utf-8"))
+        assert "fleet_device_id" not in on_disk["join"]
+        assert set(on_disk["join"]) == {"storage_path", "device_name", "sources"}
+        assert config_module.load_join_record() == owner_managed
+
+        # Extra keys are ignored on load.
+        rec_path.write_text(
+            rec_path.read_text(encoding="utf-8") + 'extra_note = "ignored"\n',
+            encoding="utf-8",
+        )
+        assert config_module.load_join_record() == owner_managed
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            b"\xff\xfe",
+            b"[join\nbroken",
+            b'join = "not-a-table"\n',
+            b"[other]\nx = 1\n",
+            b'[join]\ndevice_name = "Mac B"\nsources = ["claude"]\n',
+            b'[join]\nstorage_path = ""\ndevice_name = "Mac B"\nsources = ["claude"]\n',
+            b'[join]\nstorage_path = "   "\ndevice_name = "Mac B"\nsources = ["claude"]\n',
+            b'[join]\nstorage_path = 123\ndevice_name = "Mac B"\nsources = ["claude"]\n',
+            (
+                b'[join]\nstorage_path = "~/Sync/mind-meld"\n'
+                b'fleet_device_id = "bad-id"\ndevice_name = "Mac B"\nsources = ["claude"]\n'
+            ),
+            (
+                b'[join]\nstorage_path = "~/Sync/mind-meld"\n'
+                b'fleet_device_id = 42\ndevice_name = "Mac B"\nsources = ["claude"]\n'
+            ),
+            b'[join]\nstorage_path = "~/Sync/mind-meld"\nsources = ["claude"]\n',
+            b'[join]\nstorage_path = "~/Sync/mind-meld"\ndevice_name = ""\nsources = ["claude"]\n',
+            b'[join]\nstorage_path = "~/Sync/mind-meld"\ndevice_name = 99\nsources = ["claude"]\n',
+            b'[join]\nstorage_path = "~/Sync/mind-meld"\ndevice_name = "Mac B"\n',
+            (
+                b'[join]\nstorage_path = "~/Sync/mind-meld"\n'
+                b'device_name = "Mac B"\nsources = "claude"\n'
+            ),
+            b'[join]\nstorage_path = "~/Sync/mind-meld"\ndevice_name = "Mac B"\nsources = []\n',
+            b'[join]\nstorage_path = "~/Sync/mind-meld"\ndevice_name = "Mac B"\nsources = [""]\n',
+            b'[join]\nstorage_path = "~/Sync/mind-meld"\ndevice_name = "Mac B"\nsources = [123]\n',
+            (
+                b'[join]\nstorage_path = "~/Sync/mind-meld"\n'
+                b'device_name = "Mac B"\nsources = ["unknown-src"]\n'
+            ),
+            (
+                b'[join]\nstorage_path = "~/Sync/mind-meld"\n'
+                b'device_name = "Mac B"\nsources = ["mm-events"]\n'
+            ),
+        ],
+    )
+    def test_invalid_record_raises_config_error_naming_path(self, tmp_path, monkeypatch, raw):
+        from mind_meld import config as config_module
+
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "config.toml")
+        rec_path = config_module.join_record_path()
+        rec_path.write_bytes(raw)
+        with pytest.raises(ConfigError) as exc_info:
+            config_module.load_join_record()
+        assert f"config: {rec_path} is not a valid join record (" in str(exc_info.value)
+
+    def test_unreadable_record_raises_config_error(self, tmp_path, monkeypatch):
+        from mind_meld import config as config_module
+
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "config.toml")
+        rec_path = config_module.join_record_path()
+        rec_path.mkdir()
+        with pytest.raises(ConfigError) as exc_info:
+            config_module.load_join_record()
+        assert f"config: {rec_path} is not a valid join record (" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "bad_kwargs",
+        [
+            {"storage_path": ""},
+            {"storage_path": "  "},
+            {"fleet_device_id": "not-a-device-id"},
+            {"device_name": ""},
+            {"device_name": "  "},
+            {"sources": ()},
+            {"sources": ("",)},
+            {"sources": ("unknown-src",)},
+            {"sources": ("mm-events",)},
+        ],
+    )
+    def test_save_refuses_invalid_record_before_writing_anything(
+        self, tmp_path, monkeypatch, bad_kwargs
+    ):
+        from mind_meld import config as config_module
+
+        cfg_dir = tmp_path / "uncreated"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_dir / "config.toml")
+        base = {
+            "storage_path": "~/Sync/mind-meld",
+            "fleet_device_id": self.VALID_ID,
+            "device_name": "Mac B",
+            "sources": ("claude",),
+        }
+        base.update(bad_kwargs)
+        record = config_module.JoinRecord(**base)  # type: ignore[arg-type]
+        with pytest.raises(ConfigError):
+            config_module.save_join_record(record)
+        assert not cfg_dir.exists()
+
+    def test_delete_missing_and_existing_record(self, tmp_path, monkeypatch):
+        from mind_meld import config as config_module
+
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "config.toml")
+        config_module.delete_join_record()
+        assert not config_module.join_record_path().exists()
+
+        config_module.save_join_record(
+            config_module.JoinRecord(
+                storage_path="~/Sync/mind-meld",
+                fleet_device_id=None,
+                device_name="Mac B",
+                sources=("claude",),
+            )
+        )
+        assert config_module.join_record_path().is_file()
+        config_module.delete_join_record()
+        assert not config_module.join_record_path().exists()
+
+    def test_save_and_delete_refuse_protected_root(
+        self, synthetic_account_home, monkeypatch, forbid_fs_mutations
+    ):
+        from mind_meld import config as config_module
+        from mind_meld import fsutil
+
+        root = synthetic_account_home / ".config/mind-meld"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", root / "config.toml")
+        destination = config_module.join_record_path()
+        assert destination == root / "join.toml"
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            fsutil.refuse_real_state_write_under_pytest(destination)
+        record = config_module.JoinRecord(
+            storage_path="~/Sync/mind-meld",
+            fleet_device_id=self.VALID_ID,
+            device_name="Mac B",
+            sources=("claude",),
+        )
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            config_module.save_join_record(record)
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            config_module.delete_join_record()
+        assert calls == []
+        assert not root.exists()

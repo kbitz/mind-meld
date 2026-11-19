@@ -315,13 +315,22 @@ fingerprint and refuses on mismatch with an actionable error.
   `root_salt` + keycheck, and writes `mm-crypto-init` atomically (via `os.link`
   EEXIST) into an empty folder, after writing `.stignore`. It refuses any folder
   that holds anything beyond `.stfolder`, `.stignore`, `.stversions` and `.DS_Store`.
-- Every other machine: plain `mm init` single-prompts, fetches `mm-crypto-init`,
-  decrypts keycheck to verify the passphrase matches the first machine's, then
-  registers the device, saves config and pulls. With no `mm-crypto-init` in the
-  folder it stops and writes nothing (no folder, config, device entry, keyring
-  item, key header or `.stignore`); wait for the sync tool to deliver it and run
-  `mm init` again. Wrong passphrase aborts cleanly with no local state written
-  (no config, no device registration, no keyring write).
+- Every other machine: plain `mm init` offers to resume any saved join answers
+  (`~/.config/mind-meld/join.toml`), or asks whether to start or join a fleet,
+  prompts for the storage path, the fleet machine's Syncthing device ID (when
+  managed and pairing is needed), the device name and the sources first, saves
+  those answers in `join.toml` (never the passphrase), pairs and waits up to 10
+  minutes for the fleet machine's approval, accepts the folder offer and waits up
+  to 2 minutes for `mm-crypto-init`, then single-prompts for the passphrase,
+  decrypts keycheck to verify it matches the first machine's, writes `.stignore`
+  (when managed), registers the device, saves `config.toml`, deletes
+  `join.toml` and pulls. With no `mm-crypto-init` after the wait (or when stopped
+  during the approval or header wait), it writes only the saved join answers in
+  `join.toml` and, on a managed machine, Syncthing pairing (`syncthing.toml` and
+  the paired device/folder setup) — no Mind Meld storage folder, `config.toml`,
+  device entry, keyring item, key header or `.stignore`. Wrong passphrase aborts
+  cleanly with no `config.toml`, device registration or keyring write, keeping
+  `join.toml` so the rerun can retry without re-entering the join answers.
 - Derived key cached in the OS keyring via `keyring` library (macOS Keychain)
 - **Headless fallback:** if no keyring is available, fall back to `MINDMELD_PASSPHRASE` environment variable
 - **Single function:** `crypto.get_passphrase()` encapsulates the full fallback chain (keyring → env var → prompt). All commands call this — no duplication.
@@ -451,14 +460,15 @@ receipt or proof that another Mac has received a row. See
 
 ### `mm init`
 
-1. Detect if already initialized. If config.toml exists, ask to overwrite (under `--new-fleet` the prompt names the current `storage.path` and `root_salt_fp`).
-2. Prompt for the storage folder path (default `~/Sync/mind-meld`, the root of a Syncthing folder). Read the folder; create nothing yet.
-3. Plain `mm init`: fetch `mm-crypto-init`. If it is missing, stop with exit 1 and write nothing. If it is corrupt or newer, refuse. `--new-fleet`: the folder must be absent or hold only `.stfolder`, `.stignore`, `.stversions` and `.DS_Store`; anything else refuses.
-4. Generate a short device ID and prompt for the device name.
-5. Prompt for the encryption passphrase (twice under `--new-fleet`).
-6. `--new-fleet`: write `.stignore`, then create `mm-crypto-init`. Plain `mm init`: verify the passphrase against it.
-7. Prompt for sources. Register the device in storage, then write `config.toml`, then store the passphrase in the OS keyring (or instruct to set `MINDMELD_PASSPHRASE` if no keyring).
-8. Plain `mm init` ends by pulling with the passphrase it just verified; `--new-fleet` does not pull.
+1. Detect if already initialized. If `config.toml` exists, ask to overwrite (under `--new-fleet` the prompt names the current `storage.path` and `root_salt_fp`). Check Syncthing's configuration (`_check_syncthing`).
+2. Without `--new-fleet`, load `~/.config/mind-meld/join.toml` if present: print the saved answers and ask `Continue joining? [Y/n]` (`y` resumes without asking them again; `n` deletes `join.toml` and starts over). Without a resumed record and without `--new-fleet`, ask `Start a new fleet or join an existing one? (new/join)` (default `join`; `new` takes the `--new-fleet` path).
+3. Prompt for the storage folder path (or take it from the resumed record; default `~/Sync/mind-meld`, the root of a Syncthing folder). Read the folder; create nothing yet. Under `--new-fleet`, the folder must be absent or hold only `.stfolder`, `.stignore`, `.stversions` and `.DS_Store`; anything else refuses.
+4. Joining (`not new_fleet`): on a managed Syncthing configuration where the exact `mind-meld` folder is not yet configured, take the fleet machine's Syncthing device ID from the resumed record or prompt for and validate it. Take the device name and sources from the resumed record or prompt for them (refusing if no user-facing sources are enabled). When pairing is needed, verify the target folder is empty or holds only Syncthing bookkeeping. When not resuming, save the join answers in `~/.config/mind-meld/join.toml` (never the passphrase). When pairing is needed, write `syncthing.toml`, add the fleet device and mark it introducer, print this machine's Syncthing device ID and the copyable `mm devices approve <id>` line, remove an unshared empty stock Default Folder when nested inside `~/Sync`, poll up to 10 minutes (`APPROVAL_WAIT_SECONDS = 600`, `APPROVAL_POLL_SECONDS = 2`) for the folder offer (exiting 1 with an `Init: waiting for ... Run: mm init` outcome on timeout or Ctrl-C), and accept the folder offer.
+5. Fetch `mm-crypto-init`. On a managed join with an accepted share where `mm-crypto-init` is missing, wait up to 2 minutes (`HEADER_WAIT_SECONDS = 120`, `HEADER_POLL_SECONDS = 1`); a timeout (with only bookkeeping or in-flight files) or Ctrl-C exits 1 with an `Init: waiting for ... Run: mm init` outcome, writing no device entry, `config.toml`, keyring item, key header or `.stignore`. Any other missing-header join stops with exit 1. If `mm-crypto-init` is corrupt or newer, refuse. Under `--new-fleet`, refuse if a header is already present.
+6. Joining: run the re-init orphan guard (`_init_storage_guard`) when this machine already had a configured device ID. Generate a unique short device ID. (Under `--new-fleet`, prompt for the device name here.)
+7. Prompt for the encryption passphrase (twice under `--new-fleet`). Under `--new-fleet`, set up the managed Syncthing folder if applicable, write `.stignore`, create `mm-crypto-init`, and prompt for sources. Joining: verify the passphrase against `mm-crypto-init` and write `.stignore` when managed.
+8. Register the device in storage, write `config.toml`, store the passphrase in the OS keyring (or instruct to set `MINDMELD_PASSPHRASE` if no keyring), and delete `join.toml`.
+9. Plain `mm init` (joining) ends by pulling with the passphrase it just verified; `--new-fleet` (and an interactive `new` answer) returns `None` and does not pull.
 
 ### `mm push`
 

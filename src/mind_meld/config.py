@@ -1416,6 +1416,153 @@ def load_syncthing_record() -> str | None:
     return device_id
 
 
+@dataclass(frozen=True)
+class JoinRecord:
+    """Saved plain-`mm init` join answers for resuming an interrupted join."""
+
+    storage_path: str
+    fleet_device_id: str | None
+    device_name: str
+    sources: tuple[str, ...]
+
+
+def join_record_path() -> Path:
+    """Return the saved join record path, derived from ``CONFIG_PATH`` at call time."""
+    return CONFIG_PATH.parent / "join.toml"
+
+
+def _valid_join_source_names() -> frozenset[str]:
+    return frozenset(
+        s["name"] for s in DEFAULT_SOURCES if s["name"] not in MM_INTERNAL_SOURCE_NAMES
+    )
+
+
+def save_join_record(record: JoinRecord) -> None:
+    """Write ``join.toml`` recording the user's join answers (never the passphrase)."""
+    if not isinstance(record.storage_path, str) or not record.storage_path.strip():
+        raise ConfigError("config: join.storage_path must be a non-empty string.")
+    if record.fleet_device_id is not None and not syncthing.is_device_id(record.fleet_device_id):
+        raise ConfigError("config: join.fleet_device_id is not a canonical Syncthing device ID.")
+    if not isinstance(record.device_name, str) or not record.device_name.strip():
+        raise ConfigError("config: join.device_name must be a non-empty string.")
+    if not isinstance(record.sources, (tuple, list)) or not record.sources:
+        raise ConfigError("config: join.sources must be a non-empty list of source names.")
+    valid_sources = _valid_join_source_names()
+    for src in record.sources:
+        if not isinstance(src, str) or not src.strip():
+            raise ConfigError("config: join.sources entries must be non-empty strings.")
+        if src in MM_INTERNAL_SOURCE_NAMES:
+            raise ConfigError(
+                f"config: join.sources cannot include internal source '{safe_terminal_str(src)}'."
+            )
+        if src not in valid_sources:
+            raise ConfigError(f"config: unknown source '{safe_terminal_str(src)}' in join.sources.")
+    join_table: dict[str, Any] = {"storage_path": record.storage_path}
+    if record.fleet_device_id is not None:
+        join_table["fleet_device_id"] = record.fleet_device_id
+    join_table["device_name"] = record.device_name
+    join_table["sources"] = list(record.sources)
+    save_config({"join": join_table}, join_record_path())
+
+
+def load_join_record() -> JoinRecord | None:
+    """Read ``JoinRecord`` from ``join.toml``, or return ``None`` when absent."""
+    record_path = join_record_path()
+    try:
+        raw_bytes = record_path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid join record "
+            f"({os_error_cause(e)})."
+        ) from e
+    try:
+        parsed = tomllib.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid join record "
+            f"(could not parse TOML: {safe_terminal_str(e)})."
+        ) from e
+    join_table = parsed.get("join") if isinstance(parsed, dict) else None
+    if not isinstance(join_table, dict):
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid join record "
+            "(missing [join] table)."
+        )
+    if "storage_path" not in join_table:
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid join record "
+            "(missing join.storage_path)."
+        )
+    storage_path = join_table.get("storage_path")
+    if not isinstance(storage_path, str) or not storage_path.strip():
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid join record "
+            "(join.storage_path must be a non-empty string)."
+        )
+    fleet_device_id = join_table.get("fleet_device_id")
+    if fleet_device_id is not None and not syncthing.is_device_id(fleet_device_id):
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid join record "
+            "(join.fleet_device_id is not a canonical Syncthing device ID)."
+        )
+    if "device_name" not in join_table:
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid join record "
+            "(missing join.device_name)."
+        )
+    device_name = join_table.get("device_name")
+    if not isinstance(device_name, str) or not device_name.strip():
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid join record "
+            "(join.device_name must be a non-empty string)."
+        )
+    if "sources" not in join_table:
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid join record "
+            "(missing join.sources)."
+        )
+    raw_sources = join_table.get("sources")
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise ConfigError(
+            f"config: {safe_terminal_str(record_path)} is not a valid join record "
+            "(join.sources must be a non-empty list of source names)."
+        )
+    valid_sources = _valid_join_source_names()
+    sources: list[str] = []
+    for item in raw_sources:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(
+                f"config: {safe_terminal_str(record_path)} is not a valid join record "
+                "(join.sources entries must be non-empty strings)."
+            )
+        if item in MM_INTERNAL_SOURCE_NAMES:
+            raise ConfigError(
+                f"config: {safe_terminal_str(record_path)} is not a valid join record "
+                f"(join.sources cannot include internal source '{safe_terminal_str(item)}')."
+            )
+        if item not in valid_sources:
+            raise ConfigError(
+                f"config: {safe_terminal_str(record_path)} is not a valid join record "
+                f"(unknown source '{safe_terminal_str(item)}' in join.sources)."
+            )
+        sources.append(item)
+    return JoinRecord(
+        storage_path=storage_path,
+        fleet_device_id=fleet_device_id,
+        device_name=device_name,
+        sources=tuple(sources),
+    )
+
+
+def delete_join_record() -> None:
+    """Remove ``join.toml`` if present."""
+    path = join_record_path()
+    fsutil.refuse_real_state_write_under_pytest(path)
+    path.unlink(missing_ok=True)
+
+
 def patch_config_on_disk(updates: dict[str, dict[str, Any]], path: Path | None = None) -> None:
     """Re-read TOML from disk, shallow-merge `updates` per field within each
     section, save.

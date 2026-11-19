@@ -5522,9 +5522,9 @@ class TestInitFlow:
         # Use reduced memory_kb for test speed; bootstrap writes it into the blob.
         bootstrap_crypto_init(backend, "pw-shared", argon2_memory_kb=MEMORY_KB)
 
-        # Second-device init: only 1 passphrase prompt (single, no confirm),
-        # then per-source prompts (claude Y, all others n).
-        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
+        # Second-device init: start-or-join, storage, device name, per-source
+        # prompts (claude Y, all others n), then 1 passphrase prompt.
+        stdin = f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\npw-shared\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "Verified passphrase against existing mm-crypto-init" in result.output
@@ -5567,13 +5567,13 @@ class TestInitReInitGuard:
         self._setup(tmp_path, monkeypatch)
         storage, _backend = self._populated(tmp_path)
         first = runner.invoke(
-            app, ["init"], input=f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
+            app, ["init"], input=f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\npw-shared\n"
         )
         assert first.exit_code == 0, first.output
 
-        # Inputs: overwrite confirm, storage path, orphan-confirm y, device
-        # name, passphrase, per-source.
-        stdin = f"y\n{storage}\ny\nMac C\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
+        # Inputs: overwrite confirm, start-or-join, storage path, device name,
+        # per-source, orphan-confirm y, passphrase.
+        stdin = f"y\njoin\n{storage}\nMac C\nY\nn\nn\nn\nn\nn\nn\ny\npw-shared\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "orphaning existing device" in result.output
@@ -5594,7 +5594,9 @@ class TestInitReInitGuard:
 
         refused = runner.invoke(app, ["init", "--new-fleet"], input=f"{storage}\n")
         assert refused.exit_code == 1, refused.output
-        stopped = runner.invoke(app, ["init"], input=f"{storage}\n")
+        stopped = runner.invoke(
+            app, ["init"], input=f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\n"
+        )
         assert stopped.exit_code == 1, stopped.output
         assert "holds fleet files" in " ".join(stopped.output.split())
         assert not backend.exists("mm-crypto-init")
@@ -5658,7 +5660,7 @@ class TestInitJoinPull89A:
             raise AssertionError("the join's pull asked for the passphrase again")
 
         monkeypatch.setattr(core, "get_passphrase", no_prompt)
-        result = runner.invoke(app, ["init"], input=f"{storage}\nMac B\n{PASSPHRASE}\n")
+        result = runner.invoke(app, ["init"], input=f"join\n{storage}\nMac B\n{PASSPHRASE}\n")
         assert result.exit_code == 0, result.output
         assert asked == []
         rel = "projects/-Users-user-myapp/memory/user_role.md"
@@ -5672,7 +5674,7 @@ class TestInitJoinPull89A:
     def test_a_stale_keyring_entry_does_not_fail_the_join(self, tmp_path, monkeypatch):
         storage, _claude_a, claude_b, _config_b, _backend = self._fleet(tmp_path, monkeypatch)
         monkeypatch.setattr(core, "get_passphrase", lambda *a, **kw: "stale-wrong-passphrase")
-        result = runner.invoke(app, ["init"], input=f"{storage}\nMac B\n{PASSPHRASE}\n")
+        result = runner.invoke(app, ["init"], input=f"join\n{storage}\nMac B\n{PASSPHRASE}\n")
         assert result.exit_code == 0, result.output
         assert (claude_b / "projects/-Users-user-myapp/memory/user_role.md").exists()
 
@@ -5685,7 +5687,7 @@ class TestInitJoinPull89A:
             raise MindMeldError("storage went away")
 
         monkeypatch.setattr(cli_module.pullflow, "_pull_core", broken)
-        result = runner.invoke(app, ["init"], input=f"{storage}\nMac B\n{PASSPHRASE}\n")
+        result = runner.invoke(app, ["init"], input=f"join\n{storage}\nMac B\n{PASSPHRASE}\n")
         assert result.exit_code == 1, result.output
         assert config_b.exists()
         assert len(backend.list_keys("devices/")) == 2
@@ -5698,7 +5700,7 @@ class TestInitJoinPull89A:
         monkeypatch.setattr(
             cli_module, "_attended_pull", lambda **kw: pytest.fail("pulled after a bad passphrase")
         )
-        result = runner.invoke(app, ["init"], input=f"{storage}\nMac B\nwrong\n")
+        result = runner.invoke(app, ["init"], input=f"join\n{storage}\nMac B\nwrong\n")
         assert result.exit_code == 1, result.output
         assert not config_b.exists()
         assert len(backend.list_keys("devices/")) == 1
@@ -5720,7 +5722,7 @@ class TestInitJoinPull89A:
     def test_pull_command_still_prompts_for_its_own_passphrase(self, tmp_path, monkeypatch):
         """The shared helper only skips the lookup when init hands it a passphrase."""
         storage, _claude_a, _claude_b, _config_b, _backend = self._fleet(tmp_path, monkeypatch)
-        joined = runner.invoke(app, ["init"], input=f"{storage}\nMac B\n{PASSPHRASE}\n")
+        joined = runner.invoke(app, ["init"], input=f"join\n{storage}\nMac B\n{PASSPHRASE}\n")
         assert joined.exit_code == 0, joined.output
         seen = []
 
@@ -5797,7 +5799,7 @@ class TestInitTerminalAndHelp89A:
         assert DEFAULT_STORAGE_PATH == "~/Sync/mind-meld"
         expected = tmp_path / "Sync" / "mind-meld"
         # Accepting the prompt default names the expanded path and creates nothing.
-        result = runner.invoke(app, ["init"], input="\n")
+        result = runner.invoke(app, ["init"], input="\n\n\nY\nn\nn\nn\nn\nn\nn\n")
         assert result.exit_code == 1, result.output
         assert str(expected).replace(" ", "") in "".join(result.output.split())
         assert not expected.exists()
@@ -12093,7 +12095,12 @@ class TestNewerStorage66A:
         else:
             (storage / "mm-crypto-init").write_bytes(b"\x03")
         args = ["init", "--new-fleet"] if race else ["init"]
-        result = runner.invoke(app, args, input=f"{storage}\nMac A\npw\npw\n")
+        stdin = (
+            f"{storage}\nMac A\npw\npw\n"
+            if race
+            else f"join\n{storage}\nMac A\nY\nn\nn\nn\nn\nn\nn\n"
+        )
+        result = runner.invoke(app, args, input=stdin)
         assert result.exit_code == 1, result.output
         assert upgrade.INSTALL_CMD in " ".join(result.output.split())
         assert "delete" not in result.output.lower()
@@ -12551,7 +12558,11 @@ class TestCryptoInspection60A:
         monkeypatch.setattr(
             initflow, "_register_and_save", lambda *a, **kw: pytest.fail("stale init registered")
         )
-        result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\n{PASSPHRASE}\n")
+        result = runner.invoke(
+            app,
+            ["init"],
+            input=f"join\n{storage}\nMac A\nY\nn\nn\nn\nn\nn\nn\n{PASSPHRASE}\n",
+        )
         assert result.exit_code == 1, result.output
         assert "nothing was published" in _preview_text(result)
         assert not cfg.exists()

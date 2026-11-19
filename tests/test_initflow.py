@@ -232,7 +232,8 @@ def test_a_file_at_the_storage_path_is_reported_on_both_flows(env, tmp_path, fla
     _storage, _backend = env
     target = tmp_path / "a-file"
     target.write_bytes(b"x")
-    result, text = _run(f"{target}\n", *flags)
+    stdin = f"{target}\n" if flags else f"join\n{target}\n"
+    result, text = _run(stdin, *flags)
     assert result.exit_code == 1, result.output
     assert "cannot read the storage folder" in text
     assert "Nothing was written" in text
@@ -249,8 +250,9 @@ def test_an_unreadable_folder_is_reported_on_both_flows(env, flags, mode):
     # bypass the scandir error; seam=none; no_claim=Syncthing delivery behavior.
     storage, _backend = env
     storage.chmod(mode)
+    stdin = f"{storage}\n" if flags else f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}"
     try:
-        result, text = _run(f"{storage}\n", *flags)
+        result, text = _run(stdin, *flags)
     finally:
         storage.chmod(0o755)
     assert result.exit_code == 1, result.output
@@ -410,7 +412,7 @@ def test_new_fleet_every_source_declined_is_recoverable_by_plain_init(env):
     assert not config.CONFIG_PATH.exists()
     assert _device_keys(backend) == []
     # The header this machine wrote verifies for plain init with the same passphrase.
-    joined, _text = _run(f"{storage}\nMac A\npw\n{SOURCES_CLAUDE_ONLY}")
+    joined, _text = _run(f"join\n{storage}\nMac A\n{SOURCES_CLAUDE_ONLY}pw\n")
     assert joined.exit_code == 0, joined.output
 
 
@@ -474,7 +476,9 @@ def test_join_verifies_registers_and_hands_over_the_passphrase(env):
     storage, backend = env
     _populate(backend)
     before = (storage / "mm-crypto-init").read_bytes()
-    result, text = _run(f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}", command="capture")
+    result, text = _run(
+        f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n", command="capture"
+    )
     assert result.exit_code == 0, result.output
     assert _joined == [PASSPHRASE]
     assert "Verified passphrase against existing mm-crypto-init" in text
@@ -500,7 +504,7 @@ def test_a_fresh_machine_joining_a_populated_folder_is_not_asked(env):
     storage, backend = env
     _populate(backend)
     # No confirm line in the input: any prompt would consume a wrong answer.
-    result, text = _run(f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}")
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
     assert result.exit_code == 0, result.output
     assert "Proceed?" not in text
 
@@ -508,10 +512,10 @@ def test_a_fresh_machine_joining_a_populated_folder_is_not_asked(env):
 def test_a_configured_machine_declining_re_init_changes_nothing(env):
     storage, backend = env
     _populate(backend)
-    first, _text = _run(f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}")
+    first, _text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
     assert first.exit_code == 0, first.output
     saved = config.CONFIG_PATH.read_bytes()
-    result, text = _run(f"y\n{storage}\nn\n")
+    result, text = _run(f"y\njoin\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}n\n")
     assert result.exit_code == 0, result.output
     assert "orphaning existing device" in text
     assert "Device registration cancelled." in text
@@ -522,7 +526,7 @@ def test_a_configured_machine_declining_re_init_changes_nothing(env):
 def test_populated_folder_join_overwrite_declined(env):
     storage, backend = env
     _populate(backend)
-    first, _text = _run(f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}")
+    first, _text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
     assert first.exit_code == 0, first.output
     result, _text = _run("n\n")
     assert result.exit_code == 0, result.output
@@ -532,7 +536,7 @@ def test_populated_folder_join_overwrite_declined(env):
 def test_populated_folder_wrong_passphrase(env):
     storage, backend = env
     _populate(backend)
-    result, text = _run(f"{storage}\nMac B\nnot-the-passphrase\n")
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}not-the-passphrase\n")
     assert result.exit_code == 1, result.output
     assert "does not match" in text
     assert "another machine" in text
@@ -543,7 +547,7 @@ def test_populated_folder_wrong_passphrase(env):
 def test_a_corrupt_key_header_names_the_folder(env):
     storage, _backend = env
     (storage / "mm-crypto-init").write_bytes(b"garbage")
-    result, text = _run(f"{storage}\n")
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     assert "is corrupt" in text
     assert "never reinitialize" in text
@@ -557,7 +561,7 @@ def test_a_corrupt_key_header_names_the_folder(env):
 def test_plain_init_on_an_absent_folder_stops_and_creates_nothing(env, tmp_path):
     _storage, _backend = env
     target = tmp_path / "not-yet"
-    result, text = _run(f"{target}\n")
+    result, text = _run(f"join\n{target}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     assert "does not exist" in text
     assert "Nothing was written" in text
@@ -570,7 +574,7 @@ def test_plain_init_on_a_bookkeeping_only_folder_reserves_new_fleet(env):
     storage, _backend = env
     (storage / ".stfolder").mkdir()
     before = _tree(storage)
-    result, text = _run(f"{storage}\n")
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     assert "not in" in text and "yet" in text
     assert "Nothing was written" in text
@@ -584,7 +588,7 @@ def test_plain_init_on_a_folder_with_blobs_never_offers_new_fleet(env):
     storage, backend = env
     backend.put(blob_key(PEER, "a" * 64), b"opaque")
     before = _tree(storage)
-    result, text = _run(f"{storage}\n")
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     assert "Aborted." not in text
     assert "holds fleet files" in text
@@ -598,7 +602,7 @@ def test_plain_init_mid_delivery_never_offers_new_fleet(env):
     storage, _backend = env
     (storage / ".syncthing.mm-crypto-init.tmp").write_bytes(b"partial")
     before = _tree(storage)
-    result, text = _run(f"{storage}\n")
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     assert "still receiving files from Syncthing" in text
     assert "--new-fleet" not in text
@@ -608,7 +612,7 @@ def test_plain_init_mid_delivery_never_offers_new_fleet(env):
 def test_plain_init_with_unrelated_files_never_offers_new_fleet(env):
     storage, _backend = env
     (storage / "notes.txt").write_bytes(b"x")
-    result, text = _run(f"{storage}\n")
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     assert "'notes.txt'" in text
     assert "--new-fleet" not in text
@@ -735,7 +739,7 @@ def test_managed_new_fleet_rerun_after_header_failure_does_not_duplicate_folder(
     # Plain init cannot wait for a peer to deliver a header to a local-only
     # folder. It must explain how to resume the interrupted first-machine setup.
     writes = list(fake_syncthing.bodies)
-    joined, joined_text = _run(f"{storage}\n")
+    joined, joined_text = _run(f"join\n{storage}\nMac A\n{SOURCES_CLAUDE_ONLY}")
     assert joined.exit_code == 1, joined.output
     assert "no peer" in joined_text
     assert joined_text.endswith("Run: mm init --new-fleet")
@@ -762,7 +766,7 @@ def test_managed_rerun_changed_path_explains_existing_folder_recovery(
     fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
         "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
     }
-    first, _text = _run(f"{storage}\n{peer_id}\n")
+    first, _text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert first.exit_code == 1
     writes = list(fake_syncthing.bodies)
     other_path = tmp_path / "different-folder"
@@ -770,7 +774,7 @@ def test_managed_rerun_changed_path_explains_existing_folder_recovery(
     result, text = (
         _new_fleet(f"{other_path}\nMac B\npw\npw\n{SOURCES_CLAUDE_ONLY}")
         if new_fleet
-        else _run(f"{other_path}\n{peer_id}\n")
+        else _run(f"n\njoin\n{other_path}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     )
 
     assert result.exit_code == 1, result.output
@@ -799,12 +803,13 @@ def test_managed_join_refuses_populated_new_share_before_any_write(
     }
     before = _tree(storage)
 
-    result, text = _run(f"{storage}\n{peer_id}\n")
+    result, text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
 
     assert result.exit_code == 1, result.output
     assert "Choose an empty storage folder" in text
     assert fake_syncthing.bodies == []
     assert not config.syncthing_record_path().exists()
+    assert not config.join_record_path().exists()
     assert not config.CONFIG_PATH.exists()
     assert _tree(storage) == before
 
@@ -818,7 +823,7 @@ def test_managed_new_fleet_refuses_accepted_share_waiting_for_header(
     fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
         "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
     }
-    joined, _text = _run(f"{storage}\n{peer_id}\n")
+    joined, _text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert joined.exit_code == 1
     before = _tree(storage)
     writes = list(fake_syncthing.bodies)
@@ -857,7 +862,7 @@ def test_managed_setup_state_failure_stops_before_writes(
     result, text = (
         _new_fleet(f"{storage}\nMac B\npw\npw\n{SOURCES_CLAUDE_ONLY}")
         if new_fleet
-        else _run(f"{storage}\n{peer_id}\n")
+        else _run(f"join\n{storage}\n{peer_id}\n")
     )
     assert result.exit_code == 1, result.output
     assert text.endswith("Run: mm diag")
@@ -873,12 +878,20 @@ def test_managed_record_write_failure_stops_before_syncthing_writes(
 ):
     storage, _backend = env
     _, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    config.save_join_record(
+        config.JoinRecord(
+            storage_path=str(storage),
+            fleet_device_id=peer_id,
+            device_name="Mac B",
+            sources=("claude",),
+        )
+    )
 
     def fail_write(*args, **kwargs):
         raise error_type("record publication failed")
 
     monkeypatch.setattr(fsutil, "atomic_write_bytes", fail_write)
-    result, text = _run(f"{storage}\n{peer_id}\n")
+    result, text = _run("y\n")
     assert result.exit_code == 1, result.output
     assert "could not record that mm manages Syncthing" in text
     assert fake_syncthing.bodies == []
@@ -906,9 +919,13 @@ def test_managed_join_rerun_refuses_invalid_or_missing_folder_option(
     fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
         "mind-meld": {"offeredBy": {peer_id: {"receiveEncrypted": False, "remoteEncrypted": False}}}
     }
-    accepted, accepted_text = _run(f"{storage}\n{peer_id}\n")
+    accepted, accepted_text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert accepted.exit_code == 1, accepted.output
-    assert "Syncthing has accepted the fleet folder" in accepted_text
+    assert (
+        "Init: waiting for Syncthing to deliver the fleet's key header "
+        f"(mm-crypto-init) to {storage}; your answers are saved, and no device "
+        "entry, config or key header was written. Run: mm init"
+    ) in accepted_text
 
     # Delivery finishes after the owner changes one option in Syncthing's GUI.
     # Retrying must not enroll this machine with the unsafe folder setup.
@@ -926,7 +943,7 @@ def test_managed_join_rerun_refuses_invalid_or_missing_folder_option(
     before = _tree(storage)
     record_before = config.syncthing_record_path().read_bytes()
 
-    result, text = _run(f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}")
+    result, text = _run("y\n")
 
     assert result.exit_code == 1, result.output
     assert "Syncthing's GUI" in text
@@ -947,13 +964,27 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     storage = stock_root / "mind-meld"
 
     # Run 1: peer has not shared the folder yet -> add device, mark introducer,
-    # remove Default Folder, stop on no-offer with approval command.
-    run1, text1 = _run(f"{storage}\n{peer_id}\n")
+    # remove Default Folder, poll for approval and stop on timeout with saved answers.
+    run1, text1 = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert run1.exit_code == 1, run1.output
-    assert pauses == []
+    assert pauses == [initflow.APPROVAL_POLL_SECONDS] * (
+        initflow.APPROVAL_WAIT_SECONDS // initflow.APPROVAL_POLL_SECONDS
+    )
     assert my_id in text1
     assert f"mm devices approve {my_id}" in text1
+    assert (
+        f"Init: waiting for a fleet machine to approve this one ('mm devices approve {my_id}'); "
+        "your answers are saved, and no device entry, config or key header was written. "
+        "Run: mm init"
+    ) in text1
+    assert text1.endswith("Run: mm init")
     assert config.load_syncthing_record() == my_id
+    assert config.load_join_record() == config.JoinRecord(
+        storage_path=str(storage),
+        fleet_device_id=peer_id,
+        device_name="Mac B",
+        sources=("claude",),
+    )
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
         ("POST", "/rest/config/devices"),
         ("PATCH", f"/rest/config/devices/{peer_id}"),
@@ -966,7 +997,9 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     assert not (storage / "mm-crypto-init").exists()
     assert not (storage / ".stignore").exists()
 
-    # Run 2: peer now offers the folder, but key header has not arrived yet.
+    # Run 2: peer now offers the folder, but key header has not arrived yet ->
+    # resumes from saved answers ("y") without re-prompting.
+    pauses.clear()
     fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
         "mind-meld": {
             "offeredBy": {
@@ -978,12 +1011,17 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
             }
         }
     }
-    run2, text2 = _run(f"{storage}\n{peer_id}\n")
+    run2, text2 = _run("y\n")
     assert run2.exit_code == 1, run2.output
     assert pauses == [1] * 120
+    assert "Saved join answers:" in text2
     assert "Waiting up to 2 minutes for Syncthing to deliver the key header" in text2
-    assert "Syncthing has accepted the fleet folder" in text2
-    assert "Wait for Syncthing to deliver it, then run 'mm init' again." in text2
+    assert (
+        "Init: waiting for Syncthing to deliver the fleet's key header "
+        f"(mm-crypto-init) to {storage}; your answers are saved, and no device "
+        "entry, config or key header was written. Run: mm init"
+    ) in text2
+    assert text2.endswith("Run: mm init")
     assert len(fake_syncthing.bodies) == 4
     post_method, post_path, post_body = fake_syncthing.bodies[3]
     assert (post_method, post_path) == ("POST", "/rest/config/folders")
@@ -1000,14 +1038,15 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     assert not (storage / "mm-crypto-init").exists()
     assert not (storage / ".stignore").exists()
 
-    # Run 3: key header arrives -> no device ID prompt, verifies passphrase,
-    # writes .stignore, registers device, and returns the passphrase.
+    # Run 3: key header arrives -> resumes from saved answers ("y"), verifies
+    # passphrase, writes .stignore, registers device, removes join.toml, and
+    # returns the passphrase.
     pauses.clear()
     storage.mkdir(parents=True, exist_ok=True)
     backend = LocalBackend(storage)
     _populate(backend)
     run3, text3 = _run(
-        f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}",
+        f"y\n{PASSPHRASE}\n",
         command="capture",
     )
     assert run3.exit_code == 0, run3.output
@@ -1016,6 +1055,7 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     assert text3.endswith(JOIN_OUTCOME)
     assert (storage / ".stignore").read_text() == STIGNORE
     assert config.CONFIG_PATH.is_file()
+    assert not config.join_record_path().exists()
     assert len(_device_keys(backend)) == 2
     # Across all three runs: exactly one device POST, one introducer PATCH,
     # one Default Folder DELETE, and one folder POST.
@@ -1050,7 +1090,7 @@ def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
     # Now test plain join on the same pre-existing Syncthing configuration.
     config.CONFIG_PATH.unlink()
     (storage / ".stignore").unlink(missing_ok=True)
-    res_join, text_join = _run(f"{storage}\nMac B\npw\n{SOURCES_CLAUDE_ONLY}")
+    res_join, text_join = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}pw\n")
     assert res_join.exit_code == 0, res_join.output
     assert fake_syncthing.bodies == []
     assert core.SYNCTHING_GUIDE_HEADING in text_join
@@ -1117,7 +1157,7 @@ def test_managed_join_refuses_invalid_device_id_before_any_write(
     stock_root, my_id, _peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
     storage = stock_root / "mind-meld"
     candidate = my_id if pasted == "OWN" else pasted
-    result, text = _run(f"{storage}\n{candidate}\n")
+    result, text = _run(f"join\n{storage}\n{candidate}\n")
     assert result.exit_code == 1, result.output
     assert why in text
     assert "Nothing was written." in text
@@ -1133,7 +1173,7 @@ def test_managed_join_normalizes_lowercase_dashless_valid_id(
     stock_root, _my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
     storage = stock_root / "mind-meld"
     compact_lower = "".join(peer_id.split("-")).lower()
-    result, _text = _run(f"{storage}\n{compact_lower}\n")
+    result, _text = _run(f"join\n{storage}\n{compact_lower}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     method, path, body = fake_syncthing.bodies[0]
     assert (method, path) == ("POST", "/rest/config/devices")
@@ -1192,7 +1232,7 @@ def test_unsupported_gui_address_with_offline_pre_existing_config_continues_with
         assert text.endswith(NEW_FLEET_OUTCOME)
         assert (storage / ".stignore").read_text() == STIGNORE
     else:
-        result, text = _run(f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}")
+        result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
         assert result.exit_code == 0, result.output
         assert text.endswith(JOIN_OUTCOME)
         assert not (storage / ".stignore").exists()
@@ -1263,7 +1303,7 @@ def test_managed_join_writer_failures_stop_with_their_fixing_command(
         expected_message = "Syncthing did not add the fleet device ("
         expected_tail = "Run: mm diag"
 
-    result, text = _run(f"{storage}\n{peer_id}\n")
+    result, text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
 
     assert result.exit_code == 1, result.output
     assert expected_message in text
@@ -1295,7 +1335,7 @@ def test_managed_join_stignore_failure_after_verify_registers_nothing(
         raise OSError(errno.EACCES, os.strerror(errno.EACCES))
 
     monkeypatch.setattr(initflow, "_write_stignore", fail_stignore)
-    result, text = _run(f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}")
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
 
     assert result.exit_code == 1, result.output
     assert "could not write .stignore" in text
@@ -1372,10 +1412,14 @@ def test_stale_record_on_default_syncthing_is_replaced_before_first_write(
         ]
     else:
         before = _tree(storage)
-        result, text = _run(f"{storage}\n{peer_id}\n")
+        result, text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
         assert result.exit_code == 1, result.output
-        assert "the fleet machine has not shared mm's folder" in text
-        assert text.endswith("wait for Syncthing, then run 'mm init' here again.")
+        assert (
+            "Init: waiting for a fleet machine to approve this one "
+            f"('mm devices approve {my_id}'); your answers are saved, and no "
+            "device entry, config or key header was written. Run: mm init"
+        ) in text
+        assert text.endswith("Run: mm init")
         assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
             ("POST", "/rest/config/devices"),
             ("PATCH", f"/rest/config/devices/{peer_id}"),
@@ -1408,7 +1452,7 @@ def test_managed_join_stops_when_default_folder_becomes_occupied_or_shared(
                 ]
 
     fake_syncthing.on_write = make_default_in_use
-    result, text = _run(f"{storage}\n{peer_id}\n")
+    result, text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
 
     assert result.exit_code == 1, result.output
     assert "Syncthing's Default Folder at ~/Sync holds files or is shared" in text
@@ -1453,7 +1497,7 @@ def test_managed_join_waits_and_completes_in_one_run_when_header_arrives(
 
     monkeypatch.setattr(initflow, "_pause", pause_then_deliver)
     result, text = _run(
-        f"{storage}\n{peer_id}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}",
+        f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n",
         command="capture",
     )
     assert result.exit_code == 0, result.output
@@ -1463,6 +1507,7 @@ def test_managed_join_waits_and_completes_in_one_run_when_header_arrives(
     assert _joined == [PASSPHRASE]
     assert (storage / ".stignore").read_text() == STIGNORE
     assert config.CONFIG_PATH.is_file()
+    assert not config.join_record_path().exists()
     assert config.load_syncthing_record() == my_id
     assert len(_device_keys(LocalBackend(storage))) == 2
 
@@ -1470,8 +1515,9 @@ def test_managed_join_waits_and_completes_in_one_run_when_header_arrives(
 def test_managed_join_ctrl_c_during_header_wait_stops_with_nothing_written(
     env, fake_syncthing, tmp_path, monkeypatch, pauses
 ):
-    """Criterion 5 (Track 127A): Ctrl-C during the header wait exits 1 with
-    nothing written to the Mind Meld store or config.toml."""
+    """Criterion 5 (Track 127A) & Criterion 2 (Track 151A): Ctrl-C during the
+    header wait exits 1 with the waiting outcome and nothing written to the
+    Mind Meld store or config.toml."""
     _storage, _backend = env
     stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
     storage = stock_root / "mind-meld"
@@ -1492,17 +1538,18 @@ def test_managed_join_ctrl_c_during_header_wait_stops_with_nothing_written(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(initflow, "_pause", interrupt_on_first_pause)
-    result, text = _run(f"{storage}\n{peer_id}\n")
+    result, text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     assert pauses == [initflow.HEADER_POLL_SECONDS]
     assert "Waiting up to 2 minutes for Syncthing to deliver the key header" in text
-    assert "init: stopped while waiting for the key header." in text
-    assert text.endswith(
-        "No device entry, config.toml or key header was written. "
-        "Syncthing keeps syncing the accepted folder; once it delivers the header, "
-        "run 'mm init' again."
-    )
+    assert (
+        "Init: waiting for Syncthing to deliver the fleet's key header "
+        f"(mm-crypto-init) to {storage}; your answers are saved, and no device "
+        "entry, config or key header was written. Run: mm init"
+    ) in text
+    assert text.endswith("Run: mm init")
     assert config.load_syncthing_record() == my_id
+    assert config.join_record_path().is_file()
     assert not config.CONFIG_PATH.exists()
     assert not storage.exists()
     assert _device_keys(LocalBackend(storage)) == []
@@ -1517,7 +1564,7 @@ def test_no_header_wait_on_local_only_or_owner_managed_or_absent_folders(
     # 1. Owner-managed pre-existing Syncthing config with missing folder -> 0 pauses.
     absent = tmp_path / "absent-store"
     (storage / ".stignore").unlink(missing_ok=True)
-    res_absent, text_absent = _run(f"{absent}\n")
+    res_absent, text_absent = _run(f"join\n{absent}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert res_absent.exit_code == 1, res_absent.output
     assert pauses == []
     assert "Waiting up to 2 minutes" not in text_absent
@@ -1525,7 +1572,7 @@ def test_no_header_wait_on_local_only_or_owner_managed_or_absent_folders(
     assert not config.CONFIG_PATH.exists()
 
     # 2. Owner-managed pre-existing Syncthing config with empty folder -> 0 pauses.
-    res_owner, text_owner = _run(f"{storage}\n")
+    res_owner, text_owner = _run(f"n\njoin\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert res_owner.exit_code == 1, res_owner.output
     assert pauses == []
     assert "Waiting up to 2 minutes" not in text_owner
@@ -1536,7 +1583,7 @@ def test_no_header_wait_on_local_only_or_owner_managed_or_absent_folders(
     managed_storage = stock_root / "mind-meld"
     config.save_syncthing_record(my_id)
     fake_syncthing.set_folder(managed_storage, peers=[], write_stignore=False)
-    res_local, text_local = _run(f"{managed_storage}\n")
+    res_local, text_local = _run(f"n\njoin\n{managed_storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert res_local.exit_code == 1, res_local.output
     assert pauses == []
     assert "Waiting up to 2 minutes" not in text_local
@@ -1559,16 +1606,22 @@ def test_managed_join_rerun_on_already_shared_folder_waits_for_header(
     fake_syncthing.bodies.clear()
 
     # Sub-run A: header never arrives -> full wait, no device-ID prompt, no REST writes.
-    res_timeout, text_timeout = _run(f"{storage}\n")
+    res_timeout, text_timeout = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert res_timeout.exit_code == 1, res_timeout.output
     assert pauses == [1] * 120
     assert "Waiting up to 2 minutes for Syncthing to deliver the key header" in text_timeout
-    assert "Syncthing has accepted the fleet folder" in text_timeout
+    assert (
+        "Init: waiting for Syncthing to deliver the fleet's key header "
+        f"(mm-crypto-init) to {storage}; your answers are saved, and no device "
+        "entry, config or key header was written. Run: mm init"
+    ) in text_timeout
+    assert text_timeout.endswith("Run: mm init")
     assert fake_syncthing.bodies == []
     assert not config.CONFIG_PATH.exists()
     assert not (storage / ".stignore").exists()
 
-    # Sub-run B: header arrives on the 2nd pause -> completes in one run.
+    # Sub-run B: header arrives on the 2nd pause -> resumes from saved answers
+    # and completes in one run.
     pauses.clear()
 
     def pause_then_deliver(seconds: float) -> None:
@@ -1578,7 +1631,7 @@ def test_managed_join_rerun_on_already_shared_folder_waits_for_header(
 
     monkeypatch.setattr(initflow, "_pause", pause_then_deliver)
     res_ok, text_ok = _run(
-        f"{storage}\nMac B\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}",
+        f"y\n{PASSPHRASE}\n",
         command="capture",
     )
     assert res_ok.exit_code == 0, res_ok.output
@@ -1588,6 +1641,7 @@ def test_managed_join_rerun_on_already_shared_folder_waits_for_header(
     assert _joined == [PASSPHRASE]
     assert (storage / ".stignore").read_text() == STIGNORE
     assert config.CONFIG_PATH.is_file()
+    assert not config.join_record_path().exists()
     assert len(_device_keys(LocalBackend(storage))) == 2
 
 
@@ -1640,9 +1694,16 @@ def test_managed_join_poll_stops_immediately_on_corrupt_newer_or_unreadable_head
 
     monkeypatch.setattr(initflow, "_pause", pause_and_plant)
 
-    # No device name, passphrase or source answers in stdin: any prompt after
-    # polling would fail on EOF.
-    result, text = _run(f"{storage}\n{peer_id}\n")
+    config.save_join_record(
+        config.JoinRecord(
+            storage_path=str(storage),
+            fleet_device_id=peer_id,
+            device_name="Mac B",
+            sources=("claude",),
+        )
+    )
+    # Resuming answers only Continue joining?: any prompt after polling would fail on EOF.
+    result, text = _run("y\n")
 
     assert result.exit_code == 1, result.output
     assert pauses == [1]
@@ -1710,7 +1771,7 @@ def test_managed_join_rerun_with_unknown_peer_count_skips_wait_and_prompts(
 
     monkeypatch.setattr(syncthing, "read_state", read_state_unknown_peers)
 
-    result, text = _run(f"{storage}\n")
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
 
     assert result.exit_code == 1, result.output
     assert pauses == []
@@ -1765,7 +1826,7 @@ def test_managed_join_reclassifies_folder_after_header_wait_timeout(
 
     monkeypatch.setattr(initflow, "_pause", pause_and_mutate_at_timeout)
 
-    result, text = _run(f"{storage}\n")
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
 
     assert result.exit_code == 1, result.output
     assert pauses == [1] * 120
@@ -1780,7 +1841,11 @@ def test_managed_join_reclassifies_folder_after_header_wait_timeout(
     fail_classify = False
     _assert_nothing_written(storage, delivered_tree)
     if post_wait_state == "in_flight":
-        assert "still receiving files from Syncthing ('.syncthing.mm-crypto-init.tmp')" in text
+        assert (
+            "Init: waiting for Syncthing to deliver the fleet's key header "
+            f"(mm-crypto-init) to {storage}; your answers are saved, and no "
+            "device entry, config or key header was written. Run: mm init"
+        ) in text
     elif post_wait_state == "fleet":
         assert "holds fleet files ('data') but no key header" in text
     else:
@@ -1821,3 +1886,355 @@ def test_init_skill_link_notice_and_forced_terminal_outcome(env, monkeypatch):
         "and run 'mm push'."
     )
     assert "\x1b" not in outcome_line
+
+
+# ── Track 151A: saved join answers, resume, and approval wait ────────
+
+
+def test_owner_managed_stop_then_resume_without_reprompting(env):
+    storage, backend = env
+    before = _tree(storage)
+
+    # Run 1 on an empty folder stops with no header, leaving join.toml and no config.toml.
+    run1, text1 = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
+    assert run1.exit_code == 1, run1.output
+    assert "the key header (mm-crypto-init) is not in" in text1
+    _assert_nothing_written(storage, before)
+    assert config.load_join_record() == config.JoinRecord(
+        storage_path=str(storage),
+        fleet_device_id=None,
+        device_name="Mac B",
+        sources=("claude",),
+    )
+
+    # After _populate, run 2 answers only "Continue joining?" and the passphrase.
+    _populate(backend)
+    run2, text2 = _run(f"y\n{PASSPHRASE}\n", command="capture")
+    assert run2.exit_code == 0, run2.output
+    assert _joined == [PASSPHRASE]
+    assert (f"Saved join answers: storage {storage}, device name Mac B, sources claude.") in text2
+    assert "fleet machine" not in text2
+    assert "Storage folder path" not in text2
+    assert "Device name" not in text2
+    assert "Sync 'claude'" not in text2
+    assert text2.endswith(JOIN_OUTCOME)
+    assert not config.join_record_path().exists()
+    saved_cfg = tomllib.loads(config.CONFIG_PATH.read_text(encoding="utf-8"))
+    assert saved_cfg["device"]["name"] == "Mac B"
+    assert [s["name"] for s in saved_cfg["sync"]["sources"]] == ["claude", "mm-events"]
+
+
+def test_declining_continue_joining_forgets_answers_and_leaves_syncthing_pairing(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
+):
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+
+    # Run 1: approval timeout saves join.toml and pairs in Syncthing.
+    run1, _text1 = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
+    assert run1.exit_code == 1, run1.output
+    assert config.join_record_path().is_file()
+    assert config.load_syncthing_record() == my_id
+    bodies_after_run1 = list(fake_syncthing.bodies)
+
+    # Run 2: answer "n" to Continue joining? -> deletes join.toml, shows start-or-join,
+    # and sends no new write to Syncthing.
+    pauses.clear()
+    run2, text2 = _run("n\n")
+    assert run2.exit_code == 1, run2.output
+    assert f"fleet machine {peer_id}" in text2
+    assert "Continue joining?" in text2
+    assert "Start a new fleet or join an existing one? (new/join)" in text2
+    assert not config.join_record_path().exists()
+    assert fake_syncthing.bodies == bodies_after_run1
+    assert config.load_syncthing_record() == my_id
+
+
+@pytest.mark.parametrize("managed", [True, False])
+def test_passphrase_never_written_to_saved_join_answers(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses, managed
+):
+    import stat
+
+    storage, backend = env
+    peer_id = None
+    if managed:
+        stock_root, _my_id, peer_id = _setup_default_syncthing(
+            fake_syncthing, tmp_path, monkeypatch
+        )
+        storage = stock_root / "mind-meld"
+        backend = LocalBackend(storage)
+        fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+            "mind-meld": {
+                "offeredBy": {
+                    peer_id: {
+                        "label": "Mind Meld",
+                        "receiveEncrypted": False,
+                        "remoteEncrypted": False,
+                    }
+                }
+            }
+        }
+
+        def deliver_header_on_pause(seconds: float) -> None:
+            pauses.append(seconds)
+            storage.mkdir(parents=True, exist_ok=True)
+            _populate(backend)
+
+        monkeypatch.setattr(initflow, "_pause", deliver_header_on_pause)
+    else:
+        _populate(backend)
+    typed_wrong = "typed-wrong-passphrase-value"
+    stdin = (
+        f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}{typed_wrong}\n"
+        if managed
+        else f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{typed_wrong}\n"
+    )
+    result, text = _run(stdin)
+    assert result.exit_code == 1, result.output
+    assert "does not match" in text
+    assert not config.CONFIG_PATH.exists()
+
+    rec_path = config.join_record_path()
+    assert rec_path.is_file()
+    assert stat.S_IMODE(rec_path.stat().st_mode) == 0o600
+    raw = rec_path.read_bytes()
+    assert typed_wrong.encode("utf-8") not in raw
+    assert PASSPHRASE.encode("utf-8") not in raw
+    parsed = tomllib.loads(raw.decode("utf-8"))
+    expected_fields = (
+        {"storage_path", "fleet_device_id", "device_name", "sources"}
+        if managed
+        else {"storage_path", "device_name", "sources"}
+    )
+    assert set(parsed) == {"join"}
+    assert set(parsed["join"]) == expected_fields
+
+
+def test_new_fleet_flag_and_interactive_new_answer(env, tmp_path):
+    storage, backend = env
+    config.save_join_record(
+        config.JoinRecord(
+            storage_path=str(storage),
+            fleet_device_id=None,
+            device_name="Stale Joiner",
+            sources=("claude",),
+        )
+    )
+    res_flag, text_flag = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
+    assert res_flag.exit_code == 0, res_flag.output
+    assert "Start a new fleet or join" not in text_flag
+    assert "Continue joining?" not in text_flag
+    assert not config.join_record_path().exists()
+    assert backend.exists("mm-crypto-init")
+
+    # Reset for interactive "new" answer (with an invalid response first).
+    config.CONFIG_PATH.unlink()
+    storage2 = tmp_path / "storage-interactive-new"
+    backend2 = LocalBackend(storage2)
+    _joined.clear()
+
+    res_new, text_new = _run(
+        f"maybe\nNEW\n{storage2}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}",
+        command="capture",
+    )
+    assert res_new.exit_code == 0, res_new.output
+    assert "Answer 'new' or 'join'." in text_new
+    assert backend2.exists("mm-crypto-init")
+    assert _joined == [None]
+
+
+def test_malformed_join_record_stops_naming_file_with_run_mm_init(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    storage, _backend = env
+    _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    rec_path = config.join_record_path()
+    rec_path.parent.mkdir(parents=True, exist_ok=True)
+    rec_path.write_text("[join\nbroken", encoding="utf-8")
+    record_before = rec_path.read_bytes()
+    fake_syncthing.bodies.clear()
+    before = _tree(storage)
+
+    result, text = _run("")
+
+    assert result.exit_code == 1, result.output
+    assert str(rec_path) in text
+    assert "is not a valid join record" in text
+    assert text.endswith("Run: mm init")
+    assert "Continue joining?" not in text
+    assert "Start a new fleet or join" not in text
+    assert fake_syncthing.bodies == []
+    assert rec_path.read_bytes() == record_before
+    _assert_nothing_written(storage, before)
+
+
+def test_managed_join_completes_in_one_run_when_offer_and_header_arrive_during_waits(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
+):
+    """Criterion 1 (Track 151A): a managed join finishes in one `mm init` run
+    when the folder offer arrives during the approval wait and the key header
+    arrives during the header wait."""
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+
+    def pause_and_advance(seconds: float) -> None:
+        pauses.append(seconds)
+        if len(pauses) == 2:
+            fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+                "mind-meld": {
+                    "offeredBy": {
+                        peer_id: {
+                            "label": "Mind Meld",
+                            "receiveEncrypted": False,
+                            "remoteEncrypted": False,
+                        }
+                    }
+                }
+            }
+        elif len(pauses) == 3:
+            storage.mkdir(parents=True, exist_ok=True)
+            _populate(LocalBackend(storage))
+
+    monkeypatch.setattr(initflow, "_pause", pause_and_advance)
+    result, text = _run(
+        f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n",
+        command="capture",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert pauses == [2, 2, 1]
+    assert f"mm devices approve {my_id}" in text
+    assert "Waiting up to 10 minutes for that approval" in text
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("POST", "/rest/config/devices"),
+        ("PATCH", f"/rest/config/devices/{peer_id}"),
+        ("DELETE", "/rest/config/folders/default"),
+        ("POST", "/rest/config/folders"),
+    ]
+    assert config.CONFIG_PATH.is_file()
+    assert not config.join_record_path().exists()
+    assert _joined == [PASSPHRASE]
+
+
+def test_managed_join_approval_timeout_exits_with_waiting_outcome(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
+):
+    """Criterion 2 (Track 151A): approval timeout exits 1 with the waiting
+    outcome ending `Run: mm init` and writes no device entry, config.toml or
+    key header."""
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+
+    result, text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 1, result.output
+    assert pauses == [2] * 300
+    assert (
+        f"Init: waiting for a fleet machine to approve this one ('mm devices approve {my_id}'); "
+        "your answers are saved, and no device entry, config or key header was written. "
+        "Run: mm init"
+    ) in text
+    assert text.endswith("Run: mm init")
+    assert not config.CONFIG_PATH.exists()
+    assert not (storage / "mm-crypto-init").exists()
+    assert not (storage / ".stignore").exists()
+    assert _device_keys(LocalBackend(storage)) == []
+    assert config.join_record_path().is_file()
+
+
+def test_managed_join_approval_ctrl_c_exits_with_waiting_outcome(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
+):
+    """Criterion 2 (Track 151A): Ctrl-C during the approval wait exits 1 with
+    the waiting outcome ending `Run: mm init` and writes no device entry,
+    config.toml or key header."""
+    _storage, _backend = env
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+
+    def interrupt_on_first_pause(seconds: float) -> None:
+        pauses.append(seconds)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(initflow, "_pause", interrupt_on_first_pause)
+    result, text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 1, result.output
+    assert pauses == [2]
+    assert (
+        f"Init: waiting for a fleet machine to approve this one ('mm devices approve {my_id}'); "
+        "your answers are saved, and no device entry, config or key header was written. "
+        "Run: mm init"
+    ) in text
+    assert text.endswith("Run: mm init")
+    assert not config.CONFIG_PATH.exists()
+    assert not (storage / "mm-crypto-init").exists()
+    assert not (storage / ".stignore").exists()
+    assert _device_keys(LocalBackend(storage)) == []
+    assert config.join_record_path().is_file()
+
+
+def test_managed_join_writer_failure_on_later_approval_poll_keeps_join_record(
+    env, fake_syncthing, tmp_path, monkeypatch, pauses
+):
+    _storage, _backend = env
+    stock_root, _my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+
+    def stop_stand_in_on_first_pause(seconds: float) -> None:
+        pauses.append(seconds)
+        fake_syncthing.close()
+
+    monkeypatch.setattr(initflow, "_pause", stop_stand_in_on_first_pause)
+    result, text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 1, result.output
+    assert pauses == [2]
+    assert "Syncthing stopped answering while mm was setting it up" in text
+    assert "accept the fleet folder offer" in text
+    assert text.endswith(f"Run: {core._syncthing_start_command()}")
+    assert config.join_record_path().is_file()
+    assert not config.CONFIG_PATH.exists()
+
+
+@pytest.mark.parametrize("error_type", [OSError, StorageError])
+def test_join_record_save_failure_stops_before_syncthing_writes(
+    env, fake_syncthing, tmp_path, monkeypatch, error_type
+):
+    _storage, _backend = env
+    stock_root, _my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    storage = stock_root / "mind-meld"
+
+    def fail_write(*args, **kwargs):
+        raise error_type("join record disk full")
+
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", fail_write)
+    result, text = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 1, result.output
+    assert "init: could not save your join answers (" in text
+    assert "Nothing else was written. Fix that, then run 'mm init' again." in text
+    assert fake_syncthing.bodies == []
+    assert not config.join_record_path().exists()
+    assert not config.syncthing_record_path().exists()
+    assert not config.CONFIG_PATH.exists()
+
+
+def test_completed_join_warns_when_join_record_deletion_fails(env, monkeypatch):
+    storage, backend = env
+    _populate(backend)
+
+    def fail_delete() -> None:
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(config, "delete_join_record", fail_delete)
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
+
+    assert result.exit_code == 0, result.output
+    assert "could not remove saved join answers" in text
+    assert "delete that file by hand" in text
+    assert config.CONFIG_PATH.is_file()

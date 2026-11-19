@@ -589,11 +589,12 @@ def _upload_mtime_matches(accepted_iso: str, advertised: str) -> bool:
 
 def _init_needs_terminal() -> None:
     core._error(
-        "mm init needs a terminal: it asks for the storage path, fleet Syncthing device ID, "
-        "device name, passphrase and sources, so the owner must run it in an interactive "
-        "shell. Anything it already wrote stays. If a key header was written, running "
-        "'mm init' again in a terminal continues from it. Otherwise retry your original "
-        "command in a terminal."
+        "mm init needs a terminal: it asks whether to start or join a fleet, the storage "
+        "path, the fleet Syncthing device ID, the device name, the sources and the "
+        "passphrase, so the owner must run it in an interactive shell. Anything it "
+        "already wrote stays. A rerun in a terminal offers any saved join answers; if a "
+        "key header was written, running 'mm init' again in a terminal continues from "
+        "it. Otherwise retry your original command in a terminal."
     )
 
 
@@ -616,20 +617,28 @@ def init(
     Syncthing configuration it changes nothing in Syncthing and points to README
     "Configuring Syncthing yourself".
 
-    On a default Syncthing configuration, 'mm init --new-fleet' records that mm
+    Plain 'mm init' first offers to resume from saved join answers when a join
+    is in progress, or asks whether to start a new fleet or join an existing one
+    ('mm init --new-fleet' skips that question and starts a new fleet).
+
+    On a default Syncthing configuration, starting a new fleet records that mm
     manages Syncthing here, creates the 'mind-meld' folder at the storage path
     (removing the unshared empty stock Default Folder first when nested inside
     ~/Sync), writes .stignore, creates the key header (mm-crypto-init) and prints
     this machine's Syncthing device ID. Then run 'mm push' here and 'mm init' on
     each other machine.
 
-    Plain 'mm init' joins: on a default Syncthing configuration it asks for a
-    fleet machine's Syncthing device ID, adds that device as introducer, prints
-    this machine's device ID and 'mm devices approve <id>' to run on the fleet
-    machine, accepts the 'mind-meld' folder offer once shared, and waits up to
-    two minutes for Syncthing to deliver mm-crypto-init (if the header has not
-    arrived after the wait it stops and writes nothing to the Mind Meld store;
-    it never creates a key header). Once your passphrase verifies, it writes
+    Joining asks for the storage path, a fleet machine's Syncthing device ID (on
+    a default Syncthing configuration), the device name and the sources first,
+    and saves those answers locally (never the passphrase). On a default
+    Syncthing configuration it adds the fleet device as introducer, prints this
+    machine's device ID and 'mm devices approve <id>' to run on the fleet
+    machine, waits up to 10 minutes for that approval, accepts the 'mind-meld'
+    folder offer once shared, and waits up to two minutes for Syncthing to
+    deliver mm-crypto-init (if the approval or header wait times out or is
+    stopped with Ctrl-C, it prints a waiting outcome ending 'Run: mm init',
+    stops and writes nothing to the Mind Meld store; it never creates a key
+    header). Once the header arrives and your passphrase verifies, it writes
     .stignore, registers this device, saves config and pulls.
 
     Running init again on a configured machine asks before it replaces this

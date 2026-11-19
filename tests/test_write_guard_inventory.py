@@ -362,6 +362,12 @@ REVIEWED = {
             "config_path.parent.mkdir(parents=True, exist_ok=True)",
         ],
     ),
+    "config.py:delete_join_record": (
+        *_GUARDED,
+        [
+            "path.unlink(missing_ok=True)",
+        ],
+    ),
     "config.py:patch_config_on_disk": (
         *_READ_ONLY,
         [
