@@ -134,6 +134,19 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap card run — 2026-11-19 (Syncthing device names carded as Track 153A; Tracks 151A and 151B recorded)
+
+Verified against `0bec1e4` (v1.12.70), from the Factory Manager's brief relaying the developer's report that Syncthing on `mac-a` named itself "Mac" although `mm init` asked for a device name ("if we can just fold this into another track, that's preferred otherwise go ahead"). The only Track touching those files, 152A, is mid-implementation on an approved plan, so nothing was folded into it; a new Track follows it.
+
+| Item | Disposition |
+|---|---|
+| Brief: Syncthing's own device name is not the mm device name on macOS (both Macs fixed by hand) | place (Track 153A, task 1); verified at `0bec1e4`: nothing in `src/` writes Syncthing's own device name, and both `add_device` callers pass no name |
+| Track 152A plan follow-up CEO-7: `mm status` counts vouched pending devices | place (Track 153A, task 2) |
+| Track 152A plan follow-up DX-12: the pull's join notice says approve during the upgrade window | place (Track 153A, task 3) |
+| Track 152A plan follow-up DX-15: SPEC's manual-steps line about introducers re-adding a removed machine | defer (Future; needs `/project-spec`) |
+
+No inbox item drained: the ten test gaps from PRs #354 and #355 wait for the next regeneration. Track 152A's `_touches:` cover the `initflow.py` gaps, but its card is fixed while it is being implemented, and three `pullflow.py` gaps on Track 153A would take it past the session-weight cap. Tracks 151A and 151B recorded (PRs #355 and #354; tombstone 151); Group 152 moved to In Progress. Future goes from 78 to 79 entries. No bump: documentation-only.
+
 ### Roadmap regeneration — 2026-11-18 (SPEC O2 amended: one-run join and one-approval mesh; Track 150A recorded)
 
 Verified against `8bf0020` (v1.12.68), composed by `/project-spec` with the docs/SPEC.md O2 amendment the developer approved that day ("Good with that" to the one-run join proposal; "Go" to the six recommended answers), from the Factory Manager's brief and its two added inputs: the developer's "I shouldn't have to re-auth every machine on every other machine" after joining `mac-c`, and the held `.jsonl` peer edits seen on `mac-c`'s pulls. Track 150A merged in PR #352 and is recorded as an independent receipt in docs/roadmap-shipped.md; Group 150 is retired. Admission follows docs/SPEC.md (MVP-1 on Syncthing; O2's acceptance is part of the 2.0.0 line), the AGENTS.md planning rules and the standing constraint that a reproducible bug the owner encountered goes to Current Plan. No Track in the plan touches `bin/_check.py`, so the four inbox test gaps wait in Future.
