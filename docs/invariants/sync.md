@@ -660,7 +660,7 @@ can differ from the held version until a push publishes the file again, so a
 subsequent peer edit can take the union path too. A push that skips publication
 leaves that ledger state in place.
 
-Every per-source summary line in `_print_pull_summary` uses `<peer>/<source>:`
+Every per-source stdout summary line in `_print_pull_summary` uses `<peer>/<source>:`
 and carries at least one count. Held edits print
 `Pull: N older peer edits not applied (mm pull --verbose).` on their own outcome
 line. `mm pull --verbose` keeps `Up to date with <peer>/<source>.` when a source
@@ -763,7 +763,7 @@ mints nothing.
 **More limits (Track 91A).**
 
 - A fast-forward overwrites local bytes with no recovery copy (an owner-accepted limit).
-- A line deleted on one side returns when both sides changed the file, or when a peer's `.jsonl` or `MEMORY.md` edit carries an older mtime than the local file it built on (which unions as row 8 instead of fast-forwarding or holding as `older`; an owner-accepted limit).
+- A line deleted on one side can return when both sides changed a mergeable file (an owner-accepted limit). The same effect can occur when pull line-merges a peer's `.jsonl` or `MEMORY.md` edit with an older mtime than the local version it built on.
 - The mtime gate survives only as the `older` guard on non-mergeable files (rows 4 and 6; `.jsonl` and `MEMORY.md` union first) and the no-base fallback (row 7).
 - `mm-events` tombstones stay suppress-only (see events-retro.md).
 - A machine that catches up and deletes before its next push uses its newest held
