@@ -1154,6 +1154,8 @@ def init(new_fleet: bool = False) -> str | None:
                             fix="mm init",
                         )
                 else:
+                    if saved is not None:
+                        _require_shareable_folder(full_path, join_saved=True)
                     fleet_id = _read_fleet_device_id(setup.local_id)
                     save_answers = True
         if saved is not None:
@@ -1217,7 +1219,7 @@ def init(new_fleet: bool = False) -> str | None:
         try:
             occupancy = _probe_storage_occupancy(backend)
         except OSError as e:
-            _unreadable_folder(full_path, e)
+            _unreadable_folder(full_path, e, join_saved=True)
         _init_storage_guard(
             occupancy,
             existing_device_id=existing_device_id,

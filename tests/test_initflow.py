@@ -2369,3 +2369,41 @@ def test_join_revalidates_saved_fleet_id_before_writing(env, fake_syncthing, tmp
     assert text.endswith("Run: mm init")
     assert not config.syncthing_record_path().exists()
     assert fake_syncthing.bodies == []
+
+
+def test_join_occupancy_probe_error_reports_saved_answers(env, monkeypatch):
+    storage, backend = env
+    _populate(backend)
+
+    def unreadable(_backend):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(initflow, "_probe_storage_occupancy", unreadable)
+    result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}")
+
+    assert result.exit_code == 1
+    assert "cannot read the storage folder" in text
+    assert "Your join answers are saved" in text
+    assert "Encryption passphrase" not in text
+    assert config.join_record_path().is_file()
+    assert not config.CONFIG_PATH.exists()
+    assert _device_keys(backend) == [f"devices/{PEER}.json"]
+
+
+def test_join_checks_populated_target_before_asking_for_missing_fleet_id(
+    env, fake_syncthing, tmp_path, monkeypatch
+):
+    storage, _ = env
+    saved = config.JoinRecord(str(storage), None, "Mac B", ("claude",))
+    config.save_join_record(saved)
+    _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    (storage / "notes.txt").write_text("synthetic local file")
+
+    result, text = _run("y\n")
+
+    assert result.exit_code == 1
+    assert "Syncthing device ID of a machine already in the fleet" not in text
+    assert "notes.txt" in text
+    assert text.endswith("Run: mm init")
+    assert config.load_join_record() == saved
+    assert fake_syncthing.bodies == []
