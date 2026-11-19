@@ -44,6 +44,16 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/initflow.py|tests/test_integration.py] Test gap: A blank fleet choice starts a join
+- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The existing blank-input test checks the storage path and exit code. It can pass with either fleet choice.
+- **Hypothesis (untested):** Assert that accepting the default saves join answers before stopping on an empty store.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/initflow.py:_ask_start_or_join`
+- **Evidence:** Track 151A coverage re-audit traced both prompt paths. The current default is `join`.
+- **Context:** Filed while re-reviewing [PR #355](https://github.com/kbitz/mind-meld/pull/355) at `45309d5`. Revisit when a Track touches the fleet choice prompt or its integration test.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Help covers the init join flow
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Pin the start-or-join choice, saved-answer resume, approval wait and retry text in the real help output.
