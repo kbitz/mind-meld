@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -454,6 +455,10 @@ def test_mesh_pass_steady_state_request_ceiling_and_unvouched_or_own_or_paused_s
     assert fake_syncthing.bodies == []
 
 
+# Value: protects=invalid folder options prevent every mesh write even at the correct path;
+# fails_when=the snapshot lets add and introducer writes run before the share guard;
+# why_new=the existing wrong-path case cannot catch an omitted option check; seam=none;
+# no_claim=option enforcement by real Syncthing (loopback stand-in).
 def test_mesh_pass_folder_binding_and_managed_id_mismatch_gates(
     fake_syncthing, tmp_path, monkeypatch
 ):
@@ -477,14 +482,23 @@ def test_mesh_pass_folder_binding_and_managed_id_mismatch_gates(
         "mm: notice: Syncthing mesh step stopped (not-mm-folder). Run: mm diag" in res_path.output
     )
 
-    # 2. Missing mind-meld folder -> zero non-GET, no-folder degradation
+    # 2. Invalid options at the exact storage root still prevent the first write.
+    fake_syncthing.set_folder(storage_dir, peers=[], order="random")
+    res_options = runner.invoke(app, ["pull"])
+    assert res_options.exit_code == 0, res_options.output
+    assert fake_syncthing.bodies == []
+    assert "mm: notice: Syncthing mesh step stopped (not-mm-folder). Run: mm diag" in (
+        res_options.stderr
+    )
+
+    # 3. Missing mind-meld folder -> zero non-GET, no-folder degradation
     fake_syncthing.set_config(devices=[], folders=[])
     res_nofld = runner.invoke(app, ["pull"])
     assert res_nofld.exit_code == 0, res_nofld.output
     assert fake_syncthing.bodies == []
     assert "mm: notice: Syncthing mesh step stopped (no-folder). Run: mm diag" in res_nofld.output
 
-    # 3. Managed ID in syncthing.toml != live REST myID -> zero writes, not-managed
+    # 4. Managed ID in syncthing.toml != live REST myID -> zero writes, not-managed
     fake_syncthing.set_folder(storage_dir, peers=[])
     config.save_syncthing_record(_valid_syncthing_id("F"))
     fake_syncthing.requests.clear()
@@ -525,23 +539,32 @@ def test_mesh_rechecks_folder_path_when_sharing(fake_syncthing, tmp_path, monkey
     ]
 
 
+# Value: protects=a blocked REST publication ends the hook quietly before the mesh snapshot;
+# fails_when=the request cap is lost, another REST request starts, or evidence omits the timeout;
+# why_new=the synthetic timeout exercised classification without blocking transport; seam=none;
+# no_claim=latency on a host with real Syncthing (loopback stand-in).
 def test_publish_timeout_stops_before_mesh_snapshot(fake_syncthing, tmp_path, monkeypatch):
     _, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch, publish_own=False)
     peer = _valid_syncthing_id("B")
     register_device(backend, "dev-b", "mac-b")
     devices.publish_record(backend, "dev-b", peer, PASSPHRASE, TEST_MEMORY_KB)
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {peer: {}}
-    requested = []
+    status_route = "/rest/system/status"
+    release = fake_syncthing.hold(status_route)
+    started = time.monotonic()
+    try:
+        res = runner.invoke(app, ["autopush"])
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
 
-    def timeout_get(address, path, **kwargs):
-        requested.append(path)
-        return "unreachable", None, "timeout"
-
-    monkeypatch.setattr(syncthing, "_get_json", timeout_get)
-    res = runner.invoke(app, ["autopush"])
     assert res.exit_code == 0
     assert res.output == ""
-    assert requested == ["/rest/system/status"]
+    # gstack-timing-ok: A held loopback response exercises the hook's real deadline.
+    assert elapsed < 1.8, elapsed
+    requests = [(method, path) for method, path, _ in fake_syncthing.requests]
+    assert requests == [("GET", status_route)]
+    assert fake_syncthing.bodies == []
     crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["push"]
     assert crumb["outcome"] == "degraded"
     assert "Syncthing mesh step stopped (timeout)" in crumb["detail"]
@@ -734,6 +757,10 @@ def test_attended_pull_pending_notice_counts_only_unvouched_even_after_partial_p
     ) in res.output
 
 
+# Value: protects=managed REST and config failures surface distinct remedies without any write;
+# fails_when=mesh refusal drops the attended notice or silent degraded hook detail;
+# why_new=the prior unauthorized CLI test covered publication on an owner-managed host; seam=none;
+# no_claim=live Syncthing configuration (loopback stand-in and malformed test config).
 def test_dx4_cause_table_rows_status_rendering_and_unexpected_exception(
     fake_syncthing, tmp_path, monkeypatch
 ):
@@ -751,6 +778,30 @@ def test_dx4_cause_table_rows_status_rendering_and_unexpected_exception(
         peer_b: {"name": "mac-b"},
         peer_c: {"name": "linux-c"},
     }
+    for cause in ("unauthorized", "config-unreadable"):
+        if cause == "unauthorized":
+            fake_syncthing.responses["/rest/system/status"] = 403
+        else:
+            fake_syncthing.responses["/rest/system/status"] = {"myID": fake_syncthing.my_id}
+            fake_syncthing.config_path.write_text("<configuration>", encoding="utf-8")
+
+        detail = f"Syncthing mesh step stopped ({cause}). Run: mm diag"
+        attended = runner.invoke(app, ["pull"])
+        assert attended.exit_code == 0, attended.output
+        assert f"mm: notice: {detail}" in attended.stderr.splitlines()
+        attended_run = attemptlog.read_runs()["runs"]["pull"]
+        assert attended_run["outcome"] == "degraded"
+        assert detail in attended_run["degradations"]
+
+        hook = runner.invoke(app, ["autopull"])
+        assert hook.exit_code == 0, hook.output
+        assert hook.output == ""
+        refusal_crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["pull"]
+        assert refusal_crumb["outcome"] == "degraded"
+        assert detail in refusal_crumb["detail"]
+        assert fake_syncthing.bodies == []
+    fake_syncthing.write_config()
+
     fake_syncthing.write_responses[("PATCH", f"/rest/config/devices/{peer_c}")] = 500
     res_hook = runner.invoke(app, ["autopull"])
     assert res_hook.exit_code == 0

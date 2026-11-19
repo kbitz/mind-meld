@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import fcntl
 import json
 from pathlib import Path
 
@@ -887,6 +888,10 @@ def _scan_pairing_reach(
     return call_sites, entry_refs
 
 
+# Value: protects=the same vouched knock stays pending in pull preview and pairs under lock in sync;
+# fails_when=preview touches Syncthing or a real mutation moves outside the sync lock;
+# why_new=older preview and lock tests do not observe eligible peers and mesh writes; seam=none;
+# no_claim=serialization with manual approval or Syncthing's own introductions (loopback stand-in).
 def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_path, monkeypatch):
     from mind_meld import crypto, devices
 
@@ -1034,6 +1039,18 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
     )
     monkeypatch.setenv("MINDMELD_PASSPHRASE", passphrase)
 
+    lock_held_during_writes: list[bool] = []
+
+    def observe_sync_lock(_method, _path, _body):
+        with config.LOCK_PATH.open("r+b") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_held_during_writes.append(True)
+            else:
+                lock_held_during_writes.append(False)
+
+    fake_syncthing.on_write = observe_sync_lock
     for cmd in ("push", "pull", "autopush", "autopull"):
         fake_syncthing.set_folder(storage_dir, peers=[])
         fake_syncthing.responses["/rest/cluster/pending/devices"] = {
@@ -1042,6 +1059,13 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
         }
         fake_syncthing.requests.clear()
         fake_syncthing.bodies.clear()
+        lock_held_during_writes.clear()
+
+        if cmd == "pull":
+            preview = runner.invoke(app, ["pull", "--dry-run"])
+            assert preview.exit_code == 0, preview.output
+            assert fake_syncthing.requests == []
+            assert vouched_id in fake_syncthing.responses["/rest/cluster/pending/devices"]
 
         res = runner.invoke(app, [cmd])
         assert res.exit_code == 0, f"{cmd} failed: {res.output}"
@@ -1070,6 +1094,7 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
                 },
             ),
         ], f"{cmd} bodies mismatch"
+        assert lock_held_during_writes == [True, True, True], cmd
         assert unvouched_id in fake_syncthing.responses["/rest/cluster/pending/devices"]
         assert vouched_id not in fake_syncthing.responses["/rest/cluster/pending/devices"]
 
