@@ -651,10 +651,20 @@ def test_status_and_diag_autorun_breadcrumb_matches_current_upgrade_cache_verdic
 
 
 def test_status_reports_pending_syncthing_join_by_count_without_printing_id_or_name(
-    inspection, fake_syncthing
+    inspection, fake_syncthing, monkeypatch
 ):
-    joining_a = "JOINAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA"
-    joining_b = "JOINBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB"
+    from mind_meld import devices, syncthing
+    from mind_meld.errors import StorageError
+
+    def _valid_id(seed_char: str) -> str:
+        chunk13 = seed_char * 13
+        group14 = chunk13 + syncthing._luhn32(chunk13)
+        full56 = group14 * 4
+        return "-".join(full56[i : i + 7] for i in range(0, 56, 7))
+
+    backend, _ = inspection
+    joining_a = _valid_id("J")
+    joining_b = _valid_id("K")
     hostile_name = "hostile-joiner-[bold red]pwn[/bold red]-\x1b]52;c;ZHVtbXk=\x07-\x1b[2J"
 
     config.save_syncthing_record(fake_syncthing.my_id)
@@ -702,6 +712,68 @@ def test_status_reports_pending_syncthing_join_by_count_without_printing_id_or_n
     assert joining_b not in combined_two
     assert "hostile-joiner" not in combined_two
     assert "linux-b" not in combined_two
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
+
+    # Vouched pending device is subtracted from the count (2 pending, 1 vouched -> reports 1)
+    cfg = config.load_config()
+    core._init_crypto_session(backend, "contract-passphrase", cfg, read_only=True)
+    devices.register_device(backend, "peer-a", "mac-b")
+    assert devices.publish_record(backend, "peer-a", joining_a, "contract-passphrase", 1024)
+    fake_syncthing.requests.clear()
+
+    res_filtered = runner.invoke(app, ["status"])
+    assert res_filtered.exit_code == 0, res_filtered.output
+    st_lines_filtered = [
+        line for line in res_filtered.stdout.splitlines() if line.startswith("  Syncthing:")
+    ]
+    assert st_lines_filtered == [
+        "  Syncthing: connected 2 of 2 devices; up to date",
+        (
+            "  Syncthing: 1 device is asking to join; use the ID the new machine printed. "
+            "Run: mm devices approve <device-id>"
+        ),
+    ]
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
+
+    # When records cannot be read, status falls back to the full pending count (2)
+    orig_read_fleet_records = statusflow.read_fleet_records
+
+    def _fail_records(*_a, **_kw):
+        raise StorageError("records unreadable")
+
+    monkeypatch.setattr(statusflow, "read_fleet_records", _fail_records)
+    fake_syncthing.requests.clear()
+
+    res_fallback = runner.invoke(app, ["status"])
+    assert res_fallback.exit_code == 0, res_fallback.output
+    st_lines_fallback = [
+        line for line in res_fallback.stdout.splitlines() if line.startswith("  Syncthing:")
+    ]
+    assert st_lines_fallback == [
+        "  Syncthing: connected 2 of 2 devices; up to date",
+        (
+            "  Syncthing: 2 devices are asking to join; use the ID each new machine printed. "
+            "Run: mm devices approve <device-id>"
+        ),
+    ]
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
+
+    # All pending devices vouched -> no pending-join line
+    monkeypatch.setattr(statusflow, "read_fleet_records", orig_read_fleet_records)
+    devices.register_device(backend, "peer-b", "linux-b")
+    assert devices.publish_record(backend, "peer-b", joining_b, "contract-passphrase", 1024)
+    fake_syncthing.requests.clear()
+
+    res_all_vouched = runner.invoke(app, ["status"])
+    assert res_all_vouched.exit_code == 0, res_all_vouched.output
+    st_lines_all_vouched = [
+        line for line in res_all_vouched.stdout.splitlines() if line.startswith("  Syncthing:")
+    ]
+    assert st_lines_all_vouched == ["  Syncthing: connected 2 of 2 devices; up to date"]
+    assert "mm devices approve" not in res_all_vouched.stdout + res_all_vouched.stderr
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []
 

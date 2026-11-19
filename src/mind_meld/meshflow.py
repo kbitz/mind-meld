@@ -126,6 +126,8 @@ class MeshResult:
     unreadable: list[str] = field(default_factory=list)
     degradations: list[str] = field(default_factory=list)
     unvouched_pending: int | None = None
+    unpublished_names: tuple[str, ...] = ()
+    vouched_ids: frozenset[str] | None = None
     ran: bool = False
     snapshot_taken: bool = False
     published: bool = False
@@ -372,6 +374,33 @@ def _run_inner(
             notice=True,
         )
 
+    try:
+        inventory = devices.inventory_devices(backend)
+    except (OSError, StorageError):
+        pass
+    else:
+        published_mm_ids = (
+            set(records.by_mm_id)
+            | set(records.unreadable)
+            | set(records.newer_format)
+            | set(records.vanished)
+        )
+        unpublished_entries = sorted(
+            (
+                entry
+                for entry in inventory.valid
+                if isinstance(entry.get("device_id"), str)
+                and entry["device_id"] != own_mm_id
+                and entry["device_id"] not in published_mm_ids
+            ),
+            key=lambda entry: entry["device_id"],
+        )
+        result.unpublished_names = tuple(
+            _safe_peer_name(entry.get("device_name"), entry["device_id"])
+            for entry in unpublished_entries
+        )
+        result.vouched_ids = frozenset(records.vouched)
+
     need_classify = False
     publish_stop = None
     if verb == "push":
@@ -461,8 +490,8 @@ def _run_inner(
         return result
 
     result.snapshot_taken = True
-    result.unvouched_pending = sum(
-        1 for pid in snap.pending_ids if pid != snap.my_id and pid not in other_vouched
+    result.unvouched_pending = len(
+        syncthing.unvouched_pending_ids(snap.pending_ids, other_vouched, own_id=snap.my_id)
     )
 
     if not snap.folder_present:

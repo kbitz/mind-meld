@@ -2955,10 +2955,19 @@ def _attended_pull(
             if not dry_run:
                 if not join:
                     if mesh_res is not None and mesh_res.snapshot_taken:
-                        if msg := syncthing.pending_join_message(mesh_res.unvouched_pending):
+                        if msg := pullflow.compose_pending_syncthing_join_message(
+                            syncthing.pending_join_message(mesh_res.unvouched_pending),
+                            mesh_res.unpublished_names,
+                        ):
                             core._notice(msg, fix=syncthing.PENDING_JOIN_FIX)
                     else:
-                        pullflow.notice_pending_syncthing_join(config)
+                        pullflow.notice_pending_syncthing_join(
+                            config,
+                            vouched_ids=mesh_res.vouched_ids if mesh_res is not None else None,
+                            unpublished_names=(
+                                mesh_res.unpublished_names if mesh_res is not None else ()
+                            ),
+                        )
                 _sync_update(config, verbose=verbose)
 
 

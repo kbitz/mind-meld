@@ -36,6 +36,8 @@ def _call_op(writer: syncthing.SyncthingWriter, op_name: str, peer_id: str, fold
         return writer.approval_state("mind-meld", peer_id)
     if op_name == "mesh_snapshot":
         return writer.mesh_snapshot("mind-meld")
+    if op_name == "set_own_device_name":
+        return writer.set_own_device_name("Mac A")
     if op_name == "mark_introducer":
         return writer.mark_introducer(peer_id)
     if op_name == "remove_default_folder":
@@ -51,6 +53,7 @@ _ALL_OPS = (
     "pending_devices",
     "approval_state",
     "mesh_snapshot",
+    "set_own_device_name",
     "mark_introducer",
     "remove_default_folder",
 )
@@ -500,6 +503,143 @@ def test_pending_devices_parsing_sorting_and_errors(fake_syncthing, isolated_hom
     fake_syncthing.responses["/rest/cluster/pending/devices"] = 403
     unauth = writer.pending_devices()
     assert unauth == syncthing.PendingDevices("unauthorized", "http-403", ())
+
+
+def test_set_own_device_name_validations_idempotence_and_patch(fake_syncthing, isolated_home):
+    assert syncthing._WRITE_ROUTES == (
+        ("POST", "/rest/config/folders"),
+        ("POST", "/rest/config/devices"),
+        ("PATCH", "/rest/config/folders/{id}"),
+        ("PATCH", "/rest/config/devices/{id}"),
+        ("DELETE", "/rest/config/folders/default"),
+    )
+    fake_syncthing.set_config(devices=(), folders=())
+
+    # Not-managed refusal sends nothing
+    unmanaged_writer = syncthing.SyncthingWriter(None)
+    assert unmanaged_writer.set_own_device_name("Mac A") == syncthing.WriteResult(
+        "refused", "not-managed"
+    )
+    assert fake_syncthing.requests == []
+    assert fake_syncthing.bodies == []
+
+    writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(fake_syncthing.my_id))
+
+    # Bad-name refusals (non-string, empty, whitespace-only) send nothing
+    for bad_name in (None, 123, "", "   ", "\t\n"):
+        assert writer.set_own_device_name(bad_name) == syncthing.WriteResult(  # type: ignore[arg-type]
+            "refused", "bad-device-name"
+        )
+    assert fake_syncthing.requests == []
+    assert fake_syncthing.bodies == []
+
+    # Own device entry missing -> device-not-configured with no write
+    fake_syncthing.responses["/rest/config/devices"] = []
+    assert writer.set_own_device_name("Mac A") == syncthing.WriteResult(
+        "refused", "device-not-configured"
+    )
+    assert fake_syncthing.bodies == []
+
+    # Restore default own entry ("mac-a") and rename to "Mac A"
+    fake_syncthing.set_config(devices=(), folders=())
+    fake_syncthing.requests.clear()
+    fake_syncthing.bodies.clear()
+    res = writer.set_own_device_name("Mac A")
+    assert res == syncthing.WriteResult("ok", None, write_attempted=True)
+    assert res.write_attempted is True
+    assert fake_syncthing.bodies == [
+        ("PATCH", f"/rest/config/devices/{fake_syncthing.my_id}", {"name": "Mac A"})
+    ]
+    assert [req[0] for req in fake_syncthing.requests[:-1]] == ["GET", "GET"]
+    assert fake_syncthing.requests[-1][:2] == (
+        "PATCH",
+        f"/rest/config/devices/{fake_syncthing.my_id}",
+    )
+    own_entry = next(
+        d
+        for d in fake_syncthing.responses["/rest/config/devices"]
+        if d.get("deviceID") == fake_syncthing.my_id
+    )
+    assert own_entry["name"] == "Mac A"
+
+    # Rerun with identical name is unchanged and sends no second PATCH
+    res2 = writer.set_own_device_name("Mac A")
+    assert res2 == syncthing.WriteResult("unchanged", None)
+    assert res2.write_attempted is False
+    assert len(fake_syncthing.bodies) == 1
+
+    # Comparison is exact (no case-folding or stripping): "mac a" sends a PATCH
+    res3 = writer.set_own_device_name("mac a")
+    assert res3 == syncthing.WriteResult("ok", None, write_attempted=True)
+    assert len(fake_syncthing.bodies) == 2
+    assert fake_syncthing.bodies[-1] == (
+        "PATCH",
+        f"/rest/config/devices/{fake_syncthing.my_id}",
+        {"name": "mac a"},
+    )
+
+
+def test_set_own_device_name_referenced_only_by_managed_setup_paths():
+    import ast
+
+    from tests.test_devices_approve import _scan_pairing_reach
+
+    src_root = Path(__file__).resolve().parents[1] / "src" / "mind_meld"
+    entry_points = {
+        ("initflow", "_managed_join"),
+        ("initflow", "_managed_new_fleet_folder"),
+    }
+    call_sites: set[tuple[str, str]] = set()
+    entry_refs: set[tuple[str, str, str]] = set()
+    raw_occurrences: set[tuple[str, str]] = set()
+
+    for path in sorted(src_root.rglob("*.py")):
+        rel = str(path.relative_to(src_root))
+        source = path.read_text(encoding="utf-8")
+        sites, refs = _scan_pairing_reach(
+            rel,
+            source,
+            pairing_methods={"set_own_device_name"},
+            raw_writes=set(),
+            entry_points=entry_points,
+        )
+        call_sites.update(sites)
+        entry_refs.update(refs)
+
+        tree = ast.parse(source)
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+        def scope_of(node: ast.AST) -> str:
+            scope: list[str] = []
+            cur = node
+            while cur in parents:
+                cur = parents[cur]
+                if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    scope.append(cur.name)
+            return ".".join(reversed(scope)) or "<module>"
+
+        for node in ast.walk(tree):
+            if (
+                (isinstance(node, ast.FunctionDef) and node.name == "set_own_device_name")
+                or (isinstance(node, ast.Attribute) and node.attr == "set_own_device_name")
+                or (isinstance(node, ast.Name) and node.id == "set_own_device_name")
+                or (isinstance(node, ast.Constant) and node.value == "set_own_device_name")
+            ):
+                raw_occurrences.add((rel, scope_of(node)))
+
+    assert call_sites == {
+        ("initflow.py", "_managed_join"),
+        ("initflow.py", "_managed_new_fleet_folder"),
+    }
+    assert raw_occurrences == {
+        ("syncthing.py", "SyncthingWriter"),
+        ("initflow.py", "_managed_join"),
+        ("initflow.py", "_managed_new_fleet_folder"),
+    }
+    assert entry_refs == {
+        ("initflow.py", "init", "initflow._managed_join"),
+        ("initflow.py", "init", "initflow._managed_new_fleet_folder"),
+    }
 
 
 def test_mark_introducer_validations_and_patch(fake_syncthing, isolated_home):

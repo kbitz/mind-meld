@@ -4320,11 +4320,18 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
 ):
     from typer.testing import CliRunner
 
-    from mind_meld import cli
+    from mind_meld import cli, syncthing
     from mind_meld import config as config_mod
+    from mind_meld.storage.keys import syncthing_record_key
 
-    joining_a = "JOINAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA"
-    joining_b = "JOINBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB"
+    def _valid_id(seed_char: str) -> str:
+        chunk13 = seed_char * 13
+        group14 = chunk13 + syncthing._luhn32(chunk13)
+        full56 = group14 * 4
+        return "-".join(full56[i : i + 7] for i in range(0, 56, 7))
+
+    joining_a = _valid_id("J")
+    joining_b = _valid_id("K")
     hostile_name = "hostile-joiner-[bold red]pwn[/bold red]-\x1b]52;c;ZHVtbXk=\x07-\x1b[2J"
 
     cfg_path = fleet.root / "config.toml"
@@ -4333,7 +4340,7 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     config_mod.save_syncthing_record(fake_syncthing.my_id)
 
-    # 1. Normal peer pull with 1 pending device
+    # 1. Fallback branch (not mesh_res.snapshot_taken): Peer B is registered with no record
     _seed(fleet, {"note.md": b"peer content\n"})
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {
         joining_a: {"name": hostile_name, "address": "192.0.2.12:22000"},
@@ -4344,9 +4351,12 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
     assert res_one.exit_code == 0, (res_one.stdout, res_one.stderr)
     expected_one = (
         "mm: notice: Syncthing: 1 device is asking to join; use the ID the new machine printed. "
+        "Registered fleet machine Peer B has not published a Syncthing ID yet; "
+        "run 'mm update' and 'mm push' on that machine. "
         "Run: mm devices approve <device-id>"
     )
     assert res_one.stderr.splitlines().count(expected_one) == 1
+    assert expected_one.endswith("Run: mm devices approve <device-id>")
     combined_one = res_one.stdout + res_one.stderr
     assert joining_a not in combined_one
     assert "hostile-joiner" not in combined_one
@@ -4354,8 +4364,80 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []
 
-    # 2. 1-machine fleet (no peer devices yet) with 2 pending devices
+    # Fallback function also subtracts vouched_ids and formats multiple unpublished names
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_a: {"name": hostile_name},
+        joining_b: {"name": "linux-b"},
+    }
+    fake_syncthing.requests.clear()
+    err_buf = io.StringIO()
+    orig_pull_stderr = pullflow.stderr_console
+    orig_core_stderr = core.stderr_console
+    monkeypatch.setattr(
+        pullflow,
+        "stderr_console",
+        Console(file=err_buf, force_terminal=False, color_system=None, width=240),
+    )
+    monkeypatch.setattr(core, "stderr_console", pullflow.stderr_console)
+    pullflow.notice_pending_syncthing_join(
+        fleet.config,
+        vouched_ids=frozenset({joining_a}),
+        unpublished_names=("Peer B", "Peer D"),
+    )
+    monkeypatch.setattr(pullflow, "stderr_console", orig_pull_stderr)
+    monkeypatch.setattr(core, "stderr_console", orig_core_stderr)
+    assert err_buf.getvalue().splitlines() == [
+        (
+            "mm: notice: Syncthing: 1 device is asking to join; "
+            "use the ID the new machine printed. "
+            "Registered fleet machines Peer B, Peer D have not published a Syncthing ID yet; "
+            "run 'mm update' and 'mm push' on those machines. "
+            "Run: mm devices approve <device-id>"
+        )
+    ]
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
+
+    # 2. Primary branch (mesh_res.snapshot_taken): Peer C vouches joining_a (already shared),
+    # Peer B has no published record, and joining_b is an unvouched pending device
+    peer_c = "cccccccc"
+    devices.register_device(fleet.backend, peer_c, "Peer C")
+    assert devices.publish_record(fleet.backend, peer_c, joining_a, PASSPHRASE, MEMORY_KB)
+    ok_folder = {
+        **fake_syncthing.stock_folder(fleet.backend.root, shared_with=[joining_a]),
+        "id": "mind-meld",
+    }
+    fake_syncthing.set_config(
+        devices=[
+            {
+                "deviceID": joining_a,
+                "name": "Peer C",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            }
+        ],
+        folders=[ok_folder],
+    )
+    fake_syncthing.requests.clear()
+
+    res_primary = CliRunner().invoke(cli.app, ["pull"])
+    assert res_primary.exit_code == 0, (res_primary.stdout, res_primary.stderr)
+    assert res_primary.stderr.splitlines().count(expected_one) == 1
+    combined_primary = res_primary.stdout + res_primary.stderr
+    assert joining_a not in combined_primary
+    assert joining_b not in combined_primary
+    assert "hostile-joiner" not in combined_primary
+    assert "linux-b" not in combined_primary
+    assert "\x1b" not in combined_primary
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
+
+    # 3. 1-machine fleet (no peer devices yet) with 2 pending devices
     fleet.backend.delete(device_key(PEER))
+    fleet.backend.delete(device_key(peer_c))
+    fleet.backend.delete(syncthing_record_key(peer_c))
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {
         joining_a: {"name": hostile_name},
         joining_b: {"name": "linux-b"},

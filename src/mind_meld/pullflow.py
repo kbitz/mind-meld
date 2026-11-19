@@ -28,7 +28,7 @@ import stat
 import sys
 import time
 import unicodedata
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -4479,7 +4479,35 @@ def _pull_core(
         return _partial_result
 
 
-def notice_pending_syncthing_join(config: dict[str, Any]) -> None:
+def compose_pending_syncthing_join_message(
+    base_message: str | None,
+    unpublished_names: Sequence[str] = (),
+) -> str | None:
+    """Append an unpublished-machines remedy clause to ``base_message`` when needed."""
+    if not base_message:
+        return None
+    names = [
+        cleaned
+        for raw in unpublished_names
+        if (cleaned := safety.safe_terminal_str(str(raw)).strip())
+    ]
+    if not names:
+        return base_message
+    verb = "has" if len(names) == 1 else "have"
+    target = "that machine" if len(names) == 1 else "those machines"
+    return (
+        f"{base_message} Registered fleet "
+        f"{'machine' if len(names) == 1 else 'machines'} {', '.join(names)} "
+        f"{verb} not published a Syncthing ID yet; run 'mm update' and 'mm push' on {target}."
+    )
+
+
+def notice_pending_syncthing_join(
+    config: dict[str, Any],
+    *,
+    vouched_ids: Collection[str] | None = None,
+    unpublished_names: Sequence[str] = (),
+) -> None:
     """Emit a pending-join notice after an attended pull on a managed machine."""
     try:
         recorded = _config_module.load_syncthing_record()
@@ -4496,5 +4524,20 @@ def notice_pending_syncthing_join(config: dict[str, Any]) -> None:
         storage_root,
         managed=syncthing.ManagedRecord(device_id=recorded),
     )
-    if st.state == "ok" and (msg := syncthing.pending_join_message(st.pending_device_count)):
+    if st.state != "ok":
+        return
+    if vouched_ids is not None and st.pending_device_ids:
+        pending_count: int | None = len(
+            syncthing.unvouched_pending_ids(
+                st.pending_device_ids,
+                vouched_ids,
+                own_id=recorded,
+            )
+        )
+    else:
+        pending_count = st.pending_device_count
+    if msg := compose_pending_syncthing_join_message(
+        syncthing.pending_join_message(pending_count),
+        unpublished_names,
+    ):
         core._notice(msg, fix=syncthing.PENDING_JOIN_FIX)

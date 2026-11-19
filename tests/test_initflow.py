@@ -680,9 +680,14 @@ def test_managed_new_fleet_removes_default_folder_creates_mm_folder_before_heade
     assert result.exit_code == 0, result.output
     assert config.load_syncthing_record() == my_id
     assert observed == {"record_at_post": my_id, "header_at_post": False}
-    assert len(fake_syncthing.bodies) == 2
-    assert fake_syncthing.bodies[0] == ("DELETE", "/rest/config/folders/default", None)
-    post_method, post_path, post_body = fake_syncthing.bodies[1]
+    assert len(fake_syncthing.bodies) == 3
+    assert fake_syncthing.bodies[0] == (
+        "PATCH",
+        f"/rest/config/devices/{my_id}",
+        {"name": "Mac A"},
+    )
+    assert fake_syncthing.bodies[1] == ("DELETE", "/rest/config/folders/default", None)
+    post_method, post_path, post_body = fake_syncthing.bodies[2]
     assert (post_method, post_path) == ("POST", "/rest/config/folders")
     assert post_body["id"] == "mind-meld"
     assert post_body["label"] == "Mind Meld"
@@ -710,7 +715,15 @@ def test_managed_new_fleet_outside_default_folder_skips_delete(
     result, text = _new_fleet(f"{outside}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 0, result.output
     assert config.load_syncthing_record() == my_id
-    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [("POST", "/rest/config/folders")]
+    assert fake_syncthing.bodies[0] == (
+        "PATCH",
+        f"/rest/config/devices/{my_id}",
+        {"name": "Mac A"},
+    )
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("PATCH", f"/rest/config/devices/{my_id}"),
+        ("POST", "/rest/config/folders"),
+    ]
     assert (outside / "mm-crypto-init").is_file()
     assert my_id in text
 
@@ -736,6 +749,7 @@ def test_managed_new_fleet_rerun_after_header_failure_does_not_duplicate_folder(
     assert first.exit_code == 1, first.output
     assert config.load_syncthing_record() == my_id
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("PATCH", f"/rest/config/devices/{my_id}"),
         ("DELETE", "/rest/config/folders/default"),
         ("POST", "/rest/config/folders"),
     ]
@@ -755,6 +769,7 @@ def test_managed_new_fleet_rerun_after_header_failure_does_not_duplicate_folder(
     second, text = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
     assert second.exit_code == 0, second.output
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("PATCH", f"/rest/config/devices/{my_id}"),
         ("DELETE", "/rest/config/folders/default"),
         ("POST", "/rest/config/folders"),
     ]
@@ -991,13 +1006,15 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
         sources=("claude",),
     )
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("PATCH", f"/rest/config/devices/{my_id}"),
         ("POST", "/rest/config/devices"),
         ("PATCH", f"/rest/config/devices/{peer_id}"),
         ("DELETE", "/rest/config/folders/default"),
     ]
-    assert fake_syncthing.bodies[0][2]["deviceID"] == peer_id
-    assert fake_syncthing.bodies[0][2]["introducer"] is False
-    assert fake_syncthing.bodies[1][2] == {"introducer": True}
+    assert fake_syncthing.bodies[0][2] == {"name": "Mac B"}
+    assert fake_syncthing.bodies[1][2]["deviceID"] == peer_id
+    assert fake_syncthing.bodies[1][2]["introducer"] is False
+    assert fake_syncthing.bodies[2][2] == {"introducer": True}
     assert not config.CONFIG_PATH.exists()
     assert not (storage / "mm-crypto-init").exists()
     assert not (storage / ".stignore").exists()
@@ -1027,8 +1044,8 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
         "entry, config or key header was written. Run: mm init"
     ) in text2
     assert text2.endswith("Run: mm init")
-    assert len(fake_syncthing.bodies) == 4
-    post_method, post_path, post_body = fake_syncthing.bodies[3]
+    assert len(fake_syncthing.bodies) == 5
+    post_method, post_path, post_body = fake_syncthing.bodies[4]
     assert (post_method, post_path) == ("POST", "/rest/config/folders")
     assert post_body["id"] == "mind-meld"
     assert post_body["devices"] == [
@@ -1062,9 +1079,10 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     assert config.CONFIG_PATH.is_file()
     assert not config.join_record_path().exists()
     assert len(_device_keys(backend)) == 2
-    # Across all three runs: exactly one device POST, one introducer PATCH,
-    # one Default Folder DELETE, and one folder POST.
+    # Across all three runs: one own-name PATCH, one device POST, one
+    # introducer PATCH, one Default Folder DELETE, and one folder POST.
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("PATCH", f"/rest/config/devices/{my_id}"),
         ("POST", "/rest/config/devices"),
         ("PATCH", f"/rest/config/devices/{peer_id}"),
         ("DELETE", "/rest/config/folders/default"),
@@ -1087,6 +1105,7 @@ def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
     res_new, text_new = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
     assert res_new.exit_code == 0, res_new.output
     assert fake_syncthing.bodies == []
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert core.SYNCTHING_GUIDE_HEADING in text_new
     assert text_new.endswith(NEW_FLEET_OUTCOME)
     if not stale_record:
@@ -1098,6 +1117,7 @@ def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
     res_join, text_join = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}pw\n")
     assert res_join.exit_code == 0, res_join.output
     assert fake_syncthing.bodies == []
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert core.SYNCTHING_GUIDE_HEADING in text_join
     assert text_join.endswith(JOIN_OUTCOME)
     assert not (storage / ".stignore").exists()
@@ -1175,12 +1195,17 @@ def test_managed_join_normalizes_lowercase_dashless_valid_id(
     env, fake_syncthing, tmp_path, monkeypatch
 ):
     _storage, _backend = env
-    stock_root, _my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
     storage = stock_root / "mind-meld"
     compact_lower = "".join(peer_id.split("-")).lower()
     result, _text = _run(f"join\n{storage}\n{compact_lower}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
-    method, path, body = fake_syncthing.bodies[0]
+    assert fake_syncthing.bodies[0] == (
+        "PATCH",
+        f"/rest/config/devices/{my_id}",
+        {"name": "Mac B"},
+    )
+    method, path, body = fake_syncthing.bodies[1]
     assert (method, path) == ("POST", "/rest/config/devices")
     assert body["deviceID"] == peer_id
     assert body["introducer"] is False
@@ -1255,7 +1280,7 @@ def test_unsupported_gui_address_with_offline_pre_existing_config_continues_with
     assert len(_device_keys(backend)) == len(peer_devices) + 1
 
 
-@pytest.mark.parametrize("kind", ["transport", "path-overlap", "generic"])
+@pytest.mark.parametrize("kind", ["own-name", "transport", "path-overlap", "generic"])
 def test_managed_join_writer_failures_stop_with_their_fixing_command(
     env, fake_syncthing, tmp_path, monkeypatch, kind
 ):
@@ -1264,9 +1289,17 @@ def test_managed_join_writer_failures_stop_with_their_fixing_command(
     storage = stock_root / "mind-meld"
     backend = LocalBackend(storage)
     before = _tree(storage)
-    expected_writes = [("POST", "/rest/config/devices")]
+    expected_writes = [
+        ("PATCH", f"/rest/config/devices/{my_id}"),
+        ("POST", "/rest/config/devices"),
+    ]
 
-    if kind == "transport":
+    if kind == "own-name":
+        fake_syncthing.write_responses[("PATCH", f"/rest/config/devices/{my_id}")] = 500
+        expected_message = "Syncthing did not name this device in Syncthing ("
+        expected_tail = "Run: mm diag"
+        expected_writes = [("PATCH", f"/rest/config/devices/{my_id}")]
+    elif kind == "transport":
         fake_syncthing.stop_after("POST", "/rest/config/devices")
         expected_message = "Syncthing stopped answering"
         expected_tail = f"Run: {core._syncthing_start_command()}"
@@ -1412,6 +1445,7 @@ def test_stale_record_on_default_syncthing_is_replaced_before_first_write(
         assert (storage / ".stignore").read_text() == STIGNORE
         assert (storage / "mm-crypto-init").is_file()
         assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+            ("PATCH", f"/rest/config/devices/{my_id}"),
             ("DELETE", "/rest/config/folders/default"),
             ("POST", "/rest/config/folders"),
         ]
@@ -1426,6 +1460,7 @@ def test_stale_record_on_default_syncthing_is_replaced_before_first_write(
         ) in text
         assert text.endswith("Run: mm init")
         assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+            ("PATCH", f"/rest/config/devices/{my_id}"),
             ("POST", "/rest/config/devices"),
             ("PATCH", f"/rest/config/devices/{peer_id}"),
             ("DELETE", "/rest/config/folders/default"),
@@ -1442,7 +1477,7 @@ def test_managed_join_stops_when_default_folder_becomes_occupied_or_shared(
     env, fake_syncthing, tmp_path, monkeypatch, reason
 ):
     _storage, _backend = env
-    stock_root, _my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
     storage = stock_root / "mind-meld"
     before = _tree(storage)
 
@@ -1463,6 +1498,7 @@ def test_managed_join_stops_when_default_folder_becomes_occupied_or_shared(
     assert "Syncthing's Default Folder at ~/Sync holds files or is shared" in text
     assert text.endswith("Choose a storage path outside ~/Sync, then run 'mm init' again.")
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("PATCH", f"/rest/config/devices/{my_id}"),
         ("POST", "/rest/config/devices"),
         ("PATCH", f"/rest/config/devices/{peer_id}"),
     ]
@@ -2114,6 +2150,7 @@ def test_managed_join_completes_in_one_run_when_offer_and_header_arrive_during_w
     assert f"mm devices approve {my_id}" in text
     assert "Waiting up to 10 minutes for that approval" in text
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
+        ("PATCH", f"/rest/config/devices/{my_id}"),
         ("POST", "/rest/config/devices"),
         ("PATCH", f"/rest/config/devices/{peer_id}"),
         ("DELETE", "/rest/config/folders/default"),
@@ -2535,3 +2572,58 @@ def test_init_publish_record_failure_prints_notice_and_still_exits_zero(
         "the next mm push retries it. Run: mm push"
     ) in text
     assert config.CONFIG_PATH.is_file()
+
+
+def test_default_device_name_darwin_local_hostname_and_fallbacks(monkeypatch):
+    calls: list[list[str]] = []
+    monkeypatch.setattr(initflow.socket, "gethostname", lambda: "fallback-hostname")
+
+    # 1. Linux / non-darwin never spawns scutil
+    monkeypatch.setattr(initflow.sys, "platform", "linux")
+    monkeypatch.setattr(
+        initflow.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("scutil spawned on linux")),
+    )
+    assert initflow._default_device_name() == "fallback-hostname"
+
+    # 2. Darwin success: takes first line stripped of scutil --get LocalHostName
+    monkeypatch.setattr(initflow.sys, "platform", "darwin")
+
+    def fake_scutil_ok(cmd, **kwargs):
+        calls.append(list(cmd))
+        assert kwargs == {
+            "capture_output": True,
+            "text": True,
+            "timeout": 2,
+            "check": False,
+        }
+        return subprocess.CompletedProcess(cmd, 0, stdout="  Mac-Studio  \nextra-line\n", stderr="")
+
+    monkeypatch.setattr(initflow.subprocess, "run", fake_scutil_ok)
+    assert initflow._default_device_name() == "Mac-Studio"
+    assert calls == [["scutil", "--get", "LocalHostName"]]
+
+    # 3. Darwin non-zero exit, empty output, whitespace-only first line -> fallback
+    for returncode, stdout in ((1, "Mac-Studio\n"), (0, ""), (0, "   \n"), (0, "\nsecond-line\n")):
+        monkeypatch.setattr(
+            initflow.subprocess,
+            "run",
+            lambda cmd, rc=returncode, out=stdout, **_kw: subprocess.CompletedProcess(
+                cmd, rc, stdout=out, stderr=""
+            ),
+        )
+        assert initflow._default_device_name() == "fallback-hostname"
+
+    # 4. Darwin missing binary (FileNotFoundError / OSError) and TimeoutExpired -> fallback
+    for exc in (
+        FileNotFoundError(errno.ENOENT, "No such file or directory: 'scutil'"),
+        OSError(errno.EACCES, "Permission denied"),
+        subprocess.TimeoutExpired(["scutil", "--get", "LocalHostName"], 2),
+    ):
+        monkeypatch.setattr(
+            initflow.subprocess,
+            "run",
+            lambda *_a, err=exc, **_kw: (_ for _ in ()).throw(err),
+        )
+        assert initflow._default_device_name() == "fallback-hostname"
