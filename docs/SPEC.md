@@ -87,7 +87,23 @@ audience and release policy are unchanged. Amended 2026-11-14 by
 `/project-spec` on the owner's decision that the repository is public ("change
 the docs"): Audience and target now says so, and the README install returns to
 the anonymous curl one-liner. Outcomes, target, audience ceiling and release
-policy are unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
+policy are unchanged. Amended 2026-11-18 by `/project-spec` to make joining
+the fleet one `mm init` run with one approval, on the owner's words after
+joining a Mac: "It is still very clunky — it seems like when we run mm init
+the second time, it should save our prior entries and just connect"; "when we
+first run mm init, it should ask if we are joining an existing fleet, and if
+we say yes, it shouldn't "error", it should just provide the id we need, and
+the copyable approve command to run on the home machine"; and, after the other
+fleet machines were left asking the new Mac to accept them, "I shouldn't have
+to re-auth every machine on every other machine". The owner then accepted the
+recommended answers ("Go"). O2's criteria 2, 3, 5, 6 and 7 change: `mm init`
+asks whether to start or join a fleet, waits for the approval in the same
+run, and resumes a stopped join with its saved answers; each machine records
+its Syncthing device ID in the fleet's encrypted store, so one approval on one
+fleet machine connects the new machine to every machine where mm manages
+Syncthing. O4, target, audience and release policy are unchanged; the 2.0.0
+line's O2 acceptance observes this flow. Earlier text lives in
+`git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -197,7 +213,10 @@ holds the same synced files.
 ### O2: A machine joins the Syncthing fleet from a fresh install
 Owner decisions of 2026-11-07: no migration tool; mm sets Syncthing up only
 when Syncthing still has its default configuration; joining takes one pasted
-device ID on each side; every fleet machine links to every other.
+device ID on each side; every fleet machine links to every other. Owner
+decisions of 2026-11-18: a join is one `mm init` run that waits for the
+approval, a stopped join resumes with the answers already given, and one
+approval on one fleet machine is the only approval a new machine needs.
 1. **Default configuration.** Syncthing has its default configuration when it
    has no paired device and no folder except its stock Default Folder,
    unshared and empty. Changes to the GUI or other options do not count. Any
@@ -206,49 +225,76 @@ device ID on each side; every fleet machine links to every other.
    there when it set Syncthing up; the owner manages Syncthing on every other
    machine.
 2. **Setup.** On a machine whose Syncthing has its default configuration, the
-   install starts Syncthing at login and mm configures it. `mm init
-   --new-fleet`, on macOS or Linux, creates the shared folder with mm's folder
-   options. `mm init` on a joining machine asks for one fleet machine's
-   Syncthing device ID, pairs with it, accepts the fleet folder with mm's
-   options and prints this machine's own device ID. mm may remove the
-   unshared, empty stock Default Folder so mm's folder is not nested inside
-   it.
+   install starts Syncthing at login and mm configures it. `mm init`, on
+   macOS or Linux, first asks whether this machine starts a new fleet or
+   joins an existing one; `mm init --new-fleet` answers "new" without asking.
+   Starting a new fleet creates the shared folder with mm's folder options.
+   Joining asks for one fleet machine's Syncthing device ID, pairs with it
+   and prints this machine's own device ID and a copyable
+   `mm devices approve <device-id>` line to run on a fleet machine, as
+   ordinary progress, not an error. Once approved it accepts the fleet folder
+   with mm's options. mm may remove the unshared, empty stock Default Folder
+   so mm's folder is not nested inside it.
 3. **Approval.** On a fleet machine where mm manages Syncthing, the owner
    runs one mm command with the new machine's pasted device ID (for example
    `mm devices approve <device-id>`). mm accepts only an exact match among
    Syncthing's pending devices, then adds the device and shares the fleet
-   folder; it never accepts a device on its own. Besides that exact match, it
-   only finishes an approval mm started on an earlier run: a device that
-   exactly matches the pasted ID, has the shape mm's add step writes and does
-   not yet share the fleet folder. The two paired machines mark
-   each other as Syncthing introducers, so every machine where mm manages
-   Syncthing connects to every other with no further step. On a fleet
-   machine where the owner manages Syncthing, the owner approves the new
-   machine in Syncthing as the README guide describes.
+   folder. Besides that exact match, it only finishes an approval mm started
+   on an earlier run: a device that exactly matches the pasted ID, has the
+   shape mm's add step writes and does not yet share the fleet folder. On a
+   fleet machine where the owner manages Syncthing, the owner approves the
+   new machine in Syncthing as the README guide describes. That one approval,
+   on one fleet machine, is the only approval a new machine needs: every
+   machine where mm manages Syncthing then connects to every other with no
+   further approval. Each machine records its own Syncthing device ID in the
+   fleet's encrypted store once it holds the passphrase, so only a fleet
+   member can vouch for a device. On a machine where mm manages Syncthing,
+   the next `mm push` or `mm pull` (the agent hooks included) adds a device
+   that is asking to connect when a fleet member's encrypted record names
+   it, and shares the fleet folder with it. mm never accepts a device that
+   no approval and no such record names. The paired machines also mark each
+   other as Syncthing introducers. mm promises this mesh only among machines
+   where it manages Syncthing; for a machine where the owner manages
+   Syncthing, the README guide has the owner mark one fleet machine as
+   introducer there, so it learns of later machines.
 4. **Pre-existing configuration.** On a machine whose Syncthing has a
    pre-existing configuration, mm changes nothing in Syncthing and points the
    owner to the README guide for configuring Syncthing to work with mm
-   (pairing, sharing the folder and its options).
-5. **Join and move.** Once the folder is shared, `mm init` joins: it never
-   creates a key header, verifies the passphrase and pulls. If the fleet's
-   key header has not arrived, it stops without writing anything and says to
-   wait for Syncthing; the owner reruns `mm init` once it has. Creating a
-   new fleet refuses on a folder that already holds one. The owner moves a
-   machine from iCloud Drive by uninstalling mm, reinstalling it with the
-   bootstrap script and joining (or starting the fleet with `mm init
-   --new-fleet`). The machine's agent files stay in its home and merge
+   (pairing, sharing the folder and its options), instead of pairing and
+   waiting for the approval; a rerun reuses the saved answers as criterion 5
+   describes.
+5. **Join and move.** Joining asks every question except the passphrase
+   before it waits: the storage path, the fleet machine's device ID, the
+   device name and the sources. It saves those answers on this machine,
+   never the passphrase. It then waits, up to about 10 minutes, for the
+   approval and the folder offer, accepts the folder and waits for the
+   fleet's key header; Ctrl-C stops either wait. Once the header arrives it
+   asks the passphrase, verifies it and pulls; it never creates a key header.
+   A wait that times out or is stopped is a waiting outcome, not an error: it
+   says what it is waiting for, ends with `Run: mm init` and exits non-zero,
+   and it writes no device entry, config or key header. A rerun while a join
+   is in progress shows the saved answers and asks once whether to continue
+   joining: yes goes straight to connecting without asking again, and no
+   forgets the saved answers and starts over, leaving Syncthing's pairing as
+   it is. Creating a new fleet refuses on a folder that already holds one.
+   The owner moves a machine from iCloud Drive by uninstalling mm,
+   reinstalling it with the bootstrap script and joining (or starting the
+   fleet with `mm init --new-fleet`). The machine's agent files stay in its home and merge
    through the pull rules of O1.1: no local agent file is lost, and a file
    that differs from the fleet's copy without a proven last-synced base is
    kept both ways until `mm resolve`.
 6. `mm status` and `mm diag` read and report Syncthing's state (connected
    peers, the folder's sync state and the folder options mm relies on).
-   Outside criteria 2 and 3, mm never changes Syncthing's configuration.
+   Outside criteria 2 and 3 (setup, approval and the mesh step of criterion
+   3), mm never changes Syncthing's configuration.
 7. Evidence: tests against a stand-in for Syncthing's local API cover setup,
-   approval, the exact-match refusal and the pre-existing-configuration
-   guide; an integration test joins a machine that holds iCloud-era state to
-   a fresh fleet without losing a file; and the owner observes setup, join
-   and approval on their own machines, recorded in PROGRESS.md
-   `## Acceptance`.
+   approval, the exact-match refusal, the pre-existing-configuration guide,
+   the join's wait, stop and resume, and the mesh step adding only a device a
+   fleet record names; an integration test joins a machine that holds
+   iCloud-era state to a fresh fleet without losing a file; and the owner
+   observes, on their own machines, a join that finishes in one `mm init`
+   run after one approval and the new machine connected to every machine
+   where mm manages Syncthing, recorded in PROGRESS.md `## Acceptance`.
 
 ### O3: Partial sync is a reported state, never an error
 1. Content that has not arrived yet, a file Syncthing is replacing, and
@@ -388,9 +434,10 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   its default configuration (O2.1), stops with instructions if Homebrew is
   missing on macOS, and ships before 2.0.0.
 - Accepted manual steps: pasting a fleet machine's Syncthing device ID into
-  `mm init` and the new machine's into the approval command; configuring
-  Syncthing with the README guide on a machine with a pre-existing Syncthing
-  configuration; moving each machine off iCloud Drive by uninstalling and
+  `mm init` and the new machine's into the approval command on one fleet
+  machine; configuring Syncthing with the README guide on a machine with a
+  pre-existing Syncthing configuration, including marking one fleet machine
+  as introducer there; moving each machine off iCloud Drive by uninstalling and
   reinstalling mm; `mm resolve` for real conflicts; unlocking the Linux
   keyring before hooks run; re-joining a machine restored from backup or
   cloned; removing a dead machine from the fleet, in Syncthing on every
@@ -417,9 +464,9 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   to join the fleet.
 - Multi-user collaboration, a GUI, real-time file watching, syncing session
   transcripts, walking a host home root. Unchanged exclusions.
-- mm-managed Syncthing beyond O2's setup, approval and introducers: invite
-  codes, relays, changing a pre-existing Syncthing configuration, removing
-  dead machines and scan requests after push. Revisit when the fleet grows
+- mm-managed Syncthing beyond O2's setup, approval, introducers and mesh
+  step: invite codes, relays, changing a pre-existing Syncthing
+  configuration, removing dead machines and scan requests after push. Revisit when the fleet grows
   past a handful of machines, or pairing or folder settings cause an
   observed missed sync.
 - A migration tool or fleet-wide cutover from iCloud Drive, and carrying the

@@ -44,51 +44,26 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=bin/_check.py|tests/test_bin_check.py] Test gap: Git selector timeout translation
-
-- **Test gap:** no demonstrated defect, filed under `test-gaps=record`.
-- **Description:** The post-suite failure test injects a selection error after Git. The selector's 60-second Git subprocess bound and its timeout diagnostic need direct coverage.
-- **Hypothesis (untested):** Inject a timeout at the Git subprocess call and check the translated selection error and bound.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `bin/_check.py` (`_git`)
-- **Evidence:** Track 150A coverage audit found no failure on this path.
-- **Context:** /review-and-prep for Track 150A, `3dcfff8` (2026-11-18). Revisit in the next Track touching these files.
-- **Effort:** ?
-
-### [review:files=bin/_check.py|tests/test_bin_check.py] Test gap: Missing coverage in the running interpreter
-
-- **Test gap:** no demonstrated defect, filed under `test-gaps=record`.
-- **Description:** The missing-coverage fallback test replaces the whole environment probe, leaving the in-process `coverage` import failure untested.
-- **Hypothesis (untested):** Exercise that probe with the import unavailable and verify the reported coverage flag.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `bin/_check.py` (`probe_env`)
-- **Evidence:** Track 150A coverage audit found no failure on this path.
-- **Context:** /review-and-prep for Track 150A, `3dcfff8` (2026-11-18). Revisit in the next Track touching these files.
-- **Effort:** ?
-
-### [review:files=bin/_check.py|tests/test_bin_check.py] Test gap: Worker parts with no collected nodes
-
-- **Test gap:** no demonstrated defect, filed under `test-gaps=record`.
-- **Description:** The empty-worker test covers a valid collection beside an empty part. The no-tests pytest exit bypasses the merger when every worker part is empty.
-- **Hypothesis (untested):** Extend the merge test with only empty parts and check that it refuses to publish a baseline.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `bin/_check.py` (`_merge_parts`)
-- **Evidence:** Track 150A coverage audit found no failure on this path.
-- **Context:** /review-and-prep for Track 150A, `3dcfff8` (2026-11-18). Revisit in the next Track touching these files.
-- **Effort:** ?
-
-### [review:files=bin/_check.py|tests/test_bin_check.py] Test gap: Cleanup lock contention after refresh fallback
-
-- **Test gap:** no demonstrated defect, filed under `test-gaps=record`.
-- **Description:** The existing second-recorder test covers contention when seeding. Lock contention during stale-record cleanup after a green fallback is untested.
-- **Hypothesis (untested):** Hold the lock during fallback cleanup and verify that it preserves the existing record and the green exit.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `bin/_check.py` (`_drop_stale_refresh_record`)
-- **Evidence:** Track 150A coverage audit found no failure on this path.
-- **Context:** /review-and-prep for Track 150A, `3dcfff8` (2026-11-18). Revisit in the next Track touching these files.
-- **Effort:** ?
-
 ## Drain records
+
+### Roadmap regeneration — 2026-11-18 (SPEC O2 amended: one-run join and one-approval mesh; Track 150A recorded)
+
+Verified against `8bf0020` (v1.12.68), composed by `/project-spec` with the docs/SPEC.md O2 amendment the developer approved that day ("Good with that" to the one-run join proposal; "Go" to the six recommended answers), from the Factory Manager's brief and its two added inputs: the developer's "I shouldn't have to re-auth every machine on every other machine" after joining `mac-c`, and the held `.jsonl` peer edits seen on `mac-c`'s pulls. Track 150A merged in PR #352 and is recorded as an independent receipt in docs/roadmap-shipped.md; Group 150 is retired. Admission follows docs/SPEC.md (MVP-1 on Syncthing; O2's acceptance is part of the 2.0.0 line), the AGENTS.md planning rules and the standing constraint that a reproducible bug the owner encountered goes to Current Plan. No Track in the plan touches `bin/_check.py`, so the four inbox test gaps wait in Future.
+
+| Item | Disposition |
+|---|---|
+| Brief: one-run join (developer's decision and the approved proposal) | place (Track 151A); promotes the Future entry "Joining mm init waits for the fleet's approval instead of stopping and asking for a rerun", whose trigger (an O2 revision) is met |
+| Brief A: one approval should reach every machine; `mac-c` learned no devices from its introducer | place (Track 151A's introducer task and Track 152A's encrypted-record mesh) |
+| Brief B: 24 `.jsonl` older peer edits held on every pull on `mac-c`, and bare "  gstack:" verbose lines | place (Track 151B); verified at `8bf0020` (the `older` verdict returns before `should_merge`; held edits suppress the "Up to date" line and are missing from the per-source counts) |
+| Future: Test gap: interrupted pull skips the memory-index tidy | place (Track 151B; its `_touches:` trigger is met) |
+| Future: Test gap: unreadable Syncthing management record during pull | place (Track 151B; trigger met) |
+| Future: Test gaps: never-auto-accept gate reach (2) | place (Track 152A, which replaces that gate with the record rule; trigger met) |
+| Test gap: Git selector timeout translation (PR #352) | defer (test gap; no Track touches `bin/_check.py`) |
+| Test gap: Missing coverage in the running interpreter (PR #352) | defer (same) |
+| Test gap: Worker parts with no collected nodes (PR #352) | defer (same) |
+| Test gap: Cleanup lock contention after refresh fallback (PR #352) | defer (same) |
+
+4 inbox items drained: 0 placed, 4 deferred, 0 killed, 0 discharged. Three Future test gaps placed on Tracks and one Future entry promoted; Future stays at 78 entries, and its other entries keep their text. No other Future trigger is met: no single Track's `_touches:` cover another test gap's files. No bump under SPEC documentation-only policy.
 
 ### Roadmap inbox drain — 2026-11-18 (two flaky tests carded; Track 149A recorded)
 
