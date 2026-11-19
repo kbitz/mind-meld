@@ -999,3 +999,43 @@ def test_mesh_pass_reports_unpublished_names_and_vouched_ids_excluding_self_and_
     assert "mac-a" not in mesh_res.unpublished_names
     assert "mac-b" not in mesh_res.unpublished_names
     assert "unreadable-d" not in mesh_res.unpublished_names
+
+
+@pytest.mark.parametrize("attended", [False, True])
+def test_mesh_pairs_vouched_peer_with_one_registry_read(
+    fake_syncthing, tmp_path, monkeypatch, attended
+):
+    _, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    peer = _valid_syncthing_id("B")
+    register_device(backend, "dev-b", "mac-b")
+    assert devices.publish_record(backend, "dev-b", peer, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {peer: {"name": "mac-b"}}
+
+    inventory_devices = devices.inventory_devices
+    budget = meshflow.ATTENDED_PASS_BUDGET_S if attended else meshflow.HOOK_PASS_BUDGET_S
+    clock = [1000.0]
+    reads = 0
+
+    def read_inventory(backend):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            clock[0] += budget - 0.5
+            return inventory_devices(backend)
+        clock[0] += 0.5
+        raise StorageError("registry unavailable during second read")
+
+    monkeypatch.setattr(meshflow.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(devices, "inventory_devices", read_inventory)
+    result = meshflow.run(
+        config.load_config(),
+        PASSPHRASE,
+        TEST_MEMORY_KB,
+        verb="pull",
+        attended=attended,
+        backend=backend,
+    )
+
+    assert result.stop_cause is None
+    assert result.shared == [("mac-b", peer)]
+    assert reads == 1

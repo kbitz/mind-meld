@@ -4420,19 +4420,27 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
         ],
         folders=[ok_folder],
     )
-    fake_syncthing.requests.clear()
-
-    res_primary = CliRunner().invoke(cli.app, ["pull"])
-    assert res_primary.exit_code == 0, (res_primary.stdout, res_primary.stderr)
-    assert res_primary.stderr.splitlines().count(expected_one) == 1
-    combined_primary = res_primary.stdout + res_primary.stderr
-    assert joining_a not in combined_primary
-    assert joining_b not in combined_primary
-    assert "hostile-joiner" not in combined_primary
-    assert "linux-b" not in combined_primary
-    assert "\x1b" not in combined_primary
-    assert all(req[0] == "GET" for req in fake_syncthing.requests)
-    assert fake_syncthing.bodies == []
+    for snapshot_unavailable in (False, True):
+        fake_syncthing.requests.clear()
+        with monkeypatch.context() as patch:
+            if snapshot_unavailable:
+                # The fresh pending-device GET still succeeds on the fallback path.
+                patch.setattr(
+                    syncthing.SyncthingWriter,
+                    "mesh_snapshot",
+                    lambda *_: syncthing.MeshSnapshot("unreachable", "timeout"),
+                )
+            result = CliRunner().invoke(cli.app, ["pull"])
+        assert result.exit_code == 0, (result.stdout, result.stderr)
+        assert result.stderr.splitlines().count(expected_one) == 1
+        combined = result.stdout + result.stderr
+        assert joining_a not in combined
+        assert joining_b not in combined
+        assert "hostile-joiner" not in combined
+        assert "linux-b" not in combined
+        assert "\x1b" not in combined
+        assert all(req[0] == "GET" for req in fake_syncthing.requests)
+        assert fake_syncthing.bodies == []
 
     # 3. 1-machine fleet (no peer devices yet) with 2 pending devices
     fleet.backend.delete(device_key(PEER))

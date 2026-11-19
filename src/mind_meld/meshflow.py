@@ -374,32 +374,25 @@ def _run_inner(
             notice=True,
         )
 
-    try:
-        inventory = devices.inventory_devices(backend)
-    except (OSError, StorageError):
-        pass
-    else:
-        published_mm_ids = (
-            set(records.by_mm_id)
-            | set(records.unreadable)
-            | set(records.newer_format)
-            | set(records.vanished)
-        )
-        unpublished_entries = sorted(
-            (
-                entry
-                for entry in inventory.valid
-                if isinstance(entry.get("device_id"), str)
-                and entry["device_id"] != own_mm_id
-                and entry["device_id"] not in published_mm_ids
-            ),
-            key=lambda entry: entry["device_id"],
-        )
-        result.unpublished_names = tuple(
-            _safe_peer_name(entry.get("device_name"), entry["device_id"])
-            for entry in unpublished_entries
-        )
+    if attended and verb == "pull" and recorded_id:
         result.vouched_ids = frozenset(records.vouched)
+        inventory = records.inventory
+        if inventory is None:
+            # An empty record directory needs no registry read for pairing.
+            # Read it only to name unpublished machines in the pull notice.
+            try:
+                inventory = devices.inventory_devices(backend)
+            except (OSError, StorageError):
+                pass
+        if inventory is not None:
+            published_mm_ids = set(records.by_mm_id).union(
+                records.unreadable, records.newer_format, records.vanished
+            )
+            result.unpublished_names = tuple(
+                _safe_peer_name(entry["device_name"], entry["device_id"])
+                for entry in sorted(inventory.valid, key=lambda entry: entry["device_id"])
+                if entry["device_id"] != own_mm_id and entry["device_id"] not in published_mm_ids
+            )
 
     need_classify = False
     publish_stop = None

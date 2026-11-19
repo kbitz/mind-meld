@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from dataclasses import replace as replace_dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -898,17 +899,15 @@ def status(
             except (OSError, StorageError):
                 pass
             else:
-                syncthing_state = syncthing.SyncthingState(
-                    **{
-                        **syncthing_state.__dict__,
-                        "pending_device_count": len(
-                            syncthing.unvouched_pending_ids(
-                                syncthing_state.pending_device_ids,
-                                set(fleet_records.vouched),
-                                own_id=managed_record.device_id,
-                            )
-                        ),
-                    }
+                syncthing_state = replace_dataclass(
+                    syncthing_state,
+                    pending_device_count=len(
+                        syncthing.unvouched_pending_ids(
+                            syncthing_state.pending_device_ids,
+                            fleet_records.vouched,
+                            own_id=managed_record.device_id,
+                        )
+                    ),
                 )
         peer_states = _peer_states(
             devices,
