@@ -105,14 +105,13 @@ that peer whose peer publishes no ancestry (a peer on an older release, a lost
 database, a file never synced) falls to row 7. The future-clamp in
 `_restore_mtime_best_effort` still matters for both.
 
-**Line-deletion limit.** A line deleted on one machine stays deleted on the others
-when they did not change that file and the remote mtime is not older than the local
-file (rows 4 and 6 overwrite, no union). When both
-sides changed the file, on a row-7 no-base union, or when a peer's edit to a
-mergeable file carries an older mtime than the local version it built on (rows 4
-and 6 returning `both`), the union has no base bytes
-to tell a deleted line from an added one, so the unioned bytes bring the deleted
-line back and reach peers on this machine's next push. What still returns: a deleted line with no
+**Line-deletion limit.** A fast-forward propagates a line deletion by writing the
+peer's bytes. A union has no base bytes to tell a deleted line from an added one.
+This applies when both sides changed, on a row-7 no-base union, and when a peer
+edit to a mergeable file carries an older mtime than the local version it built
+on (rows 4 and 6 returning `both`). Publishing unioned bytes can carry the retained
+line back to peers. A no-op union keeps the local bytes and can leave peers with
+different versions. The union retains a deleted line with no
 relative `.md` link (including every `.jsonl` line), a deleted `MEMORY.md` line whose
 linked file still exists here or was left `waiting` or `failed` by this pull, and the
 local wording when the two sides word one file's line differently (`merge_lines` keeps

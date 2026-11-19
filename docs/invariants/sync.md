@@ -643,27 +643,31 @@ quiet-gated) and adds `N files deleted by <origin>; copies in <folder>` to its
 breadcrumb. History gains the `deleted` action (`mm log --action deleted`; the row's
 `extra` holds the folder) and `.mind-meld-log.md` lists deleted files.
 `mm pull --dry-run` predicts `delete` (`totals`: `N would be deleted`) and never
-reaps. The pull rule decides `older` (a fast-forward whose remote mtime is older
-than the local file) only for a file `should_merge` does not cover: a `.jsonl` or
-`MEMORY.md` edit that would be `older` under rows 4 or 6 unions first as row 8
-(`both`). Why: a pulled file's mtime cannot prove a peer edit is older, because
-`_apply_merge` stamps the pull's write time (only `_apply_write` and
-`_apply_fast_forward` call `_restore_mtime_best_effort`) and peers' clocks or
-republished mtimes can disagree — confirmed on HEAD before Track 151B, where a
-two-peer pull that merged Peer B's V1 (stamping the pull's write time, while the
-planner already predicted `merge` for Peer C) or wrote Peer B's V1 with an ahead
-mtime held Peer C's V2 (built on V1 with an older mtime) as `older` and left the
-file at V1. A no-op union (such as a restored machine's subset) settles the older
-remote version as this machine's newest `held` version until its next push, so the
-local file is not clean until then and a peer fast-forward meanwhile unions
-(existing row-8 semantics). Every per-source summary line in `_print_pull_summary`
-is labeled `<peer>/<source>:` and prints only when it carries at least one count;
-`older` prints `Pull: N older peer edits not applied (mm pull --verbose).` on its
-own outcome line; `mm pull --verbose` keeps `Up to date with <peer>/<source>.`
-when a source holds only older edits, prints `<peer>/<source>: N older peer
-edit(s) held` on the per-source summary line, and lists each `older peer edit not
-applied: <peer>/<source>/<path>`; and `--dry-run` predicts it.
-To accept such an edit on a non-merged file, compare both versions, then `touch <file>` and `mm push` on
+reaps.
+
+When rows 4 or 6 see an older remote mtime, the pull rule sends `.jsonl` and
+`MEMORY.md` to the row-8 union (`both`) and holds other files as `older`.
+`_apply_merge` gives the canonical file the pull's write time. `_apply_write`
+and `_apply_fast_forward` restore the peer's mtime on the canonical file, and
+peers' clocks or republished mtimes can disagree. Before Track 151B, the
+two-peer test held Peer C's older V2 at apply time and left V1 on disk in both
+cases (Peer B merged V1 with the pull's write time or wrote V1 with an ahead
+clock). The planner already predicted a merge for C in the first case.
+
+A no-op union (such as a restored machine's subset) settles the peer's SHA
+as the newest `held` version without changing local bytes. The local file
+can differ from the held version until a push publishes the file again, so a
+subsequent peer edit can take the union path too. A push that skips publication
+leaves that ledger state in place.
+
+Every per-source summary line in `_print_pull_summary` uses `<peer>/<source>:`
+and carries at least one count. Held edits print
+`Pull: N older peer edits not applied (mm pull --verbose).` on their own outcome
+line. `mm pull --verbose` keeps `Up to date with <peer>/<source>.` when a source
+holds only older edits. It prints `<peer>/<source>: N older peer edits held` in
+the summary and lists each `older peer edit not applied: <peer>/<source>/<path>`.
+`mm pull --dry-run` predicts the hold. To accept a held edit, compare both
+versions, then run `touch <file>` and `mm push` on
 the machine whose version should win: the mtime-only republish makes it newer. `mm
 diag` and `--json` gain a read-only `fast_forward` section (ledger state,
 `peer_base` rows per peer, `seen_version` rows, each scan root's token state; a
@@ -2000,7 +2004,10 @@ Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(by
 ## Pull-time mtime preservation (load-bearing, v0.12.3)
 `_apply_write` and `_apply_conflict` (pullflow.py) MUST call `_restore_mtime_best_effort(path, remote_info.get("mtime"))` after a successful `atomic_write_bytes`. Without it, every pulled file lands with `st_mtime = now-of-pull`, and any downstream consumer that orders by mtime (e.g. gstack skill preambles' `ls -t` recency scan over `~/.gstack/projects/*/checkpoints/`) sees freshly-pulled-old files as "newer" than locally-authored newer ones. `_apply_fast_forward` (and the keep-remote interactive branch in `_apply_incoming_file`, which goes through `_apply_fast_forward`) does the same restore. Because the inline prompt can wait indefinitely, keep-remote (through `_apply_fast_forward`) and merge (through `_unchanged_since`) recheck the file against the `before` `lstat` tuple taken with the hash before writing: a changed file keeps both through `_apply_conflict`, and a removed one is a contained failure.
 
-`_apply_merge` and the merge-via-LCS interactive branch deliberately do NOT restore — line-union merges produce locally-authored content, and backdating to the remote mtime would make the merged result look older than the peers' files, so the pull rule's `older` guard (or the no-base fallback's local-newer skip) would hold it back and lose the union content fleet-wide.
+`_apply_merge` and the interactive merge-via-LCS branch leave the merged file's
+mtime at the time of the local write. The canonical file holds a locally authored
+merge, and restoring the peer's mtime would give mtime-based consumers the age of
+one input instead of the age of the merge.
 
 **Future-clamp invariant.** `conflictmtime.py:_restore_mtime_best_effort` caps the applied mtime at `now + _MTIME_RESTORE_MAX_SKEW_SECONDS` (60s). Without the clamp, a peer with a bad clock OR a passphrase-holding attacker minting a manifest dated in 2099 would poison the victim's local mtime into a permanent `local_mtime > remote_mtime` hold (the `older` guard, or the no-base fallback's skip in `pullflow.py:_apply_incoming_file`) — silently locking the victim out of all future legitimate updates to that path. The 60s window absorbs normal NTP drift between Macs without admitting year-2099 abuse.
 

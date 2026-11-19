@@ -645,9 +645,10 @@ def _prompt_conflict_choice(
 #   local hash == remote hash               -> UNCHANGED (settles the base)
 #   remote == this peer's base              -> SKIP      (silent, no download)
 #   clean local, peer built on it           -> FAST-FORWARD (write remote, no
-#                                              union, no recovery copy); OLDER
-#                                              (not applied) if remote mtime <
-#                                              local mtime
+#                                              union, no recovery copy)
+#                                              Older peer mtime: use the union
+#                                              below for mergeable files and
+#                                              hold the rest as OLDER.
 #   remote already seen/held here           -> STALE     (silent)
 #   no base and no peer ancestry            -> FALLBACK  (today's rule below)
 #   otherwise both changed:
