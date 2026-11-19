@@ -1106,3 +1106,17 @@ Recorded by the 2026-11-18 regeneration at `8bf0020`. Identity: PR #352's body n
 ### Track 150A: Make the `--affected` refresh test and the release check's grandchild-kill test deterministic ✓ Shipped (v1.12.68)
 - 2026-11-18: merged [PR #352](https://github.com/kbitz/mind-meld/pull/352) (commit `8bf002047cf1b3c37b99cba6ad839f6f3f11308b`); verified land-time Track 150A, original Group 150, factory branch `mmm/73235cfa`. Introduction/lineage: carded by the 2026-11-18 inbox drain (`3e18673`, PR #351) from the two tests that failed intermittently that day.
 - Approved-scope evidence: merged PR review/prep and ship receipts (release head `13cc848`, full `./bin/check` passed there), merged changes to `bin/_check.py`, `tests/test_bin_check.py` and `tests/test_upgrade.py` (plus a matching installer timeout test in `tests/test_self_update.py`), no change to `src/mind_meld/upgrade.py`, and the v1.12.68 release row. Four test gaps went to the inbox (deferred by this regeneration).
+
+## Individual Track history
+
+_tombstone: 151_
+
+Recorded by the 2026-11-19 card run at `0bec1e4`. Identity: PR #354's body names Track 151B and PR #355's body names Track 151A; their head branches `mmm/206ebef1` and `mmm/19bf6e16` are the factory items for those Tracks. Scope evidence is each merged PR's review-and-prep and ship receipts, the merged content and the release rows in docs/PROGRESS.md.
+
+### Track 151B: Merge older peer edits to line-merged files and name held edits in verbose pull output ✓ Shipped (v1.12.69)
+- 2026-11-19: merged [PR #354](https://github.com/kbitz/mind-meld/pull/354) (commit `3d3f37095e77c53e7deb74bea29510330adf550e`); verified land-time Track 151B, original Group 151, factory branch `mmm/206ebef1`. Introduction/lineage: carded by the 2026-11-18 SPEC O2 amendment run (`4db36b7`, PR #353) from the held `.jsonl` edits on the newly joined `mac-c`.
+- Approved-scope evidence: merged PR review/prep and ship receipts (release head `b195f40`, full `./bin/check` passed there; the PR body reports all 15 plan items verified), merged changes to `pullflow.py`, `pullplan.py`, their tests and docs/invariants/sync.md, and the v1.12.69 release row. An older peer edit to a `.jsonl` or `MEMORY.md` file built on the local version now merges by line union, and each pull line names its peer and source. Four test gaps went to the inbox.
+
+### Track 151A: Join the fleet in one `mm init` run that waits for the approval and resumes with saved answers ✓ Shipped (v1.12.70)
+- 2026-11-19: merged [PR #355](https://github.com/kbitz/mind-meld/pull/355) (commit `0bec1e445c431a2517c1b7cd28395cb1062dc0fe`); verified land-time Track 151A, original Group 151, factory branch `mmm/19bf6e16`. Introduction/lineage: carded by the 2026-11-18 SPEC O2 amendment run (`4db36b7`, PR #353).
+- Approved-scope evidence: merged PR review/prep and ship receipts (release head `b7c4db9`, full `./bin/check` passed there), merged changes to `initflow.py`, `config.py`, their tests, README, root SPEC.md and docs/invariants/init-devices.md, and the v1.12.70 release row. The introducer task's three-instance Syncthing 2.1.7 probe found that the joiner learns introduced devices only after it reconnects to the introducer; docs/invariants/init-devices.md records this and hands mesh convergence to Track 152A, as the card allowed. Six test gaps went to the inbox.
