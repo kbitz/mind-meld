@@ -41,6 +41,7 @@ from mind_meld import (
     devices,
     errors,
     manifest,
+    merge,
     pullflow,
     pullhistory,
     pullplan,
@@ -82,12 +83,12 @@ def fleet(tmp_path):
     return SimpleNamespace(root=tmp_path, local=local, peer=peer, backend=backend, config=cfg)
 
 
-def _seed(fleet, files, *, tombstones=None):
+def _seed(fleet, files, *, tombstones=None, mtime=1_700_000_000):
     for name, content in files.items():
         path = fleet.peer / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-        os.utime(path, (1_700_000_000, 1_700_000_000))
+        os.utime(path, (mtime, mtime))
     peer = manifest.build_manifest_v2(
         PEER,
         "Peer B",
@@ -227,7 +228,7 @@ def test_two_device_pull_counts_and_summary(fleet, monkeypatch, mode, scenario):
     else:
         assert (fleet.local / name).read_bytes() == b'{"local":1}\n{"remote":1}\n'
     stdout = (
-        "  notes: 1 conflicts\n    - note.md\n"
+        "  Peer B/notes: 1 conflicts\n    - note.md\n"
         if scenario == "conflict" and mode != "quiet"
         else ""
     )
@@ -255,6 +256,23 @@ def test_two_device_pull_counts_and_summary(fleet, monkeypatch, mode, scenario):
         if scenario == "conflict":
             stdout += "  Run mm conflicts to review, mm resolve to pick a winner.\n"
     assert summaries == [(stdout, stderr)]
+
+
+def test_attended_pull_summary_keeps_a_multiline_peer_name_on_one_line(fleet, monkeypatch):
+    entry_key = device_key(PEER)
+    entry = json.loads(fleet.backend.get(entry_key))
+    entry["device_name"] = "Peer B\nLab"
+    fleet.backend.put(entry_key, json.dumps(entry).encode())
+    _seed(fleet, {"note.md": b"peer content\n"})
+    _put_local(fleet, "note.md", b"local content\n", 1_600_000_000)
+
+    result, summaries, _ = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_conflicted == 1
+    lines = summaries[0][0].splitlines()
+    assert len(lines) == 2
+    assert lines[0].endswith("notes: 1 conflicts")
+    assert lines[1] == "    - note.md"
 
 
 @pytest.mark.parametrize("mode", ("attended", "quiet"))
@@ -301,7 +319,7 @@ def test_corrupt_blob_failure_lines_and_counts(fleet, monkeypatch, mode):
         assert output == ("", warning + count_warning)
     else:
         assert output[1] == warning
-        summary = "  notes: 1 failed\n    - note.md\n"
+        summary = "  Peer B/notes: 1 failed\n    - note.md\n"
         if mode == "direct":
             summary += (
                 "\nPull incomplete: 0 written, 1 failed. Fix the warning above, then run "
@@ -444,6 +462,44 @@ def _third_device(fleet, *, tombstones=None):
     )
 
 
+def _seed_third(fleet, files, *, mtime=1_700_000_000, ancestry=None):
+    """Register `THIRD` ("Peer C") with encrypted `notes` blobs and manifest."""
+    devices.register_device(fleet.backend, THIRD, "Peer C")
+    devices.update_last_seen(fleet.backend, THIRD)
+    entries = {}
+    transferred = 0
+    iso_mtime = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+    for name, content in files.items():
+        sha = hashlib.sha256(content).hexdigest()
+        info = {"sha256": sha, "size": len(content), "mtime": iso_mtime}
+        if ancestry and name in ancestry:
+            info["from"] = list(ancestry[name])
+        entries[name] = info
+        encrypted = crypto.encrypt(content, PASSPHRASE, MEMORY_KB)
+        fleet.backend.put(blob_key(THIRD, sha), encrypted)
+        transferred += len(encrypted)
+    third = {
+        "device_id": THIRD,
+        "device_name": "Peer C",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "sources": {
+            "notes": {
+                "base_path": str(fleet.peer),
+                "type": "generic",
+                "files": entries,
+            }
+        },
+        "tombstones": {},
+    }
+    fleet.backend.put(
+        manifest_key(THIRD),
+        crypto.encrypt(manifest.serialize_manifest(third), PASSPHRASE, MEMORY_KB),
+    )
+    fetched = core._fetch_remote_manifest(fleet.backend, THIRD, PASSPHRASE, MEMORY_KB)
+    assert fetched.status == "ok" and fetched.manifest == third
+    return third, transferred
+
+
 @pytest.mark.parametrize("mode", MODES)
 # Coverage audit value card:
 # Value: protects=undelivered blobs create no file history before they arrive;
@@ -467,7 +523,7 @@ def test_manifest_before_blobs_reports_waiting_then_applies(fleet, syncthing, mo
     if mode == "quiet":
         assert summaries == [("", "")]
     elif mode == "attended":
-        assert summaries == [("  notes: 2 waiting\n    - a.md\n    - b.md\n", "")]
+        assert summaries == [("  Peer B/notes: 2 waiting\n    - a.md\n    - b.md\n", "")]
     else:
         text = summaries[0][0]
         assert "Pull complete." in text and "2 waiting" in text
@@ -727,8 +783,41 @@ def test_newer_local_with_a_base_is_held_as_older_and_never_skipped_or_overwritt
     assert summaries[0][1] == ""  # nothing at risk is printed to stderr
     if mode != "quiet":
         assert "older peer edit not applied: Peer B/notes/note.md" in output[0]
+        lines = output[0].splitlines()
+        assert lines.count("  Peer B/notes: 1 older peer edit held") == 1
+        assert "  Up to date with Peer B/notes." in lines
+        assert "  notes:" not in lines and "  Peer B/notes:" not in lines
     else:
         assert "older peer edit" not in output[0]
+
+
+@pytest.mark.parametrize("verbose", (True, False))
+def test_restored_machine_row4_older_hold_names_peer_and_source_in_verbose_only(
+    fleet, monkeypatch, verbose
+):
+    peer, _ = _seed(fleet, {"note.md": b"peer content\n"}, mtime=1_700_000_000)
+    local_bytes = b"local content\n"
+    peer["sources"]["notes"]["files"]["note.md"]["from"] = [pullplan.prefix(_sha(local_bytes))]
+    _republish(fleet, peer)
+    local = _put_local(fleet, "note.md", local_bytes, 1_800_000_000)
+    _record(("note.md", local_bytes))
+
+    result, summaries, (out, err) = _run(fleet, monkeypatch, "attended", verbose=verbose)
+
+    _counts(result, older=_older("note.md"))
+    assert local.read_bytes() == local_bytes
+    assert err == ""
+    lines = out.splitlines()
+    if verbose:
+        assert summaries == [("  Peer B/notes: 1 older peer edit held\n", "")]
+        assert lines.count("  Peer B/notes: 1 older peer edit held") == 1
+        assert "  Up to date with Peer B/notes." in lines
+        assert "  notes:" not in lines and "  Peer B/notes:" not in lines
+    else:
+        assert summaries == [("", "")]
+        assert "  Peer B/notes: 1 older peer edit held" not in lines
+        assert "  Up to date with Peer B/notes." not in lines
+        assert "older peer edit" not in out
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -767,6 +856,94 @@ def test_a_mergeable_file_the_owner_did_not_touch_fast_forwards_with_no_union(
 
     assert (result.total_written, result.total_merged, result.total_conflicted) == (1, 0, 0)
     assert local.read_bytes() == new
+
+
+@pytest.mark.parametrize("first_write", ("merge-stamps-now", "peer-clock-ahead"))
+def test_two_peer_pull_merges_second_peers_older_jsonl_edit_and_settles(
+    fleet, monkeypatch, first_write
+):
+    line_1 = b'{"ts":"2026-01-01T00:00:01Z","seq":1}\n'
+    line_2 = b'{"ts":"2026-01-01T00:00:02Z","seq":2}\n'
+    line_3 = b'{"ts":"2026-01-01T00:00:03Z","seq":3}\n'
+    v1 = line_1 + line_2
+    v2 = v1 + line_3
+    assert merge.merge_file("events.jsonl", line_1, v1) == v1
+    assert merge.merge_file("events.jsonl", v1, v2) == v2
+
+    local = fleet.local / "events.jsonl"
+    if first_write == "merge-stamps-now":
+        _put_local(fleet, "events.jsonl", line_1, 1_600_000_000)
+        peer_b, b_transferred = _seed(fleet, {"events.jsonl": v1}, mtime=1_700_000_000)
+        want_first = ("merge", "")
+        want_counts = (0, 2)
+    else:
+        peer_b, b_transferred = _seed(fleet, {"events.jsonl": v1}, mtime=1_700_000_200)
+        want_first = ("write", "")
+        want_counts = (1, 1)
+    peer_c, c_transferred = _seed_third(
+        fleet,
+        {"events.jsonl": v2},
+        mtime=1_700_000_100,
+        ancestry={"events.jsonl": [pullplan.prefix(_sha(v1))]},
+    )
+
+    targets = [d for d in devices.inventory_devices(fleet.backend).valid if d["device_id"] != LOCAL]
+    assert [d["device_id"] for d in targets] == [PEER, THIRD]
+    manifests = {PEER: peer_b, THIRD: peer_c}
+    before = _snapshot(fleet.root)
+    planner, unknown = pullflow._plan_pull(
+        targets,
+        manifests,
+        {NOTES: {"path": fleet.local, "type": "generic"}},
+        None,
+        manifest.collect_tombstones([PEER, THIRD], manifests.get),
+        _committed(PEER, THIRD),
+        lambda src, rel: (False, False),
+        LOCAL,
+    )
+    assert unknown == []
+    assert _snapshot(fleet.root) == before
+    predicted = {(p.device_id, p.rel_path): (p.outcome, p.reason) for p in planner.predictions}
+    assert predicted == {
+        (PEER, "events.jsonl"): want_first,
+        (THIRD, "events.jsonl"): ("merge", ""),
+    }
+
+    recorded: dict[tuple[str | None, str], str] = {}
+    real_record = pullflow._ApplyReporter.record
+
+    def spy(self, outcome):
+        first = self.recorded is None
+        real_record(self, outcome)
+        if first:
+            recorded[(self.peer_id, self.rel_path)] = outcome
+
+    monkeypatch.setattr(pullflow._ApplyReporter, "record", spy)
+    result, _, (out, err) = _run(fleet, monkeypatch, "attended", verbose=True)
+
+    assert result.device_names == ["Peer B", "Peer C"]
+    assert result.older == []
+    assert "older peer edit" not in out + err
+    assert local.read_bytes() == v2
+    assert (result.total_written, result.total_merged) == want_counts
+    assert result.bytes_transferred == b_transferred + c_transferred
+    meaning = {
+        ("write", ""): {"written"},
+        ("merge", ""): {"merged", "unchanged"},
+    }
+    for key, want in predicted.items():
+        assert recorded[key] in meaning[want], (key, want, recorded.get(key))
+    ledger = _committed(PEER, THIRD)
+    assert ledger.base(PEER, NOTES, "events.jsonl") == _sha(v1)
+    assert ledger.base(THIRD, NOTES, "events.jsonl") == _sha(v2)
+
+    mtime_ns = local.stat().st_mtime_ns
+    second, summaries, (out2, err2) = _run(fleet, monkeypatch, "attended")
+    _counts(second)
+    assert summaries == [("", "")]
+    assert "older peer edit" not in out2 + err2
+    assert local.read_bytes() == v2
+    assert local.stat().st_mtime_ns == mtime_ns
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -3494,6 +3671,30 @@ def test_a_failed_tidy_keeps_the_merged_index_and_prints_one_notice(fleet, monke
     assert "lines for missing memory files may remain." in notice_lines[0]
 
 
+def test_an_interrupted_pull_skips_the_memory_index_tidy_and_commits_the_merge(fleet, monkeypatch):
+    base_index = b"- [Keep](keep.md)\n"
+    local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
+    peer_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n"
+    _seed(fleet, {"memory/MEMORY.md": peer_index, "memory/keep.md": b"keep\n"})
+    index_path = _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/keep.md", b"keep\n", 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/keep.md", b"keep\n"))
+
+    def interrupt_before_tidy(**kwargs):
+        raise KeyboardInterrupt("injected interrupt before tidy")
+
+    monkeypatch.setattr(pullflow, "_deletion_candidates", interrupt_before_tidy)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(fleet, monkeypatch, "attended")
+
+    expected = merge.merge_file("memory/MEMORY.md", local_index, peer_index)
+    assert b"- [Gone](gone.md)\n" in expected
+    assert index_path.read_bytes() == expected
+    assert _committed().base(PEER, NOTES, "memory/MEMORY.md") == _sha(peer_index)
+
+
 def test_a_late_tidy_flush_failure_keeps_the_tidied_index_and_prints_one_notice(fleet, monkeypatch):
     base_index = b"- [Keep](keep.md)\n"
     local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
@@ -4248,3 +4449,43 @@ def test_pull_pending_syncthing_join_stays_silent_for_zero_unmanaged_dry_run_aut
     assert "mm devices approve" not in res_down.stdout + res_down.stderr
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []
+
+
+@pytest.mark.parametrize(
+    "record_text",
+    (
+        "not = [valid toml",
+        'other = "no syncthing table"\n',
+    ),
+    ids=("invalid-toml", "missing-syncthing-table"),
+)
+def test_pull_pending_syncthing_join_stays_silent_when_syncthing_record_is_unreadable(
+    fleet, fake_syncthing, monkeypatch, record_text
+):
+    from typer.testing import CliRunner
+
+    from mind_meld import cli
+    from mind_meld import config as config_mod
+
+    joining_a = "JOINAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA"
+
+    cfg_path = fleet.root / "config.toml"
+    config_mod.save_config(fleet.config, cfg_path)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", cfg_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _seed(fleet, {"note.md": b"peer content\n"})
+
+    record_path = config_mod.syncthing_record_path()
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(record_text, encoding="utf-8")
+    with pytest.raises(config_mod.ConfigError):
+        config_mod.load_syncthing_record()
+
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_a: {"name": "linux-b"},
+    }
+    fake_syncthing.requests.clear()
+    res = CliRunner().invoke(cli.app, ["pull"])
+    assert res.exit_code == 0, (res.stdout, res.stderr)
+    assert "mm devices approve" not in res.stdout + res.stderr
+    assert fake_syncthing.requests == []

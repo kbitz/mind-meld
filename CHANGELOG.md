@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.69] - 2026-11-19
+
+`mm pull` now line-merges a peer's older `.jsonl` or `MEMORY.md` edit that was built on the local version, and each pull line names its peer and source.
+
+### Changed
+
+- Pull summaries name the peer and source, and verbose output shows held-edit counts.
+
+### Fixed
+
+- `mm pull` now line-merges a peer's `.jsonl` or `MEMORY.md` edit that carries an older timestamp instead of holding it, so a newly joined machine stops repeating `N older peer edits not applied` for those files, and every per-source line in pull output names its peer and source (for example `Mac B/notes: 1 older peer edit held` under `mm pull --verbose`).
+- `mm pull` line-merges older peer edits to `.jsonl` files and `MEMORY.md` when the edit was built on the local version.
+
 ## [1.12.68] - 2026-11-18
 
 A passing `./bin/check --affected --refresh` that cannot save new coverage now clears the stale baseline when it can do so safely.
