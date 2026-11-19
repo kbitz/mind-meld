@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.70 | 2026-11-19 | Plain `mm init` now asks whether to start a fleet or join one, waits in the same run for approval, and resumes a stopped join from its saved answers. |
 | 1.12.69 | 2026-11-19 | `mm pull` now line-merges a peer's older `.jsonl` or `MEMORY.md` edit that was built on the local version, and each pull line names its peer and source. |
 | 1.12.68 | 2026-11-18 | A passing `./bin/check --affected --refresh` that cannot save new coverage now clears the stale baseline when it can do so safely. |
 | 1.12.67 | 2026-11-18 | Warm host-usage reads during `mm autopush` now wait longer for later readers, attended `mm push` tells you what to do when capture needs an owner, and command output says machine rather than Mac. |
