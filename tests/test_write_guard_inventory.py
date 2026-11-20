@@ -782,6 +782,8 @@ REVIEWED = {
     "storage/local.py:LocalBackend.delete": (
         *_GUARDED,
         [
+            "os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)",
+            "os.unlink(path.name, dir_fd=directory_fd)",
             "path.unlink()",
         ],
     ),

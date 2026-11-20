@@ -727,6 +727,15 @@ def test_set_device_name_and_remove_device_validations_and_mutations(fake_syncth
     )
     assert fake_syncthing.bodies == []
 
+    for invalid_entry in ({}, None, {"connected": None}, {"connected": 0}):
+        fake_syncthing.responses["/rest/system/connections"] = {
+            "connections": {fake_syncthing.peer_id: invalid_entry}
+        }
+        assert writer.remove_device(fake_syncthing.peer_id) == syncthing.WriteResult(
+            "error", "bad-response"
+        )
+        assert fake_syncthing.bodies == []
+
     # Disconnected peer also in a non-mind-meld folder -> refused (shared-in-other-folder)
     fake_syncthing.responses["/rest/system/connections"] = {
         "connections": {fake_syncthing.peer_id: {"connected": False}}

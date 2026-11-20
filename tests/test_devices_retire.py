@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from mind_meld import config, core, crypto, devices, lockfile, syncthing
+from mind_meld import config, core, crypto, devices, fsutil, lockfile, syncthing
 from mind_meld.cli import app
 from mind_meld.devices import register_device
 from mind_meld.errors import LockError
@@ -311,16 +311,32 @@ def test_retire_refusals_multi_match_chooser_partial_completion_and_old_peer_gat
     assert backend.exists(device_key("dup22222"))
     monkeypatch.setattr(backend_cls, "put", real_put)
 
-    def fail_dev_delete(self, key: str) -> None:
+    retirement_id = _valid_syncthing_id("R")
+    devices.publish_record(backend, "dup22222", retirement_id, PASSPHRASE, TEST_MEMORY_KB)
+
+    def fail_syncthing_delete(self, key: str, **kwargs) -> None:
+        if key == syncthing_record_key("dup22222"):
+            raise OSError(errno.EACCES, "Permission denied")
+        real_delete(self, key, **kwargs)
+
+    monkeypatch.setattr(backend_cls, "delete", fail_syncthing_delete)
+    res_f2 = runner.invoke(app, ["devices", "retire", "dup22222", "--yes"])
+    assert res_f2.exit_code == 1
+    assert "could not remove its Syncthing record" in res_f2.output
+    assert backend.exists(syncthing_record_key("dup22222"))
+    assert backend.exists(device_key("dup22222"))
+
+    def fail_dev_delete(self, key: str, **kwargs) -> None:
         if key == device_key("dup22222"):
             raise OSError(errno.EACCES, "Permission denied")
-        real_delete(self, key)
+        real_delete(self, key, **kwargs)
 
     monkeypatch.setattr(backend_cls, "delete", fail_dev_delete)
     res_f3 = runner.invoke(app, ["devices", "retire", "dup22222", "--yes"])
     assert res_f3.exit_code == 1
     assert "wrote the retirement record and removed the Syncthing record" in res_f3.output
     assert backend.exists(retired_record_key("dup22222"))
+    assert not backend.exists(syncthing_record_key("dup22222"))
     assert backend.exists(device_key("dup22222"))
 
     # Rerun finishes the partial retirement (State 1 of E1)
@@ -328,6 +344,8 @@ def test_retire_refusals_multi_match_chooser_partial_completion_and_old_peer_gat
     res_finish = runner.invoke(app, ["devices", "retire", "dup22222", "--yes"])
     assert res_finish.exit_code == 0, res_finish.output
     assert not backend.exists(device_key("dup22222"))
+    record = devices.read_retirement_records(backend, PASSPHRASE, TEST_MEMORY_KB).records
+    assert record["dup22222"].syncthing_device_id == retirement_id
 
     # 6. Old-peer check (X10, E9, E14): --yes refuses when another peer has
     # last_seen_version <= 1.7.1
@@ -392,3 +410,80 @@ def test_retire_command_intent_and_read_only_policy():
     src_root = Path(__file__).resolve().parents[1] / "src" / "mind_meld"
     for py_file in sorted(src_root.rglob("*.py")):
         _check_read_only_policy62(py_file.read_text(encoding="utf-8"))
+
+
+def test_retire_reactivation_resolves_live_name_and_flushes_before_ordered_deletes(
+    tmp_path, monkeypatch
+):
+    backend = _setup_retire_fleet(tmp_path, monkeypatch)
+    old_id, live_id = "bbbb2222", "cccc3333"
+    old_syncthing, live_syncthing = _valid_syncthing_id("B"), _valid_syncthing_id("C")
+    devices.write_retirement_record(
+        backend, old_id, "mac-b", old_syncthing, PASSPHRASE, TEST_MEMORY_KB
+    )
+    register_device(backend, live_id, "mac-b")
+    devices.publish_record(backend, live_id, live_syncthing, PASSPHRASE, TEST_MEMORY_KB)
+
+    calls = []
+    fsync_dir = fsutil.fsync_dir
+    delete = LocalBackend.delete
+
+    def observe_flush(path):
+        calls.append(("flush", path.name))
+        return fsync_dir(path)
+
+    def observe_delete(self, key, **kwargs):
+        calls.append(("delete", key))
+        return delete(self, key, **kwargs)
+
+    monkeypatch.setattr(fsutil, "fsync_dir", observe_flush)
+    monkeypatch.setattr(LocalBackend, "delete", observe_delete)
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
+    result = runner.invoke(app, ["devices", "retire", "mac-b"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        ("flush", "retired"),
+        ("flush", backend.root.name),
+        ("delete", syncthing_record_key(live_id)),
+        ("delete", device_key(live_id)),
+    ]
+    records = devices.read_retirement_records(backend, PASSPHRASE, TEST_MEMORY_KB).records
+    assert records[live_id].syncthing_device_id == live_syncthing
+    assert records[old_id].syncthing_device_id == old_syncthing
+
+    # Reactivation and retirement again prefer the present authenticated binding.
+    register_device(backend, old_id, "mac-b")
+    devices.publish_record(backend, old_id, live_syncthing, PASSPHRASE, TEST_MEMORY_KB)
+    result = runner.invoke(app, ["devices", "retire", old_id, "--yes"])
+    assert result.exit_code == 0, result.output
+    records = devices.read_retirement_records(backend, PASSPHRASE, TEST_MEMORY_KB).records
+    assert records[old_id].syncthing_device_id == live_syncthing
+
+
+def test_retire_does_not_backfill_config_or_follow_namespace_symlink(tmp_path, monkeypatch):
+    backend = _setup_retire_fleet(tmp_path, monkeypatch)
+    target = "bbbb2222"
+    register_device(backend, target, "mac-b")
+    legacy = config.load_config()
+    legacy["crypto"].pop("root_salt_fp")
+    config.save_config(legacy)
+    before = config.CONFIG_PATH.read_bytes()
+
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: False)
+    result = runner.invoke(app, ["devices", "retire", target])
+    assert result.exit_code == 1
+    assert "confirming needs a terminal" in result.output
+    assert config.CONFIG_PATH.read_bytes() == before
+
+    # A synced link cannot turn a retirement's unlink into an external deletion.
+    external = tmp_path / "unrelated"
+    (backend.root / "syncthing").rename(external)
+    sentinel = external / f"{target}.enc"
+    sentinel.write_bytes(b"unrelated data")
+    (backend.root / "syncthing").symlink_to(external, target_is_directory=True)
+    result = runner.invoke(app, ["devices", "retire", target, "--yes"])
+    assert result.exit_code == 1
+    assert sentinel.read_bytes() == b"unrelated data"
+    assert backend.exists(device_key(target))
+    assert not backend.exists(retired_record_key(target))
+    assert config.CONFIG_PATH.read_bytes() == before

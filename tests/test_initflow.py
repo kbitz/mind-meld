@@ -424,8 +424,9 @@ def test_new_fleet_on_a_configured_machine_names_the_store_it_would_replace(env)
     assert first.exit_code == 0, first.output
     saved = config.CONFIG_PATH.read_text()
     fingerprint = tomllib.loads(saved)["crypto"]["root_salt_fp"]
-    result, text = _new_fleet("n\n")
+    result, text = _new_fleet("\n")
     assert result.exit_code == 0, result.output
+    assert "Overwrite? [y/n] (Enter = n)" in text
     assert fingerprint in text
     assert "separate fleet" in text
     assert config.CONFIG_PATH.read_text() == saved
@@ -517,9 +518,10 @@ def test_a_configured_machine_declining_re_init_changes_nothing(env):
     first, _text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
     assert first.exit_code == 0, first.output
     saved = config.CONFIG_PATH.read_bytes()
-    result, text = _run(f"y\njoin\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}n\n")
+    result, text = _run(f"y\nj\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}\n")
     assert result.exit_code == 0, result.output
     assert "orphaning existing device" in text
+    assert "Proceed? [y/n] (Enter = n)" in text
     assert "Device registration cancelled." in text
     assert config.CONFIG_PATH.read_bytes() == saved
     assert len(_device_keys(backend)) == 2
@@ -530,9 +532,16 @@ def test_populated_folder_join_overwrite_declined(env):
     _populate(backend)
     first, _text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
     assert first.exit_code == 0, first.output
-    result, _text = _run("n\n")
+    result, text = _run("\n")
     assert result.exit_code == 0, result.output
+    assert "Overwrite? [y/n] (Enter = n)" in text
     assert len(_device_keys(backend)) == 2
+    before = config.CONFIG_PATH.read_bytes()
+    eof, text = _run("")
+    assert eof.exit_code == 1
+    assert "Overwrite? [y/n] (Enter = n)" in text
+    assert "needs a terminal" in text
+    assert config.CONFIG_PATH.read_bytes() == before
 
 
 def test_populated_folder_wrong_passphrase(env):
@@ -2079,7 +2088,7 @@ def test_new_fleet_flag_and_interactive_new_answer(env, tmp_path):
     _joined.clear()
 
     res_new, text_new = _run(
-        f"maybe\nNEW\n{storage2}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}",
+        f"maybe\nN\n{storage2}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}",
         command="capture",
     )
     assert res_new.exit_code == 0, res_new.output
@@ -2389,9 +2398,10 @@ def test_interactive_new_confirms_fleet_identity_before_overwrite(env):
     before = config.CONFIG_PATH.read_bytes()
     fingerprint = tomllib.loads(before.decode())["crypto"]["root_salt_fp"]
 
-    result, text = _run("y\nnew\nn\n")
+    result, text = _run("y\nnew\n\n")
 
     assert result.exit_code == 0, text
+    assert text.count("Overwrite? [y/n] (Enter = n)") == 2
     assert f"storage {storage}, root_salt fp {fingerprint}" in text
     assert "starts a separate fleet" in text
     assert config.CONFIG_PATH.read_bytes() == before

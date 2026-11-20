@@ -1450,6 +1450,7 @@ class MeshSnapshot:
     own_name: str = field(default="", repr=False)
     pending_ids: tuple[str, ...] = ()
     pending_devices: dict[str, str] = field(default_factory=dict, repr=False)
+    other_folder_device_ids: frozenset[str] = frozenset()
     devices: dict[str, ConfiguredDevice] = field(default_factory=dict)
     folder_present: bool = False
     folder_path: Path | None = None
@@ -2060,6 +2061,16 @@ class SyncthingWriter:
             folder_problems = tuple(opt_problems)
             folder_device_ids = frozenset(device_ids)
 
+        other_folder_device_ids: set[str] = set()
+        for folder in folders:
+            if folder.get("id") == folder_id:
+                continue
+            other_ids = _folder_device_ids(folder)
+            if other_ids is None:
+                other_folder_device_ids.update(configured)
+                break
+            other_folder_device_ids.update(other_ids)
+
         return MeshSnapshot(
             outcome="ok",
             cause=None,
@@ -2067,6 +2078,7 @@ class SyncthingWriter:
             own_name=own_name,
             pending_ids=pending_ids,
             pending_devices=pending_devices,
+            other_folder_device_ids=frozenset(other_folder_device_ids),
             devices=configured,
             folder_present=folder_present,
             folder_path=folder_path,
@@ -2138,7 +2150,31 @@ class SyncthingWriter:
         )
         return WriteResult(w_out, w_cause, write_attempted=True)
 
-    def remove_device(self, device_id: str, *, fleet_folder_id: str = "mind-meld") -> WriteResult:
+    def fleet_folder_members(self, folder_id: str) -> tuple[frozenset[str], WriteResult | None]:
+        endpoint, _my_id, timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None:
+            return frozenset(), err or WriteResult("refused", "not-managed")
+        folders, err = self._get_list(
+            endpoint, "/rest/config/folders", timeout=timeout, deadline=deadline
+        )
+        if err is not None or folders is None:
+            return frozenset(), err or WriteResult("error", "bad-response")
+        fleet = next((entry for entry in folders if entry.get("id") == folder_id), None)
+        if fleet is None:
+            return frozenset(), WriteResult("refused", "no-folder")
+        members = _folder_device_ids(fleet)
+        if members is None:
+            return frozenset(), WriteResult("error", "bad-response")
+        return frozenset(members), None
+
+    def remove_device(
+        self,
+        device_id: str,
+        *,
+        fleet_folder_id: str = "mind-meld",
+        expected_path: Path | None = None,
+        still_retired: Callable[[str], bool] | None = None,
+    ) -> WriteResult:
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()
         if err is not None or endpoint is None or my_id is None:
             return err or WriteResult("refused", "not-managed")
@@ -2172,9 +2208,9 @@ class SyncthingWriter:
         if not isinstance(raw_conns, dict):
             return WriteResult("error", "bad-response")
         conn_entry = raw_conns.get(device_id)
-        if conn_entry is not None and not isinstance(conn_entry, dict):
+        if not isinstance(conn_entry, dict) or type(conn_entry.get("connected")) is not bool:
             return WriteResult("error", "bad-response")
-        if isinstance(conn_entry, dict) and bool(conn_entry.get("connected", False)):
+        if conn_entry["connected"]:
             return WriteResult("refused", "device-connected")
 
         folders, fld_err = self._get_list(
@@ -2182,6 +2218,7 @@ class SyncthingWriter:
         )
         if fld_err is not None or folders is None:
             return fld_err or WriteResult("error", "bad-response")
+        fleet_folder = None
         for folder in folders:
             fid = folder.get("id")
             if not isinstance(fid, str) or not fid.strip():
@@ -2189,8 +2226,25 @@ class SyncthingWriter:
             device_ids = _folder_device_ids(folder)
             if device_ids is None:
                 return WriteResult("error", "bad-response")
-            if device_id in device_ids and fid.strip() != fleet_folder_id:
+            if fid == fleet_folder_id:
+                fleet_folder = folder
+            elif device_id in device_ids:
                 return WriteResult("refused", "shared-in-other-folder")
+        if fleet_folder is None:
+            return WriteResult("refused", "no-folder")
+        if expected_path is not None:
+            path = fleet_folder.get("path")
+            _, problems = _extract_options(fleet_folder)
+            if not isinstance(path, str) or _writer_path(path) != expected_path or problems:
+                return WriteResult("refused", "not-mm-folder")
+
+        introducer = target_dev.get("introducedBy", "")
+        if not isinstance(introducer, str):
+            return WriteResult("error", "bad-response")
+        if not any(entry.get("deviceID") == introducer for entry in devices):
+            introducer = ""
+        if still_retired is not None and not still_retired(introducer):
+            return WriteResult("refused", "retirement-held")
 
         w_out, w_cause = _send_json(
             endpoint,

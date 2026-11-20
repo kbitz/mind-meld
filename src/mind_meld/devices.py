@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shlex
 import sys
 import time
 import uuid
@@ -247,16 +248,11 @@ def generate_unique_short_device_id(
     """
     existing = {d.get("device_id") for d in devices if isinstance(d.get("device_id"), str)}
     if backend is not None:
-        try:
-            for key in backend.list_keys(RETIRED_PREFIX):
-                leaf = key.rsplit("/", 1)[-1]
-                if is_conflict_name(leaf):
-                    continue
-                rid = parse_retired_record_key(key)
-                if rid is not None:
-                    existing.add(rid)
-        except (OSError, StorageError):
-            pass
+        for key in backend.list_keys(RETIRED_PREFIX):
+            if not is_conflict_name(key.rsplit("/", 1)[-1]):
+                retired_id = parse_retired_record_key(key)
+                if retired_id is not None:
+                    existing.add(retired_id)
     last_drawn = ""
     for _attempt in range(max_retries):
         candidate = uuid.uuid4().hex[:8]
@@ -317,7 +313,7 @@ def lookup_device_by_short_id(
     return (None, count)
 
 
-def inventory_devices(backend: LocalBackend) -> DeviceInventory:
+def inventory_devices(backend: LocalBackend, *, strict: bool = False) -> DeviceInventory:
     """Read ``devices/`` once (see `DeviceInventory`).
 
     A file counts as a device only when its name is that device's key
@@ -326,7 +322,12 @@ def inventory_devices(backend: LocalBackend) -> DeviceInventory:
     ``<id> 2.json`` would otherwise list the same device twice.
     """
     inventory = DeviceInventory()
-    for key in backend.list_keys(DEVICES_PREFIX):
+    keys = (
+        backend.list_keys(DEVICES_PREFIX, strict=True)
+        if strict
+        else backend.list_keys(DEVICES_PREFIX)
+    )
+    for key in keys:
         key_id = parse_device_key(key)
         if key_id is None or is_conflict_name(key.rsplit("/", 1)[-1]):
             # Not `devices/<id>.json`, or a conflict copy of one: never read,
@@ -334,7 +335,7 @@ def inventory_devices(backend: LocalBackend) -> DeviceInventory:
             inventory.foreign.append(key)
             continue
         try:
-            raw = json.loads(backend.get(key, expected=True))
+            raw = json.loads(backend.get(key, expected=not strict))
         except StorageNotFound:
             # Listed, then gone after the bounded retry: Syncthing is replacing
             # it. Not corrupt; the pull reports it as waiting.
@@ -416,6 +417,7 @@ def read_fleet_records(
     memory_kb: int = DEFAULT_ARGON2_MEMORY_KB,
     *,
     own_device_id: str | None = None,
+    strict: bool = False,
 ) -> FleetSyncthingRecords:
     """Read and authenticate ``syncthing/*.enc`` records under the fleet key.
 
@@ -425,10 +427,14 @@ def read_fleet_records(
     registry device name.
     """
     records = FleetSyncthingRecords()
-    keys = backend.list_keys(SYNCTHING_PREFIX)
-    if not keys:
+    keys = (
+        backend.list_keys(SYNCTHING_PREFIX, strict=True)
+        if strict
+        else backend.list_keys(SYNCTHING_PREFIX)
+    )
+    if not keys and not strict:
         return records
-    inventory = inventory_devices(backend)
+    inventory = inventory_devices(backend, strict=True) if strict else inventory_devices(backend)
     records.inventory = inventory
     registered: dict[str, dict[str, Any]] = {d["device_id"]: d for d in inventory.valid}
     best_rank: dict[str, tuple[str, str, str]] = {}
@@ -456,7 +462,7 @@ def read_fleet_records(
             records.unreadable.append(key_id)
             continue
         try:
-            raw = backend.get(key, expected=True)
+            raw = backend.get(key, expected=not strict)
         except StorageNotFound:
             records.vanished.append(key_id)
             continue
@@ -550,6 +556,16 @@ def read_single_syncthing_record(
     return None
 
 
+def retire_command(device_id: str, *, yes: bool = False) -> str:
+    """Format an exact single-line shell argument from the registry identity."""
+    if safety.safe_terminal_str(device_id) != device_id:
+        return "mm devices"
+    argument = shlex.quote(device_id)
+    if device_id.startswith("-"):
+        return f"mm devices retire {'--yes ' if yes else ''}-- {argument}"
+    return f"mm devices retire {argument}{' --yes' if yes else ''}"
+
+
 def normalize_device_name(raw_name: object) -> str:
     """Return the sanitized, trimmed, casefolded comparison key for a device name."""
     return safety.safe_terminal_str(str(raw_name or "")).strip().casefold()
@@ -564,11 +580,9 @@ def _parse_iso_ts(raw: object) -> datetime | None:
         text = text[:-1] + "+00:00"
     try:
         dt = datetime.fromisoformat(text)
+        return dt.astimezone(timezone.utc) if dt.utcoffset() is not None else None
     except (ValueError, OverflowError):
         return None
-    if dt.utcoffset() is None:
-        return None
-    return dt.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -784,7 +798,7 @@ def compose_pending_syncthing_join_items(
         items.append(
             (
                 f"Syncthing: old {s_name} registration {s_old} superseded by {s_new}.",
-                f"mm devices retire {s_old}",
+                retire_command(sup.old_id),
             )
         )
     return items
@@ -834,14 +848,26 @@ def write_retirement_record(
         else mm_device_id
     )
     key = retired_record_key(mm_device_id)
+    if parse_retired_record_key(key) != mm_device_id or is_conflict_name(key.rsplit("/", 1)[-1]):
+        raise StorageError("storage: device ID does not form a readable retirement record")
     payload = {
         "mm_device_id": mm_device_id,
         "device_name": clean_name,
         "syncthing_device_id": clean_st_id,
     }
-    plaintext = json.dumps(payload, sort_keys=True).encode("utf-8")
+    plaintext = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     encrypted = crypto.encrypt(plaintext, passphrase, memory_kb)
+    if len(encrypted) > MAX_SYNCTHING_RECORD_BYTES:
+        # Preserve a readable removal target even for an unusually long name.
+        clean_name = clean_name[:128]
+        payload["device_name"] = clean_name
+        plaintext = json.dumps(payload, sort_keys=True).encode("utf-8")
+        encrypted = crypto.encrypt(plaintext, passphrase, memory_kb)
+    if len(encrypted) > MAX_SYNCTHING_RECORD_BYTES:
+        raise StorageError("storage: retirement record exceeds its readable size limit")
+    backend.check_namespace(RETIRED_PREFIX)
     backend.put(key, encrypted)
+    fsutil.fsync_dir(backend.root)
     return RetirementRecord(
         mm_device_id=mm_device_id,
         device_name=clean_name,
@@ -853,10 +879,16 @@ def read_retirement_records(
     backend: LocalBackend,
     passphrase: str,
     memory_kb: int = DEFAULT_ARGON2_MEMORY_KB,
+    *,
+    strict: bool = False,
 ) -> FleetRetirementRecords:
     """Read and authenticate ``retired/*.enc`` records under the fleet key."""
     out = FleetRetirementRecords()
-    keys = backend.list_keys(RETIRED_PREFIX)
+    keys = (
+        backend.list_keys(RETIRED_PREFIX, strict=True)
+        if strict
+        else backend.list_keys(RETIRED_PREFIX)
+    )
     if not keys:
         return out
     for key in sorted(keys):
@@ -878,7 +910,7 @@ def read_retirement_records(
             out.unreadable.append(key_id)
             continue
         try:
-            raw = backend.get(key, expected=True)
+            raw = backend.get(key, expected=not strict)
         except StorageNotFound:
             out.vanished.append(key_id)
             continue

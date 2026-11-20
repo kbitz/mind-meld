@@ -18,7 +18,8 @@ The `@devices_app` group callback and `@devices_app.command` shells and their
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import typer
@@ -29,10 +30,15 @@ from mind_meld import attemptlog, core, crypto, lockfile, outputstyle, syncthing
 from mind_meld import config as _config_module
 from mind_meld import devices as _devices_module
 from mind_meld.consoles import console
-from mind_meld.errors import ConfigError, LockError, StorageError, os_error_cause
+from mind_meld.errors import ConfigError, CryptoError, LockError, StorageError, os_error_cause
 from mind_meld.safety import safe_str, safe_terminal_str
 from mind_meld.storage import get_backend
-from mind_meld.storage.keys import device_key, parse_device_key, syncthing_record_key
+from mind_meld.storage.keys import (
+    device_key,
+    parse_device_key,
+    retired_record_key,
+    syncthing_record_key,
+)
 
 
 def devices(fmt: str) -> None:
@@ -194,8 +200,8 @@ def _stop_partial(
     )
 
 
-def _looks_like_full_device_id_attempt(trimmed: str, candidate: str) -> bool:
-    """Return True when ``trimmed`` has full 56-char / 8-group Syncthing ID shape."""
+def _looks_like_full_device_id_attempt(candidate: str) -> bool:
+    """Return True when the input has full 56-char / 8-group Syncthing ID shape."""
     if syncthing.is_device_id(candidate):
         return True
     compact = "".join(candidate.split("-"))
@@ -215,7 +221,7 @@ def _display_pending_name(raw_name: object, device_id: str) -> str:
 class _PendingCandidate:
     device_id: str
     short_id: str
-    raw_name: str
+    raw_name: str = field(repr=False)
     display_name: str
     is_retired: bool = False
     is_unpublished_fleet: bool = False
@@ -258,23 +264,22 @@ def _match_pending_candidates(
     return matched
 
 
-def _try_read_approve_fleet_context() -> tuple[
-    _devices_module.FleetSyncthingRecords | None,
-    _devices_module.FleetRetirementRecords | None,
-    _devices_module.UnpublishedSplit | None,
-    bool,
-]:
-    """Best-effort read of fleet and retirement records without prompting on stdin."""
+@dataclass
+class _ApproveContext:
+    storage_root: Path | None = None
+    retirements: _devices_module.FleetRetirementRecords | None = None
+    fleet_records: _devices_module.FleetSyncthingRecords | None = None
+    split: _devices_module.UnpublishedSplit | None = None
+
+
+def _try_read_approve_fleet_context(*, include_fleet: bool) -> _ApproveContext:
+    """Read authenticated retirement data independently of optional list labels."""
+    context = _ApproveContext()
     try:
         cfg = _config_module.load_config()
-        dev_cfg = cfg.get("device") if isinstance(cfg, dict) else None
-        own_mm_id = dev_cfg.get("id") if isinstance(dev_cfg, dict) else None
-        if not isinstance(own_mm_id, str) or not own_mm_id:
-            return (None, None, None, False)
-        passphrase = crypto.get_passphrase(non_interactive=True)
-        if not passphrase:
-            return (None, None, None, False)
         backend = get_backend(cfg)
+        context.storage_root = backend.root
+        passphrase = crypto.get_passphrase(non_interactive=True)
         fetch = crypto.fetch_crypto_init(backend)
         if (
             fetch.status != "ok"
@@ -282,31 +287,34 @@ def _try_read_approve_fleet_context() -> tuple[
             or fetch.argon2_memory_kb is None
             or fetch.keycheck_blob is None
         ):
-            return (None, None, None, False)
-        crypto.set_crypto_session(fetch.root_salt, fetch.argon2_memory_kb)
-        master_key = crypto.load_master_key(passphrase, fetch.root_salt, fetch.argon2_memory_kb)
+            return context
+        memory_kb = fetch.argon2_memory_kb
+        crypto.set_crypto_session(fetch.root_salt, memory_kb)
+        master_key = crypto.load_master_key(passphrase, fetch.root_salt, memory_kb)
         crypto.verify_passphrase(master_key, fetch.keycheck_blob)
-        fleet_records = _devices_module.read_fleet_records(
-            backend,
-            passphrase,
-            fetch.argon2_memory_kb,
-            own_device_id=own_mm_id,
+    except (ConfigError, CryptoError, OSError, StorageError):
+        return context
+    try:
+        context.retirements = _devices_module.read_retirement_records(
+            backend, passphrase, memory_kb
         )
-        inventory = fleet_records.inventory or _devices_module.inventory_devices(backend)
-        published_ids = _devices_module.published_record_mm_ids(backend, fleet_records)
-        split = _devices_module.split_unpublished(
-            inventory,
-            published_ids,
-            own_device_id=own_mm_id,
-        )
-        retirements = _devices_module.read_retirement_records(
-            backend,
-            passphrase,
-            fetch.argon2_memory_kb,
-        )
-        return (fleet_records, retirements, split, True)
-    except Exception:
-        return (None, None, None, False)
+    except (OSError, StorageError):
+        pass
+    if include_fleet:
+        own_mm_id = cfg["device"]["id"]
+        try:
+            records = _devices_module.read_fleet_records(
+                backend, passphrase, memory_kb, own_device_id=own_mm_id
+            )
+            inventory = records.inventory or _devices_module.inventory_devices(backend)
+            published_ids = _devices_module.published_record_mm_ids(backend, records)
+            context.split = _devices_module.split_unpublished(
+                inventory, published_ids, own_device_id=own_mm_id
+            )
+            context.fleet_records = records
+        except (OSError, StorageError):
+            pass
+    return context
 
 
 def _load_recorded_syncthing_id_or_stop() -> str:
@@ -329,7 +337,7 @@ def approve(device_id: str | None = None) -> None:
         if not trimmed:
             _stop_bad_device_id(device_id, "device name or ID cannot be empty")
         candidate = core._normalize_device_id(trimmed)
-        if _looks_like_full_device_id_attempt(trimmed, candidate):
+        if _looks_like_full_device_id_attempt(candidate):
             why = core._device_id_problem(candidate, None)
             if why is not None:
                 _stop_bad_device_id(trimmed, why)
@@ -477,53 +485,45 @@ def approve(device_id: str | None = None) -> None:
             f"('{_config_module.SYNCTHING_FOLDER_ID}') with mm's folder options, so "
             "there is nothing to share. Nothing was changed. Run: mm diag"
         )
-    pending = writer.pending_devices()
-    if pending.outcome != "ok":
-        _stop_unchanged(pending.outcome, pending.cause, device_id or "pending devices")
-
-    fleet_records, retirements, split, fleet_ok = _try_read_approve_fleet_context()
-    if device_id is None and not fleet_ok:
+    context = _try_read_approve_fleet_context(include_fleet=device_id is None)
+    if context.storage_root is not None and context.storage_root != snap.folder_path:
+        core._error(
+            "devices approve: the Syncthing fleet folder does not match this machine's "
+            "Mind Meld storage path. Nothing was changed.",
+            fix="mm diag",
+        )
+    if device_id is None and context.fleet_records is None:
         console.print(
             "  Note: could not read fleet records, so the list below may include fleet machines."
         )
 
-    vouched_map = fleet_records.vouched if fleet_records is not None else {}
-    retired_by_st = retirements.by_syncthing_id if retirements is not None else {}
-    unpub_by_norm = split.unpublished_by_norm_name if split is not None else {}
+    vouched_map = context.fleet_records.vouched if context.fleet_records is not None else {}
+    retired_by_st = context.retirements.by_syncthing_id if context.retirements is not None else {}
+    unpub_by_norm = context.split.unpublished_by_norm_name if context.split is not None else {}
 
     unvouched_candidates: list[_PendingCandidate] = []
     vouched_knockers: list[_PendingCandidate] = []
-    for dev in pending.devices:
-        if dev.device_id == recorded:
-            continue
-        short_id = syncthing.short_device_id(dev.device_id)
-        if dev.device_id in vouched_map:
-            _, reg_name = vouched_map[dev.device_id]
-            disp = _display_pending_name(dev.name or reg_name, dev.device_id)
+    for pending_id, name in snap.pending_devices.items():
+        short_id = syncthing.short_device_id(pending_id)
+        if pending_id in vouched_map:
+            _, reg_name = vouched_map[pending_id]
             vouched_knockers.append(
                 _PendingCandidate(
-                    device_id=dev.device_id,
-                    short_id=short_id,
-                    raw_name=dev.name or reg_name,
-                    display_name=disp,
+                    pending_id, short_id, name, _display_pending_name(name or reg_name, pending_id)
                 )
             )
             continue
-        disp = _display_pending_name(dev.name, dev.device_id)
-        is_ret = dev.device_id in retired_by_st
-        is_unpub = (
-            not is_ret
-            and bool(_devices_module.normalize_device_name(dev.name))
-            and _devices_module.normalize_device_name(dev.name) in unpub_by_norm
-        )
+        is_retired = pending_id in retired_by_st
         unvouched_candidates.append(
             _PendingCandidate(
-                device_id=dev.device_id,
-                short_id=short_id,
-                raw_name=dev.name,
-                display_name=disp,
-                is_retired=is_ret,
-                is_unpublished_fleet=is_unpub,
+                pending_id,
+                short_id,
+                name,
+                _display_pending_name(name, pending_id),
+                is_retired=is_retired,
+                is_unpublished_fleet=(
+                    not is_retired and _devices_module.normalize_device_name(name) in unpub_by_norm
+                ),
             )
         )
 
@@ -533,16 +533,6 @@ def approve(device_id: str | None = None) -> None:
         trimmed = device_id.strip()
         matches = _match_pending_candidates(trimmed, unvouched_candidates)
         if not matches:
-            vouched_matches = _match_pending_candidates(trimmed, vouched_knockers)
-            if len(vouched_matches) == 1:
-                vm = vouched_matches[0]
-                console.print(
-                    f"  {safe_str(vm.display_name)} ({safe_str(vm.short_id)}) is asking to join "
-                    "and a fleet record vouches for it; the next push or pull pairs it. "
-                    f"{outputstyle._fix_line('mm pull')}",
-                    soft_wrap=True,
-                )
-                return
             # Check configured devices read-only (X4)
             configured_list = [
                 _PendingCandidate(
@@ -630,12 +620,19 @@ def approve(device_id: str | None = None) -> None:
                 soft_wrap=True,
             )
         for cid, cdev in sorted(snap.devices.items()):
-            if cdev.writer_shape and not cdev.paused and cid not in snap.folder_device_ids:
+            if (
+                is_tty
+                and cdev.writer_shape
+                and not cdev.paused
+                and cid not in snap.folder_device_ids
+                and cid not in snap.other_folder_device_ids
+                and cid not in retired_by_st
+            ):
                 cname = _display_pending_name(cdev.name, cid)
                 cshort = syncthing.short_device_id(cid)
                 console.print(
-                    f"  {safe_str(cname)} ({safe_str(cshort)}) was already added; finish "
-                    f"approving it with: {outputstyle._fix_line(f'mm devices approve {cid}')}",
+                    f"  {safe_str(cname)} ({safe_str(cshort)}) may have an unfinished approval. "
+                    f"{outputstyle._fix_line(f'mm devices approve {cid}')}",
                     soft_wrap=True,
                 )
         if not unvouched_candidates:
@@ -707,6 +704,46 @@ def approve(device_id: str | None = None) -> None:
 
     assert target_candidate is not None
     full_id = target_candidate.device_id
+    if why := core._device_id_problem(full_id, recorded):
+        _stop_bad_device_id(full_id, why)
+    # The terminal may have been waiting for the owner while the pending
+    # request, retirement record or folder configuration changed.
+    latest = writer.mesh_snapshot(_config_module.SYNCTHING_FOLDER_ID)
+    if latest.outcome != "ok":
+        _stop_unchanged(latest.outcome, latest.cause, full_id)
+    approved_path = context.storage_root or snap.folder_path
+    if latest.folder_problems or latest.folder_path is None or latest.folder_path != approved_path:
+        core._error(
+            "devices approve: the Syncthing fleet folder changed. Nothing was changed.",
+            fix="mm diag",
+        )
+    if full_id in latest.devices:
+        if full_id in latest.folder_device_ids:
+            core._print_outcome(
+                outputstyle._outcome_line(
+                    "approve",
+                    f"{safe_terminal_str(target_candidate.display_name)} "
+                    f"({target_candidate.short_id}) is already approved",
+                )
+            )
+            return
+        core._error(
+            "devices approve: the device is already configured. Finishing approval requires "
+            "the full Syncthing device ID. Nothing was changed.",
+            fix=f"mm devices approve {full_id}",
+        )
+    if full_id not in latest.pending_devices:
+        core._error(
+            "devices approve: that Syncthing device is no longer pending. Nothing was changed.",
+            fix="mm devices approve",
+        )
+    current = _try_read_approve_fleet_context(include_fleet=False)
+    if current.retirements is not None and full_id in current.retirements.by_syncthing_id:
+        core._error(
+            "devices approve: that Syncthing device has a retirement record. "
+            "Nothing was changed. To re-approve it intentionally, pass its full ID.",
+            fix=f"mm devices approve {full_id}",
+        )
     add_res = writer.add_device(full_id)
     if add_res.outcome in ("not-found", "refused"):
         _stop_unchanged(add_res.outcome, add_res.cause, full_id)
@@ -725,7 +762,9 @@ def approve(device_id: str | None = None) -> None:
             outcome=intro_res.outcome,
             cause=intro_res.cause,
         )
-    share_res = writer.share_folder(_config_module.SYNCTHING_FOLDER_ID, full_id)
+    share_res = writer.share_folder(
+        _config_module.SYNCTHING_FOLDER_ID, full_id, expected_path=approved_path
+    )
     if share_res.outcome not in ("ok", "unchanged"):
         _stop_partial(
             full_id,
@@ -789,11 +828,15 @@ def retire(target: str, *, yes: bool = False) -> None:
             fix="mm devices",
         )
 
-    config = core._get_config(read_only=False)
-    passphrase = core._get_passphrase_or_exit()
+    config = core._get_config(read_only=True)
     own_id = config["device"]["id"]
     backend = get_backend(config)
-    memory_kb = core._init_crypto_session(backend, passphrase, config, read_only=False)
+    if trimmed == own_id:
+        core._error(
+            "devices retire: cannot retire this machine from itself. Nothing was changed. "
+            "Retire it from another fleet machine.",
+            fix="mm devices",
+        )
 
     try:
         lockfile.acquire_lock()
@@ -801,18 +844,24 @@ def retire(target: str, *, yes: bool = False) -> None:
         core._error(str(e))
 
     try:
-        inventory = _devices_module.inventory_devices(backend)
-        fleet_records = _devices_module.read_fleet_records(
-            backend,
-            passphrase,
-            memory_kb,
-            own_device_id=own_id,
-        )
-        retirements = _devices_module.read_retirement_records(
-            backend,
-            passphrase,
-            memory_kb,
-        )
+        is_tty = core._both_streams_are_terminals()
+        try:
+            passphrase = crypto.get_passphrase(non_interactive=not is_tty)
+            memory_kb = core._init_crypto_session(backend, passphrase, config, read_only=True)
+            fleet_records = _devices_module.read_fleet_records(
+                backend, passphrase, memory_kb, own_device_id=own_id, strict=True
+            )
+            retirements = _devices_module.read_retirement_records(
+                backend, passphrase, memory_kb, strict=True
+            )
+        except (CryptoError, OSError, StorageError) as exc:
+            core._error(
+                f"devices retire: could not verify the fleet records ({safe_terminal_str(exc)}). "
+                "Nothing was changed.",
+                fix="mm diag",
+            )
+        inventory = fleet_records.inventory
+        assert inventory is not None  # strict reads always include the registry
 
         valid_by_id: dict[str, dict[str, Any]] = {d["device_id"]: d for d in inventory.valid}
         dropped_ids: set[str] = {
@@ -820,13 +869,6 @@ def retire(target: str, *, yes: bool = False) -> None:
         }
         vanished_ids: set[str] = set(inventory.vanished)
         all_registry_ids: set[str] = set(valid_by_id) | dropped_ids | vanished_ids
-
-        if trimmed == own_id:
-            core._error(
-                "devices retire: cannot retire this machine from itself. Nothing was changed. "
-                "Retire it from another fleet machine.",
-                fix="mm devices",
-            )
 
         norm_target = _devices_module.normalize_device_name(trimmed)
         name_matches = [
@@ -855,8 +897,6 @@ def retire(target: str, *, yes: bool = False) -> None:
         ]
 
         is_exact_id = (trimmed in all_registry_ids) or (trimmed in retirements.records)
-        is_tty = core._both_streams_are_terminals()
-
         if (yes or not is_tty) and not is_exact_id:
             if peer_name_matches or retired_name_matches:
                 console.print(f"Matching devices for '{safe_str(trimmed)}':")
@@ -879,7 +919,7 @@ def retire(target: str, *, yes: bool = False) -> None:
                     f"devices retire: '{safe_terminal_str(trimmed)}' is a device name; --yes "
                     "and non-terminal runs require an exact device ID from 'mm devices'. "
                     "Nothing was changed.",
-                    fix=f"mm devices retire {first_id} --yes",
+                    fix=_devices_module.retire_command(first_id, yes=True),
                 )
             core._error(
                 f"devices retire: unknown device '{safe_terminal_str(trimmed)}'. "
@@ -980,6 +1020,12 @@ def retire(target: str, *, yes: bool = False) -> None:
                     fix="mm devices",
                 )
 
+        if not is_tty and not yes:
+            core._error(
+                "devices retire: confirming needs a terminal. Nothing was changed.",
+                fix=_devices_module.retire_command(target_id, yes=True),
+            )
+
         if already_retired_only:
             rec = retirements.records[target_id]
             consequence = _retire_consequence_clause(
@@ -997,10 +1043,18 @@ def retire(target: str, *, yes: bool = False) -> None:
             )
             return
 
-        if not is_tty and not yes:
+        if target_id in retirements.newer_format:
             core._error(
-                "devices retire: confirming needs a terminal. Nothing was changed.",
-                fix=f"mm devices retire {target_id} --yes",
+                "devices retire: this machine's retirement record needs a newer mm. "
+                "Nothing was changed.",
+                fix="mm update",
+            )
+        if target_id in retirements.unreadable or target_id in retirements.vanished:
+            key = safe_terminal_str(retired_record_key(target_id))
+            core._error(
+                f"devices retire: could not verify {key}. "
+                "Nothing was changed. Wait for sync or check the retirement file.",
+                fix=_devices_module.retire_command(target_id, yes=yes),
             )
 
         syncthing_id = (
@@ -1018,7 +1072,10 @@ def retire(target: str, *, yes: bool = False) -> None:
             )
         )
 
-        old_gc_peers: list[str] = []
+        old_gc_peers = [
+            safe_terminal_str(pid)
+            for pid in sorted((dropped_ids | vanished_ids) - {own_id, target_id})
+        ]
         old_release_peers: list[str] = []
         min_gc_ver = Version("1.7.1")
         curr_ver = Version(core.__version__)
@@ -1063,13 +1120,25 @@ def retire(target: str, *, yes: bool = False) -> None:
                 fix="mm update",
             )
 
-        if not yes:
-            console.print(
-                f"  Retiring {safe_str(target_name)} ({safe_str(target_id)}) removes its "
-                "Mind Meld registration and Syncthing record. Pull on a machine with the "
-                "same home first if it had unpulled project memory, and shut down the "
-                "machine or stop Syncthing there first so it does not re-register on push."
+        consequence = _retire_consequence_clause(
+            syncthing_id, target_id, fleet_records, valid_by_id
+        )
+        if syncthing_id is None:
+            unpublished = _devices_module.split_unpublished(
+                inventory, _devices_module.published_record_mm_ids(backend, fleet_records)
             )
+            if any(entry.old_id == target_id for entry in unpublished.superseded):
+                consequence += (
+                    "; if the machine rejoined under the same Syncthing ID, keep that device"
+                )
+        console.print(
+            f"  Before retiring {safe_str(target_name)} ({safe_str(target_id)}), pull on a "
+            "machine with the same home if it had unpulled project memory. Shut it down "
+            "or stop Syncthing there before retiring it.",
+            soft_wrap=True,
+        )
+        if not yes:
+            console.print(f"  After retirement, {safe_str(consequence)}.", soft_wrap=True)
             if not core.ask_yes_no(
                 f"Retire {safe_terminal_str(target_name)} ({safe_terminal_str(target_id)})?",
                 default=False,
@@ -1092,37 +1161,31 @@ def retire(target: str, *, yes: bool = False) -> None:
                 f"devices retire: could not write retirement record for "
                 f"{safe_terminal_str(target_name)} ({safe_terminal_str(target_id)}) "
                 f"({safe_terminal_str(cause)}); nothing was deleted.",
-                fix=f"mm devices retire {target_id}",
+                fix=_devices_module.retire_command(target_id, yes=yes),
             )
 
         try:
-            backend.delete(syncthing_record_key(target_id))
+            backend.delete(syncthing_record_key(target_id), durable_flat=True)
         except (OSError, StorageError) as exc:
             cause = attemptlog.storage_errno(exc) or os_error_cause(exc)
             core._error(
                 f"devices retire: wrote the retirement record for "
                 f"{safe_terminal_str(target_name)} ({safe_terminal_str(target_id)}), "
                 f"but could not remove its Syncthing record ({safe_terminal_str(cause)}).",
-                fix=f"mm devices retire {target_id}",
+                fix=_devices_module.retire_command(target_id, yes=yes),
             )
 
         try:
-            backend.delete(device_key(target_id))
+            backend.delete(device_key(target_id), durable_flat=True)
         except (OSError, StorageError) as exc:
             cause = attemptlog.storage_errno(exc) or os_error_cause(exc)
             core._error(
                 f"devices retire: wrote the retirement record and removed the Syncthing "
                 f"record for {safe_terminal_str(target_name)} ({safe_terminal_str(target_id)}), "
                 f"but could not remove its device entry ({safe_terminal_str(cause)}).",
-                fix=f"mm devices retire {target_id}",
+                fix=_devices_module.retire_command(target_id, yes=yes),
             )
 
-        consequence = _retire_consequence_clause(
-            syncthing_id,
-            target_id,
-            fleet_records,
-            valid_by_id,
-        )
         core._print_outcome(
             outputstyle._outcome_line(
                 "retire",

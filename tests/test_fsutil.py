@@ -1528,6 +1528,8 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
     def invoke():
         if writer.startswith("local_"):
             backend = LocalBackend(base)
+            if writer == "local_delete_durable":
+                return backend.delete("data/sentinel", durable_flat=True)
             method = getattr(backend, writer.removeprefix("local_"))
             if writer in ("local_put", "local_put_exclusive"):
                 return method("data/sentinel", b"new")
@@ -1690,7 +1692,7 @@ def raw_writer_control(tmp_path, monkeypatch):
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
         else:
             result = invoke()
-            if writer in ("local_delete", "migration_unlink"):
+            if writer in ("local_delete", "local_delete_durable", "migration_unlink"):
                 assert not path.exists()
             elif writer == "local_delete_conflict_copies":
                 assert result == (2 if exists else 0)
@@ -1792,12 +1794,14 @@ def test_local_put_exclusive_tmp_control(raw_writer_control, raw_writer_exists):
     raw_writer_control("local_put_exclusive", raw_writer_exists)
 
 
-def test_local_delete_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
-    raw_writer_refusal("local_delete", raw_writer_exists)
+@pytest.mark.parametrize("writer", ["local_delete", "local_delete_durable"])
+def test_local_delete_refuses_protected_root(raw_writer_refusal, raw_writer_exists, writer):
+    raw_writer_refusal(writer, raw_writer_exists)
 
 
-def test_local_delete_tmp_control(raw_writer_control, raw_writer_exists):
-    raw_writer_control("local_delete", raw_writer_exists)
+@pytest.mark.parametrize("writer", ["local_delete", "local_delete_durable"])
+def test_local_delete_tmp_control(raw_writer_control, raw_writer_exists, writer):
+    raw_writer_control(writer, raw_writer_exists)
 
 
 def test_local_delete_conflict_copies_refuses_protected_root(raw_writer_refusal, raw_writer_exists):

@@ -1740,16 +1740,12 @@ class TestPromptSources:
         """User declines every prompt — mm-internal sources (mm-events)
         still auto-include. The init guard treats this as 'no user-facing
         sources' and refuses; here we just pin the prompt-level shape."""
-        from mind_meld import cli as cli_module
-
-        monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: False)
+        monkeypatch.setattr(core, "ask_yes_no", lambda *a, **kw: False)
         result = _prompt_sources()
         assert [s["name"] for s in result] == ["mm-events"]
 
     def test_all_accepted_returns_every_default(self, monkeypatch) -> None:
-        from mind_meld import cli as cli_module
-
-        monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: True)
+        monkeypatch.setattr(core, "ask_yes_no", lambda *a, **kw: True)
         result = _prompt_sources()
         names = [s["name"] for s in result]
         assert names == [s["name"] for s in DEFAULT_SOURCES]
@@ -1757,9 +1753,7 @@ class TestPromptSources:
     def test_returns_deep_copies_not_aliases(self, monkeypatch) -> None:
         """Mutating the returned dict must not pollute DEFAULT_SOURCES —
         Issue 1C's aliasing guard (get_default_source deep-copies)."""
-        from mind_meld import cli as cli_module
-
-        monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: True)
+        monkeypatch.setattr(core, "ask_yes_no", lambda *a, **kw: True)
         result = _prompt_sources()
         for src in result:
             src["path"] = "/mutated/value"
@@ -1770,15 +1764,13 @@ class TestPromptSources:
         """DEFAULT_SOURCES no longer ships opencode, so init asks for the
         seven user-facing names (claude, gstack, gstack-extend, codex, grok,
         muse, agy). mm-events auto-includes."""
-        from mind_meld import cli as cli_module
-
         prompted: list[str] = []
 
         def capture(prompt, default):
             prompted.append(prompt)
             return False
 
-        monkeypatch.setattr(cli_module.typer, "confirm", capture)
+        monkeypatch.setattr(core, "ask_yes_no", capture)
         _prompt_sources()
         user_facing = [s["name"] for s in DEFAULT_SOURCES if s["name"] != "mm-events"]
         assert len(user_facing) == 7
@@ -1792,43 +1784,18 @@ class TestPromptSources:
         """User answers Y for claude and n for the other agent sources. mm-events is
         mm-internal infrastructure and auto-includes without prompting,
         so it appears in the result list alongside claude."""
-        from mind_meld import cli as cli_module
-
         responses = iter([True, False, False, False, False, False, False])
-        monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
+        monkeypatch.setattr(core, "ask_yes_no", lambda *a, **kw: next(responses))
         result = _prompt_sources()
         assert [s["name"] for s in result] == ["claude", "mm-events"]
 
     def test_init_uses_one_detection_snapshot_per_user_source(self, monkeypatch) -> None:
         """Prompt copy and default must share one filesystem observation."""
-        from mind_meld import cli as cli_module
-
         probes: list[str] = []
 
-        class CountingPath:
-            def __init__(self, value: str):
-                self.value = value
-
-            def expanduser(self):
-                return self
-
-            def __truediv__(self, child: str):
-                return CountingPath(f"{self.value}/{child}")
-
-            def exists(self) -> bool:
-                probes.append(self.value)
-                return True
-
-            def is_dir(self) -> bool:
-                probes.append(self.value)
-                return True
-
-            def is_symlink(self) -> bool:
-                return False
-
-            def lstat(self):
-                probes.append(self.value)
-                return os.stat_result((0o040755, 1, 0, 1, 0, 0, 0, 0, 0, 0))
+        def detect(source):
+            probes.append(source["name"])
+            return True
 
         prompts: list[tuple[str, bool]] = []
 
@@ -1836,15 +1803,13 @@ class TestPromptSources:
             prompts.append((prompt, default))
             return False
 
-        monkeypatch.setattr(cli_module, "Path", CountingPath)
-        monkeypatch.setattr(pullflow, "Path", CountingPath)
-        monkeypatch.setattr(core, "Path", CountingPath)
-        monkeypatch.setattr(cli_module.typer, "confirm", confirm)
+        monkeypatch.setattr(core, "_source_path_is_detected", detect)
+        monkeypatch.setattr(core, "ask_yes_no", confirm)
 
         _prompt_sources()
 
         user_sources = [s for s in DEFAULT_SOURCES if s["name"] != "mm-events"]
-        assert len(probes) == len(user_sources)
+        assert probes == [source["name"] for source in user_sources]
         # Every detected source defaults on, Grok and Muse included.
         assert [default for _prompt, default in prompts] == [True for _ in user_sources]
         assert all("detected" in prompt for prompt, _default in prompts)

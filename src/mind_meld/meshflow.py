@@ -5,7 +5,6 @@ Imported only by ``cli``; never imports ``cli``, ``devicesflow`` or ``initflow``
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -23,32 +22,6 @@ HOOK_REQUEST_TIMEOUT_S = 0.5
 HOOK_PASS_BUDGET_S = 2.0
 BREADCRUMB_BUDGET_CHARS = 300
 _MAX_PEER_NAME_CHARS = 128
-
-_EXTRA_MESH_DETAIL_PATTERN = (
-    r"|the retirement record of device [A-Za-z0-9._-]{1,64} is from a newer mm\. Run: mm update"
-    r"|the retirement record of device [A-Za-z0-9._-]{1,64} is unreadable\. Run: mm diag"
-    r"|could not list retirement records \([A-Za-z0-9._ -]{1,64}\); "
-    r"the next push or pull retries"
-    r"|Syncthing device removals wait for [^/~]{1,240}"
-    r"|[^/~]{1,128} \([A-Z2-7]{7}\) is retired but still connected; "
-    r"shut it down or stop Syncthing there, or remove it in Syncthing's web UI"
-    r"|[^/~]{1,128} \([A-Z2-7]{7}\) is retired from Mind Meld but also shares another "
-    r"Syncthing folder on this machine; remove it in Syncthing's web UI"
-    r"|[^/~]{1,128} \([A-Z2-7]{7}\) stays until [^/~]{1,128} drops it; "
-    r"its next push or pull does that where mm manages Syncthing on this release; "
-    r"otherwise remove it in Syncthing's web UI there"
-    r"|Syncthing did not remove retired device [^/~]{1,128} \([A-Z2-7]{7}\)[^/~]{0,120}; "
-    r"remove it in Syncthing's web UI"
-    r"|could not rename this device in Syncthing \([A-Za-z0-9._ -]{1,64}\); "
-    r"rename it in Syncthing's web UI"
-    r"|could not rename [^/~]{1,128} \([A-Z2-7]{7}\) in Syncthing \([A-Za-z0-9._ -]{1,64}\); "
-    r"rename it in Syncthing's web UI"
-)
-if _EXTRA_MESH_DETAIL_PATTERN not in attemptlog._MESH_DETAIL_RE.pattern:
-    attemptlog._MESH_DETAIL_RE = re.compile(
-        attemptlog._MESH_DETAIL_RE.pattern + _EXTRA_MESH_DETAIL_PATTERN
-    )
-
 
 _PATH_CHAR_TRANS = str.maketrans({"/": "_", "~": "_"})
 
@@ -186,7 +159,7 @@ class MeshResult:
     unreadable: list[str] = field(default_factory=list)
     degradations: list[str] = field(default_factory=list)
     unvouched_pending: int | None = None
-    unvouched_pending_devices: dict[str, str] = field(default_factory=dict)
+    unvouched_pending_devices: dict[str, str] = field(default_factory=dict, repr=False)
     unpublished_names: tuple[str, ...] = ()
     superseded_registrations: tuple[devices.SupersededRegistration, ...] = ()
     vouched_ids: frozenset[str] | None = None
@@ -370,6 +343,44 @@ def run(
     return result
 
 
+def _registered_ids(inventory: devices.DeviceInventory) -> set[str]:
+    return (
+        {entry["device_id"] for entry in inventory.valid}
+        | {did for key, _ in inventory.dropped if (did := devices.parse_device_key(key))}
+        | set(inventory.vanished)
+    )
+
+
+def _note_introducer_hold(
+    result: MeshResult,
+    *,
+    retired_name: str,
+    device_id: str,
+    introducer_name: str,
+    attended: bool,
+) -> None:
+    _record_degradation(
+        result,
+        f"{retired_name} ({syncthing.short_device_id(device_id)}) stays until {introducer_name} "
+        "drops it; its next push or pull does that where mm manages Syncthing on this "
+        "release; otherwise remove it in Syncthing's web UI there",
+        attended=attended,
+        notice=True,
+    )
+
+
+def _retired_share_still_listed(
+    result: MeshResult, *, name: str, device_id: str, attended: bool
+) -> None:
+    _record_degradation(
+        result,
+        f"Syncthing did not remove retired device {name} ({syncthing.short_device_id(device_id)}) "
+        "from the fleet folder; remove it in Syncthing's web UI",
+        attended=attended,
+        notice=True,
+    )
+
+
 def _run_inner(
     result: MeshResult,
     *,
@@ -473,9 +484,24 @@ def _run_inner(
         result.unreadable.append(mm_id)
         _record_degradation(
             result,
-            f"the retirement record of device {safe_id} is unreadable. Run: mm diag",
+            f"the retirement record of device {safe_id} is unreadable. "
+            "Remove its retirement file by hand if it stays unreadable",
             attended=attended,
-            notice=True,
+            notice=False,
+        )
+        if attended:
+            core._notice(
+                f"Retirement file {devices.retired_record_key(mm_id)} is unreadable. "
+                "Remove it by hand if it stays unreadable."
+            )
+    for mm_id in retirements.vanished:
+        safe_id = _safe_detail_token(mm_id)
+        _record_degradation(
+            result,
+            f"the retirement record of device {safe_id} is still syncing; "
+            "the next push or pull retries",
+            attended=attended,
+            notice=False,
         )
 
     inventory = records.inventory
@@ -652,7 +678,7 @@ def _run_inner(
             candidates.append((dev_id, steps))
 
     # 2. Plan retirement removal steps (only when fleet folder is valid)
-    executable_removals: list[tuple[str, str]] = []
+    executable_removals: list[tuple[str, str, str]] = []
     if folder_ok and retirements.records:
         if inventory is None:
             try:
@@ -674,15 +700,7 @@ def _run_inner(
                 inventory = None
 
         if inventory is not None:
-            all_registered_ids = (
-                {d["device_id"] for d in inventory.valid}
-                | {
-                    did
-                    for key, _ in inventory.dropped
-                    if (did := devices.parse_device_key(key)) is not None
-                }
-                | set(inventory.vanished)
-            )
+            all_registered_ids = _registered_ids(inventory)
             seen_retired_st_ids: set[str] = set()
             candidate_removals: list[tuple[devices.RetirementRecord, str]] = []
             for rec in sorted(retirements.records.values(), key=lambda r: r.mm_device_id):
@@ -694,12 +712,19 @@ def _run_inner(
                     or st_id == snap.my_id
                     or st_id == recorded_id
                     or st_id in records.vouched
-                    or st_id not in snap.devices
                     or st_id in seen_retired_st_ids
                 ):
                     continue
                 seen_retired_st_ids.add(st_id)
-                candidate_removals.append((rec, st_id))
+                if st_id in snap.devices:
+                    candidate_removals.append((rec, st_id))
+                elif st_id in snap.folder_device_ids:
+                    _retired_share_still_listed(
+                        result,
+                        name=_safe_peer_name(rec.device_name, rec.mm_device_id),
+                        device_id=st_id,
+                        attended=attended,
+                    )
 
             if candidate_removals:
                 hold_removals = False
@@ -752,7 +777,7 @@ def _run_inner(
                         _record_degradation(
                             result,
                             f"Syncthing device removals wait for superseded registration "
-                            f"{s_name} ({s_old}). Run: mm devices retire {s_old}",
+                            f"{s_name} ({s_old}). Run: {devices.retire_command(sup.old_id)}",
                             attended=attended,
                             notice=True,
                         )
@@ -783,16 +808,15 @@ def _run_inner(
                         ):
                             intro_mm_id, intro_raw_name = other_vouched[cdev.introduced_by]
                             intro_name = _safe_peer_name(intro_raw_name, intro_mm_id)
-                            _record_degradation(
+                            _note_introducer_hold(
                                 result,
-                                f"{ret_name} ({st_id[:7]}) stays until {intro_name} drops it; "
-                                "its next push or pull does that where mm manages Syncthing on "
-                                "this release; otherwise remove it in Syncthing's web UI there",
+                                retired_name=ret_name,
+                                device_id=st_id,
+                                introducer_name=intro_name,
                                 attended=attended,
-                                notice=True,
                             )
                             continue
-                        executable_removals.append((ret_name, st_id))
+                        executable_removals.append((ret_name, st_id, rec.mm_device_id))
 
     # 3. Plan own-device rename
     raw_own_cfg_name = dev_cfg.get("name") if isinstance(dev_cfg, dict) else None
@@ -917,7 +941,49 @@ def _run_inner(
             return result
 
     # Execute 2: Retirement removals
-    for ret_name, st_id in executable_removals:
+    def still_retired(mm_id: str, st_id: str, ret_name: str, introduced_by: str) -> bool:
+        try:
+            fresh = devices.read_fleet_records(
+                backend, passphrase, memory_kb, own_device_id=own_mm_id, strict=True
+            )
+        except (OSError, StorageError):
+            _record_degradation(
+                result,
+                "Syncthing device removals wait for a complete fleet registry read. Run: mm diag",
+                attended=attended,
+                notice=True,
+            )
+            return False
+
+        assert fresh.inventory is not None
+        registered = _registered_ids(fresh.inventory)
+        if mm_id in registered or st_id in fresh.vouched:
+            return False
+        missing = registered - fresh.by_mm_id.keys() - {own_mm_id}
+        if missing:
+            for did in sorted(missing):
+                safe_id = _safe_detail_token(did)
+                _record_degradation(
+                    result,
+                    f"Syncthing device removals wait for {safe_id}'s Syncthing record; "
+                    "the next push or pull retries",
+                    attended=attended,
+                    notice=False,
+                )
+            return False
+        if introduced_by in fresh.vouched:
+            intro_id, intro_name = fresh.vouched[introduced_by]
+            _note_introducer_hold(
+                result,
+                retired_name=ret_name,
+                device_id=st_id,
+                introducer_name=_safe_peer_name(intro_name, intro_id),
+                attended=attended,
+            )
+            return False
+        return True
+
+    for ret_name, st_id, mm_id in executable_removals:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _stop_pass(result, "timeout", completed_steps, total_steps, attended=attended)
@@ -929,8 +995,13 @@ def _run_inner(
             deadline=deadline,
         )
         rem_res = step_writer.remove_device(
-            st_id, fleet_folder_id=_config_module.SYNCTHING_FOLDER_ID
+            st_id,
+            fleet_folder_id=_config_module.SYNCTHING_FOLDER_ID,
+            expected_path=storage_root,
+            still_retired=lambda introducer: still_retired(mm_id, st_id, ret_name, introducer),
         )
+        if rem_res.outcome == "refused" and rem_res.cause == "retirement-held":
+            continue
         if rem_res.outcome == "ok":
             completed_steps += 1
             result.removed.append((ret_name, st_id))
@@ -988,24 +1059,26 @@ def _run_inner(
 
     if result.removed:
         remaining = deadline - time.monotonic()
-        if remaining > 0:
-            check_writer = syncthing.SyncthingWriter(
-                managed,
-                timeout=min(req_timeout, remaining),
-                budget=remaining,
-                deadline=deadline,
-            )
-            after_snap = check_writer.mesh_snapshot(_config_module.SYNCTHING_FOLDER_ID)
-            if after_snap.outcome == "ok":
-                for ret_name, st_id in list(result.removed):
-                    if st_id in after_snap.folder_device_ids:
-                        _record_degradation(
-                            result,
-                            f"Syncthing did not remove retired device {ret_name} ({st_id[:7]}) "
-                            "from the fleet folder; remove it in Syncthing's web UI",
-                            attended=attended,
-                            notice=True,
-                        )
+        members, check_error = syncthing.SyncthingWriter(
+            managed,
+            timeout=min(req_timeout, remaining),
+            budget=remaining,
+            deadline=deadline,
+        ).fleet_folder_members(_config_module.SYNCTHING_FOLDER_ID)
+        for ret_name, st_id in result.removed:
+            if check_error is not None:
+                _record_degradation(
+                    result,
+                    f"could not confirm Syncthing removed retired device {ret_name} "
+                    f"({syncthing.short_device_id(st_id)}); check the fleet folder in "
+                    "Syncthing's web UI",
+                    attended=attended,
+                    notice=True,
+                )
+            elif st_id in members:
+                _retired_share_still_listed(
+                    result, name=ret_name, device_id=st_id, attended=attended
+                )
 
     # Execute 3: Own-device rename
     if need_own_rename and snap.my_id is not None:

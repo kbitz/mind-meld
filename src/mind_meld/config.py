@@ -892,37 +892,22 @@ def muse_memory_dir_exists(root: Path) -> bool:
     """
     from mind_meld.manifest import MUSE_EXCLUDE_PATTERNS, MUSE_SYNCED_SUBDIRS
 
-    for name in MUSE_SYNCED_SUBDIRS:
-        subdir = root / name
-        try:
-            st = subdir.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
-            continue
-        if not isinstance(subdir, (str, bytes, os.PathLike)):
-            return True
-        stack = [subdir]
+    try:
+        stack = [root / name for name in MUSE_SYNCED_SUBDIRS if (root / name).is_dir()]
         while stack:
-            current = stack.pop()
-            try:
-                with os.scandir(current) as it:
-                    entries = list(it)
-            except OSError:
-                return False
-            for entry in entries:
-                try:
-                    if entry.is_symlink():
-                        continue
+            directory = stack.pop()
+            if directory.is_symlink():
+                continue
+            with os.scandir(directory) as entries:
+                for entry in entries:
                     if entry.is_dir(follow_symlinks=False):
                         stack.append(Path(entry.path))
-                    elif entry.is_file(follow_symlinks=False):
-                        if not any(
-                            fnmatch.fnmatch(entry.name, pat) for pat in MUSE_EXCLUDE_PATTERNS
-                        ):
-                            return True
-                except OSError:
-                    return False
+                    elif entry.is_file(follow_symlinks=False) and not any(
+                        fnmatch.fnmatch(entry.name, pattern) for pattern in MUSE_EXCLUDE_PATTERNS
+                    ):
+                        return True
+    except OSError:
+        return False
     return False
 
 

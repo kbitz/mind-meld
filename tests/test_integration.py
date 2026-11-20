@@ -2959,10 +2959,11 @@ class TestMigrateConfigCommand:
             return original(config, **kwargs)
 
         monkeypatch.setattr(core, "_maybe_prompt_migration", prompt)
-        monkeypatch.setattr(typer, "confirm", lambda *a, **kw: True)
-        result = runner.invoke(app, ["push"])
+        result = runner.invoke(app, ["push"], input="\n\n")
         assert result.exit_code == 0, result.output
         output = " ".join(result.output.split())
+        assert "Run 'mm migrate-config' now? [y/n] (Enter = y)" in output
+        assert "Apply these updates? [y/n] (Enter = y)" in output
         assert "Config is missing recommended exclude_patterns for source(s): gstack" in output
         assert "for gstack: virtualenvs, app bundles, archives and binaries, QA evidence" in output
         assert "writes no tombstones, and every machine keeps its copy" in output
@@ -10762,7 +10763,7 @@ def test_preview_tty_notice62(preview62, monkeypatch, command):
         return original(config, **kwargs)
 
     monkeypatch.setattr(core, "_maybe_prompt_migration", prompt)
-    monkeypatch.setattr(typer, "confirm", lambda *a, **kw: confirms.append(True) or True)
+    monkeypatch.setattr(core, "ask_yes_no", lambda *a, **kw: confirms.append(True) or True)
     result = preview62["audit"]([command, "--dry-run", *(["1d"] if command == "recapture" else [])])
     assert result.exit_code == 0, result.output
     assert confirms == []
@@ -11518,7 +11519,7 @@ class TestPushPreviewNoMutation56A:
             return original(config, **kwargs)
 
         monkeypatch.setattr(core, "_maybe_prompt_migration", migration)
-        monkeypatch.setattr(typer, "confirm", lambda *a, **kw: pytest.fail("preview prompted"))
+        monkeypatch.setattr(core, "ask_yes_no", lambda *a, **kw: pytest.fail("preview prompted"))
         result = env["invoke"]()
         _assert_preview_complete(result)
         assert "config missing recommended excludes" not in result.stdout

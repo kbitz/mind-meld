@@ -1196,8 +1196,8 @@ def test_mesh_pass_retirement_removals_holds_introducer_and_device_renames(
     res_remove = runner.invoke(app, ["pull"])
     assert res_remove.exit_code == 0, res_remove.output
     assert (
-        "mm: notice: the retirement record of device badret11 is unreadable. Run: mm diag"
-        in res_remove.output
+        "mm: notice: Retirement file retired/badret11.enc is unreadable. "
+        "Remove it by hand if it stays unreadable." in res_remove.output
     )
     assert (
         f"Pull: Syncthing removed retired device mac-retired ({ret_st_id[:7]})."
@@ -1210,3 +1210,112 @@ def test_mesh_pass_retirement_removals_holds_introducer_and_device_renames(
     assert ret_st_id not in {
         d["deviceID"] for d in fake_syncthing.responses["/rest/config/folders"][0]["devices"]
     }
+
+
+@pytest.mark.parametrize("remove_fails", [False, True])
+def test_attended_retirement_leaves_budget_for_both_renames(
+    fake_syncthing, tmp_path, monkeypatch, remove_fails
+):
+    root, backend, my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    retired_id = _valid_syncthing_id("R")
+    current_id = _valid_syncthing_id("B")
+    fake_syncthing.set_folder(
+        root, peers=[(retired_id, "retired", False), (current_id, "old name", True)]
+    )
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = "old own name"
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {retired_id: {"connected": False}}
+    }
+    devices.write_retirement_record(
+        backend, "dev-ret", "retired", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    register_device(backend, "dev-b", "mac-b")
+    devices.publish_record(backend, "dev-b", current_id, PASSPHRASE, TEST_MEMORY_KB)
+    now = 1000.0
+    real_get = syncthing._get_json
+    real_send = syncthing._send_json
+
+    def slow_get(*args, **kwargs):
+        nonlocal now
+        now += 0.55
+        return real_get(*args, **kwargs)
+
+    def slow_send(endpoint, method, *args, **kwargs):
+        nonlocal now
+        now += 0.55
+        if method == "DELETE" and remove_fails:
+            return "error", "http-500"
+        return real_send(endpoint, method, *args, **kwargs)
+
+    monkeypatch.setattr(syncthing.time, "monotonic", lambda: now)
+    monkeypatch.setattr(syncthing, "_get_json", slow_get)
+    monkeypatch.setattr(syncthing, "_send_json", slow_send)
+    result = meshflow.run(
+        config.load_config(),
+        PASSPHRASE,
+        TEST_MEMORY_KB,
+        verb="pull",
+        attended=True,
+        backend=backend,
+    )
+
+    assert result.stop_cause is None
+    assert result.renamed == [("mac-a", my_id, True), ("mac-b", current_id, False)]
+    assert result.removed == ([] if remove_fails else [("retired", retired_id)])
+    if remove_fails:
+        assert any("http-500" in detail for detail in result.degradations)
+    else:
+        assert ("DELETE", f"/rest/config/devices/{retired_id}", None) in fake_syncthing.bodies
+
+
+@pytest.mark.parametrize("late_change", ["folder", "introducer", "registration", "listing-error"])
+def test_retirement_rechecks_eligibility_after_initial_snapshot(
+    fake_syncthing, tmp_path, monkeypatch, late_change
+):
+    root, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    retired_id = _valid_syncthing_id("R")
+    current_id = _valid_syncthing_id("B")
+    fake_syncthing.set_folder(
+        root, peers=[(retired_id, "retired", False), (current_id, "mac-b", True)]
+    )
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {retired_id: {"connected": False}}
+    }
+    devices.write_retirement_record(
+        backend, "dev-ret", "retired", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    register_device(backend, "dev-b", "mac-b")
+    devices.publish_record(backend, "dev-b", current_id, PASSPHRASE, TEST_MEMORY_KB)
+    take_snapshot = syncthing.SyncthingWriter.mesh_snapshot
+
+    def snapshot_then_change(writer, folder_id):
+        snapshot = take_snapshot(writer, folder_id)
+        if late_change == "folder":
+            fake_syncthing.responses["/rest/config/folders"] = []
+        elif late_change == "introducer":
+            fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = current_id
+        elif late_change == "registration":
+            register_device(backend, "dev-ret", "retired")
+            devices.publish_record(backend, "dev-ret", retired_id, PASSPHRASE, TEST_MEMORY_KB)
+        else:
+            real_list = LocalBackend.list_keys
+
+            def list_keys(self, prefix, *, strict=False):
+                if prefix == "devices/" and strict:
+                    raise PermissionError(errno.EACCES, "Cannot list registry")
+                return real_list(self, prefix, strict=strict)
+
+            monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
+        return snapshot
+
+    monkeypatch.setattr(syncthing.SyncthingWriter, "mesh_snapshot", snapshot_then_change)
+    result = meshflow.run(
+        config.load_config(),
+        PASSPHRASE,
+        TEST_MEMORY_KB,
+        verb="pull",
+        attended=True,
+        backend=backend,
+    )
+    assert result.removed == []
+    assert not any(method == "DELETE" for method, _, _ in fake_syncthing.bodies)

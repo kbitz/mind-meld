@@ -43,6 +43,14 @@ Scripts and tests that supply input for a fresh join must enter `j` or `join` be
 the storage path and supply the device name and source answers before the
 passphrase.
 
+**Fleet approval and retirement (Track 154A).** Update the approving machine to use
+a name or short ID at a terminal. For an older release or a script, use the full
+Syncthing ID printed by the joining machine. Init offers Grok Build and Muse and
+defaults to yes when it detects their supported files or directories. On managed
+machines, each push or pull applies Mind Meld device names to Syncthing. A name
+changed in Syncthing's web UI returns to the Mind Meld name on the next pass.
+Update managed peers so they apply new [retirements](#retiring-a-dead-machine).
+
 **`mm retro-fleet --no-save` removed (Track 145A):** `mm retro-fleet --no-save` is
 removed and now exits 2 as an unknown option (`mm: error: No such option: --no-save`).
 Remove `--no-save` from any scripts or aliases calling `mm retro-fleet`. If an agent
@@ -1031,10 +1039,10 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm push --dry-run` | Preview publication and deletions (files a recreated scan folder hides are not counted as deletions); changes nothing except the local lock file |
 | `mm pull --dry-run` | Preview what a pull would write, merge, conflict, delete or hold back as `older` (add `--verbose` for why a file with a deletion record is kept: `keep (<reason>)`); changes nothing except the local lock file |
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`) and end with one `Recapture: ... .` outcome line (`--verbose` / `-v` adds the window, repository, record-count and size breakdown, plus the inner push's own progress and detail). When the oldest recovered commit falls outside a 7-day retro window, an `mm: notice:` line names the `mm retro-fleet <N>d` window that covers it. Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Any other held file adds a `Push: N files held.` line (paths with `-v`) and goes with a later push. Retros window by the COMMIT's date, not by when mm captured it |
-| `mm pull` | Pull context; one final line per outcome. Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)). On a machine where `mm` manages Syncthing, adds knocking fleet devices vouched by a peer's encrypted `syncthing/<id>.enc` record (and finishes half-finished adds), removes disconnected retired devices (`retired/<id>.enc`), keeps Syncthing device names current, and reports any [unvouched pending join requests](#syncthing-folder-options) during an attended pull. Knocking devices whose sanitized name matches an unpublished registered fleet machine report `Run: mm update` (and `mm push` on that machine); superseded old registrations report `Run: mm devices retire <old-id>`; other pending join requests end with `Run: mm devices approve` |
+| `mm pull` | Pull context; one final line per outcome. Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)). On a machine where `mm` manages Syncthing, adds knocking fleet devices vouched by a peer's encrypted `syncthing/<id>.enc` record (and finishes half-finished adds), removes disconnected retired devices (`retired/<id>.enc`), keeps Syncthing device names current, and reports any [unvouched pending join requests](#syncthing-folder-options) during an attended pull. Knocking devices whose sanitized name matches an unpublished registered fleet machine report `Run: mm update` (and `mm push` on that machine); superseded old registrations appear alongside join requests with `Run: mm devices retire <old-id>`; other pending join requests end with `Run: mm devices approve` |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
-| `mm status` | Open with a scoped verdict comparing local context with this device's last push, then show Syncthing state (including knocking unpublished fleet machines with `Run: mm update`, superseded old registrations with `Run: mm devices retire <old-id>`, and a count-only `Run: mm devices approve` line for other pending join requests on a machine where `mm` manages Syncthing), each peer's last push and applied state, the latest auto or attended run per verb, and current diagnostics. Peer pushes overdue by more than 24 h warn in every mode. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
+| `mm status` | Open with a scoped verdict comparing local context with this device's last push, then show Syncthing state (including knocking unpublished fleet machines with `Run: mm update`, superseded old registrations alongside join requests with `Run: mm devices retire <old-id>`, and a count-only `Run: mm devices approve` line for other pending join requests on a machine where `mm` manages Syncthing), each peer's last push and applied state, the latest auto or attended run per verb, and current diagnostics. Peer pushes overdue by more than 24 h warn in every mode. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
 | `mm diag` | Dump non-secret crypto, sync, Syncthing, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`, with `grok` beside `codex`, `muse` and `agy`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
@@ -1210,7 +1218,7 @@ Source 'claude' — 1 new, 0 modified and 0 deleted waiting to push. Run: mm pus
 Sync run evidence unknown [run-evidence-ambiguous] (pull). Run: mm diag
 ```
 
-`mm status` also reports the local Syncthing connection and folder state (`Syncthing: ...`, plus a nudge to `mm diag` when folder settings need attention and, on a machine where `mm` manages Syncthing, knocking unpublished fleet machines with `Run: mm update`, superseded old registrations with `Run: mm devices retire <old-id>`, and a count-only `Run: mm devices approve` line for other devices waiting to join) and, under `Other devices`, each peer's last push and whether it is applied here (`applied here`, `not pulled here yet`, `N file(s) waiting for sync`, `its manifest has not arrived`, `never pushed`, `manifest unreadable here (mm pull shows why)`, or `applied state unknown`). When a peer's unpulled push, waiting files, or missing manifest has waited more than 24 h (strictly `> 24 h`), the opening verdict warns in every mode (`Waiting more than 24 h for <peer>'s push of YYYY-MM-DD. Run: mm pull` or `mm diag`) whenever no higher-priority local or run verdict applies; otherwise the warning follows that verdict. Unplaced project-memory files and old-form peer files are not pending and never trigger the 24 h warning. Counts cover the selected `--source` set. Metadata means
+`mm status` also reports the local Syncthing connection and folder state (`Syncthing: ...`, plus a nudge to `mm diag` when folder settings need attention and, on a machine where `mm` manages Syncthing, knocking unpublished fleet machines with `Run: mm update`, superseded old registrations alongside join requests with `Run: mm devices retire <old-id>`, and a count-only `Run: mm devices approve` line for other devices waiting to join) and, under `Other devices`, each peer's last push and whether it is applied here (`applied here`, `not pulled here yet`, `N file(s) waiting for sync`, `its manifest has not arrived`, `never pushed`, `manifest unreadable here (mm pull shows why)`, or `applied state unknown`). When a peer's unpulled push, waiting files, or missing manifest has waited more than 24 h (strictly `> 24 h`), the opening verdict warns in every mode (`Waiting more than 24 h for <peer>'s push of YYYY-MM-DD. Run: mm pull` or `mm diag`) whenever no higher-priority local or run verdict applies; otherwise the warning follows that verdict. Unplaced project-memory files and old-form peer files are not pending and never trigger the 24 h warning. Counts cover the selected `--source` set. Metadata means
 equal hashes with a strictly newer local mtime, using the same forward-only
 gate as push; a source selection change also needs publication. Holds and
 failed files stay pending or degraded; pushing does not force a green verdict.
@@ -2007,12 +2015,33 @@ Run `mm devices retire <name|id>` from any remaining fleet machine to retire a d
 
    ```bash
    mm devices
-   mm devices retire <name|id>
-   # or, for scripts and non-terminal runs (requires the exact 8-char Mind Meld ID):
-   mm devices retire <id> --yes
+   mm devices retire linux-a
+   # For scripts, use the exact Mind Meld ID from the list:
+   mm devices retire bbbb2222 --yes
    ```
 
-On owner-managed machines (or if the retired machine had never published a Syncthing ID, or also shares another non-Mind Meld Syncthing folder), remove the device in Syncthing's web UI as well. `manifests/<id>/` and `data/<id>/` stay in the store and cost only disk; deleting them later is **final** and can remove the only stored copy of memory no machine has placed. A retired machine that returns must re-join with `mm init` (or be re-approved by its full 56-character Syncthing device ID with `mm devices approve <full-device-id>`).
+A hook may need several passes on a slow Syncthing. Run an attended
+`mm pull` or `mm push` for a longer pass. Removal waits for fleet registrations
+to finish publishing and for the retired device to disconnect. Remove the
+device in Syncthing's web UI on owner-managed peers that still list it.
+An owner-managed introducer can reintroduce it until it is removed there.
+For a machine with no published Syncthing ID, identify the correct device in
+Syncthing before removing it. Keep the device if a newer registration still
+uses that same Syncthing ID.
+
+If mm cannot identify a registration because its `devices/<id>.json` is
+unreadable, locate it by filename in `storage.path` and move it out of the
+shared folder. If mm reports an unreadable `retired/<id>.enc` that stays
+unreadable after sync, remove that retirement file by hand. It only holds
+the removal target, so finish removing the device in Syncthing where needed.
+Keep `manifests/<id>/` and `data/<id>/` to preserve memory the fleet has
+yet to pull.
+
+To undo retirement while the device can still sync, run `mm push` on that
+machine to re-register it. If peers have removed it from Syncthing, use
+`mm devices approve <full-device-id>` on a fleet machine once the returning
+machine is pending, then run `mm push` on the returning machine to publish its
+registration and Syncthing ID.
 
 ### Newer or damaged storage format
 

@@ -1257,7 +1257,7 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
 
     # 10. Fleet context: vouched knocker explained & filtered, unpublished fleet labeled,
     # retired knocker flagged (retired) and refused by name/short-ID
-    storage_dir = tmp_path / "fleet-store"
+    storage_dir = tmp_path / "sync"
     backend = LocalBackend(str(storage_dir))
     passphrase = "approve-context-pass"
     init_fetch = crypto.bootstrap_crypto_init(backend, passphrase, 1024)
@@ -1301,6 +1301,28 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
     ) in flat_ctx
     assert f"old-laptop ({retired_id[:7]}) (retired)" in flat_ctx
 
+    # An explicit name resolves across all pending IDs, including vouched peers.
+    fake_syncthing.responses["/rest/cluster/pending/devices"][unpub_knocker]["name"] = "mac-vouched"
+    fake_syncthing.bodies.clear()
+    ambiguous = runner.invoke(app, ["devices", "approve", "mac-vouched"], input="\n")
+    assert ambiguous.exit_code == 1
+    assert "matches 2 pending devices" in ambiguous.output
+    assert vouched_id[:7] in ambiguous.output and unpub_knocker[:7] in ambiguous.output
+    assert fake_syncthing.bodies == []
+
+    # A failure reading fleet labels must not lose a separately readable retirement.
+    def unavailable(*args, **kwargs):
+        raise OSError("fleet records unavailable")
+
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {retired_id: {"name": "old-laptop"}}
+    with monkeypatch.context() as m:
+        m.setattr(devices, "read_fleet_records", unavailable)
+        failed_read = runner.invoke(app, ["devices", "approve"], input="\n")
+    assert failed_read.exit_code == 1
+    assert "could not read fleet records" in failed_read.output
+    assert f"old-laptop ({retired_id[:7]}) (retired)" in failed_read.output
+    assert fake_syncthing.bodies == []
+
     # Approving retired device by name or short ID refuses and points to full ID
     res_ret_refuse = runner.invoke(app, ["devices", "approve", "old-laptop"])
     assert res_ret_refuse.exit_code == 1
@@ -1313,3 +1335,23 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
     assert res_ret_full.exit_code == 0, res_ret_full.output
     assert f"Approve: approved {retired_id}" in res_ret_full.output
     assert len(fake_syncthing.bodies) == 3
+
+
+def test_short_approval_rechecks_pending_request_after_confirmation(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    _, _, joining = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    pending = "/rest/cluster/pending/devices"
+    fake_syncthing.responses[pending] = {joining: {"name": "linux-b"}}
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
+
+    def dismiss_during_confirmation(prompt, *, default):
+        assert default
+        fake_syncthing.responses[pending] = {}
+        return True
+
+    monkeypatch.setattr(core, "ask_yes_no", dismiss_during_confirmation)
+    result = runner.invoke(app, ["devices", "approve", joining[:7]])
+    assert result.exit_code == 1
+    assert "no longer pending" in result.output
+    assert fake_syncthing.bodies == []

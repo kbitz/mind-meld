@@ -101,8 +101,13 @@ asks whether to start or join a fleet, waits for the approval in the same
 run, and resumes a stopped join with its saved answers; each machine records
 its Syncthing device ID in the fleet's encrypted store, so one approval on one
 fleet machine connects the new machine to every machine where mm manages
-Syncthing. O4, target, audience and release policy are unchanged; the 2.0.0
-line's O2 acceptance observes this flow. Earlier text lives in
+Syncthing. Amended 2026-11-20 on the owner's request to make approval
+easier than using “those super long IDs” and to default detected sources
+to yes. O2 adds approval by name or short ID, retirement, and managed
+device names. Init shows each Enter default. The owner confirmed retirement
+and name correction on managed machines and kept destructive confirmations
+defaulted to no. O4, target, audience and release policy are unchanged.
+Earlier text lives in
 `git log -- docs/SPEC.md`.
 
 ## Purpose
@@ -134,8 +139,8 @@ first install sets Syncthing up so it just works.
 |---|---|---|
 | Claude Code | Project memory and `todos/` under `~/.claude` (CLAUDE.md, agents and commands stay in git) | Tokens, cost, sessions and skills from local session logs |
 | Codex | `skills/`, `plugins/`, `AGENTS.md` | Tokens and cost from session rollouts, archived ones included |
-| Grok Build | `skills/`, `commands/` and `rules/` under `~/.grok`, and its memory topics (each scope's `topics/` Markdown, global and per repository), after `mm enable-source grok`; pending observations stay on the machine that captured them | Tokens and cost from local session records, runs through Paseo (ACP) included, in the Grok row |
-| Muse | `memory/`, after `mm enable-source muse` | Tokens and cost, as its own `muse` family |
+| Grok Build | `skills/`, `commands/` and `rules/` under `~/.grok`, and its memory topics (each scope's `topics/` Markdown, global and per repository). `mm init` offers Grok Build and defaults to yes when it detects customizations. To enable it later, run `mm enable-source grok`. Pending observations stay on the machine that captured them | Tokens and cost from local session records, runs through Paseo (ACP) included, in the Grok row |
+| Muse | `memory/`. `mm init` offers Muse and defaults to yes when it finds an eligible memory file. To enable it later, run `mm enable-source muse` | Tokens and cost, as its own `muse` family |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config` | Tokens and cost from conversation steps, as its own `agy` family |
 | gstack, gstack-extend | Project state, analytics and retros; generator output and machine-local files (factory manager files, evidence ledgers, browser profiles, pair-review resume copies) excluded | — |
 | mmm-factory | Nothing: `~/.mmm/` stays local, and the factory moves between hosts with mmm-factory's own tool ([factory handover](#factory-handover)) | — (factory workers' tokens count under their host's row) |
@@ -238,10 +243,12 @@ approval on one fleet machine is the only approval a new machine needs.
 3. **Approval and retirement.** On a fleet machine where mm manages Syncthing, the owner
    runs one mm command (`mm devices approve` with no argument, by device name,
    by short-ID prefix, or by full Syncthing device ID). On a terminal, mm lists
-   pending devices and confirms by name or short ID; with a full 56-character
-   Syncthing device ID, mm accepts an exact match among Syncthing's pending
-   devices with or without a terminal, then adds the device and shares the fleet
-   folder. Besides a pending device, the full-ID form finishes an approval mm started
+   pending devices and asks the owner to identify one uniquely by name or
+   short-ID prefix. The joining machine supplies its pending name. Compare
+   the displayed seven-character short ID with the one printed by the joining
+   machine before approving it. The owner can also supply the exact full
+   Syncthing ID with or without a terminal. mm adds the approved device and
+   shares the fleet folder. The full-ID form also finishes an approval mm started
    on an earlier run: a device that exactly matches the pasted ID, has the
    shape mm's add step writes and does not yet share the fleet folder. On a
    fleet machine where the owner manages Syncthing, the owner approves the
@@ -255,9 +262,10 @@ approval on one fleet machine is the only approval a new machine needs.
    that is asking to connect when a fleet member's encrypted record names
    it, shares the fleet folder with it, keeps this machine's and each
    configured vouched peer's Syncthing device name aligned with `config.toml` /
-   `devices/<id>.json`, and removes any disconnected Syncthing device whose
-   Mind Meld device was retired via `mm devices retire <name|id>`
-   (`retired/<id>.enc`). mm never accepts a device that
+   `devices/<id>.json`, and removes eligible disconnected devices after
+   `mm devices retire <name|id>`. The pass checks current fleet registrations,
+   introducers and folder shares before removing a device named in an encrypted
+   retirement record (`retired/<id>.enc`). mm never accepts a device that
    no approval and no such record names. The paired machines also mark each
    other as Syncthing introducers. mm promises this mesh only among machines
    where it manages Syncthing; for a machine where the owner manages
@@ -291,16 +299,19 @@ approval on one fleet machine is the only approval a new machine needs.
    kept both ways until `mm resolve`.
 6. `mm status` and `mm diag` read and report Syncthing's state (connected
    peers, the folder's sync state and the folder options mm relies on).
-   Outside criteria 2 and 3 (setup, approval and the mesh step of criterion
-   3), mm never changes Syncthing's configuration.
+   mm writes Syncthing configuration only during managed setup, approval,
+   and the mesh step that pairs fleet members, removes retired devices and
+   corrects fleet device names.
 7. Evidence: tests against a stand-in for Syncthing's local API cover setup,
-   approval, the exact-match refusal, the pre-existing-configuration guide,
-   the join's wait, stop and resume, and the mesh step adding only a device a
-   fleet record names; an integration test joins a machine that holds
-   iCloud-era state to a fresh fleet without losing a file; and the owner
-   observes, on their own machines, a join that finishes in one `mm init`
-   run after one approval and the new machine connected to every machine
-   where mm manages Syncthing, recorded in PROGRESS.md `## Acceptance`.
+   approval, ambiguous-match refusal, the pre-existing-configuration guide,
+   the join's wait, stop and resume, and mesh pairing, retirement and name
+   correction. An integration test joins a machine that holds iCloud-era state
+   to a fresh fleet without losing a file. On their own machines, the owner
+   observes a join that finishes in one `mm init` run after one approval,
+   records the time from the joiner's approval line to approval, and checks
+   that the new machine connects to each managed peer. The owner observes a
+   retired device and its fleet-folder share disappear on managed peers and
+   records these observations in PROGRESS.md `## Acceptance`.
 
 ### O3: Partial sync is a reported state, never an error
 1. Content that has not arrived yet, a file Syncthing is replacing, and
@@ -440,14 +451,16 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   its default configuration (O2.1), stops with instructions if Homebrew is
   missing on macOS, and ships before 2.0.0.
 - Accepted manual steps: pasting a fleet machine's Syncthing device ID into
-  `mm init` and the new machine's into the approval command on one fleet
-  machine; configuring Syncthing with the README guide on a machine with a
+  `mm init` and approving the join on one fleet machine; configuring
+  Syncthing with the README guide on a machine with a
   pre-existing Syncthing configuration, including marking one fleet machine
   as introducer there; moving each machine off iCloud Drive by uninstalling and
   reinstalling mm; `mm resolve` for real conflicts; unlocking the Linux
   keyring before hooks run; re-joining a machine restored from backup or
-  cloned; removing a dead machine from the fleet, in Syncthing on every
-  machine that still lists it (introducers re-add it otherwise).
+  cloned; and removing retired devices in Syncthing on owner-managed machines.
+  Managed peers can pair a removed device again while its Mind Meld
+  registration still vouches for it. An owner-managed introducer that still
+  lists a retired device can reintroduce it until removed there.
 - Known limits: a project outside the home folder with no network git
   `origin` stays machine-specific. Grok Build memory for a repository with
   no `origin`, or for a folder that is not a repository, reaches other
@@ -472,7 +485,7 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   transcripts, walking a host home root. Unchanged exclusions.
 - mm-managed Syncthing beyond O2's setup, approval, introducers and mesh
   step: invite codes, relays, changing a pre-existing Syncthing
-  configuration, removing dead machines and scan requests after push. Revisit when the fleet grows
+  configuration, and scan requests after push. Revisit when the fleet grows
   past a handful of machines, or pairing or folder settings cause an
   observed missed sync.
 - A migration tool or fleet-wide cutover from iCloud Drive, and carrying the

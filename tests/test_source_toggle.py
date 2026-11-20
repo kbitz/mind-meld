@@ -111,7 +111,7 @@ class TestPromptSourceToggle:
             captured["default"] = default
             return default
 
-        monkeypatch.setattr(typer, "confirm", fake_confirm)
+        monkeypatch.setattr(core, "ask_yes_no", fake_confirm)
         result = core._prompt_source_toggle(
             {"name": "claude", "path": str(tmp_path)}, current_state=True
         )
@@ -123,7 +123,7 @@ class TestPromptSourceToggle:
         def fake_confirm(prompt, default):
             return default
 
-        monkeypatch.setattr(typer, "confirm", fake_confirm)
+        monkeypatch.setattr(core, "ask_yes_no", fake_confirm)
         result = core._prompt_source_toggle(
             {"name": "gstack", "path": str(tmp_path)}, current_state=False
         )
@@ -371,7 +371,7 @@ class TestRetiredSourceToggle:
             prompts.append(prompt)
             return keep_claude and "'claude'" in prompt
 
-        monkeypatch.setattr(typer, "confirm", choose)
+        monkeypatch.setattr(core, "ask_yes_no", choose)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0, result.output
         on_disk = load_config(cfg)
@@ -545,7 +545,7 @@ class TestReconfigureSources:
                 defaults.append(default)
             return default
 
-        monkeypatch.setattr(typer, "confirm", accept_default)
+        monkeypatch.setattr(core, "ask_yes_no", accept_default)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0, result.output
         assert defaults == [detected_tree is not None]
@@ -564,7 +564,7 @@ class TestReconfigureSources:
             prompts.append((prompt, default))
             return default
 
-        monkeypatch.setattr(typer, "confirm", accept)
+        monkeypatch.setattr(core, "ask_yes_no", accept)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0
         assert not any("opencode" in p for p, _ in prompts)
@@ -605,7 +605,7 @@ class TestReconfigureSources:
                 grok_prompt.update(prompt=prompt, default=default)
             return default
 
-        monkeypatch.setattr(typer, "confirm", accept_default)
+        monkeypatch.setattr(core, "ask_yes_no", accept_default)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0, result.output
         expected_suffix = "(detected)" if detected_subdir else "(not detected)"
@@ -651,7 +651,7 @@ class TestReconfigureSources:
                 muse_prompt.update(prompt=prompt, default=default)
             return default
 
-        monkeypatch.setattr(typer, "confirm", accept_default)
+        monkeypatch.setattr(core, "ask_yes_no", accept_default)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0, result.output
         assert muse_prompt == {
@@ -699,7 +699,7 @@ class TestReconfigureSources:
                 claude_prompt.update(prompt=prompt, default=default)
             return default
 
-        monkeypatch.setattr(typer, "confirm", accept_default)
+        monkeypatch.setattr(core, "ask_yes_no", accept_default)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0, result.output
         assert claude_prompt["default"] is False
@@ -724,8 +724,8 @@ class TestReconfigureSources:
         assert grok_usage_consented(load_config(cfg)) is False
 
         monkeypatch.setattr(
-            typer,
-            "confirm",
+            core,
+            "ask_yes_no",
             lambda prompt, default: True if "'grok'" in prompt else default,
         )
         result = runner.invoke(app, ["reconfigure-sources"])
@@ -985,16 +985,22 @@ def test_unified_yes_no_helper_and_no_confirm_calls_or_missing_retired_prefixes(
     for path in sorted(src_root.rglob("*.py")):
         rel = str(path.relative_to(src_root))
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        banned = {"click.confirm", "typer.confirm", "rich.prompt.Confirm"}
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                fn = node.func
-                if isinstance(fn, ast.Attribute) and fn.attr in ("confirm", "ask"):
-                    if isinstance(fn.value, ast.Name) and fn.value.id in (
-                        "typer",
-                        "click",
-                        "Confirm",
-                    ):
-                        forbidden_calls.append(f"{rel}:{node.lineno}")
+            if isinstance(node, ast.Attribute) and ast.unparse(node) in banned:
+                forbidden_calls.append(f"{rel}:{node.lineno}")
+            elif isinstance(node, ast.ImportFrom) and any(
+                f"{node.module}.{alias.name}" in banned for alias in node.names
+            ):
+                forbidden_calls.append(f"{rel}:{node.lineno}")
+            elif (
+                isinstance(node, ast.Call)
+                and ast.unparse(node.func) == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and f"{ast.unparse(node.args[0])}.{node.args[1].value}" in banned
+            ):
+                forbidden_calls.append(f"{rel}:{node.lineno}")
     assert forbidden_calls == []
 
     # 2. Pin "retired" in initflow._FLEET_DIRS and "retired/" in local._DURABLE_PREFIXES

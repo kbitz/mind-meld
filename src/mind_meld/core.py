@@ -2035,15 +2035,10 @@ def _resolve_all_configured_sources(config: dict) -> list[dict[str, Any]]:
 
 def _both_streams_are_terminals() -> bool:
     """Return True when both stdin and stdout are attached to a terminal."""
-    return bool(
-        sys.stdin is not None
-        and sys.stdin.isatty()
-        and sys.stdout is not None
-        and sys.stdout.isatty()
-    )
-
-
-_ORIG_CONFIRM = getattr(typer, "confirm", None)
+    try:
+        return _stdin_is_terminal() and sys.stdout is not None and sys.stdout.isatty()
+    except (OSError, ValueError):
+        return False
 
 
 def ask_yes_no(prompt: str, *, default: bool) -> bool:
@@ -2054,14 +2049,14 @@ def ask_yes_no(prompt: str, *, default: bool) -> bool:
     any other input prints a one-line hint naming what Enter does and re-asks.
     Raises ``typer.Abort`` on EOF/Ctrl-C.
     """
-    hook = getattr(typer, "confirm", _ORIG_CONFIRM)
-    if hook is not None and hook is not _ORIG_CONFIRM:
-        return bool(hook(prompt, default=default))
     default_token = "y" if default else "n"
     default_word = "yes" if default else "no"
     full_prompt = f"{prompt} [y/n] (Enter = {default_token})"
     while True:
-        raw = typer.prompt(full_prompt, default=default_token, show_default=False)
+        try:
+            raw = typer.prompt(full_prompt, default=default_token, show_default=False)
+        except (OSError, ValueError):
+            raise typer.Abort() from None
         choice = raw.strip().lower()
         if not choice:
             return default

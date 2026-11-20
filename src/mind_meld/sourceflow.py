@@ -326,7 +326,6 @@ def reconfigure_sources() -> None:
     explicit_names = [s["name"] for s in explicit_sources]
     has_explicit_sources = "sources" in sync
     disabled = list(sync.get("disabled_sources", []) or [])
-    default_names = [s["name"] for s in DEFAULT_SOURCES]
 
     # Unified ordered list: DEFAULT_SOURCES first (canonical surfacing
     # order), then any user-customized names not in defaults. Prefer the
@@ -368,13 +367,8 @@ def reconfigure_sources() -> None:
         for item in ordered:
             iname = item["name"]
             detected = core._source_path_is_detected(item)
-            default_active = iname in default_names
-            if iname in _config_module.OPT_IN_SOURCE_NAMES:
-                # Interactive enrollment follows init's detected-host default;
-                # background resolution still requires explicit consent.
-                default_active = detected
             currently_active = (
-                iname in explicit_names or (not has_explicit_sources and default_active)
+                iname in explicit_names or (not has_explicit_sources and detected)
             ) and iname not in disabled
             answered = core._prompt_source_toggle(
                 item, current_state=currently_active, detected=detected
