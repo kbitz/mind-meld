@@ -208,6 +208,18 @@ REVIEWED = {
             "replace(diff, deleted=[p for p in diff.deleted if p not in left_out])",
         ],
     ),
+    "devicesflow.py:_looks_like_full_device_id_attempt": (
+        *_READ_ONLY,
+        ["candidate.replace('-', '')"],
+    ),
+    "devicesflow.py:_match_pending_candidates": (
+        *_READ_ONLY,
+        ["trimmed.replace('-', '')", "item.device_id.replace('-', '')"],
+    ),
+    "devicesflow.py:approve": (
+        *_READ_ONLY,
+        ["trimmed.replace('-', '')"],
+    ),
     "pullflow.py:_make_copy_dirs": (
         *_GUARDED,
         [

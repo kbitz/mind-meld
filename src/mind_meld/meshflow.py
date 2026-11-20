@@ -381,6 +381,17 @@ def _retired_share_still_listed(
     )
 
 
+def _stop_folder_steps(result: MeshResult, cause: str, *, attended: bool) -> None:
+    result.stop_cause = cause
+    result.stops.append(cause)
+    _record_degradation(
+        result,
+        f"Syncthing mesh step stopped ({cause}). Run: mm diag",
+        attended=attended,
+        notice=True,
+    )
+
+
 def _run_inner(
     result: MeshResult,
     *,
@@ -525,9 +536,7 @@ def _run_inner(
         )
         if attended and verb == "pull" and recorded_id:
             result.vouched_ids = frozenset(records.vouched)
-            result.unpublished_names = tuple(
-                _safe_peer_name(name, name) for name in split.unpublished_names
-            )
+            result.unpublished_names = split.unpublished_names
             result.superseded_registrations = split.superseded
     elif attended and verb == "pull" and recorded_id:
         result.vouched_ids = frozenset(records.vouched)
@@ -631,24 +640,10 @@ def _run_inner(
     folder_ok = True
     if not snap.folder_present:
         folder_ok = False
-        result.stop_cause = "no-folder"
-        result.stops.append("no-folder")
-        _record_degradation(
-            result,
-            "Syncthing mesh step stopped (no-folder). Run: mm diag",
-            attended=attended,
-            notice=True,
-        )
+        _stop_folder_steps(result, "no-folder", attended=attended)
     elif snap.folder_path != storage_root or snap.folder_problems:
         folder_ok = False
-        result.stop_cause = "not-mm-folder"
-        result.stops.append("not-mm-folder")
-        _record_degradation(
-            result,
-            "Syncthing mesh step stopped (not-mm-folder). Run: mm diag",
-            attended=attended,
-            notice=True,
-        )
+        _stop_folder_steps(result, "not-mm-folder", attended=attended)
 
     # 1. Plan pairing steps (only when fleet folder is valid)
     candidates: list[tuple[str, list[tuple[str, str]]]] = []
@@ -729,6 +724,8 @@ def _run_inner(
             if candidate_removals:
                 hold_removals = False
                 for mm_id in records.newer_format:
+                    if mm_id == own_mm_id:
+                        continue
                     hold_removals = True
                     safe_id = _safe_detail_token(mm_id)
                     _record_degradation(
@@ -739,6 +736,8 @@ def _run_inner(
                         notice=True,
                     )
                 for mm_id in records.unreadable:
+                    if mm_id == own_mm_id:
+                        continue
                     hold_removals = True
                     safe_id = _safe_detail_token(mm_id)
                     _record_degradation(
@@ -749,8 +748,11 @@ def _run_inner(
                         notice=True,
                     )
                 for key, _reason in inventory.dropped:
+                    mm_id = devices.parse_device_key(key)
+                    if mm_id == own_mm_id:
+                        continue
                     hold_removals = True
-                    dropped_id = _safe_detail_token(devices.parse_device_key(key) or key)
+                    dropped_id = _safe_detail_token(mm_id or key)
                     _record_degradation(
                         result,
                         f"Syncthing device removals wait for unreadable device entry "
@@ -758,7 +760,9 @@ def _run_inner(
                         attended=attended,
                         notice=True,
                     )
-                for mm_id in sorted(set(inventory.vanished) | set(records.vanished)):
+                for mm_id in sorted(
+                    (set(inventory.vanished) | set(records.vanished)) - {own_mm_id}
+                ):
                     hold_removals = True
                     van_id = _safe_detail_token(mm_id)
                     _record_degradation(
@@ -923,6 +927,11 @@ def _run_inner(
                 )
                 return result
 
+            if w_res.outcome == "refused" and w_res.cause in ("no-folder", "not-mm-folder"):
+                folder_ok = False
+                _stop_folder_steps(result, w_res.cause, attended=attended)
+                break
+
             env_stop = w_res.outcome in ("unauthorized", "config-unreadable", "address-unsupported")
             diagnostic_cause = (
                 w_res.outcome if env_stop else _safe_detail_token(w_res.cause or w_res.outcome)
@@ -939,6 +948,9 @@ def _run_inner(
                 return result
 
             return result
+
+        if not folder_ok:
+            break
 
     # Execute 2: Retirement removals
     def still_retired(mm_id: str, st_id: str, ret_name: str, introduced_by: str) -> bool:
@@ -988,7 +1000,7 @@ def _run_inner(
             return False
         return True
 
-    for ret_name, st_id, mm_id in executable_removals:
+    for ret_name, st_id, mm_id in executable_removals if folder_ok else ():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _stop_pass(result, "timeout", completed_steps, total_steps, attended=attended)
@@ -1007,6 +1019,9 @@ def _run_inner(
         )
         if rem_res.outcome == "refused" and rem_res.cause == "retirement-held":
             continue
+        if rem_res.outcome == "refused" and rem_res.cause in ("no-folder", "not-mm-folder"):
+            _stop_folder_steps(result, rem_res.cause, attended=attended)
+            break
         if rem_res.outcome == "ok":
             completed_steps += 1
             result.removed.append((ret_name, st_id))

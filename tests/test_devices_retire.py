@@ -273,7 +273,7 @@ def test_retire_refusals_multi_match_chooser_partial_completion_and_old_peer_gat
     assert res_nontty_name.exit_code == 1
     assert "dup11111" in res_nontty_name.output
     assert "dup22222" in res_nontty_name.output
-    assert "Run: mm devices retire dup11111 --yes" in res_nontty_name.output
+    assert res_nontty_name.output.rstrip().splitlines()[-1] == "Run: mm devices retire <id> --yes"
 
     # Non-TTY with exact ID but no --yes refuses with --yes fix
     res_nontty_id = runner.invoke(app, ["devices", "retire", "dup11111"])
@@ -286,7 +286,8 @@ def test_retire_refusals_multi_match_chooser_partial_completion_and_old_peer_gat
     res_yes_name = runner.invoke(app, ["devices", "retire", "dup-box", "--yes"])
     assert res_yes_name.exit_code == 1
     assert "require an exact device ID" in res_yes_name.output
-    assert "Run: mm devices retire dup11111 --yes" in res_yes_name.output
+    assert res_yes_name.output.rstrip().splitlines()[-1] == "Run: mm devices retire <id> --yes"
+    assert all(backend.exists(device_key(device_id)) for device_id in ("dup11111", "dup22222"))
 
     # 4. TTY multi-match chooser: lists details, selects ID, then asks Retire confirm
     res_multi = runner.invoke(app, ["devices", "retire", "dup-box"], input="bad-id\ndup11111\ny\n")
@@ -526,3 +527,18 @@ def test_retire_refuses_if_syncthing_record_arrives_during_confirmation(tmp_path
     assert not backend.exists(retired_record_key(target))
     assert backend.exists(syncthing_record_key(target))
     assert backend.exists(device_key(target))
+
+
+def test_retire_by_saved_name_finishes_when_registry_entry_is_unreadable(tmp_path, monkeypatch):
+    backend = _setup_retire_fleet(tmp_path, monkeypatch)
+    retired_id = _valid_syncthing_id("B")
+    devices.write_retirement_record(
+        backend, "bbbb2222", "old-box", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    backend.put(device_key("bbbb2222"), b"unreadable registry")
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
+    result = runner.invoke(app, ["devices", "retire", "old-box"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "Retire old-box (bbbb2222)? [y/n] (Enter = n)" in result.output
+    assert "Retire: retired old-box (bbbb2222)" in result.output
+    assert not backend.exists(device_key("bbbb2222"))

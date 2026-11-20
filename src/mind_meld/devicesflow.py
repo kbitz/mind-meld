@@ -18,6 +18,7 @@ The `@devices_app` group callback and `@devices_app.command` shells and their
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -204,16 +205,25 @@ def _looks_like_full_device_id_attempt(candidate: str) -> bool:
     """Return True when the input has full 56-char / 8-group Syncthing ID shape."""
     if syncthing.is_device_id(candidate):
         return True
-    compact = "".join(candidate.split("-"))
+    compact = candidate.replace("-", "")
     if len(compact) == 56:
         return True
     parts = candidate.split("-")
     return len(parts) == 8 and all(len(part) == 7 for part in parts)
 
 
-def _display_pending_name(raw_name: object, device_id: str) -> str:
+_FULL_ID_IN_PENDING_NAME = re.compile(
+    r"[A-Z2-7]{7}(?:-[A-Z2-7]{7}){7}|[A-Z2-7]{56}", re.ASCII | re.IGNORECASE
+)
+
+
+def _display_pending_name(raw_name: object, device_id: str, *, short_ids_only: bool = False) -> str:
     """Return a sanitized display name for a pending or configured Syncthing device."""
     cleaned = safe_terminal_str(str(raw_name or "")).strip()
+    if short_ids_only:
+        cleaned = _FULL_ID_IN_PENDING_NAME.sub(
+            lambda match: syncthing.short_device_id(match[0]), cleaned
+        )
     return cleaned or syncthing.short_device_id(device_id)
 
 
@@ -248,7 +258,7 @@ def _match_pending_candidates(
     if not trimmed:
         return []
     norm_name = _devices_module.normalize_device_name(trimmed)
-    compact = "".join(trimmed.split("-")).upper()
+    compact = trimmed.replace("-", "").upper()
     is_prefix = len(compact) >= 4 and all(
         ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" for ch in compact
     )
@@ -256,9 +266,7 @@ def _match_pending_candidates(
     for item in candidates:
         item_norm = _devices_module.normalize_device_name(item.raw_name)
         name_hit = bool(norm_name and item_norm and item_norm == norm_name)
-        prefix_hit = bool(
-            is_prefix and "".join(item.device_id.split("-")).upper().startswith(compact)
-        )
+        prefix_hit = bool(is_prefix and item.device_id.replace("-", "").upper().startswith(compact))
         if name_hit or prefix_hit:
             matched.append(item)
     return matched
@@ -316,7 +324,7 @@ def _try_read_approve_fleet_context(*, include_fleet: bool) -> _ApproveContext:
             return context
         try:
             records = _devices_module.read_fleet_records(
-                backend, passphrase, memory_kb, own_device_id=own_mm_id
+                backend, passphrase, memory_kb, own_device_id=own_mm_id, strict=True
             )
             inventory = records.inventory or _devices_module.inventory_devices(backend)
             published_ids = _devices_module.published_record_mm_ids(backend, records)
@@ -521,7 +529,10 @@ def approve(device_id: str | None = None) -> None:
             _, reg_name = vouched_map[pending_id]
             vouched_knockers.append(
                 _PendingCandidate(
-                    pending_id, short_id, name, _display_pending_name(name or reg_name, pending_id)
+                    pending_id,
+                    short_id,
+                    name,
+                    _display_pending_name(name or reg_name, pending_id, short_ids_only=not is_tty),
                 )
             )
             continue
@@ -531,7 +542,7 @@ def approve(device_id: str | None = None) -> None:
                 pending_id,
                 short_id,
                 name,
-                _display_pending_name(name, pending_id),
+                _display_pending_name(name, pending_id, short_ids_only=not is_tty),
                 is_retired=is_retired,
                 is_unpublished_fleet=(
                     not is_retired and _devices_module.normalize_device_name(name) in unpub_by_norm
@@ -586,7 +597,7 @@ def approve(device_id: str | None = None) -> None:
             console.print("Pending devices asking to join:")
             for item in unvouched_candidates:
                 console.print(f"  {safe_str(_format_pending_candidate(item))}", soft_wrap=True)
-            compact = "".join(trimmed.split("-"))
+            compact = trimmed.replace("-", "")
             if len(compact) < 4:
                 core._error(
                     f"devices approve: '{safe_terminal_str(trimmed)}' did not match any pending "
@@ -925,18 +936,13 @@ def retire(target: str, *, yes: bool = False) -> None:
                     if rec.mm_device_id not in valid_by_id:
                         console.print(
                             f"  {safe_str(rec.device_name)} ({safe_str(rec.mm_device_id)}) "
-                            "(retired)"
+                            "(retirement record)"
                         )
-                first_id = (
-                    peer_name_matches[0]["device_id"]
-                    if peer_name_matches
-                    else retired_name_matches[0].mm_device_id
-                )
                 core._error(
                     f"devices retire: '{safe_terminal_str(trimmed)}' is a device name; --yes "
                     "and non-terminal runs require an exact device ID from 'mm devices'. "
                     "Nothing was changed.",
-                    fix=_devices_module.retire_command(first_id, yes=True),
+                    fix="mm devices retire <id> --yes",
                 )
             core._error(
                 f"devices retire: unknown device '{safe_terminal_str(trimmed)}'. "
@@ -1025,11 +1031,24 @@ def retire(target: str, *, yes: bool = False) -> None:
                             "listed device IDs. Nothing was changed.",
                             fix="mm devices",
                         )
-            elif len(retired_name_matches) >= 1:
+            elif retired_name_matches:
+                if len(retired_name_matches) > 1:
+                    for rec in retired_name_matches:
+                        console.print(
+                            f"  {safe_str(rec.device_name)} ({safe_str(rec.mm_device_id)})"
+                        )
+                    core._error(
+                        f"devices retire: '{safe_terminal_str(trimmed)}' matches several "
+                        "retirement records. Choose an exact device ID. Nothing was changed.",
+                        fix="mm devices retire <id>",
+                    )
                 rec = retired_name_matches[0]
                 target_id = rec.mm_device_id
-                target_name = safe_terminal_str(rec.device_name).strip() or target_id
-                already_retired_only = True
+                current_name = valid_by_id.get(target_id, {}).get("device_name")
+                target_name = (
+                    safe_terminal_str(current_name or rec.device_name).strip() or target_id
+                )
+                already_retired_only = target_id not in all_registry_ids
             else:
                 core._error(
                     f"devices retire: unknown device '{safe_terminal_str(trimmed)}'. "

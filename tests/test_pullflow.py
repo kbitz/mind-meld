@@ -4494,13 +4494,13 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
         ).encode("utf-8"),
     )
     assert devices.publish_record(fleet.backend, peer_c, joining_a, PASSPHRASE, MEMORY_KB)
-    devices.register_device(fleet.backend, "unpub222", "cachyos")
+    devices.register_device(fleet.backend, "unpub222", "Studio/Lab")
     fleet.backend.put(
         device_key("unpub222"),
         json.dumps(
             {
                 "device_id": "unpub222",
-                "device_name": "cachyos",
+                "device_name": "Studio/Lab",
                 "registered": "2026-02-03T00:00:00+00:00",
                 "last_seen": "2026-02-03T01:00:00+00:00",
                 "last_seen_version": "1.7.1",
@@ -4509,14 +4509,14 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
     )
     joining_c = _valid_id("L")
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {
-        joining_b: {"name": "cachyos"},
+        joining_b: {"name": "Studio/Lab"},
         joining_c: {"name": "stranger-device"},
     }
     res_matched = CliRunner().invoke(cli.app, ["pull"])
     assert res_matched.exit_code == 0, (res_matched.stdout, res_matched.stderr)
     err_lines = res_matched.stderr.splitlines()
     assert (
-        "mm: notice: Syncthing: registered fleet machine cachyos is asking to join and has "
+        "mm: notice: Syncthing: registered fleet machine Studio/Lab is asking to join and has "
         "not published a Syncthing ID yet; on that machine, run 'mm update', then 'mm push'. "
         "Run: mm update"
     ) in err_lines

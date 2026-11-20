@@ -843,8 +843,8 @@ Before the first attended `mm push` or `mm gc` on any Mac, including a dormant
 one, every `mm` it can run must have own-device GC: older releases' GC can delete
 peer blobs during a push or gc. Hooks do not run GC, but their background update
 is conditional (pipx `@latest`, v1.3.0+, `auto_install`), so it is not a rollout
-guarantee. This device never cleans abandoned peer
-blobs, and 1.x has no retirement command. A lagging peer reading a prior manifest
+guarantee. This device never cleans abandoned peer blobs. `mm devices retire`
+removes fleet registrations and their Syncthing records. A lagging peer reading a prior manifest
 can still miss an own blob that has since been collected. Protection is limited
 to peer namespaces from this updated installation's GC; clone/shared-device-ID
 protection and general arrival-order safety remain outside this repair.

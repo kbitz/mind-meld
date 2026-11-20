@@ -1393,3 +1393,65 @@ def test_pending_approval_accepts_enter_when_optional_context_is_unavailable(
     assert f"Approve linux-b ({joining[:7]})? [y/n] (Enter = y)" in result.output
     assert result.output.count("could not read fleet records") == (0 if argument else 1)
     assert [method for method, _, _ in fake_syncthing.bodies] == ["POST", "PATCH", "PATCH"]
+
+
+@pytest.mark.parametrize("dashless", [False, True])
+def test_off_terminal_discovery_keeps_full_ids_out_of_announced_names(
+    fake_syncthing, tmp_path, monkeypatch, dashless
+):
+    _, _, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    name_id = joining_id.replace("-", "").lower() if dashless else joining_id
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_id: {"name": f"joining-box {name_id}"}
+    }
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: False)
+    res = runner.invoke(app, ["devices", "approve"])
+    assert res.exit_code == 1 and fake_syncthing.bodies == []
+    assert "joining-box" in res.output and joining_id[:7] in res.output
+    assert name_id not in res.output
+
+
+def test_tty_discovery_detects_denied_fleet_record_listing(fake_syncthing, tmp_path, monkeypatch):
+    import os
+
+    from mind_meld import crypto, devices
+
+    my_id, _, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    root = tmp_path / "sync"
+    backend = LocalBackend(str(root))
+    passphrase = "fixture-passphrase"
+    memory_kb = 1024
+    monkeypatch.setattr(crypto, "MIN_ARGON2_MEMORY_KB", memory_kb, raising=False)
+    fetch = crypto.bootstrap_crypto_init(backend, passphrase, memory_kb)
+    assert fetch.root_salt is not None
+    crypto.set_crypto_session(fetch.root_salt, memory_kb)
+    register_device(backend, "dev-a", "mac-a")
+    devices.publish_record(backend, "dev-a", my_id, passphrase, memory_kb)
+    config.save_config(
+        {
+            "device": {"id": "dev-a", "name": "mac-a"},
+            "storage": {"path": str(root)},
+            "sync": {"sources": [], "max_file_size": 1024},
+            "crypto": {
+                "argon2_memory_kb": memory_kb,
+                "root_salt_fp": crypto.root_salt_fingerprint(fetch.root_salt),
+            },
+        }
+    )
+    monkeypatch.setattr(crypto, "get_passphrase", lambda **opts: passphrase)
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
+    real_scandir = os.scandir
+
+    def deny_fleet_records(path):
+        if not isinstance(path, int) and Path(path) == root / "syncthing":
+            raise PermissionError("fixture denies the fleet record listing")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", deny_fleet_records)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_id: {"name": "joining-box"}
+    }
+    res = runner.invoke(app, ["devices", "approve"], input="n\n")
+    assert res.exit_code == 0 and fake_syncthing.bodies == []
+    assert f"Approve joining-box ({joining_id[:7]})?" in res.output
+    assert "could not read fleet records" in res.output

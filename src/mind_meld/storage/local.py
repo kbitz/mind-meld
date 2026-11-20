@@ -336,7 +336,7 @@ class LocalBackend:
                         os.unlink(path.name, dir_fd=directory_fd)
                     except FileNotFoundError:
                         pass
-                    os.fsync(directory_fd)
+                    fsutil._fsync_fd(directory_fd)
                 finally:
                     os.close(directory_fd)
             elif path.exists():

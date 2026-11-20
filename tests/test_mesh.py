@@ -1420,3 +1420,46 @@ def test_autopush_neither_removes_connected_retired_device_nor_readds_knocker(
         for method, path, _ in fake_syncthing.requests
     )
     assert fake_syncthing.bodies == []
+
+
+def test_corrupt_own_record_preserves_diagnostic_without_holding_peer_retirement(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    root, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    backend.put(syncthing_record_key("dev-a"), b"corrupt")
+    retired_id = _valid_syncthing_id("R")
+    fake_syncthing.set_folder(root, peers=[(retired_id, "old-box", False)])
+    devices.write_retirement_record(
+        backend, "dev-ret", "old-box", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    res = runner.invoke(app, ["pull"])
+    assert res.exit_code == 0, res.output
+    assert "the Syncthing record of device dev-a is unreadable" in res.output
+    assert ("DELETE", f"/rest/config/devices/{retired_id}", None) in fake_syncthing.bodies
+
+
+def test_mesh_still_renames_when_pairing_loses_fleet_folder(fake_syncthing, tmp_path, monkeypatch):
+    root, backend, own_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    joining_id = _valid_syncthing_id("B")
+    peer_id = _valid_syncthing_id("C")
+    for mm_id, name, st_id in (("dev-b", "linux-a", joining_id), ("dev-c", "linux-b", peer_id)):
+        register_device(backend, mm_id, name)
+        devices.publish_record(backend, mm_id, st_id, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.set_folder(root, peers=[(peer_id, "old-peer-name", True)])
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = "old-own-name"
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {joining_id: {}}
+
+    def move_folder_after_add(method, path, body):
+        if method == "POST" and path == "/rest/config/devices":
+            fake_syncthing.responses["/rest/config/folders"][0]["path"] = str(tmp_path / "rebound")
+
+    fake_syncthing.on_write = move_folder_after_add
+    res = runner.invoke(app, ["pull"])
+    assert res.exit_code == 0 and "not-mm-folder" in res.output
+    assert not any(path.startswith("/rest/config/folders/") for _, path, _ in fake_syncthing.bodies)
+    assert ("PATCH", f"/rest/config/devices/{own_id}", {"name": "mac-a"}) in fake_syncthing.bodies
+    assert (
+        "PATCH",
+        f"/rest/config/devices/{peer_id}",
+        {"name": "linux-b"},
+    ) in fake_syncthing.bodies
