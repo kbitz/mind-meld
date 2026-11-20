@@ -536,11 +536,13 @@ def test_populated_folder_join_overwrite_declined(env):
     assert result.exit_code == 0, result.output
     assert "Overwrite? [y/n] (Enter = n)" in text
     assert len(_device_keys(backend)) == 2
+    from mind_meld.cli import app
+
     before = config.CONFIG_PATH.read_bytes()
-    eof, text = _run("")
+    eof = CliRunner().invoke(app, ["init"], input="")
     assert eof.exit_code == 1
-    assert "Overwrite? [y/n] (Enter = n)" in text
-    assert "needs a terminal" in text
+    assert "Overwrite? [y/n] (Enter = n)" in eof.output
+    assert "needs a terminal" in eof.output
     assert config.CONFIG_PATH.read_bytes() == before
 
 

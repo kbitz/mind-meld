@@ -633,8 +633,8 @@ def init(
     a default Syncthing configuration), the device name and the sources first,
     and saves those answers locally (never the passphrase). On a default
     Syncthing configuration it adds the fleet device as introducer, prints this
-    machine's device ID and 'mm devices approve <id>' to run on the fleet
-    machine, waits up to 10 minutes for that approval, accepts the 'mind-meld'
+    machine's device ID and short ID with both 'mm devices approve' commands
+    to run on the fleet machine, waits up to 10 minutes for approval, accepts the 'mind-meld'
     folder offer once shared, and waits up to two minutes for Syncthing to
     deliver mm-crypto-init (if the approval or header wait times out or is
     stopped with Ctrl-C, it prints a waiting outcome ending 'Run: mm init',
