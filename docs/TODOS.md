@@ -44,195 +44,20 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Preserve spaces in the chosen Syncthing name
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The name writer tests case differences and refuses all-whitespace input. It does not pin spaces around a nonblank name.
-- **Hypothesis (untested):** Assert the exact PATCH body for a padded name.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/syncthing.py:2059`
-- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
-- **Context:** Revisit when a Track changes the named path or its test.
-- **Effort:** ? (owner triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing_write.py] Test gap: Stop naming after a failed device-list read
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The own-name writer covers an empty device list and a failed PATCH. Its failed and malformed GET outcomes are covered through the shared reader.
-- **Hypothesis (untested):** Exercise the shared device-list error through the name writer and assert no PATCH.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/syncthing.py:2068`
-- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
-- **Context:** Revisit when a Track changes the named path or its test.
-- **Effort:** ? (owner triages in /roadmap)
-
-### [review:files=src/mind_meld/meshflow.py|tests/test_mesh.py] Test gap: Keep newer and vanished records out of the unpublished notice
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The encrypted reader tests classify both states. The notice test covers the unreadable, readable and absent cases.
-- **Hypothesis (untested):** Add newer and vanished peers to the mesh notice fixture and assert that both stay out of the sentence.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/meshflow.py:388`
-- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
-- **Context:** Revisit when a Track changes the named path or its test.
-- **Effort:** ? (owner triages in /roadmap)
-
-### [review:files=src/mind_meld/meshflow.py|tests/test_pullflow.py] Test gap: Keep a pending count when the optional registry is unavailable
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The no-record pull fixture has a readable registry. The optional registry failure path preserves the successful empty vouched set.
-- **Hypothesis (untested):** Fail only the supplemental inventory read and assert that the count-only notice survives.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/meshflow.py:380`
-- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
-- **Context:** Revisit when a Track changes the named path or its test.
-- **Effort:** ? (owner triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Stop new-fleet setup after a failed name write
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The named failure test verifies that a managed join stops before pairing. New-fleet uses the same helper before the folder writes.
-- **Hypothesis (untested):** Fail the initial name PATCH in the new-fleet command and assert that no folder was changed.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/initflow.py:278`
-- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
-- **Context:** Revisit when a Track changes the named path or its test.
-- **Effort:** ? (owner triages in /roadmap)
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Report the raw pull count when fleet records cannot be read
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The fallback integration fixture loses the mesh snapshot after successfully reading the encrypted records.
-- **Hypothesis (untested):** Fail the encrypted record scan while leaving the pending GET available. Assert the unfiltered count and no publisher names.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/cli.py:2964`
-- **Evidence:** Track 153A coverage audit at `fbb3c94`. Scoped checks passed.
-- **Context:** Revisit when a Track changes the named path or its test.
-- **Effort:** ? (owner triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_integration.py] Test gap: A blank fleet choice starts a join
-- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The existing blank-input test checks the storage path and exit code. It can pass with either fleet choice.
-- **Hypothesis (untested):** Assert that accepting the default saves join answers before stopping on an empty store.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/initflow.py:_ask_start_or_join`
-- **Evidence:** Track 151A coverage re-audit traced both prompt paths. The current default is `join`.
-- **Context:** Filed while re-reviewing [PR #355](https://github.com/kbitz/mind-meld/pull/355) at `45309d5`. Revisit when a Track touches the fleet choice prompt or its integration test.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Help covers the init join flow
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Pin the start-or-join choice, saved-answer resume, approval wait and retry text in the real help output.
-- **Hypothesis (untested):** Extend the existing init help test. Its current assertions cover the flag and the key-header wait.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/cli.py:init`
-- **Evidence:** Track 151A coverage audit; review of existing assertions showed no defect.
-- **Context:** Filed by /review-and-prep for Track 151A at `be00305`. Revisit when a Track touches these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Declining every source stops a managed join before pairing
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The new join path refuses an empty source selection before writing answers or starting setup.
-- **Hypothesis (untested):** Drive a managed join with an available offer and decline every source. Assert no Syncthing writes and no join record.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/initflow.py:init (source selection)`
-- **Evidence:** Track 151A coverage audit; review of existing assertions showed no defect.
-- **Context:** Filed by /review-and-prep for Track 151A at `be00305`. Revisit when a Track touches these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Recheck the storage folder before the first acceptance attempt
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The existing regression test covers a file that arrives during a poll delay.
-- **Hypothesis (untested):** Have the stand-in create a local file just before the first offer can be accepted and verify the folder is not shared.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/initflow.py:_managed_join`
-- **Evidence:** Track 151A coverage audit; review of existing assertions showed no defect.
-- **Context:** Filed by /review-and-prep for Track 151A at `be00305`. Revisit when a Track touches these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Init waits clear terminal progress before reporting a stop
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The current wait tests assert final output in non-terminal mode.
-- **Hypothesis (untested):** Exercise both waits in the terminal console fixture and verify the transient display exits before the final outcome.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/initflow.py:_managed_join and _wait_for_header`
-- **Evidence:** Track 151A coverage audit; review of existing assertions showed no defect.
-- **Context:** Filed by /review-and-prep for Track 151A at `be00305`. Revisit when a Track touches these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/cli.py|src/mind_meld/initflow.py|tests/test_integration.py] Test gap: Closed stdin after saving join answers gives the resume remedy
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The terminal recovery message mentions resuming saved answers.
-- **Hypothesis (untested):** Run the real CLI until EOF at the passphrase prompt and then resume with the saved record.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/cli.py:_init_needs_terminal`
-- **Evidence:** Track 151A coverage audit; review of existing assertions showed no defect.
-- **Context:** Filed by /review-and-prep for Track 151A at `be00305`. Revisit when a Track touches these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: mtime changes between classification and apply
-
-- **Test gap** No demonstrated defect.
-- **Description** The two-peer test sets mtimes before the pull. It leaves the apply-time recheck after a timestamp-only local change untested.
-- **Hypothesis** Change only the canonical mtime after classification and assert the apply recheck unions the incoming lines.
-- **Evidence** Track 151B coverage audit. Revisit when a Track touches classification or apply-time rechecks.
-
-### [review:files=src/mind_meld/diffflow.py|tests/test_integration.py] Test gap: predict an older line merge in diff from one peer
-
-- **Test gap** No demonstrated defect.
-- **Description** The rule tests and pull planner exercise the older merge. The `mm diff --from` invocation has no direct assertion for this ledger-backed case.
-- **Hypothesis** Seed an older `.jsonl` successor to a clean local file and assert `mm diff --from` predicts `merge` without writing.
-- **Evidence** Track 151B coverage audit. Revisit when a Track touches peer-specific diff predictions.
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: summary counts across peers and deletion-only pulls
-
-- **Test gap** No demonstrated defect.
-- **Description** Existing fixtures assert apply counts and the deletion outcome. They lack exact written and merged summary fragments across peers with the same source name and a check for an empty header on deletion-only results.
-- **Hypothesis** Extend the two-peer and deletion fixtures to pin count-bearing labels and check that a deletion-only result produces no source header.
-- **Evidence** Track 151B coverage audit. Revisit when a Track changes per-source summary rendering.
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: plural held counts and mixed source outcomes
-
-- **Test gap** No demonstrated defect.
-- **Description** The held-only test covers one held file. It leaves multiple holds and a hold alongside active or unchanged outcomes untested.
-- **Hypothesis** Exercise one peer and source with multiple held files. Check the plural count and when `Up to date with` appears alongside other outcomes.
-- **Evidence** Track 151B coverage audit. Revisit when a Track changes held-edit accounting or output.
-
-### [review:files=src/mind_meld/devices.py|tests/test_mesh.py] Test gap: Syncthing record labels when two registrations claim one ID
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The encrypted record reader chooses a label by registry rank. Current fixtures supply one valid registration per Syncthing ID.
-- **Hypothesis (untested):** Authenticate two records for one Syncthing identity and check which registered label is rendered.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/devices.py:read_fleet_records`
-- **Evidence:** Track 152A coverage audit. The current reader tests pass.
-- **Context:** Filed during [PR #357](https://github.com/kbitz/mind-meld/pull/357). Revisit when the next Track changes the reader or its tests.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/devices.py|src/mind_meld/meshflow.py|tests/test_mesh.py] Test gap: Syncthing record filesystem read failures
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Vanished, malformed and oversized record fixtures exercise different branches from listing and read errors.
-- **Hypothesis (untested):** Exercise a record read error and a directory listing error. Check that the first leaves other records usable and the second reaches sync diagnostics.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/devices.py:read_fleet_records` and `src/mind_meld/meshflow.py:_run_inner`.
-- **Evidence:** Track 152A coverage audit. No failure was reproduced.
-- **Context:** Filed during [PR #357](https://github.com/kbitz/mind-meld/pull/357). Revisit when the next Track changes record storage or its diagnostics.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|src/mind_meld/meshflow.py|tests/test_mesh.py] Test gap: Syncthing device state changes during a mesh pass
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The paused-device fixture starts with the device paused. The writer also checks for a pause after the initial snapshot.
-- **Hypothesis (untested):** Pause a candidate in the local fixture after the snapshot and check that the remaining writes skip it.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/syncthing.py:mark_introducer` and `src/mind_meld/syncthing.py:share_folder`.
-- **Evidence:** Track 152A coverage audit. No failure was reproduced.
-- **Context:** Filed during [PR #357](https://github.com/kbitz/mind-meld/pull/357). Revisit when the next Track changes pairing or its tests.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/meshflow.py|tests/test_mesh.py] Test gap: Mesh breadcrumbs with several omitted details
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The fixtures cover a single omitted diagnostic and a mix of one share and one degradation.
-- **Hypothesis (untested):** Add several complete diagnostic clauses and long device names to check detail priority and how status displays omissions.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/meshflow.py:compose_hook_breadcrumb`
-- **Evidence:** Track 152A coverage audit. No failure was reproduced.
-- **Context:** Filed during [PR #357](https://github.com/kbitz/mind-meld/pull/357). Revisit when the next Track changes mesh diagnostics or tests.
-- **Effort:** ? (user triages in /roadmap)
-
 ## Drain records
+
+### Roadmap regeneration — 2026-11-19 (Tracks 152A and 153A recorded; empty plan)
+
+Verified against `13ae374` (v1.12.72), from the Factory Manager's brief carrying the developer's "If we have no more tracks, then yes regen is fine" (2026-11-20 00:40Z). Tracks 152A and 153A merged in PRs #357 and #358 and are recorded as independent receipts in docs/roadmap-shipped.md (tombstones 152 and 153); Tracks 149A, 150A, 151A and 151B, also named in the brief, already had receipts from the runs that followed them, so this run records only the two. Admission follows docs/SPEC.md (MVP-1 on Syncthing), the AGENTS.md planning rules and the standing constraint that a reproducible bug the owner encountered goes to Current Plan. Nothing passes the gates, so In Progress and Current Plan are empty: no inbox item or Future entry records a bug seen on the owner's machines with a cause found in the code. One Future trigger is met: "SPEC's manual-steps line should name the mesh step as re-adding a removed machine" (Track 152A merged); it needs a SPEC edit, so it stays in Future for the next `/project-spec` run, as the brief directs. Each test gap below was re-checked at `13ae374` (still open, paths present); with no Track to carry it, each waits in Future for a Track whose `_touches:` cover its files.
+
+| Inbox item | Disposition |
+|---|---|
+| Test gaps from Track 153A, PR #358 (6): spaces in the chosen Syncthing name; naming after a failed device-list read; newer and vanished records in the unpublished notice; pending count when the optional registry is unavailable; new-fleet setup after a failed name write; raw pull count when fleet records cannot be read | defer (test gaps) |
+| Test gaps from Track 152A, PR #357 (4): record labels when two registrations claim one ID; record filesystem read failures; device state changes during a mesh pass; mesh breadcrumbs with several omitted details | defer (test gaps) |
+| Test gaps from Track 151A, PR #355 (6): a blank fleet choice starts a join; help covers the init join flow; declining every source stops a managed join; storage folder recheck before the first acceptance; init waits clear terminal progress; closed stdin after saving join answers | defer (test gaps) |
+| Test gaps from Track 151B, PR #354 (4): mtime changes between classification and apply; `mm diff --from` predicting an older line merge; summary counts across peers and deletion-only pulls; plural held counts and mixed source outcomes | defer (test gaps) |
+
+20 drained: 0 placed, 20 deferred, 0 killed, 0 discharged. Future grows from 79 to 99 entries; its other entries passed the manifestation gate again and keep their text. No bump under SPEC documentation-only policy.
 
 ### Roadmap card run — 2026-11-19 (Syncthing device names carded as Track 153A; Tracks 151A and 151B recorded)
 
