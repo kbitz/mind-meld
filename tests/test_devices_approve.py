@@ -1,4 +1,4 @@
-"""Tests for `mm devices approve <device-id>` (Track 119A)."""
+"""Tests for approving Syncthing devices by full ID or interactive discovery."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from mind_meld.devices import register_device
 from mind_meld.storage.local import LocalBackend
 
 runner = CliRunner()
+FULL_ID_APPROVE_WORDS = ["mm", "devices", "approve", "<device-id>"]
 
 
 def _valid_syncthing_id(seed_char: str) -> str:
@@ -161,7 +162,7 @@ def test_approve_refuses_malformed_id_with_no_syncthing_requests(
     text = " ".join(res.output.split())
     assert "is not a Syncthing device ID" in text
     assert "Nothing was changed." in text
-    assert "mm devices approve <device-id>" in text
+    assert res.output.rsplit("'", 2)[1].split() == FULL_ID_APPROVE_WORDS
     assert fake_syncthing.requests == []
     assert fake_syncthing.bodies == []
 
@@ -1162,21 +1163,26 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
         "Approve: no pending devices are asking to join. Nothing was changed." in res_empty.output
     )
 
-    # 3. Non-TTY with pending devices: no-arg lists name + short ID (never full ID) and exits 1;
-    # name or short-ID arg exits 1 with Run: mm devices approve <device-id>
+    # 3. Off-terminal discovery lists names and short IDs, then requires the full ID.
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {joining_id: {"name": "cachyos"}}
     res_nontty_noarg = runner.invoke(app, ["devices", "approve"])
     assert res_nontty_noarg.exit_code == 1
     assert f"cachyos ({joining_id[:7]})" in res_nontty_noarg.output
     assert joining_id not in res_nontty_noarg.output
-    assert "Run: mm devices approve <device-id>" in res_nontty_noarg.output
+    assert res_nontty_noarg.output.rstrip().splitlines()[-1].split() == [
+        "Run:",
+        *FULL_ID_APPROVE_WORDS,
+    ]
     assert fake_syncthing.bodies == []
 
     for arg in ("cachyos", joining_id[:7]):
         res_nontty_arg = runner.invoke(app, ["devices", "approve", arg])
         assert res_nontty_arg.exit_code == 1
         assert "approving by name or short ID needs a terminal" in res_nontty_arg.output
-        assert "Run: mm devices approve <device-id>" in res_nontty_arg.output
+        assert res_nontty_arg.output.rstrip().splitlines()[-1].split() == [
+            "Run:",
+            *FULL_ID_APPROVE_WORDS,
+        ]
         assert joining_id not in res_nontty_arg.output
         assert fake_syncthing.bodies == []
 
