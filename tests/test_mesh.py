@@ -1415,5 +1415,8 @@ def test_autopush_neither_removes_connected_retired_device_nor_readds_knocker(
     fake_syncthing.requests.clear()
     second = runner.invoke(app, ["autopush"])
     assert second.exit_code == 0 and not second.output
-    assert ("GET", "/rest/cluster/pending/devices") in fake_syncthing.requests
+    assert any(
+        method == "GET" and path == "/rest/cluster/pending/devices"
+        for method, path, _ in fake_syncthing.requests
+    )
     assert fake_syncthing.bodies == []
