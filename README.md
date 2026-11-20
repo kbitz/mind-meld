@@ -39,9 +39,9 @@ pair, the device name and the sources (every yes/no question uses `[y/n] (Enter 
 needs approval, the same run prints both the short-ID and full-ID `mm devices approve` commands and waits for up to about 10 minutes plus local
 Syncthing request time. A stopped join offers to resume from the saved answers
 with `Continue joining? [y/n] (Enter = y)`.
-Scripts and tests that supply input for a fresh join must enter `j` or `join` before
-the storage path and supply the device name and source answers before the
-passphrase.
+Scripts and tests that supply input for a fresh join must send `j`, `join`, or
+a blank line before the storage path, then supply the device name and source
+answers before the passphrase.
 
 **Fleet approval and retirement (Track 154A).** Update the approving machine to use
 a name or short ID at a terminal. For an older release or a script, use the full
@@ -749,7 +749,7 @@ On a machine where mm found Syncthing's default configuration when it set Syncth
 
 On each mm-managed machine where `mind-meld` matches `storage.path` and has the options above, the next `mm push`, `mm pull`, `mm autopush` or `mm autopull` can add a device asking to connect and share the folder with it once its valid encrypted record and registry entry have arrived. The sync command also finishes interrupted adds for vouched devices that still match mm's settings. Syncthing's **Ignore device** in the pending banner (or pausing a configured device) is the per-device override.
 
-`mm status` and `mm diag` send only `GET` requests, `--dry-run` previews never touch Syncthing, and mm never changes an owner-managed Syncthing configuration. `mm status` shows the Syncthing connection and folder state and prints a count-only `mm devices approve <device-id>` line for pending devices that no fleet record vouches for on a managed machine (or every pending device when the records cannot be read). An attended `mm pull` on a managed machine prints that notice for unvouched requests after a successful mesh snapshot or when falling back to the ordinary status read (or for all pending requests if the fleet records could not be read). When mm can read the fleet records and registry, the pull notice also names other registered fleet machines whose Syncthing-ID records are absent locally and advises running `mm update` and `mm push` there. It ends with `Run: mm devices approve <device-id>`. `mm diag` checks each folder option above and `.stignore`. Inspection prefers a folder matching the storage root. For an existing parent-folder share, it reports the deepest containing folder and checks its `.stignore` and folder options.
+`mm status` and `mm diag` send only `GET` requests, `--dry-run` previews never touch Syncthing, and mm never changes an owner-managed Syncthing configuration. `mm status` shows the Syncthing connection and folder state. On a managed machine, `mm status` and attended `mm pull` exclude pending devices vouched for by the fleet when its records are readable. They show a count-only notice ending in `Run: mm devices approve` for the remaining join requests, and list all pending requests by count if fleet records are unavailable. When they recognize a knocking fleet machine whose Syncthing record is missing, they name it and advise running `mm update` and `mm push` there. The pending-join notices also flag superseded registrations with `Run: mm devices retire <old-id>`. `mm diag` checks each folder option above and `.stignore`. Inspection prefers a folder matching the storage root. For an existing parent-folder share, it reports the deepest containing folder and checks its `.stignore` and folder options.
 
 To add a machine with one approval, follow these steps on the indicated machines. For the approval step on an owner-managed machine, [use the Syncthing GUI](#configuring-syncthing-yourself).
 
@@ -1317,9 +1317,9 @@ on this device rewrites the manifest even with no content change; then retry
 `mm gc`. Hooks (`mm autopush`, `mm autopull`) never run GC, and each Mac cleans
 only its own blobs, so run `mm gc` now and then on a Mac that syncs mostly
 through hooks; otherwise its superseded blobs accumulate in the storage folder. Abandoned
-peers' blobs remain; 1.x has no retirement command. A lagging peer
-reading this device's prior manifest can still miss a blob this device has
-already collected; this repair does not solve every arrival order.
+peers' blobs remain after [device retirement](#retiring-a-dead-machine), too.
+A lagging peer reading this device's prior manifest can still miss a blob this
+device has already collected; this repair does not solve every arrival order.
 
 ### Nested git repositories
 
