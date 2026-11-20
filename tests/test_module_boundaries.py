@@ -994,7 +994,7 @@ def test_command_set_is_unchanged_by_the_decomposition() -> None:
     assert devices_group is not None
     assert {
         c.name or c.callback.__name__.rstrip("_") for c in devices_group.registered_commands
-    } == {"approve"}
+    } == {"approve", "retire"}
     assert devices_group.registered_callback is not None
     assert devices_group.registered_callback.invoke_without_command is True
 

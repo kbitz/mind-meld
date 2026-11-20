@@ -145,9 +145,9 @@ def test_approve_repeat_after_success_and_peer_introduced_device_report_already_
 @pytest.mark.parametrize(
     "bad_id",
     [
-        "not-a-device-id",
-        "AAAAAAA-AAAAAAA",
-        "AAAAAAA",
+        "0" * 56,
+        "AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAA1",
+        "1234567-1234567-1234567-1234567-1234567-1234567-1234567-1234567",
     ],
 )
 def test_approve_refuses_malformed_id_with_no_syncthing_requests(
@@ -904,6 +904,8 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
         "mark_introducer",
         "share_folder",
         "accept_folder_offer",
+        "remove_device",
+        "set_device_name",
     }
     raw_writes = {"_send_json", "_WRITE_ROUTES"}
     entry_points = {
@@ -1075,7 +1077,7 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
                 "/rest/config/devices",
                 {
                     "deviceID": vouched_id,
-                    "name": "",
+                    "name": "mac-b",
                     "addresses": ["dynamic"],
                     "introducer": False,
                     "autoAcceptFolders": False,
@@ -1131,3 +1133,183 @@ def test_approve_outcome_lines_emit_no_ansi_under_forced_terminal(
         "shares the fleet folder with it.",
     ]
     assert "\x1b" not in buf.getvalue()
+
+
+def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    """Track 154A AC1, AC2, C4, X2, X3, X4, X12, X13, X14, X15, X17, E11, E12, E17."""
+    from mind_meld import crypto, devices
+
+    my_id, peer_id, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    joining_2 = _valid_syncthing_id("E")
+    vouched_id = _valid_syncthing_id("F")
+    retired_id = _valid_syncthing_id("G")
+
+    # 1. Empty or whitespace argument refused before any Syncthing request
+    fake_syncthing.requests.clear()
+    for blank in ("", "   ", "\t"):
+        res_blank = runner.invoke(app, ["devices", "approve", blank])
+        assert res_blank.exit_code == 1
+        assert "cannot be empty" in res_blank.output
+    assert fake_syncthing.requests == []
+
+    # 2. No pending devices: exits 0 on non-TTY and TTY alike
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {}
+    res_empty = runner.invoke(app, ["devices", "approve"])
+    assert res_empty.exit_code == 0, res_empty.output
+    assert (
+        "Approve: no pending devices are asking to join. Nothing was changed." in res_empty.output
+    )
+
+    # 3. Non-TTY with pending devices: no-arg lists name + short ID (never full ID) and exits 1;
+    # name or short-ID arg exits 1 with Run: mm devices approve <device-id>
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {joining_id: {"name": "cachyos"}}
+    res_nontty_noarg = runner.invoke(app, ["devices", "approve"])
+    assert res_nontty_noarg.exit_code == 1
+    assert f"cachyos ({joining_id[:7]})" in res_nontty_noarg.output
+    assert joining_id not in res_nontty_noarg.output
+    assert "Run: mm devices approve <device-id>" in res_nontty_noarg.output
+    assert fake_syncthing.bodies == []
+
+    for arg in ("cachyos", joining_id[:7]):
+        res_nontty_arg = runner.invoke(app, ["devices", "approve", arg])
+        assert res_nontty_arg.exit_code == 1
+        assert "approving by name or short ID needs a terminal" in res_nontty_arg.output
+        assert "Run: mm devices approve <device-id>" in res_nontty_arg.output
+        assert joining_id not in res_nontty_arg.output
+        assert fake_syncthing.bodies == []
+
+    # Enable terminal mode for interactive tests
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
+
+    # 4. Single pending device on TTY: decline with 'n' exits 0 with Nothing was changed
+    res_decline = runner.invoke(app, ["devices", "approve"], input="n\n")
+    assert res_decline.exit_code == 0, res_decline.output
+    assert f"Approve cachyos ({joining_id[:7]})? [y/n] (Enter = y)" in res_decline.output
+    assert "Approve: Nothing was changed." in res_decline.output
+    assert fake_syncthing.bodies == []
+
+    # 5. Approve by short-ID prefix (case-insensitive, 4+ chars) on TTY
+    res_short = runner.invoke(app, ["devices", "approve", joining_id[:4].lower()], input="\n")
+    assert res_short.exit_code == 0, res_short.output
+    assert f"Approve cachyos ({joining_id[:7]})? [y/n] (Enter = y)" in res_short.output
+    assert f"Approve: approved cachyos ({joining_id})" in res_short.output
+    assert len(fake_syncthing.bodies) == 3
+
+    # 6. Configured & already shared device queried by name or short ID -> already approved (exit 0)
+    fake_syncthing.bodies.clear()
+    fake_syncthing.responses["/rest/config/devices"][-1]["name"] = "cachyos"
+    res_already = runner.invoke(app, ["devices", "approve", "cachyos"])
+    assert res_already.exit_code == 0, res_already.output
+    assert f"Approve: cachyos ({joining_id[:7]}) is already approved" in res_already.output
+    assert fake_syncthing.bodies == []
+
+    # 7. Configured half-finished writer_shape device queried by name/short-ID -> directs to full ID
+    half_id = _valid_syncthing_id("H")
+    fake_syncthing.responses["/rest/config/devices"].append(
+        {
+            "deviceID": half_id,
+            "name": "half-box",
+            "addresses": ["dynamic"],
+            "introducer": False,
+            "autoAcceptFolders": False,
+            "paused": False,
+        }
+    )
+    res_half = runner.invoke(app, ["devices", "approve", "half-box"])
+    assert res_half.exit_code == 1
+    assert f"Run: mm devices approve {half_id}" in res_half.output
+
+    # 8. 1-3 character argument matches only as an exact device name, not a prefix
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {joining_2: {"name": "omarchy-2"}}
+    res_short_prefix = runner.invoke(app, ["devices", "approve", joining_2[:3]])
+    assert res_short_prefix.exit_code == 1
+    assert "short-ID prefixes need at least 4 characters" in res_short_prefix.output
+
+    # 9. Multiple pending devices: ambiguity refusal on name/prefix arg, and interactive chooser
+    # Construct a second device ID sharing the first 4 chars with joining_2
+    raw56 = joining_2.replace("-", "")
+    alt_chunk0 = raw56[:4] + ("B" if raw56[4] != "B" else "C") + raw56[5:13]
+    alt_group0 = alt_chunk0 + syncthing._luhn32(alt_chunk0)
+    alt56 = alt_group0 + raw56[14:]
+    joining_2b = "-".join(alt56[i : i + 7] for i in range(0, 56, 7))
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_2: {"name": "twin-box"},
+        joining_2b: {"name": "twin-box"},
+    }
+    res_ambig = runner.invoke(app, ["devices", "approve", "twin-box"])
+    assert res_ambig.exit_code == 1
+    assert "matches 2 pending devices" in res_ambig.output
+    assert "Run: mm devices approve <longer short-ID prefix>" in res_ambig.output
+
+    # Chooser: Enter cancels (exit 0); invalid choice re-asks once then approves 7-char prefix
+    res_choose_cancel = runner.invoke(app, ["devices", "approve"], input="\n")
+    assert res_choose_cancel.exit_code == 0, res_choose_cancel.output
+    assert "Approve: Nothing was changed." in res_choose_cancel.output
+
+    fake_syncthing.bodies.clear()
+    res_choose_ok = runner.invoke(app, ["devices", "approve"], input=f"twin-box\n{joining_2[:7]}\n")
+    assert res_choose_ok.exit_code == 0, res_choose_ok.output
+    assert "Enter one listed device name or short ID" in res_choose_ok.output
+    assert f"Approve: approved twin-box ({joining_2})" in res_choose_ok.output
+    assert len(fake_syncthing.bodies) == 3
+
+    # 10. Fleet context: vouched knocker explained & filtered, unpublished fleet labeled,
+    # retired knocker flagged (retired) and refused by name/short-ID
+    storage_dir = tmp_path / "fleet-store"
+    backend = LocalBackend(str(storage_dir))
+    passphrase = "approve-context-pass"
+    init_fetch = crypto.bootstrap_crypto_init(backend, passphrase, 1024)
+    assert init_fetch.root_salt is not None
+    crypto.set_crypto_session(init_fetch.root_salt, 1024)
+    register_device(backend, "dev-a", "mac-a")
+    register_device(backend, "dev-vouched", "mac-vouched")
+    register_device(backend, "dev-unpub", "unpub-laptop")
+    devices.publish_record(backend, "dev-a", my_id, passphrase, 1024)
+    devices.publish_record(backend, "dev-vouched", vouched_id, passphrase, 1024)
+    devices.write_retirement_record(backend, "dev-ret", "old-laptop", retired_id, passphrase, 1024)
+    config.save_config(
+        {
+            "device": {"id": "dev-a", "name": "mac-a"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {"sources": [], "max_file_size": 1024 * 1024},
+            "crypto": {
+                "argon2_memory_kb": 1024,
+                "root_salt_fp": crypto.root_salt_fingerprint(init_fetch.root_salt),
+            },
+        }
+    )
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", passphrase)
+
+    unpub_knocker = _valid_syncthing_id("J")
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        vouched_id: {"name": "mac-vouched"},
+        unpub_knocker: {"name": "unpub-laptop"},
+        retired_id: {"name": "old-laptop"},
+    }
+    res_ctx = runner.invoke(app, ["devices", "approve"], input="\n")
+    assert res_ctx.exit_code == 0, res_ctx.output
+    flat_ctx = " ".join(res_ctx.output.split())
+    assert (
+        f"mac-vouched ({vouched_id[:7]}) is asking to join and a fleet record vouches for it; "
+        "the next push or pull pairs it. Run: mm pull"
+    ) in flat_ctx
+    assert (
+        f"unpub-laptop ({unpub_knocker[:7]}) (fleet machine without a published Syncthing "
+        "record; on it run 'mm update', then 'mm push')"
+    ) in flat_ctx
+    assert f"old-laptop ({retired_id[:7]}) (retired)" in flat_ctx
+
+    # Approving retired device by name or short ID refuses and points to full ID
+    res_ret_refuse = runner.invoke(app, ["devices", "approve", "old-laptop"])
+    assert res_ret_refuse.exit_code == 1
+    assert "is a retired fleet device" in res_ret_refuse.output
+    assert f"Run: mm devices approve {retired_id}" in res_ret_refuse.output
+
+    # Approving retired device by full ID still works
+    fake_syncthing.bodies.clear()
+    res_ret_full = runner.invoke(app, ["devices", "approve", retired_id])
+    assert res_ret_full.exit_code == 0, res_ret_full.output
+    assert f"Approve: approved {retired_id}" in res_ret_full.output
+    assert len(fake_syncthing.bodies) == 3

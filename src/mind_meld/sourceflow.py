@@ -369,12 +369,7 @@ def reconfigure_sources() -> None:
             iname = item["name"]
             detected = core._source_path_is_detected(item)
             default_active = iname in default_names
-            if iname in ("grok", "muse"):
-                # Grok and Muse never default on: their trees are host-created
-                # or opt-in only, so even a detected root is not consent for
-                # sync or usage reads.
-                default_active = False
-            elif iname == "agy":
+            if iname in _config_module.OPT_IN_SOURCE_NAMES:
                 # Interactive enrollment follows init's detected-host default;
                 # background resolution still requires explicit consent.
                 default_active = detected

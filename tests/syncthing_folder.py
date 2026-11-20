@@ -472,6 +472,35 @@ class FakeSyncthing:
                 if self.on_write is not None:
                     self.on_write(method, path, parsed_body)
                 return 200
+            if method == "DELETE" and path.startswith("/rest/config/devices/"):
+                target_id = urllib.parse.unquote(path[len("/rest/config/devices/") :])
+                devices = list(self.responses.get("/rest/config/devices") or [])
+                kept_devices = [
+                    item
+                    for item in devices
+                    if not (isinstance(item, dict) and item.get("deviceID") == target_id)
+                ]
+                self.responses["/rest/config/devices"] = kept_devices
+                folders = list(self.responses.get("/rest/config/folders") or [])
+                updated_folders: list[Any] = []
+                for item in folders:
+                    if not isinstance(item, dict):
+                        updated_folders.append(item)
+                        continue
+                    raw_devs = item.get("devices")
+                    if not isinstance(raw_devs, list):
+                        updated_folders.append(item)
+                        continue
+                    pruned_devs = [
+                        dev
+                        for dev in raw_devs
+                        if (dev.get("deviceID") if isinstance(dev, dict) else dev) != target_id
+                    ]
+                    updated_folders.append({**item, "devices": pruned_devs})
+                self.responses["/rest/config/folders"] = updated_folders
+                if self.on_write is not None:
+                    self.on_write(method, path, parsed_body)
+                return 200
             return 404
 
     def write_config(

@@ -4339,6 +4339,7 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
     monkeypatch.setattr(config_mod, "CONFIG_PATH", cfg_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     config_mod.save_syncthing_record(fake_syncthing.my_id)
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = fleet.config["device"]["name"]
 
     # 1. Fallback branch (not mesh_res.snapshot_taken): Peer B is registered with no record
     _seed(fleet, {"note.md": b"peer content\n"})
@@ -4350,13 +4351,13 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
     res_one = CliRunner().invoke(cli.app, ["pull"])
     assert res_one.exit_code == 0, (res_one.stdout, res_one.stderr)
     expected_one = (
-        "mm: notice: Syncthing: 1 device is asking to join; use the ID the new machine printed. "
+        "mm: notice: Syncthing: 1 device is asking to join. "
         "Registered fleet machine Peer B has not published a Syncthing ID yet; "
         "run 'mm update' and 'mm push' on that machine. "
-        "Run: mm devices approve <device-id>"
+        "Run: mm devices approve"
     )
     assert res_one.stderr.splitlines().count(expected_one) == 1
-    assert expected_one.endswith("Run: mm devices approve <device-id>")
+    assert expected_one.endswith("Run: mm devices approve")
     combined_one = res_one.stdout + res_one.stderr
     assert joining_a not in combined_one
     assert "hostile-joiner" not in combined_one
@@ -4388,11 +4389,10 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
     monkeypatch.setattr(core, "stderr_console", orig_core_stderr)
     assert err_buf.getvalue().splitlines() == [
         (
-            "mm: notice: Syncthing: 1 device is asking to join; "
-            "use the ID the new machine printed. "
+            "mm: notice: Syncthing: 1 device is asking to join. "
             "Registered fleet machines Peer B, Peer D have not published a Syncthing ID yet; "
             "run 'mm update' and 'mm push' on those machines. "
-            "Run: mm devices approve <device-id>"
+            "Run: mm devices approve"
         )
     ]
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
@@ -4420,6 +4420,7 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
         ],
         folders=[ok_folder],
     )
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = fleet.config["device"]["name"]
     for snapshot_unavailable in (False, True):
         fake_syncthing.requests.clear()
         with monkeypatch.context() as patch:
@@ -4455,10 +4456,7 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
     res_two = CliRunner().invoke(cli.app, ["pull"])
     assert res_two.exit_code == 0, (res_two.stdout, res_two.stderr)
     assert "Pull: no peer devices." in res_two.stdout.splitlines()
-    expected_two = (
-        "mm: notice: Syncthing: 2 devices are asking to join; use the ID each new machine printed. "
-        "Run: mm devices approve <device-id>"
-    )
+    expected_two = "mm: notice: Syncthing: 2 devices are asking to join. Run: mm devices approve"
     assert res_two.stderr.splitlines().count(expected_two) == 1
     combined_two = res_two.stdout + res_two.stderr
     assert joining_a not in combined_two
@@ -4467,6 +4465,69 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
     assert "linux-b" not in combined_two
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []
+
+    # 4. Knocking device matching an unpublished fleet machine + superseded registration
+    import json
+
+    fleet.backend.put(
+        device_key("old11111"),
+        json.dumps(
+            {
+                "device_id": "old11111",
+                "device_name": "Peer C",
+                "registered": "2026-01-01T00:00:00+00:00",
+                "last_seen": "2026-01-01T12:00:00+00:00",
+                "last_seen_version": "1.7.1",
+            }
+        ).encode("utf-8"),
+    )
+    fleet.backend.put(
+        device_key(peer_c),
+        json.dumps(
+            {
+                "device_id": peer_c,
+                "device_name": "Peer C",
+                "registered": "2026-02-01T00:00:00+00:00",
+                "last_seen": "2026-02-02T00:00:00+00:00",
+                "last_seen_version": "1.7.1",
+            }
+        ).encode("utf-8"),
+    )
+    assert devices.publish_record(fleet.backend, peer_c, joining_a, PASSPHRASE, MEMORY_KB)
+    devices.register_device(fleet.backend, "unpub222", "cachyos")
+    fleet.backend.put(
+        device_key("unpub222"),
+        json.dumps(
+            {
+                "device_id": "unpub222",
+                "device_name": "cachyos",
+                "registered": "2026-02-03T00:00:00+00:00",
+                "last_seen": "2026-02-03T01:00:00+00:00",
+                "last_seen_version": "1.7.1",
+            }
+        ).encode("utf-8"),
+    )
+    joining_c = _valid_id("L")
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_b: {"name": "cachyos"},
+        joining_c: {"name": "stranger-device"},
+    }
+    res_matched = CliRunner().invoke(cli.app, ["pull"])
+    assert res_matched.exit_code == 0, (res_matched.stdout, res_matched.stderr)
+    err_lines = res_matched.stderr.splitlines()
+    assert (
+        "mm: notice: Syncthing: registered fleet machine cachyos is asking to join and has "
+        "not published a Syncthing ID yet; on that machine, run 'mm update', then 'mm push'. "
+        "Run: mm update"
+    ) in err_lines
+    assert (
+        "mm: notice: Syncthing: 1 device is asking to join. Run: mm devices approve"
+    ) in err_lines
+    assert (
+        f"mm: notice: Syncthing: old Peer C registration old11111 superseded by {peer_c}. "
+        "Run: mm devices retire old11111"
+    ) in err_lines
+    assert "stranger-device" not in res_matched.stdout + res_matched.stderr
 
 
 def test_pull_pending_syncthing_join_stays_silent_for_zero_unmanaged_dry_run_autopull_and_join(
@@ -4497,6 +4558,7 @@ def test_pull_pending_syncthing_join_stays_silent_for_zero_unmanaged_dry_run_aut
 
     # 2. Managed machine: --dry-run, autopull, and _attended_pull(..., join=True) stay silent
     config_mod.save_syncthing_record(fake_syncthing.my_id)
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = fleet.config["device"]["name"]
     fake_syncthing.requests.clear()
     res_dry = CliRunner().invoke(cli.app, ["pull", "--dry-run"])
     assert res_dry.exit_code == 0, (res_dry.stdout, res_dry.stderr)
@@ -4506,7 +4568,7 @@ def test_pull_pending_syncthing_join_stays_silent_for_zero_unmanaged_dry_run_aut
     res_auto = CliRunner().invoke(cli.app, ["autopull"])
     assert res_auto.exit_code == 0, (res_auto.stdout, res_auto.stderr)
     assert "mm devices approve" not in res_auto.stdout + res_auto.stderr
-    assert fake_syncthing.requests == []
+    assert fake_syncthing.bodies == []
 
     capsys.readouterr()
     cli._attended_pull(
@@ -4520,7 +4582,8 @@ def test_pull_pending_syncthing_join_stays_silent_for_zero_unmanaged_dry_run_aut
     )
     join_out = capsys.readouterr()
     assert "mm devices approve" not in join_out.out + join_out.err
-    assert fake_syncthing.requests == []
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
 
     # 3. Managed machine with 0 pending devices, erroring endpoint, or unreachable Syncthing
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {}

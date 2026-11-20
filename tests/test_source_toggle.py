@@ -573,10 +573,10 @@ class TestReconfigureSources:
         assert grok_prompts[0][1] is False
 
     @pytest.mark.parametrize("detected_subdir", [None, "skills"])
-    def test_grok_defaults_off_even_when_detected(
+    def test_grok_defaults_follow_detection_on_legacy_config(
         self, cfg, isolated_seen_sources, monkeypatch, tmp_path, detected_subdir
     ):
-        """Reconfigure must not turn a detected ~/.grok tree into source or consent without Y."""
+        """Legacy config without explicit sources defaults grok to detected state."""
         import tomllib
 
         from mind_meld.config import load_config
@@ -611,15 +611,19 @@ class TestReconfigureSources:
         expected_suffix = "(detected)" if detected_subdir else "(not detected)"
         assert grok_prompt == {
             "prompt": f"Sync 'grok' source at ~/.grok? {expected_suffix}",
-            "default": False,
+            "default": detected_subdir is not None,
         }
 
         with open(cfg, "rb") as f:
             on_disk = tomllib.load(f)
-        assert "grok" not in [s["name"] for s in on_disk["sync"]["sources"]]
+        assert ("grok" in [s["name"] for s in on_disk["sync"]["sources"]]) is (
+            detected_subdir is not None
+        )
 
-    def test_bare_muse_root_defaults_off(self, cfg, isolated_seen_sources, monkeypatch, tmp_path):
-        """Reconfigure must not turn a stock Muse data root into source or consent."""
+    def test_bare_muse_root_and_empty_memory_default_off_until_syncable_file_exists(
+        self, cfg, isolated_seen_sources, monkeypatch, tmp_path
+    ):
+        """Empty Muse memory/ defaults off; a real non-excluded file defaults on."""
         import tomllib
 
         from mind_meld.config import load_config
@@ -627,7 +631,10 @@ class TestReconfigureSources:
         home = tmp_path / "home"
         claude = home / ".claude"
         claude.mkdir(parents=True)
-        (home / ".local" / "share" / "muse" / "sessions").mkdir(parents=True)
+        muse_root = home / ".local" / "share" / "muse"
+        (muse_root / "sessions").mkdir(parents=True)
+        (muse_root / "memory" / "personal").mkdir(parents=True)
+        (muse_root / "memory" / "personal" / ".muse-memory.lock").write_text("pid=123\n")
         monkeypatch.setenv("HOME", str(home))
 
         config = load_config(cfg)
@@ -655,6 +662,20 @@ class TestReconfigureSources:
         with open(cfg, "rb") as f:
             on_disk = tomllib.load(f)
         assert "muse" not in [s["name"] for s in on_disk["sync"]["sources"]]
+
+        # Now add a real syncable file under memory/personal -> detected and defaults True
+        (muse_root / "memory" / "personal" / "MEMORY.md").write_text("# Memory\n")
+        save_config(config, cfg)
+        muse_prompt.clear()
+        result2 = runner.invoke(app, ["reconfigure-sources"])
+        assert result2.exit_code == 0, result2.output
+        assert muse_prompt == {
+            "prompt": "Sync 'muse' source at ~/.local/share/muse? (detected)",
+            "default": True,
+        }
+        with open(cfg, "rb") as f:
+            on_disk2 = tomllib.load(f)
+        assert "muse" in [s["name"] for s in on_disk2["sync"]["sources"]]
 
     def test_explicit_empty_sources_defaults_all_off(self, cfg, isolated_seen_sources, monkeypatch):
         """An explicit empty sources list means nothing is currently active —
@@ -946,3 +967,64 @@ def test_source_command_shells_keep_their_parameters(command, expected):
 
     params = typer.main.get_command(app).commands[command].params
     assert [(p.name, p.opts) for p in params] == expected
+
+
+def test_unified_yes_no_helper_and_no_confirm_calls_or_missing_retired_prefixes(
+    monkeypatch, capsys
+):
+    """Track 154A AC4, owner-plan-review, C15, E4: unified yes/no prompts and static bans."""
+    import ast
+    from pathlib import Path
+
+    from mind_meld import initflow
+    from mind_meld.storage import local as local_storage
+
+    # 1. Static check: no typer.confirm, click.confirm, or rich.prompt.Confirm calls in src/
+    src_root = Path(__file__).resolve().parents[1] / "src" / "mind_meld"
+    forbidden_calls: list[str] = []
+    for path in sorted(src_root.rglob("*.py")):
+        rel = str(path.relative_to(src_root))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                if isinstance(fn, ast.Attribute) and fn.attr in ("confirm", "ask"):
+                    if isinstance(fn.value, ast.Name) and fn.value.id in (
+                        "typer",
+                        "click",
+                        "Confirm",
+                    ):
+                        forbidden_calls.append(f"{rel}:{node.lineno}")
+    assert forbidden_calls == []
+
+    # 2. Pin "retired" in initflow._FLEET_DIRS and "retired/" in local._DURABLE_PREFIXES
+    assert "retired" in initflow._FLEET_DIRS
+    assert "retired/" in local_storage._DURABLE_PREFIXES
+
+    # 3. ask_yes_no renders lowercase [y/n] (Enter = y|n), accepts y/yes/n/no, and re-asks
+    prompts_seen: list[str] = []
+    answers = iter(["invalid", "YES", "maybe", "No", "", ""])
+
+    def fake_prompt(text: str, *, default: str = "", show_default: bool = True) -> str:
+        assert show_default is False
+        prompts_seen.append(text)
+        ans = next(answers)
+        return default if ans == "" else ans
+
+    monkeypatch.setattr(typer, "prompt", fake_prompt)
+
+    assert core.ask_yes_no("Continue joining?", default=True) is True
+    out1 = capsys.readouterr().out
+    assert "Answer y or n; Enter means yes here." in out1
+    assert prompts_seen[-1] == "Continue joining? [y/n] (Enter = y)"
+
+    assert core.ask_yes_no("Overwrite?", default=False) is False
+    out2 = capsys.readouterr().out
+    assert "Answer y or n; Enter means no here." in out2
+    assert prompts_seen[-1] == "Overwrite? [y/n] (Enter = n)"
+
+    assert core.ask_yes_no("Apply these updates?", default=True) is True
+    assert prompts_seen[-1] == "Apply these updates? [y/n] (Enter = y)"
+
+    assert core.ask_yes_no("Retire mac-b (11112222)?", default=False) is False
+    assert prompts_seen[-1] == "Retire mac-b (11112222)? [y/n] (Enter = n)"

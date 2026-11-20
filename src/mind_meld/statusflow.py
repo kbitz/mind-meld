@@ -55,7 +55,15 @@ from mind_meld.crypto import (
     fetch_crypto_init,
     root_salt_fingerprint,
 )
-from mind_meld.devices import inventory_devices, read_fleet_records
+from mind_meld.devices import (
+    DeviceInventory,
+    UnpublishedSplit,
+    compose_pending_syncthing_join_items,
+    inventory_devices,
+    published_record_mm_ids,
+    read_fleet_records,
+    split_unpublished,
+)
 from mind_meld.errors import (
     KEYRING_UNAVAILABLE_URL,
     RETIRE_MACHINE_URL,
@@ -561,7 +569,12 @@ def _managed_syncthing_record() -> syncthing.ManagedRecord | None:
     return None
 
 
-def _syncthing_status_lines(st: syncthing.SyncthingState, storage_path: Path) -> list[str]:
+def _syncthing_status_lines(
+    st: syncthing.SyncthingState,
+    storage_path: Path,
+    *,
+    unpublished_split: UnpublishedSplit | None = None,
+) -> list[str]:
     lines: list[str] = []
     if st.state == "not-found":
         return ["  Syncthing: not found on this machine"]
@@ -610,8 +623,16 @@ def _syncthing_status_lines(st: syncthing.SyncthingState, storage_path: Path) ->
         lines.append(
             f"  Syncthing folder settings need attention ({len(setting_problems)}). Run: mm diag"
         )
-    if st.state == "ok" and (join_msg := syncthing.pending_join_message(st.pending_device_count)):
-        lines.append(f"  {join_msg} {outputstyle._fix_line(syncthing.PENDING_JOIN_FIX)}")
+    if st.state == "ok":
+        for msg, fix in compose_pending_syncthing_join_items(
+            pending_count=st.pending_device_count,
+            pending_device_names=st.pending_device_names or None,
+            unpublished_names=(
+                unpublished_split.unpublished_names if unpublished_split is not None else ()
+            ),
+            superseded=(unpublished_split.superseded if unpublished_split is not None else ()),
+        ):
+            lines.append(f"  {msg} {outputstyle._fix_line(fix)}")
     return [safe_str(line) for line in lines]
 
 
@@ -884,6 +905,7 @@ def status(
             stignore_line=initflow.STIGNORE_LINE,
             managed=managed_record,
         )
+        unpublished_split: UnpublishedSplit | None = None
         if (
             syncthing_state.state == "ok"
             and managed_record is not None
@@ -899,15 +921,33 @@ def status(
             except (OSError, StorageError):
                 pass
             else:
+                unvouched_ids = syncthing.unvouched_pending_ids(
+                    syncthing_state.pending_device_ids,
+                    fleet_records.vouched,
+                    own_id=managed_record.device_id,
+                )
+                unvouched_names = (
+                    {
+                        pid: syncthing_state.pending_device_names.get(pid, "")
+                        for pid in unvouched_ids
+                    }
+                    if syncthing_state.pending_device_names
+                    else {}
+                )
                 syncthing_state = replace_dataclass(
                     syncthing_state,
-                    pending_device_count=len(
-                        syncthing.unvouched_pending_ids(
-                            syncthing_state.pending_device_ids,
-                            fleet_records.vouched,
-                            own_id=managed_record.device_id,
-                        )
-                    ),
+                    pending_device_count=len(unvouched_ids),
+                    pending_device_ids=unvouched_ids,
+                    pending_device_names=unvouched_names,
+                )
+                inv = fleet_records.inventory
+                if inv is None:
+                    inv = DeviceInventory(valid=list(devices))
+                pub_ids = published_record_mm_ids(backend, fleet_records)
+                unpublished_split = split_unpublished(
+                    inv,
+                    pub_ids,
+                    own_device_id=device_id,
                 )
         peer_states = _peer_states(
             devices,
@@ -945,7 +985,11 @@ def status(
 
         console.print("\n[bold]Mind Meld Status[/bold]")
         console.print(f"  Device: {safe_str(device_name)} ({safe_str(device_id)})")
-        for st_line in _syncthing_status_lines(syncthing_state, storage_root):
+        for st_line in _syncthing_status_lines(
+            syncthing_state,
+            storage_root,
+            unpublished_split=unpublished_split,
+        ):
             console.print(st_line, soft_wrap=True)
         nested_count = sum(
             len(roots) for name, roots in nested_roots.items() if source is None or name == source

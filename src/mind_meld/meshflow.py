@@ -1,10 +1,11 @@
-"""Encrypted-record Syncthing mesh pass for mm-managed machines (Track 152A).
+"""Encrypted-record Syncthing mesh pass for mm-managed machines (Tracks 152A, 154A).
 
 Imported only by ``cli``; never imports ``cli``, ``devicesflow`` or ``initflow``.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -22,6 +23,31 @@ HOOK_REQUEST_TIMEOUT_S = 0.5
 HOOK_PASS_BUDGET_S = 2.0
 BREADCRUMB_BUDGET_CHARS = 300
 _MAX_PEER_NAME_CHARS = 128
+
+_EXTRA_MESH_DETAIL_PATTERN = (
+    r"|the retirement record of device [A-Za-z0-9._-]{1,64} is from a newer mm\. Run: mm update"
+    r"|the retirement record of device [A-Za-z0-9._-]{1,64} is unreadable\. Run: mm diag"
+    r"|could not list retirement records \([A-Za-z0-9._ -]{1,64}\); "
+    r"the next push or pull retries"
+    r"|Syncthing device removals wait for [^/~]{1,240}"
+    r"|[^/~]{1,128} \([A-Z2-7]{7}\) is retired but still connected; "
+    r"shut it down or stop Syncthing there, or remove it in Syncthing's web UI"
+    r"|[^/~]{1,128} \([A-Z2-7]{7}\) is retired from Mind Meld but also shares another "
+    r"Syncthing folder on this machine; remove it in Syncthing's web UI"
+    r"|[^/~]{1,128} \([A-Z2-7]{7}\) stays until [^/~]{1,128} drops it; "
+    r"its next push or pull does that where mm manages Syncthing on this release; "
+    r"otherwise remove it in Syncthing's web UI there"
+    r"|Syncthing did not remove retired device [^/~]{1,128} \([A-Z2-7]{7}\)[^/~]{0,120}; "
+    r"remove it in Syncthing's web UI"
+    r"|could not rename this device in Syncthing \([A-Za-z0-9._ -]{1,64}\); "
+    r"rename it in Syncthing's web UI"
+    r"|could not rename [^/~]{1,128} \([A-Z2-7]{7}\) in Syncthing \([A-Za-z0-9._ -]{1,64}\); "
+    r"rename it in Syncthing's web UI"
+)
+if _EXTRA_MESH_DETAIL_PATTERN not in attemptlog._MESH_DETAIL_RE.pattern:
+    attemptlog._MESH_DETAIL_RE = re.compile(
+        attemptlog._MESH_DETAIL_RE.pattern + _EXTRA_MESH_DETAIL_PATTERN
+    )
 
 
 _PATH_CHAR_TRANS = str.maketrans({"/": "_", "~": "_"})
@@ -66,6 +92,21 @@ def format_share_summary(
     return counts if len(counts) <= budget else ""
 
 
+def format_outcome_clauses(mesh_result: MeshResult) -> list[str]:
+    """Return shared-style outcome clauses for shares, removals and renames."""
+    clauses: list[str] = []
+    if mesh_result.shared:
+        clauses.append(format_share_summary(mesh_result.shared))
+    for safe_name, st_id in mesh_result.removed:
+        clauses.append(f"Syncthing removed retired device {safe_name} ({st_id[:7]})")
+    for safe_name, st_id, is_own in mesh_result.renamed:
+        if is_own:
+            clauses.append(f"Syncthing named this device {safe_name} ({st_id[:7]})")
+        else:
+            clauses.append(f"Syncthing renamed {safe_name} ({st_id[:7]})")
+    return clauses
+
+
 def compose_hook_breadcrumb(
     existing_degradations: Sequence[str],
     mesh_result: MeshResult,
@@ -76,8 +117,9 @@ def compose_hook_breadcrumb(
     """Compose a hook breadcrumb ``(outcome, detail)`` within ``budget`` characters.
 
     Existing non-mesh sync/capture degradations are preserved intact; mesh
-    degradations come before the mesh share summary within the remaining
-    budget with ``+N more``; any degradation makes the outcome ``degraded``.
+    degradations come before the mesh share, removal and rename summaries
+    within the remaining budget with ``+N more``; any degradation makes the
+    outcome ``degraded``.
     """
     degraded = any(existing_degradations) or bool(mesh_result.degradations)
     parts = [
@@ -92,6 +134,22 @@ def compose_hook_breadcrumb(
         remaining -= len(mesh_detail) + 2
     if share_summary := format_share_summary(mesh_result.shared, budget=remaining):
         parts.append(share_summary)
+        remaining -= len(share_summary) + 2
+    tail_clauses = [
+        *(
+            f"Syncthing removed retired device {safe_name} ({st_id[:7]})"
+            for safe_name, st_id in mesh_result.removed
+        ),
+        *(
+            f"Syncthing named this device {safe_name} ({st_id[:7]})"
+            if is_own
+            else f"Syncthing renamed {safe_name} ({st_id[:7]})"
+            for safe_name, st_id, is_own in mesh_result.renamed
+        ),
+    ]
+    if tail_clauses and remaining > 0:
+        if tail_detail := _join_within_budget(tail_clauses, remaining):
+            parts.append(tail_detail)
     return ("degraded" if degraded else "success", "; ".join(parts))
 
 
@@ -121,12 +179,16 @@ class MeshResult:
     """Outcome of one publish check and Syncthing mesh pass."""
 
     shared: list[tuple[str, str]] = field(default_factory=list)
+    removed: list[tuple[str, str]] = field(default_factory=list)
+    renamed: list[tuple[str, str, bool]] = field(default_factory=list)
     partial: list[tuple[str, str, str]] = field(default_factory=list)
     stops: list[str] = field(default_factory=list)
     unreadable: list[str] = field(default_factory=list)
     degradations: list[str] = field(default_factory=list)
     unvouched_pending: int | None = None
+    unvouched_pending_devices: dict[str, str] = field(default_factory=dict)
     unpublished_names: tuple[str, ...] = ()
+    superseded_registrations: tuple[devices.SupersededRegistration, ...] = ()
     vouched_ids: frozenset[str] | None = None
     ran: bool = False
     snapshot_taken: bool = False
@@ -136,6 +198,10 @@ class MeshResult:
     @property
     def shared_clause(self) -> str:
         return format_share_summary(self.shared)
+
+    @property
+    def outcome_clauses(self) -> list[str]:
+        return format_outcome_clauses(self)
 
     def compose_breadcrumb(
         self,
@@ -294,10 +360,13 @@ def run(
                 log_unexpected(verb, exc)
             detail = f"Syncthing mesh step failed ({cls_name}, see auto{verb}.log)"
             _record_degradation(result, detail, attended=False, notice=False)
-    if attended and result.shared:
-        state = core._SYNC_OUTPUT.get()
-        if state is not None:
-            state["mesh_outcome"] = result.shared_clause
+    if attended:
+        clauses = result.outcome_clauses
+        if clauses:
+            state = core._SYNC_OUTPUT.get()
+            if state is not None:
+                state["mesh_outcome"] = clauses[0]
+                state["mesh_outcomes"] = clauses
     return result
 
 
@@ -374,25 +443,68 @@ def _run_inner(
             notice=True,
         )
 
-    if attended and verb == "pull" and recorded_id:
-        result.vouched_ids = frozenset(records.vouched)
-        inventory = records.inventory
-        if inventory is None:
-            # An empty record directory needs no registry read for pairing.
-            # Read it only to name unpublished machines in the pull notice.
-            try:
-                inventory = devices.inventory_devices(backend)
-            except (OSError, StorageError):
-                pass
-        if inventory is not None:
-            published_mm_ids = set(records.by_mm_id).union(
-                records.unreadable, records.newer_format, records.vanished
-            )
+    try:
+        retirements = devices.read_retirement_records(
+            backend,
+            passphrase,
+            memory_kb,
+        )
+    except (OSError, StorageError) as exc:
+        cause = _safe_detail_token(attemptlog.storage_errno(exc) or os_error_cause(exc))
+        _record_degradation(
+            result,
+            f"could not list retirement records ({cause}); the next push or pull retries",
+            attended=attended,
+            notice=False,
+        )
+        retirements = devices.FleetRetirementRecords()
+
+    for mm_id in retirements.newer_format:
+        safe_id = _safe_detail_token(mm_id)
+        result.unreadable.append(mm_id)
+        _record_degradation(
+            result,
+            f"the retirement record of device {safe_id} is from a newer mm. Run: mm update",
+            attended=attended,
+            notice=True,
+        )
+    for mm_id in retirements.unreadable:
+        safe_id = _safe_detail_token(mm_id)
+        result.unreadable.append(mm_id)
+        _record_degradation(
+            result,
+            f"the retirement record of device {safe_id} is unreadable. Run: mm diag",
+            attended=attended,
+            notice=True,
+        )
+
+    inventory = records.inventory
+    if inventory is None and (
+        bool(retirements.records) or (attended and verb == "pull" and bool(recorded_id))
+    ):
+        try:
+            inventory = devices.inventory_devices(backend)
+        except (OSError, StorageError):
+            inventory = None
+
+    published_mm_ids = set(records.by_mm_id).union(
+        records.unreadable, records.newer_format, records.vanished
+    )
+    split: devices.UnpublishedSplit | None = None
+    if inventory is not None:
+        split = devices.split_unpublished(
+            inventory,
+            published_mm_ids,
+            own_device_id=own_mm_id,
+        )
+        if attended and verb == "pull" and recorded_id:
+            result.vouched_ids = frozenset(records.vouched)
             result.unpublished_names = tuple(
-                _safe_peer_name(entry["device_name"], entry["device_id"])
-                for entry in sorted(inventory.valid, key=lambda entry: entry["device_id"])
-                if entry["device_id"] != own_mm_id and entry["device_id"] not in published_mm_ids
+                _safe_peer_name(name, name) for name in split.unpublished_names
             )
+            result.superseded_registrations = split.superseded
+    elif attended and verb == "pull" and recorded_id:
+        result.vouched_ids = frozenset(records.vouched)
 
     need_classify = False
     publish_stop = None
@@ -424,17 +536,16 @@ def _run_inner(
         for st_id, (mm_id, dev_name) in records.vouched.items()
         if st_id != recorded_id and mm_id != own_mm_id
     }
-    if not other_vouched:
-        return result
 
     result.ran = True
+    pre_snapshot_steps = max(1, len(other_vouched) + len(retirements.records))
     remaining = deadline - time.monotonic()
     if publish_stop or remaining <= 0:
         _stop_pass(
             result,
             publish_stop or "timeout",
             0,
-            len(other_vouched),
+            pre_snapshot_steps,
             attended=attended,
         )
         return result
@@ -465,7 +576,7 @@ def _run_inner(
             return result
         if snap.outcome in ("unreachable", "not-found"):
             diagnostic_cause = "timeout" if snap.cause == "timeout" else "unreachable"
-            _stop_pass(result, diagnostic_cause, 0, len(other_vouched), attended=attended)
+            _stop_pass(result, diagnostic_cause, 0, pre_snapshot_steps, attended=attended)
             return result
         diagnostic_cause = (
             snap.outcome
@@ -483,11 +594,17 @@ def _run_inner(
         return result
 
     result.snapshot_taken = True
-    result.unvouched_pending = len(
-        syncthing.unvouched_pending_ids(snap.pending_ids, other_vouched, own_id=snap.my_id)
+    unvouched_ids = syncthing.unvouched_pending_ids(
+        snap.pending_ids, other_vouched, own_id=snap.my_id
     )
+    result.unvouched_pending = len(unvouched_ids)
+    result.unvouched_pending_devices = {
+        pid: snap.pending_devices.get(pid, "") for pid in unvouched_ids
+    }
 
+    folder_ok = True
     if not snap.folder_present:
+        folder_ok = False
         result.stop_cause = "no-folder"
         result.stops.append("no-folder")
         _record_degradation(
@@ -496,8 +613,8 @@ def _run_inner(
             attended=attended,
             notice=True,
         )
-        return result
-    if snap.folder_path != storage_root or snap.folder_problems:
+    elif snap.folder_path != storage_root or snap.folder_problems:
+        folder_ok = False
         result.stop_cause = "not-mm-folder"
         result.stops.append("not-mm-folder")
         _record_degradation(
@@ -506,42 +623,215 @@ def _run_inner(
             attended=attended,
             notice=True,
         )
-        return result
 
+    # 1. Plan pairing steps (only when fleet folder is valid)
     candidates: list[tuple[str, list[tuple[str, str]]]] = []
-    for dev_id in snap.pending_ids:
-        if dev_id in other_vouched and dev_id != snap.my_id and dev_id not in snap.devices:
-            candidates.append(
-                (
-                    dev_id,
-                    [
-                        ("adding device", "add_device"),
-                        ("marking as introducer", "mark_introducer"),
-                        ("sharing the fleet folder", "share_folder"),
-                    ],
+    if folder_ok:
+        for dev_id in snap.pending_ids:
+            if dev_id in other_vouched and dev_id != snap.my_id and dev_id not in snap.devices:
+                candidates.append(
+                    (
+                        dev_id,
+                        [
+                            ("adding device", "add_device"),
+                            ("marking as introducer", "mark_introducer"),
+                            ("sharing the fleet folder", "share_folder"),
+                        ],
+                    )
                 )
-            )
-    for dev_id in sorted(other_vouched):
-        if dev_id == snap.my_id or dev_id in snap.folder_device_ids:
-            continue
-        cdev = snap.devices.get(dev_id)
-        if cdev is None or not cdev.writer_shape or cdev.paused:
-            continue
-        steps: list[tuple[str, str]] = []
-        if not cdev.introducer:
-            steps.append(("marking as introducer", "mark_introducer"))
-        steps.append(("sharing the fleet folder", "share_folder"))
-        candidates.append((dev_id, steps))
+        for dev_id in sorted(other_vouched):
+            if dev_id == snap.my_id or dev_id in snap.folder_device_ids:
+                continue
+            cdev = snap.devices.get(dev_id)
+            if cdev is None or not cdev.writer_shape or cdev.paused:
+                continue
+            steps: list[tuple[str, str]] = []
+            if not cdev.introducer:
+                steps.append(("marking as introducer", "mark_introducer"))
+            steps.append(("sharing the fleet folder", "share_folder"))
+            candidates.append((dev_id, steps))
 
-    if not candidates:
+    # 2. Plan retirement removal steps (only when fleet folder is valid)
+    executable_removals: list[tuple[str, str]] = []
+    if folder_ok and retirements.records:
+        if inventory is None:
+            try:
+                inventory = devices.inventory_devices(backend)
+                split = devices.split_unpublished(
+                    inventory,
+                    published_mm_ids,
+                    own_device_id=own_mm_id,
+                )
+            except (OSError, StorageError) as exc:
+                cause = _safe_detail_token(attemptlog.storage_errno(exc) or os_error_cause(exc))
+                _record_degradation(
+                    result,
+                    f"Syncthing device removals wait for device registry ({cause}); "
+                    "the next push or pull retries",
+                    attended=attended,
+                    notice=False,
+                )
+                inventory = None
+
+        if inventory is not None:
+            all_registered_ids = (
+                {d["device_id"] for d in inventory.valid}
+                | {
+                    did
+                    for key, _ in inventory.dropped
+                    if (did := devices.parse_device_key(key)) is not None
+                }
+                | set(inventory.vanished)
+            )
+            seen_retired_st_ids: set[str] = set()
+            candidate_removals: list[tuple[devices.RetirementRecord, str]] = []
+            for rec in sorted(retirements.records.values(), key=lambda r: r.mm_device_id):
+                if rec.mm_device_id in all_registered_ids:
+                    continue
+                st_id = rec.syncthing_device_id
+                if (
+                    st_id is None
+                    or st_id == snap.my_id
+                    or st_id == recorded_id
+                    or st_id in records.vouched
+                    or st_id not in snap.devices
+                    or st_id in seen_retired_st_ids
+                ):
+                    continue
+                seen_retired_st_ids.add(st_id)
+                candidate_removals.append((rec, st_id))
+
+            if candidate_removals:
+                hold_removals = False
+                for mm_id in records.newer_format:
+                    hold_removals = True
+                    safe_id = _safe_detail_token(mm_id)
+                    _record_degradation(
+                        result,
+                        f"Syncthing device removals wait for device {safe_id}'s newer-format "
+                        "Syncthing record. Run: mm update",
+                        attended=attended,
+                        notice=True,
+                    )
+                for mm_id in records.unreadable:
+                    hold_removals = True
+                    safe_id = _safe_detail_token(mm_id)
+                    _record_degradation(
+                        result,
+                        f"Syncthing device removals wait for device {safe_id}'s unreadable "
+                        "Syncthing record. Run: mm diag",
+                        attended=attended,
+                        notice=True,
+                    )
+                for key, _reason in inventory.dropped:
+                    hold_removals = True
+                    dropped_id = _safe_detail_token(devices.parse_device_key(key) or key)
+                    _record_degradation(
+                        result,
+                        f"Syncthing device removals wait for unreadable device entry "
+                        f"{dropped_id}. Run: mm diag",
+                        attended=attended,
+                        notice=True,
+                    )
+                for mm_id in sorted(set(inventory.vanished) | set(records.vanished)):
+                    hold_removals = True
+                    van_id = _safe_detail_token(mm_id)
+                    _record_degradation(
+                        result,
+                        f"Syncthing device removals wait for device {van_id} to finish syncing; "
+                        "the next push or pull retries",
+                        attended=attended,
+                        notice=True,
+                    )
+                if split is not None:
+                    superseded_ids = {s.old_id for s in split.superseded}
+                    for sup in split.superseded:
+                        hold_removals = True
+                        s_name = _safe_peer_name(sup.name, sup.old_id)
+                        s_old = _safe_detail_token(sup.old_id)
+                        _record_degradation(
+                            result,
+                            f"Syncthing device removals wait for superseded registration "
+                            f"{s_name} ({s_old}). Run: mm devices retire {s_old}",
+                            attended=attended,
+                            notice=True,
+                        )
+                    for entry in sorted(inventory.valid, key=lambda item: item["device_id"]):
+                        did = entry["device_id"]
+                        if did == own_mm_id or did in published_mm_ids or did in superseded_ids:
+                            continue
+                        hold_removals = True
+                        u_name = _safe_peer_name(entry.get("device_name"), did)
+                        u_id = _safe_detail_token(did)
+                        _record_degradation(
+                            result,
+                            f"Syncthing device removals wait for {u_name} ({u_id}) to publish "
+                            f"its Syncthing ID; run 'mm update' and 'mm push' on {u_name}",
+                            attended=attended,
+                            notice=True,
+                        )
+
+                if not hold_removals:
+                    for rec, st_id in candidate_removals:
+                        cdev = snap.devices.get(st_id)
+                        ret_name = _safe_peer_name(rec.device_name, rec.mm_device_id)
+                        if (
+                            cdev is not None
+                            and cdev.introduced_by
+                            and cdev.introduced_by in snap.devices
+                            and cdev.introduced_by in other_vouched
+                        ):
+                            intro_mm_id, intro_raw_name = other_vouched[cdev.introduced_by]
+                            intro_name = _safe_peer_name(intro_raw_name, intro_mm_id)
+                            _record_degradation(
+                                result,
+                                f"{ret_name} ({st_id[:7]}) stays until {intro_name} drops it; "
+                                "its next push or pull does that where mm manages Syncthing on "
+                                "this release; otherwise remove it in Syncthing's web UI there",
+                                attended=attended,
+                                notice=True,
+                            )
+                            continue
+                        executable_removals.append((ret_name, st_id))
+
+    # 3. Plan own-device rename
+    raw_own_cfg_name = dev_cfg.get("name") if isinstance(dev_cfg, dict) else None
+    own_target_name = str(raw_own_cfg_name or "").strip()
+    need_own_rename = bool(own_target_name) and snap.own_name != own_target_name
+
+    # 4. Plan fleet peer renames
+    peer_renames: list[tuple[str, str, str]] = []
+    for st_id in sorted(other_vouched):
+        cdev = snap.devices.get(st_id)
+        if cdev is None:
+            continue
+        mm_id, raw_reg_name = other_vouched[st_id]
+        target_name = safety.safe_terminal_str(str(raw_reg_name or "")).strip()[
+            :_MAX_PEER_NAME_CHARS
+        ]
+        if not target_name or cdev.name == target_name:
+            continue
+        safe_name = _safe_peer_name(target_name, mm_id)
+        peer_renames.append((st_id, target_name, safe_name))
+
+    total_steps = (
+        sum(len(steps) for _, steps in candidates)
+        + len(executable_removals)
+        + (1 if need_own_rename else 0)
+        + len(peer_renames)
+    )
+    if total_steps == 0:
         return result
 
-    total_steps = sum(len(steps) for _, steps in candidates)
     completed_steps = 0
 
+    # Execute 1: Pairing
     for dev_id, steps in candidates:
         mm_id, raw_name = other_vouched[dev_id]
         safe_name = _safe_peer_name(raw_name, mm_id)
+        peer_target_name = safety.safe_terminal_str(str(raw_name or "")).strip()[
+            :_MAX_PEER_NAME_CHARS
+        ]
         peer_label = f"{safe_name} ({dev_id[:7]})"
         device_started = False
         for step_label, op_name in steps:
@@ -566,7 +856,7 @@ def _run_inner(
                 deadline=deadline,
             )
             if op_name == "add_device":
-                w_res = step_writer.add_device(dev_id, name="")
+                w_res = step_writer.add_device(dev_id, name=peer_target_name)
             elif op_name == "mark_introducer":
                 w_res = step_writer.mark_introducer(dev_id, require_writer_shape=True)
             else:
@@ -581,7 +871,6 @@ def _run_inner(
                     result.shared.append((safe_name, dev_id))
                 continue
             if w_res.outcome == "refused" and w_res.cause == "device-changed":
-                # The owner changed or paused this device after the snapshot.
                 break
 
             if w_res.write_attempted or device_started:
@@ -626,5 +915,194 @@ def _run_inner(
                 return result
 
             return result
+
+    # Execute 2: Retirement removals
+    for ret_name, st_id in executable_removals:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _stop_pass(result, "timeout", completed_steps, total_steps, attended=attended)
+            return result
+        step_writer = syncthing.SyncthingWriter(
+            managed,
+            timeout=min(req_timeout, remaining),
+            budget=remaining,
+            deadline=deadline,
+        )
+        rem_res = step_writer.remove_device(
+            st_id, fleet_folder_id=_config_module.SYNCTHING_FOLDER_ID
+        )
+        if rem_res.outcome == "ok":
+            completed_steps += 1
+            result.removed.append((ret_name, st_id))
+            continue
+        if rem_res.outcome == "unchanged":
+            completed_steps += 1
+            continue
+        if rem_res.outcome == "refused" and rem_res.cause == "device-connected":
+            _record_degradation(
+                result,
+                f"{ret_name} ({st_id[:7]}) is retired but still connected; shut it down or "
+                "stop Syncthing there, or remove it in Syncthing's web UI",
+                attended=attended,
+                notice=True,
+            )
+            continue
+        if rem_res.outcome == "refused" and rem_res.cause == "shared-in-other-folder":
+            _record_degradation(
+                result,
+                f"{ret_name} ({st_id[:7]}) is retired from Mind Meld but also shares another "
+                "Syncthing folder on this machine; remove it in Syncthing's web UI",
+                attended=attended,
+                notice=True,
+            )
+            continue
+        if rem_res.outcome in ("unreachable", "not-found"):
+            diagnostic_cause = "timeout" if rem_res.cause == "timeout" else "unreachable"
+            _stop_pass(
+                result,
+                diagnostic_cause,
+                completed_steps,
+                total_steps,
+                attended=attended,
+                write_uncertain=rem_res.write_attempted,
+            )
+            return result
+        if rem_res.outcome in ("unauthorized", "config-unreadable", "address-unsupported"):
+            result.stop_cause = rem_res.outcome
+            result.stops.append(rem_res.outcome)
+            _record_degradation(
+                result,
+                f"Syncthing mesh step stopped ({rem_res.outcome}). Run: mm diag",
+                attended=attended,
+                notice=True,
+            )
+            return result
+        cause_tok = _safe_detail_token(rem_res.cause or rem_res.outcome)
+        _record_degradation(
+            result,
+            f"Syncthing did not remove retired device {ret_name} ({st_id[:7]}) ({cause_tok}); "
+            "remove it in Syncthing's web UI",
+            attended=attended,
+            notice=True,
+        )
+
+    if result.removed:
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            check_writer = syncthing.SyncthingWriter(
+                managed,
+                timeout=min(req_timeout, remaining),
+                budget=remaining,
+                deadline=deadline,
+            )
+            after_snap = check_writer.mesh_snapshot(_config_module.SYNCTHING_FOLDER_ID)
+            if after_snap.outcome == "ok":
+                for ret_name, st_id in list(result.removed):
+                    if st_id in after_snap.folder_device_ids:
+                        _record_degradation(
+                            result,
+                            f"Syncthing did not remove retired device {ret_name} ({st_id[:7]}) "
+                            "from the fleet folder; remove it in Syncthing's web UI",
+                            attended=attended,
+                            notice=True,
+                        )
+
+    # Execute 3: Own-device rename
+    if need_own_rename and snap.my_id is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _stop_pass(result, "timeout", completed_steps, total_steps, attended=attended)
+            return result
+        step_writer = syncthing.SyncthingWriter(
+            managed,
+            timeout=min(req_timeout, remaining),
+            budget=remaining,
+            deadline=deadline,
+        )
+        own_res = step_writer.set_own_device_name(own_target_name)
+        if own_res.outcome == "ok":
+            completed_steps += 1
+            result.renamed.append((_safe_peer_name(own_target_name, own_mm_id), snap.my_id, True))
+        elif own_res.outcome == "unchanged":
+            completed_steps += 1
+        elif own_res.outcome in ("unreachable", "not-found"):
+            diagnostic_cause = "timeout" if own_res.cause == "timeout" else "unreachable"
+            _stop_pass(
+                result,
+                diagnostic_cause,
+                completed_steps,
+                total_steps,
+                attended=attended,
+                write_uncertain=own_res.write_attempted,
+            )
+            return result
+        elif own_res.outcome in ("unauthorized", "config-unreadable", "address-unsupported"):
+            result.stop_cause = own_res.outcome
+            result.stops.append(own_res.outcome)
+            _record_degradation(
+                result,
+                f"Syncthing mesh step stopped ({own_res.outcome}). Run: mm diag",
+                attended=attended,
+                notice=True,
+            )
+            return result
+        else:
+            cause_tok = _safe_detail_token(own_res.cause or own_res.outcome)
+            _record_degradation(
+                result,
+                f"could not rename this device in Syncthing ({cause_tok}); "
+                "rename it in Syncthing's web UI",
+                attended=attended,
+                notice=True,
+            )
+
+    # Execute 4: Fleet peer renames
+    for st_id, target_name, safe_name in peer_renames:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _stop_pass(result, "timeout", completed_steps, total_steps, attended=attended)
+            return result
+        step_writer = syncthing.SyncthingWriter(
+            managed,
+            timeout=min(req_timeout, remaining),
+            budget=remaining,
+            deadline=deadline,
+        )
+        ren_res = step_writer.set_device_name(st_id, target_name)
+        if ren_res.outcome == "ok":
+            completed_steps += 1
+            result.renamed.append((safe_name, st_id, False))
+        elif ren_res.outcome == "unchanged":
+            completed_steps += 1
+        elif ren_res.outcome in ("unreachable", "not-found"):
+            diagnostic_cause = "timeout" if ren_res.cause == "timeout" else "unreachable"
+            _stop_pass(
+                result,
+                diagnostic_cause,
+                completed_steps,
+                total_steps,
+                attended=attended,
+                write_uncertain=ren_res.write_attempted,
+            )
+            return result
+        elif ren_res.outcome in ("unauthorized", "config-unreadable", "address-unsupported"):
+            result.stop_cause = ren_res.outcome
+            result.stops.append(ren_res.outcome)
+            _record_degradation(
+                result,
+                f"Syncthing mesh step stopped ({ren_res.outcome}). Run: mm diag",
+                attended=attended,
+                notice=True,
+            )
+            return result
+        else:
+            cause_tok = _safe_detail_token(ren_res.cause or ren_res.outcome)
+            _record_degradation(
+                result,
+                f"could not rename {safe_name} ({st_id[:7]}) in Syncthing ({cause_tok}); "
+                "rename it in Syncthing's web UI",
+                attended=attended,
+                notice=True,
+            )
 
     return result

@@ -266,11 +266,13 @@ def test_push_publishes_missing_and_stale_skips_equal_and_autopush_no_change_pub
     # 3. Equal record on next push is not rewritten (no churn)
     cipher_before = backend.get(rec_key)
     fake_syncthing.requests.clear()
+    fake_syncthing.bodies.clear()
     res_eq = runner.invoke(app, ["push"])
     assert res_eq.exit_code == 0, res_eq.output
     assert backend.get(rec_key) == cipher_before
-    # With no other vouched device and an equal record, zero Syncthing requests are sent
-    assert fake_syncthing.requests == []
+    # Managed pass runs GET snapshot even without other vouched peers, sending zero writes
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
 
     # 4. Stale record is rewritten on next push
     stale_id = _valid_syncthing_id("Z")
@@ -752,8 +754,7 @@ def test_attended_pull_pending_notice_counts_only_unvouched_even_after_partial_p
     res = runner.invoke(app, ["pull"])
     assert res.exit_code == 0, res.output
     assert (
-        "mm: notice: Syncthing: 1 device is asking to join; use the ID the new machine printed. "
-        "Run: mm devices approve <device-id>"
+        "mm: notice: Syncthing: 1 device is asking to join. Run: mm devices approve"
     ) in res.output
 
 
@@ -1039,3 +1040,173 @@ def test_mesh_pairs_vouched_peer_with_one_registry_read(
     assert result.stop_cause is None
     assert result.shared == [("mac-b", peer)]
     assert reads == 1
+
+
+def test_mesh_pass_retirement_removals_holds_introducer_and_device_renames(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    """Track 154A AC9, AC10, C7, C8, C9, C24, C27, C30, E2, E3, E7, E8, E13, E16."""
+    from mind_meld.storage.keys import retired_record_key
+
+    storage_dir, backend, my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    ret_st_id = _valid_syncthing_id("R")
+    peer_b_st_id = _valid_syncthing_id("B")
+
+    # Configure ret_st_id in local Syncthing (disconnected, sharing mind-meld)
+    # and set own Syncthing name to stale "old-mac-a" while config.toml has "mac-a"
+    ok_folder = {
+        **fake_syncthing.stock_folder(storage_dir, shared_with=[ret_st_id, peer_b_st_id]),
+        "id": "mind-meld",
+    }
+    fake_syncthing.set_config(
+        devices=[
+            {
+                "deviceID": ret_st_id,
+                "name": "mac-retired",
+                "addresses": ["dynamic"],
+                "introducer": False,
+                "autoAcceptFolders": False,
+                "paused": False,
+            },
+            {
+                "deviceID": peer_b_st_id,
+                "name": "",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            },
+        ],
+        folders=[ok_folder],
+    )
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = "old-mac-a"
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {
+            ret_st_id: {"connected": False},
+            peer_b_st_id: {"connected": True},
+        }
+    }
+
+    # Write retirement record for dev-ret -> ret_st_id
+    devices.write_retirement_record(
+        backend, "dev-ret", "mac-retired", ret_st_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+
+    # 1. Removal hold when an unpublished live peer exists (dev-unpub has no syncthing record)
+    register_device(backend, "dev-unpub", "cachyos")
+    register_device(backend, "dev-b", "mac-b-renamed")
+    devices.publish_record(backend, "dev-b", peer_b_st_id, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.bodies.clear()
+
+    res_hold = runner.invoke(app, ["pull"])
+    assert res_hold.exit_code == 0, res_hold.output
+    assert (
+        "mm: notice: Syncthing device removals wait for cachyos (dev-unpub) to publish "
+        "its Syncthing ID; run 'mm update' and 'mm push' on cachyos"
+    ) in res_hold.output
+    # Renames still run even while removals hold!
+    assert "Pull: Syncthing named this device mac-a" in res_hold.output
+    assert "Pull: Syncthing renamed mac-b-renamed" in res_hold.output
+    assert not any(m == "DELETE" for m, _, _ in fake_syncthing.bodies)
+
+    # 2. Removal hold when a superseded unretired registration exists
+    from mind_meld import core
+
+    backend.put(
+        device_key("dev-unpub"),
+        json.dumps(
+            {
+                "device_id": "dev-unpub",
+                "device_name": "mac-b-renamed",
+                "registered": "2026-01-01T00:00:00+00:00",
+                "last_seen": "2026-01-02T00:00:00+00:00",
+                "last_seen_version": core.__version__,
+            }
+        ).encode("utf-8"),
+    )
+    backend.put(
+        device_key("dev-b"),
+        json.dumps(
+            {
+                "device_id": "dev-b",
+                "device_name": "mac-b-renamed",
+                "registered": "2026-02-01T00:00:00+00:00",
+                "last_seen": "2026-02-02T00:00:00+00:00",
+                "last_seen_version": core.__version__,
+            }
+        ).encode("utf-8"),
+    )
+    fake_syncthing.bodies.clear()
+    res_sup_hold = runner.invoke(app, ["pull"])
+    assert res_sup_hold.exit_code == 0, res_sup_hold.output
+    assert (
+        "mm: notice: Syncthing device removals wait for superseded registration "
+        "mac-b-renamed (dev-unpub). Run: mm devices retire dev-unpub"
+    ) in res_sup_hold.output
+    assert not any(m == "DELETE" for m, _, _ in fake_syncthing.bodies)
+    # Also zero rename writes on second run since names now match
+    assert fake_syncthing.bodies == []
+
+    # Remove the superseded registration so holds clear
+    backend.delete(device_key("dev-unpub"))
+
+    # 3. Introducer rule (E8): ret_st_id has introducedBy = peer_b_st_id (active vouched peer)
+    fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = peer_b_st_id
+    res_intro = runner.invoke(app, ["pull"])
+    assert res_intro.exit_code == 0, res_intro.output
+    assert (
+        f"mm: notice: mac-retired ({ret_st_id[:7]}) stays until mac-b-renamed drops it"
+        in res_intro.output
+    )
+    assert fake_syncthing.bodies == []
+    fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = ""
+
+    # 4. Connected device refusal (device-connected)
+    fake_syncthing.responses["/rest/system/connections"]["connections"][ret_st_id] = {
+        "connected": True
+    }
+    res_conn = runner.invoke(app, ["pull"])
+    assert res_conn.exit_code == 0, res_conn.output
+    assert (
+        f"mm: notice: mac-retired ({ret_st_id[:7]}) is retired but still connected; "
+        "shut it down or stop Syncthing there, or remove it in Syncthing's web UI"
+    ) in res_conn.output
+    assert fake_syncthing.bodies == []
+
+    # 5. Multi-folder device refusal (shared-in-other-folder)
+    fake_syncthing.responses["/rest/system/connections"]["connections"][ret_st_id] = {
+        "connected": False
+    }
+    extra_folder = {
+        **fake_syncthing.stock_folder(tmp_path / "other", shared_with=[ret_st_id]),
+        "id": "other-folder",
+    }
+    fake_syncthing.responses["/rest/config/folders"] = [ok_folder, extra_folder]
+    res_multi = runner.invoke(app, ["pull"])
+    assert res_multi.exit_code == 0, res_multi.output
+    assert (
+        f"mm: notice: mac-retired ({ret_st_id[:7]}) is retired from Mind Meld but also "
+        "shares another Syncthing folder on this machine; remove it in Syncthing's web UI"
+    ) in res_multi.output
+    assert fake_syncthing.bodies == []
+
+    # 6. Unreadable retirement record surfaces degradation without blocking valid removal
+    backend.put(retired_record_key("badret11"), b"corrupt-ciphertext")
+    fake_syncthing.responses["/rest/config/folders"] = [ok_folder]
+    res_remove = runner.invoke(app, ["pull"])
+    assert res_remove.exit_code == 0, res_remove.output
+    assert (
+        "mm: notice: the retirement record of device badret11 is unreadable. Run: mm diag"
+        in res_remove.output
+    )
+    assert (
+        f"Pull: Syncthing removed retired device mac-retired ({ret_st_id[:7]})."
+        in res_remove.output
+    )
+    assert ("DELETE", f"/rest/config/devices/{ret_st_id}", None) in fake_syncthing.bodies
+    assert ret_st_id not in {
+        d["deviceID"] for d in fake_syncthing.responses["/rest/config/devices"]
+    }
+    assert ret_st_id not in {
+        d["deviceID"] for d in fake_syncthing.responses["/rest/config/folders"][0]["devices"]
+    }

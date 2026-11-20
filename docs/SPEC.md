@@ -227,19 +227,21 @@ approval on one fleet machine is the only approval a new machine needs.
 2. **Setup.** On a machine whose Syncthing has its default configuration, the
    install starts Syncthing at login and mm configures it. `mm init`, on
    macOS or Linux, first asks whether this machine starts a new fleet or
-   joins an existing one; `mm init --new-fleet` answers "new" without asking.
+   joins an existing one (`[n/j] (Enter = j)`); `mm init --new-fleet` answers "new" without asking.
    Starting a new fleet creates the shared folder with mm's folder options.
    Joining asks for one fleet machine's Syncthing device ID, pairs with it
-   and prints this machine's own device ID and a copyable
-   `mm devices approve <device-id>` line to run on a fleet machine, as
+   and prints this machine's own device ID (with its 7-character short ID) and copyable
+   `mm devices approve <short-id>` and `mm devices approve <device-id>` lines to run on a fleet machine, as
    ordinary progress, not an error. Once approved it accepts the fleet folder
    with mm's options. mm may remove the unshared, empty stock Default Folder
    so mm's folder is not nested inside it.
-3. **Approval.** On a fleet machine where mm manages Syncthing, the owner
-   runs one mm command with the new machine's pasted device ID (for example
-   `mm devices approve <device-id>`). mm accepts only an exact match among
-   Syncthing's pending devices, then adds the device and shares the fleet
-   folder. Besides that exact match, it only finishes an approval mm started
+3. **Approval and retirement.** On a fleet machine where mm manages Syncthing, the owner
+   runs one mm command (`mm devices approve` with no argument, by device name,
+   by short-ID prefix, or by full Syncthing device ID). On a terminal, mm lists
+   pending devices and confirms by name or short ID; with a full 56-character
+   Syncthing device ID, mm accepts an exact match among Syncthing's pending
+   devices with or without a terminal, then adds the device and shares the fleet
+   folder. Besides a pending device, the full-ID form finishes an approval mm started
    on an earlier run: a device that exactly matches the pasted ID, has the
    shape mm's add step writes and does not yet share the fleet folder. On a
    fleet machine where the owner manages Syncthing, the owner approves the
@@ -251,7 +253,11 @@ approval on one fleet machine is the only approval a new machine needs.
    member can vouch for a device. On a machine where mm manages Syncthing,
    the next `mm push` or `mm pull` (the agent hooks included) adds a device
    that is asking to connect when a fleet member's encrypted record names
-   it, and shares the fleet folder with it. mm never accepts a device that
+   it, shares the fleet folder with it, keeps this machine's and each
+   configured vouched peer's Syncthing device name aligned with `config.toml` /
+   `devices/<id>.json`, and removes any disconnected Syncthing device whose
+   Mind Meld device was retired via `mm devices retire <name|id>`
+   (`retired/<id>.enc`). mm never accepts a device that
    no approval and no such record names. The paired machines also mark each
    other as Syncthing introducers. mm promises this mesh only among machines
    where it manages Syncthing; for a machine where the owner manages

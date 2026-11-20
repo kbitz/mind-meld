@@ -1845,11 +1845,8 @@ class TestPromptSources:
 
         user_sources = [s for s in DEFAULT_SOURCES if s["name"] != "mm-events"]
         assert len(probes) == len(user_sources)
-        # Every detected source defaults on except Grok and Muse, which are
-        # opt-in even when detected.
-        assert [default for _prompt, default in prompts] == [
-            s["name"] not in ("grok", "muse") for s in user_sources
-        ]
+        # Every detected source defaults on, Grok and Muse included.
+        assert [default for _prompt, default in prompts] == [True for _ in user_sources]
         assert all("detected" in prompt for prompt, _default in prompts)
 
 

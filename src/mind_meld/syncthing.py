@@ -63,6 +63,7 @@ _WRITE_ROUTES: tuple[tuple[str, str], ...] = (
     ("PATCH", "/rest/config/folders/{id}"),
     ("PATCH", "/rest/config/devices/{id}"),
     ("DELETE", "/rest/config/folders/default"),
+    ("DELETE", "/rest/config/devices/{id}"),
 )
 
 
@@ -90,9 +91,15 @@ class SyncthingState:
     stignore: str | None = None
     pending_device_count: int | None = None
     pending_device_ids: tuple[str, ...] = field(default=(), repr=False)
+    pending_device_names: dict[str, str] = field(default_factory=dict, repr=False)
 
 
-PENDING_JOIN_FIX = "mm devices approve <device-id>"
+PENDING_JOIN_FIX = "mm devices approve"
+
+
+def short_device_id(device_id: str) -> str:
+    """Return the standard 7-character first group of a Syncthing device ID."""
+    return device_id.strip()[:7]
 
 
 def unvouched_pending_ids(
@@ -110,8 +117,8 @@ def pending_join_message(count: int | None) -> str | None:
     if isinstance(count, bool) or not isinstance(count, int) or count < 1:
         return None
     if count == 1:
-        return "Syncthing: 1 device is asking to join; use the ID the new machine printed."
-    return f"Syncthing: {count} devices are asking to join; use the ID each new machine printed."
+        return "Syncthing: 1 device is asking to join."
+    return f"Syncthing: {count} devices are asking to join."
 
 
 def config_dirs() -> list[Path]:
@@ -744,6 +751,7 @@ def _read_state_inner(
     # 6. /rest/cluster/pending/devices
     pending_device_count: int | None = None
     pending_device_ids: tuple[str, ...] = ()
+    pending_device_names: dict[str, str] = {}
     if (
         isinstance(managed, ManagedRecord)
         and is_device_id(managed.device_id)
@@ -758,13 +766,11 @@ def _read_state_inner(
             deadline=deadline,
         )
         if out6 == "ok" and isinstance(pending_data, dict):
-            pending_device_ids = tuple(
-                sorted(
-                    dev_id
-                    for dev_id, info in pending_data.items()
-                    if is_device_id(dev_id) and dev_id != my_id and isinstance(info, dict)
-                )
-            )
+            for dev_id, info in sorted(pending_data.items()):
+                if is_device_id(dev_id) and dev_id != my_id and isinstance(info, dict):
+                    raw_name = info.get("name")
+                    pending_device_names[dev_id] = raw_name if isinstance(raw_name, str) else ""
+            pending_device_ids = tuple(pending_device_names)
             pending_device_count = len(pending_device_ids)
 
     return SyncthingState(
@@ -788,6 +794,7 @@ def _read_state_inner(
         stignore=st_state,
         pending_device_count=pending_device_count,
         pending_device_ids=pending_device_ids,
+        pending_device_names=pending_device_names,
     )
 
 
@@ -1292,7 +1299,7 @@ def _classify_config_inner(
 
 
 def _write_route_ok(method: str, path: str) -> bool:
-    """Return whether ``(method, path)`` is one of the 5 allowlisted write routes."""
+    """Return whether ``(method, path)`` is one of the 6 allowlisted write routes."""
     if not isinstance(method, str) or not isinstance(path, str):
         return False
     if "?" in path or "#" in path:
@@ -1423,13 +1430,14 @@ class ApprovalState:
 
 @dataclass(frozen=True)
 class ConfiguredDevice:
-    """Configured device entry from ``/rest/config/devices`` without peer-controlled names."""
+    """Configured device entry from ``/rest/config/devices``."""
 
     device_id: str
     writer_shape: bool
     introducer: bool
     introduced_by: str
     paused: bool
+    name: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -1439,7 +1447,9 @@ class MeshSnapshot:
     outcome: str
     cause: str | None = None
     my_id: str | None = None
+    own_name: str = field(default="", repr=False)
     pending_ids: tuple[str, ...] = ()
+    pending_devices: dict[str, str] = field(default_factory=dict, repr=False)
     devices: dict[str, ConfiguredDevice] = field(default_factory=dict)
     folder_present: bool = False
     folder_path: Path | None = None
@@ -1992,18 +2002,23 @@ class SyncthingWriter:
         if out != "ok" or not isinstance(pending_data, dict):
             return MeshSnapshot("error", cause or "bad-response")
 
-        pending_ids = tuple(
-            sorted(
-                dev_id
-                for dev_id, info in pending_data.items()
-                if is_device_id(dev_id) and dev_id != my_id and isinstance(info, dict)
-            )
-        )
+        pending_devices: dict[str, str] = {}
+        for dev_id, info in sorted(pending_data.items()):
+            if is_device_id(dev_id) and dev_id != my_id and isinstance(info, dict):
+                raw_pname = info.get("name")
+                pending_devices[dev_id] = raw_pname if isinstance(raw_pname, str) else ""
+        pending_ids = tuple(pending_devices)
 
+        own_name = ""
         configured: dict[str, ConfiguredDevice] = {}
         for entry in devices:
             dev_id = entry.get("deviceID")
-            if not is_device_id(dev_id) or dev_id == my_id:
+            if not is_device_id(dev_id):
+                continue
+            raw_dname = entry.get("name")
+            dev_name = raw_dname if isinstance(raw_dname, str) else ""
+            if dev_id == my_id:
+                own_name = dev_name
                 continue
             introducer = entry.get("introducer") is True
             raw_intro_by = entry.get("introducedBy")
@@ -2021,6 +2036,7 @@ class SyncthingWriter:
                 introducer=introducer,
                 introduced_by=introduced_by,
                 paused=paused,
+                name=dev_name,
             )
 
         target_folder = next((f for f in folders if f.get("id") == folder_id), None)
@@ -2048,7 +2064,9 @@ class SyncthingWriter:
             outcome="ok",
             cause=None,
             my_id=my_id,
+            own_name=own_name,
             pending_ids=pending_ids,
+            pending_devices=pending_devices,
             devices=configured,
             folder_present=folder_present,
             folder_path=folder_path,
@@ -2081,6 +2099,104 @@ class SyncthingWriter:
             "PATCH",
             f"/rest/config/devices/{my_id}",
             {"name": name},
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        return WriteResult(w_out, w_cause, write_attempted=True)
+
+    def set_device_name(self, device_id: str, name: str) -> WriteResult:
+        if not isinstance(self._record, ManagedRecord) or not is_device_id(self._record.device_id):
+            return WriteResult("refused", "not-managed")
+        if not is_device_id(device_id):
+            return WriteResult("refused", "bad-device-id")
+        if not isinstance(name, str) or not name.strip():
+            return WriteResult("refused", "bad-device-name")
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            return err or WriteResult("refused", "not-managed")
+        if device_id == my_id:
+            return WriteResult("refused", "own-device")
+
+        devices, dev_err = self._get_list(
+            endpoint, "/rest/config/devices", timeout=per_req_timeout, deadline=deadline
+        )
+        if dev_err is not None or devices is None:
+            return dev_err or WriteResult("error", "bad-response")
+        target_dev = next((d for d in devices if d.get("deviceID") == device_id), None)
+        if target_dev is None:
+            return WriteResult("refused", "device-not-configured")
+        if target_dev.get("name") == name:
+            return WriteResult("unchanged", None)
+
+        w_out, w_cause = _send_json(
+            endpoint,
+            "PATCH",
+            f"/rest/config/devices/{device_id}",
+            {"name": name},
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        return WriteResult(w_out, w_cause, write_attempted=True)
+
+    def remove_device(self, device_id: str, *, fleet_folder_id: str = "mind-meld") -> WriteResult:
+        endpoint, my_id, per_req_timeout, deadline, err = self._begin()
+        if err is not None or endpoint is None or my_id is None:
+            return err or WriteResult("refused", "not-managed")
+        if not is_device_id(device_id):
+            return WriteResult("refused", "bad-device-id")
+        if device_id == my_id:
+            return WriteResult("refused", "own-device")
+
+        devices, dev_err = self._get_list(
+            endpoint, "/rest/config/devices", timeout=per_req_timeout, deadline=deadline
+        )
+        if dev_err is not None or devices is None:
+            return dev_err or WriteResult("error", "bad-response")
+        target_dev = next((d for d in devices if d.get("deviceID") == device_id), None)
+        if target_dev is None:
+            return WriteResult("unchanged", None)
+
+        out, sys_conns, cause = _get_json(
+            endpoint.norm_addr,
+            "/rest/system/connections",
+            header_val=endpoint.header_val,
+            tls_context=endpoint.tls_context,
+            timeout=per_req_timeout,
+            deadline=deadline,
+        )
+        if out in ("unreachable", "unauthorized", "error"):
+            return WriteResult(out, cause)
+        if out != "ok" or not isinstance(sys_conns, dict):
+            return WriteResult("error", cause or "bad-response")
+        raw_conns = sys_conns.get("connections")
+        if not isinstance(raw_conns, dict):
+            return WriteResult("error", "bad-response")
+        conn_entry = raw_conns.get(device_id)
+        if conn_entry is not None and not isinstance(conn_entry, dict):
+            return WriteResult("error", "bad-response")
+        if isinstance(conn_entry, dict) and bool(conn_entry.get("connected", False)):
+            return WriteResult("refused", "device-connected")
+
+        folders, fld_err = self._get_list(
+            endpoint, "/rest/config/folders", timeout=per_req_timeout, deadline=deadline
+        )
+        if fld_err is not None or folders is None:
+            return fld_err or WriteResult("error", "bad-response")
+        for folder in folders:
+            fid = folder.get("id")
+            if not isinstance(fid, str) or not fid.strip():
+                return WriteResult("error", "bad-response")
+            device_ids = _folder_device_ids(folder)
+            if device_ids is None:
+                return WriteResult("error", "bad-response")
+            if device_id in device_ids and fid.strip() != fleet_folder_id:
+                return WriteResult("refused", "shared-in-other-folder")
+
+        w_out, w_cause = _send_json(
+            endpoint,
+            "DELETE",
+            f"/rest/config/devices/{device_id}",
+            None,
             timeout=per_req_timeout,
             deadline=deadline,
         )

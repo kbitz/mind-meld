@@ -10,6 +10,7 @@ Key shapes:
     data/{device_id}/{sha256}.enc             — content-addressed encrypted blob
     devices/{device_id}.json                  — per-device metadata JSON
     syncthing/{device_id}.enc                 — per-device encrypted Syncthing device ID
+    retired/{device_id}.enc                   — per-device encrypted retirement record
     mm-crypto-init                            — storage-root bootstrap blob
 """
 
@@ -21,6 +22,7 @@ MANIFESTS_PREFIX = "manifests/"
 DATA_PREFIX = "data/"
 DEVICES_PREFIX = "devices/"
 SYNCTHING_PREFIX = "syncthing/"
+RETIRED_PREFIX = "retired/"
 
 # Storage-root bootstrap blob (not device-scoped). Plaintext root_salt +
 # keycheck blob. See crypto.py for the byte layout.
@@ -130,6 +132,27 @@ def parse_syncthing_record_key(key: str) -> str | None:
     if not isinstance(key, str) or not key.startswith(SYNCTHING_PREFIX) or not key.endswith(".enc"):
         return None
     device_id = key[len(SYNCTHING_PREFIX) : -len(".enc")]
+    try:
+        _validate_component(device_id, "device_id")
+    except ValueError:
+        return None
+    if ".sync-conflict-" in device_id or any(ch.isspace() for ch in device_id):
+        return None
+    return device_id
+
+
+def retired_record_key(device_id: str) -> str:
+    """Key for a retired device's encrypted retirement record."""
+    _validate_component(device_id, "device_id")
+    return f"{RETIRED_PREFIX}{device_id}.enc"
+
+
+def parse_retired_record_key(key: str) -> str | None:
+    """Parse ``retired/<id>.enc`` into its device id. None unless it is
+    exactly that shape, so a conflict copy or stray file never reads as a record."""
+    if not isinstance(key, str) or not key.startswith(RETIRED_PREFIX) or not key.endswith(".enc"):
+        return None
+    device_id = key[len(RETIRED_PREFIX) : -len(".enc")]
     try:
         _validate_component(device_id, "device_id")
     except ValueError:

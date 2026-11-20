@@ -103,7 +103,7 @@ STIGNORE_LINE = f"(?d){STIGNORE_PATTERN}"
 
 # Top-level names a folder may hold and still be "empty" for `--new-fleet`.
 _BOOKKEEPING_NAMES = frozenset({".stfolder", ".stignore", ".stversions", ".DS_Store"})
-_FLEET_DIRS = frozenset({"data", "manifests", "devices", "syncthing"})
+_FLEET_DIRS = frozenset({"data", "manifests", "devices", "syncthing", "retired"})
 _IN_FLIGHT_PREFIXES = (".syncthing.", "~syncthing~")
 _HEADER_STEM = "mm-crypto-init"
 # Bounded waits during a managed join: approval wait for the fleet machine to
@@ -355,13 +355,16 @@ def _ask_start_or_join() -> str:
     """Ask whether to start a new fleet or join an existing one."""
     while True:
         raw = typer.prompt(
-            "Start a new fleet or join an existing one? (new/join)",
+            "Start a new fleet or join an existing one? [n/j] (Enter = j)",
             default="join",
+            show_default=False,
         )
         choice = raw.strip().lower()
-        if choice in ("new", "join"):
-            return choice
-        console.print("  Answer 'new' or 'join'.")
+        if choice in ("n", "new"):
+            return "new"
+        if choice in ("", "j", "join"):
+            return "join"
+        console.print("  Answer n (new) or j (join); Enter joins.")
 
 
 def _sources_from_names(names: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -443,9 +446,15 @@ def _managed_join(setup: _SyncthingSetup, full_path: Path, fleet_id: str, device
     _require_syncthing(writer.add_device(fleet_id), "add the fleet device")
     _require_syncthing(writer.mark_introducer(fleet_id), "mark the fleet device as introducer")
     local_id = setup.local_id or setup.record.device_id
+    short_id = syncthing.short_device_id(local_id)
     safe_local_id = safe_str(local_id)
-    console.print(f"  This machine's Syncthing device ID: {safe_local_id}")
-    console.print("  On a machine already in the fleet, approve this one by running:")
+    safe_short_id = safe_str(short_id)
+    console.print(
+        f"  This machine's Syncthing device ID: {safe_local_id} (short ID: {safe_short_id})"
+    )
+    console.print("  On a machine already in the fleet, approve this one in a terminal by running:")
+    console.print(f"    mm devices approve {safe_short_id}", soft_wrap=True)
+    console.print("  (For scripts, agents or an older mm, run:)")
     console.print(f"    mm devices approve {safe_local_id}", soft_wrap=True)
     if _is_inside_stock_default_folder(full_path):
         _require_syncthing(writer.remove_default_folder(), "remove the Default Folder")
@@ -720,7 +729,7 @@ def _init_storage_guard(
         f"Old blobs remain readable under the shared root_salt but the "
         f"old device entry will no longer push or pull. Proceed?"
     )
-    if not typer.confirm(msg, default=False):
+    if not core.ask_yes_no(msg, default=False):
         console.print("Device registration cancelled.")
         raise typer.Exit()
 
@@ -728,12 +737,12 @@ def _init_storage_guard(
 def _prompt_sources() -> list[dict[str, Any]]:
     """Prompt for each known source type; return the enabled entries.
 
-    User-facing sources (claude, gstack) become a Y/n prompt via
-    `_prompt_source_toggle`. Default is Y when the qualifying source tree
-    exists on disk, N otherwise; Grok and Muse always default to N.
-    This nudges users toward only-enabling-what-they-have without making it
-    impossible to enable a source whose directory doesn't exist yet (e.g. new
-    machine, same project about to be cloned).
+    User-facing sources become a yes/no prompt via `_prompt_source_toggle`.
+    Default is yes (`[y/n] (Enter = y)`) when the qualifying source tree
+    exists on disk and no (`[y/n] (Enter = n)`) otherwise, including Grok and
+    Muse. This nudges users toward only-enabling-what-they-have without making
+    it impossible to enable a source whose directory doesn't exist yet (e.g.
+    new machine, same project about to be cloned).
 
     mm-internal sources (mm-events, Group 7+) auto-include without
     prompting — they're mm-owned infrastructure for fleet-wide features
@@ -752,10 +761,7 @@ def _prompt_sources() -> list[dict[str, Any]]:
                 enabled.append(src)
             continue
         exists = core._source_path_is_detected(default)
-        # Grok and Muse are opt-in even when detected: enabling the source also
-        # consents to the usage reader.
-        default_on = exists and default["name"] not in ("grok", "muse")
-        if core._prompt_source_toggle(default, current_state=default_on, detected=exists):
+        if core._prompt_source_toggle(default, current_state=exists, detected=exists):
             src = get_default_source(default["name"])
             if src is not None:
                 enabled.append(src)
@@ -1093,7 +1099,7 @@ def init(new_fleet: bool = False) -> str | None:
     existing_device_id, existing_device_name = _load_prior_device_metadata()
     has_prior_config = _config_module.CONFIG_PATH.exists()
     if has_prior_config:
-        if not typer.confirm(_overwrite_prompt(new_fleet)):
+        if not core.ask_yes_no(_overwrite_prompt(new_fleet), default=False):
             raise typer.Exit()
 
     console.print(f"[bold]Mind Meld v{__version__} — init[/bold]\n")
@@ -1116,11 +1122,11 @@ def init(new_fleet: bool = False) -> str | None:
                 f"sources {sources_s}.",
                 soft_wrap=True,
             )
-            if not typer.confirm("Continue joining?", default=True):
+            if not core.ask_yes_no("Continue joining?", default=True):
                 _forget_join_record(required=True)
                 saved = None
         if saved is None and _ask_start_or_join() == "new":
-            if has_prior_config and not typer.confirm(_overwrite_prompt(True)):
+            if has_prior_config and not core.ask_yes_no(_overwrite_prompt(True), default=False):
                 raise typer.Exit()
             new_fleet = True
 
@@ -1249,7 +1255,9 @@ def init(new_fleet: bool = False) -> str | None:
     # Cheap to defend in depth; runtime lookup_device_by_short_id still
     # handles a stray collision if we exhaust the retry budget.
     existing_devices = [] if new_fleet else list_devices(backend)
-    device_id = generate_unique_short_device_id(existing_devices)
+    device_id = generate_unique_short_device_id(
+        existing_devices, backend=None if new_fleet else backend
+    )
     if new_fleet:
         device_name = typer.prompt("Device name", default=_default_device_name())
 

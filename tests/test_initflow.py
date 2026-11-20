@@ -991,6 +991,8 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
         initflow.APPROVAL_WAIT_SECONDS // initflow.APPROVAL_POLL_SECONDS
     )
     assert my_id in text1
+    assert f"(short ID: {my_id[:7]})" in text1
+    assert f"mm devices approve {my_id[:7]}" in text1
     assert f"mm devices approve {my_id}" in text1
     assert (
         f"Init: waiting for a fleet machine to approve this one ('mm devices approve {my_id}'); "
@@ -1985,8 +1987,8 @@ def test_declining_continue_joining_forgets_answers_and_leaves_syncthing_pairing
     run2, text2 = _run("n\n")
     assert run2.exit_code == 1, run2.output
     assert f"fleet machine {peer_id}" in text2
-    assert "Continue joining?" in text2
-    assert "Start a new fleet or join an existing one? (new/join)" in text2
+    assert "Continue joining? [y/n] (Enter = y)" in text2
+    assert "Start a new fleet or join an existing one? [n/j] (Enter = j)" in text2
     assert not config.join_record_path().exists()
     assert fake_syncthing.bodies == bodies_after_run1
     assert config.load_syncthing_record() == my_id
@@ -2081,7 +2083,7 @@ def test_new_fleet_flag_and_interactive_new_answer(env, tmp_path):
         command="capture",
     )
     assert res_new.exit_code == 0, res_new.output
-    assert "Answer 'new' or 'join'." in text_new
+    assert "Answer n (new) or j (join); Enter joins." in text_new
     assert backend2.exists("mm-crypto-init")
     assert _joined == [None]
 

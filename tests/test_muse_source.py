@@ -124,13 +124,17 @@ def test_missing_memory_dir_is_a_noop(tmp_path):
 
 
 def test_default_source_never_auto_activates(monkeypatch, tmp_path):
-    """Muse creates memory/ itself, so no tree is consent: explicit enable only."""
+    """Background resolution requires explicit consent even when memory/ holds files."""
     from mind_meld import config as config_module
 
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
-    (home / ".local" / "share" / "muse" / "memory" / "personal").mkdir(parents=True)
+    personal = home / ".local" / "share" / "muse" / "memory" / "personal"
+    personal.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    # Empty memory/personal directory is NOT detected
+    assert not muse_memory_dir_exists(home / ".local" / "share" / "muse")
+    (personal / "MEMORY.md").write_text("# index\n")
     assert muse_memory_dir_exists(home / ".local" / "share" / "muse")
 
     # Selection, not availability: both legacy shapes (no sync table, and
@@ -141,6 +145,63 @@ def test_default_source_never_auto_activates(monkeypatch, tmp_path):
 
     explicit = {"sync": {"sources": [get_default_source("muse")]}}
     assert [s["name"] for s in config_module.resolve_sources(explicit).selected] == ["muse"]
+
+
+def test_muse_memory_dir_exists_requires_non_excluded_regular_file(tmp_path, monkeypatch):
+    """Track 154A AC4, C5, X16: empty dirs, excluded files, symlinks and OSError return False."""
+    import os
+
+    root = tmp_path / "muse"
+    mem = root / "memory"
+    mem.mkdir(parents=True)
+
+    # 1. Empty memory/ -> False
+    assert muse_memory_dir_exists(root) is False
+
+    # 2. Only subdirectories and excluded lock files -> False
+    sub = mem / "personal" / "nested"
+    sub.mkdir(parents=True)
+    (mem / "personal" / ".muse-memory.lock").write_text("pid=123\n")
+    (sub / "extra.muse-memory.lock").write_text("pid=456\n")
+    assert muse_memory_dir_exists(root) is False
+
+    # 3. Symlinked file inside memory/ -> False
+    outside_file = tmp_path / "outside.md"
+    outside_file.write_text("outside")
+    (sub / "linked.md").symlink_to(outside_file)
+    assert muse_memory_dir_exists(root) is False
+
+    # 4. Symlinked directory inside memory/ holding a real file -> False (no symlink following)
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "MEMORY.md").write_text("outside")
+    (mem / "linked_dir").symlink_to(outside_dir, target_is_directory=True)
+    assert muse_memory_dir_exists(root) is False
+
+    # 5. Symlinked memory/ root -> False
+    sym_root = tmp_path / "muse_sym"
+    sym_root.mkdir()
+    (sym_root / "memory").symlink_to(outside_dir, target_is_directory=True)
+    assert muse_memory_dir_exists(sym_root) is False
+
+    # 6. Real regular non-excluded file under memory/personal -> True
+    real_file = mem / "personal" / "MEMORY.md"
+    real_file.write_text("# Memory\n")
+    assert muse_memory_dir_exists(root) is True
+    real_file.unlink()
+
+    # 7. Real regular non-excluded file under memory/projects/<workspace>/ -> True
+    proj_file = mem / "projects" / "demo-ws" / "notes.md"
+    proj_file.parent.mkdir(parents=True)
+    proj_file.write_text("# Project notes\n")
+    assert muse_memory_dir_exists(root) is True
+
+    # 8. OSError during scandir -> False
+    def boom_scandir(_path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(os, "scandir", boom_scandir)
+    assert muse_memory_dir_exists(root) is False
 
 
 def test_muse_name_and_type_are_reserved_for_each_other():

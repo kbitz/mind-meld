@@ -9964,6 +9964,7 @@ COMMAND_INTENTS62 = {
         "pull",
         "gc",
         "devices approve",
+        "devices retire",
         "disable-source",
         "enable-source",
         "reconfigure-sources",

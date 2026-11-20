@@ -1350,18 +1350,16 @@ def test_byte_ceilings_for_config_response_and_stignore_and_stdlib_only(fake_syn
 
 
 def test_pending_join_message_handles_all_count_shapes():
-    assert syncthing.PENDING_JOIN_FIX == "mm devices approve <device-id>"
+    assert syncthing.PENDING_JOIN_FIX == "mm devices approve"
+    sample_id = "ABCDEFG-2345672-ABCDEFG-2345672-ABCDEFG-2345672-ABCDEFG-2345672"
+    assert syncthing.short_device_id(sample_id) == "ABCDEFG"
     assert syncthing.pending_join_message(None) is None
     assert syncthing.pending_join_message(0) is None
     assert syncthing.pending_join_message(-1) is None
     assert syncthing.pending_join_message(True) is None  # type: ignore[arg-type]
     assert syncthing.pending_join_message(False) is None  # type: ignore[arg-type]
-    assert syncthing.pending_join_message(1) == (
-        "Syncthing: 1 device is asking to join; use the ID the new machine printed."
-    )
-    assert syncthing.pending_join_message(2) == (
-        "Syncthing: 2 devices are asking to join; use the ID each new machine printed."
-    )
+    assert syncthing.pending_join_message(1) == ("Syncthing: 1 device is asking to join.")
+    assert syncthing.pending_join_message(2) == ("Syncthing: 2 devices are asking to join.")
     assert syncthing.unvouched_pending_ids(
         ("ID-A", "ID-B", "ID-OWN"),
         {"ID-A"},

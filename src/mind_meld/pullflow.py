@@ -72,8 +72,13 @@ from mind_meld.consoles import console, stderr_console
 from mind_meld.crypto import decrypt
 from mind_meld.devices import (
     DeviceInventory,
+    SupersededRegistration,
+    compose_pending_syncthing_join_items,
     inventory_devices,
     lookup_device_by_short_id,
+)
+from mind_meld.devices import (
+    compose_pending_syncthing_join_message as compose_pending_syncthing_join_message,
 )
 from mind_meld.errors import (
     DELETED_FILES_URL,
@@ -4479,34 +4484,12 @@ def _pull_core(
         return _partial_result
 
 
-def compose_pending_syncthing_join_message(
-    base_message: str | None,
-    unpublished_names: Sequence[str] = (),
-) -> str | None:
-    """Append an unpublished-machines remedy clause to ``base_message`` when needed."""
-    if not base_message:
-        return None
-    names = [
-        cleaned
-        for raw in unpublished_names
-        if (cleaned := safety.safe_terminal_str(str(raw)).strip())
-    ]
-    if not names:
-        return base_message
-    verb = "has" if len(names) == 1 else "have"
-    target = "that machine" if len(names) == 1 else "those machines"
-    return (
-        f"{base_message} Registered fleet "
-        f"{'machine' if len(names) == 1 else 'machines'} {', '.join(names)} "
-        f"{verb} not published a Syncthing ID yet; run 'mm update' and 'mm push' on {target}."
-    )
-
-
 def notice_pending_syncthing_join(
     config: dict[str, Any],
     *,
     vouched_ids: Collection[str] | None = None,
     unpublished_names: Sequence[str] = (),
+    superseded: Sequence[SupersededRegistration] = (),
 ) -> None:
     """Emit a pending-join notice after an attended pull on a managed machine."""
     try:
@@ -4527,17 +4510,24 @@ def notice_pending_syncthing_join(
     if st.state != "ok":
         return
     if vouched_ids is not None and st.pending_device_ids:
-        pending_count: int | None = len(
-            syncthing.unvouched_pending_ids(
-                st.pending_device_ids,
-                vouched_ids,
-                own_id=recorded,
-            )
+        unvouched_ids = syncthing.unvouched_pending_ids(
+            st.pending_device_ids,
+            vouched_ids,
+            own_id=recorded,
+        )
+        pending_count: int | None = len(unvouched_ids)
+        pending_names: dict[str, str] | None = (
+            {pid: st.pending_device_names.get(pid, "") for pid in unvouched_ids}
+            if st.pending_device_names
+            else None
         )
     else:
         pending_count = st.pending_device_count
-    if msg := compose_pending_syncthing_join_message(
-        syncthing.pending_join_message(pending_count),
-        unpublished_names,
+        pending_names = st.pending_device_names or None
+    for msg, fix in compose_pending_syncthing_join_items(
+        pending_count=pending_count,
+        pending_device_names=pending_names,
+        unpublished_names=unpublished_names,
+        superseded=superseded,
     ):
-        core._notice(msg, fix=syncthing.PENDING_JOIN_FIX)
+        core._notice(msg, fix=fix)

@@ -11,6 +11,7 @@ key prefix:
     manifests/  → fsync=True (source of truth; loss = silent un-deletion)
     devices/    → fsync=True (peer discovery; pull and recovery inputs)
     mm-crypto-init* → fsync=True (canonical and preserved crypto lineage)
+    retired/    → fsync=True (durable retirement records before registry removal)
     data/       → fsync=False (hash-addressed blobs, self-healing via re-push)
 
 Conflict-copy detection accepts an optional validator predicate that
@@ -70,7 +71,7 @@ _VANISH_BUDGET_S = 2.0
 # data/ blobs are hash-addressed and re-uploadable, so they skip fsync for
 # latency. See docs/invariants/sync.md "Atomic write publication failures"
 # for the durability model.
-_DURABLE_PREFIXES = ("manifests/", "devices/", "mm-crypto-init")
+_DURABLE_PREFIXES = ("manifests/", "devices/", "mm-crypto-init", "retired/")
 
 
 def _needs_fsync(key: str) -> bool:
