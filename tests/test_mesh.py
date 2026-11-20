@@ -1353,7 +1353,7 @@ def test_retirement_rechecks_eligibility_after_initial_snapshot(
 def test_retirement_with_no_vouched_peer_requires_complete_registry(
     fake_syncthing, tmp_path, monkeypatch, inventory
 ):
-    root, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    root, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch, publish_own=False)
     retired_id = _valid_syncthing_id("R")
     fake_syncthing.set_folder(root, peers=[(retired_id, "retired", False)])
     fake_syncthing.responses["/rest/system/connections"] = {
@@ -1405,11 +1405,15 @@ def test_autopush_neither_removes_connected_retired_device_nor_readds_knocker(
     )
     first = runner.invoke(app, ["autopush"])
     assert first.exit_code == 0 and not first.output
+    crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["push"]
+    assert "is retired but still connected" in crumb["detail"]
     assert not any(method == "DELETE" for method, _, _ in fake_syncthing.bodies)
 
     fake_syncthing.set_folder(root, peers=[])
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {retired_id: {"name": "retired"}}
     fake_syncthing.bodies.clear()
+    fake_syncthing.requests.clear()
     second = runner.invoke(app, ["autopush"])
     assert second.exit_code == 0 and not second.output
+    assert ("GET", "/rest/cluster/pending/devices") in fake_syncthing.requests
     assert fake_syncthing.bodies == []

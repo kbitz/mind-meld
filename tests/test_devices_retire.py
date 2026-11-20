@@ -434,7 +434,7 @@ def test_retire_reactivation_resolves_live_name_and_flushes_before_ordered_delet
     import os
     import stat
 
-    real_fsync = os.fsync
+    real_fsync = fsutil._fsync_fd
 
     def observe_fsync(fd):
         kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
@@ -450,7 +450,7 @@ def test_retire_reactivation_resolves_live_name_and_flushes_before_ordered_delet
         return delete(self, key, **kwargs)
 
     monkeypatch.setattr(fsutil, "fsync_dir", observe_flush)
-    monkeypatch.setattr(os, "fsync", observe_fsync)
+    monkeypatch.setattr(fsutil, "_fsync_fd", observe_fsync)
     monkeypatch.setattr(LocalBackend, "delete", observe_delete)
     monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
     result = runner.invoke(app, ["devices", "retire", "mac-b"], input="y\n")

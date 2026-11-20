@@ -146,10 +146,10 @@ class LocalBackend:
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(data)
                     stream.flush()
-                    os.fsync(stream.fileno())
+                    fsutil._fsync_fd(stream.fileno())
                 os.replace(temp, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
                 temp = ""
-                os.fsync(directory_fd)
+                fsutil._fsync_fd(directory_fd)
                 if not os.path.samestat(os.fstat(directory_fd), path.parent.lstat()):
                     raise StorageError("storage: retirement directory changed during publication")
             finally:
