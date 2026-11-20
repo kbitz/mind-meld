@@ -46,6 +46,24 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap card run — 2026-11-20 (join, prompt and fleet-device UX carded as Track 154A)
+
+Verified against `616c583` (v1.12.72), from three Factory Manager briefs of 2026-11-20 relaying the developer's decisions. The developer asked for a Track for the join and prompt UX: "re: UX changes, please make a track for it yes", on all five items, the SPEC O2 step 3 change included. The developer then said "yes" to adding `mm devices retire` to the same Track, and "yes" to adding the push-time Syncthing rename to it. Nothing is in progress and Current Plan was empty, so the run adds one Track (Group 154, no dependencies) and changes no other card. The ARCHIVE_CANDIDATES advisory was already failing before this run and is left as it is.
+
+| Item | Disposition |
+|---|---|
+| Brief item 1: approve without the long ID (name, short ID, no-argument list); the joining `mm init` prints its short ID; SPEC O2.3 amended in the Track's PR | place (Track 154A, task 1); [challenge] a name or prefix match also asks for confirmation after showing the short ID and needs a terminal, because the pending name is peer-controlled |
+| Brief item 2: lowercase `[y/n]` on every prompt | place (Track 154A, task 2); verified: seven `typer.confirm` call sites, which typer renders `[Y/n]` or `[y/N]` |
+| Brief item 3: `n`/`j` for the new-or-join question | place (Track 154A, task 2); verified: `_ask_start_or_join` accepts only `new` and `join` |
+| Brief item 4: Enter = yes when detected, no otherwise, with an inventory | place (Track 154A, task 2, inventory in acceptance 4); [challenge] the two data-at-risk confirmations keep no. The card first kept detected Grok and Muse sources at no as well; the developer overruled that on PR #360 (verbatim, 2026-11-20): "c seems dumb - wtf? when detected, we should enable source -- why are only those 2 treated differently". They now default to yes when detected, with Muse counted as detected only when `memory/` holds a note beyond `.muse-memory.lock`, and the Track's SPEC edit amends the host table's Grok Build and Muse rows |
+| Brief item 5: join notices name knocking fleet machines and superseded registrations (observed 2026-11-20) | place (Track 154A, task 3); verified: `pending_join_message` always says "use the ID each new machine printed", `mm status` lacks the unpublished clause, and `meshflow.run` lists superseded registrations as unpublished |
+| Brief item 6: `mm devices retire` with an encrypted retirement record, and removal from Syncthing on mm-managed machines | place (Track 154A, task 4); verified: no such command, no device DELETE route, and SPEC's non-goals refuse removing dead machines, so the Track amends the spec; [challenge] no removal when a registered machine's record vouches for the same Syncthing ID |
+| Brief item 7: rename an mm-managed machine's Syncthing device to its mm name at push | place (Track 154A, task 4); [challenge] Syncthing fills only an empty stored peer name, so the mesh pass also renames vouched fleet entries; reverses Track 153A's setup-only name rule |
+| Future: "SPEC's manual-steps line should name the mesh step as re-adding a removed machine" (trigger met: Track 152A merged) | place (Track 154A, task 4's SPEC edit of that same line) |
+| Future: 27 recorded test gaps whose triggers Track 154A's `_touches:` meet | stay deferred: placing any would push the Track past the session-weight cap of 6 |
+
+1 Future entry placed; Future goes from 99 to 98 entries. No inbox item was waiting. 0 killed, 0 discharged. No bump under SPEC documentation-only policy.
+
 ### Roadmap regeneration — 2026-11-19 (Tracks 152A and 153A recorded; empty plan)
 
 Verified against `13ae374` (v1.12.72), from the Factory Manager's brief carrying the developer's "If we have no more tracks, then yes regen is fine" (2026-11-20 00:40Z). Tracks 152A and 153A merged in PRs #357 and #358 and are recorded as independent receipts in docs/roadmap-shipped.md (tombstones 152 and 153); Tracks 149A, 150A, 151A and 151B, also named in the brief, already had receipts from the runs that followed them, so this run records only the two. Admission follows docs/SPEC.md (MVP-1 on Syncthing), the AGENTS.md planning rules and the standing constraint that a reproducible bug the owner encountered goes to Current Plan. Nothing passes the gates, so In Progress and Current Plan are empty: no inbox item or Future entry records a bug seen on the owner's machines with a cause found in the code. One Future trigger is met: "SPEC's manual-steps line should name the mesh step as re-adding a removed machine" (Track 152A merged); it needs a SPEC edit, so it stays in Future for the next `/project-spec` run, as the brief directs. Each test gap below was re-checked at `13ae374` (still open, paths present); with no Track to carry it, each waits in Future for a Track whose `_touches:` cover its files.
