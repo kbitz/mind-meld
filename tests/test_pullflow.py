@@ -4529,6 +4529,14 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
     ) in err_lines
     assert "stranger-device" not in res_matched.stdout + res_matched.stderr
 
+    from mind_meld.storage.keys import syncthing_record_key
+
+    fleet.backend.delete(syncthing_record_key(peer_c))
+    unpublished = CliRunner().invoke(cli.app, ["pull"])
+    assert unpublished.exit_code == 0, unpublished.output
+    assert "Peer C, Peer C have not published a Syncthing ID yet" in unpublished.stderr
+    assert f"superseded by {peer_c}" not in unpublished.stderr
+
 
 def test_pull_pending_syncthing_join_stays_silent_for_zero_unmanaged_dry_run_autopull_and_join(
     fleet, fake_syncthing, monkeypatch, capsys

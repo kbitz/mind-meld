@@ -324,6 +324,7 @@ _MESH_DETAIL_RE = re.compile(
     r"rename it in Syncthing's web UI"
     r"|could not confirm Syncthing removed retired device [^/~]{1,128} \([A-Z2-7]{7}\); "
     r"check the fleet folder in Syncthing's web UI"
+    r"|Syncthing deferred its retirement share check to the next push or pull"
 )
 
 

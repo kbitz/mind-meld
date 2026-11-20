@@ -1242,6 +1242,9 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
     assert res_ambig.exit_code == 1
     assert "matches 2 pending devices" in res_ambig.output
     assert "Run: mm devices approve <longer short-ID prefix>" in res_ambig.output
+    prefix_collision = runner.invoke(app, ["devices", "approve", joining_2[:4]])
+    assert prefix_collision.exit_code == 1
+    assert "matches 2 pending devices" in prefix_collision.output
 
     # Chooser: Enter cancels (exit 0); invalid choice re-asks once then approves 7-char prefix
     res_choose_cancel = runner.invoke(app, ["devices", "approve"], input="\n")
@@ -1355,3 +1358,32 @@ def test_short_approval_rechecks_pending_request_after_confirmation(
     assert result.exit_code == 1
     assert "no longer pending" in result.output
     assert fake_syncthing.bodies == []
+
+
+@pytest.mark.parametrize("argument", [[], ["linux-b"]], ids=["no-argument", "name"])
+def test_pending_approval_accepts_enter_when_optional_context_is_unavailable(
+    fake_syncthing, tmp_path, monkeypatch, argument
+):
+    from mind_meld import crypto
+
+    _, _, joining = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    config.save_config(
+        {
+            "device": {"id": "dev-a", "name": "mac-a"},
+            "storage": {"path": str(tmp_path / "sync")},
+            "sync": {"sources": [], "max_file_size": 1024 * 1024},
+        }
+    )
+
+    def unavailable(*, non_interactive):
+        assert non_interactive
+        raise RuntimeError("simulated backend failure")
+
+    monkeypatch.setattr(crypto, "get_passphrase", unavailable)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {joining: {"name": "linux-b"}}
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
+    result = runner.invoke(app, ["devices", "approve", *argument], input="\n")
+    assert result.exit_code == 0, result.output
+    assert f"Approve linux-b ({joining[:7]})? [y/n] (Enter = y)" in result.output
+    assert result.output.count("could not read fleet records") == (0 if argument else 1)
+    assert [method for method, _, _ in fake_syncthing.bodies] == ["POST", "PATCH", "PATCH"]

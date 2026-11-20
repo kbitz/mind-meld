@@ -252,9 +252,9 @@ def _stdin_is_terminal() -> bool:
         return False
 
 
-def _get_passphrase_or_exit() -> str:
+def _get_passphrase_or_exit(*, non_interactive: bool = False) -> str:
     try:
-        return get_passphrase()
+        return get_passphrase(non_interactive=True) if non_interactive else get_passphrase()
     except CryptoError as e:
         if (
             _SYNC_OUTPUT.get() is not None

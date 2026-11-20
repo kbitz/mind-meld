@@ -822,6 +822,14 @@ def test_status_reports_pending_syncthing_join_by_count_without_printing_id_or_n
     assert joining_c not in res_mixed.stdout + res_mixed.stderr
     assert joining_d not in res_mixed.stdout + res_mixed.stderr
 
+    from mind_meld.storage.keys import syncthing_record_key
+
+    backend.delete(syncthing_record_key("peer-b"))
+    unpublished = runner.invoke(app, ["status"])
+    assert unpublished.exit_code == 0, unpublished.output
+    assert "linux-b, linux-b have not published a Syncthing ID yet" in unpublished.stdout
+    assert "superseded by peer-b" not in unpublished.stdout
+
 
 def test_status_pending_syncthing_join_stays_silent_for_zero_unmanaged_and_errors(
     inspection, fake_syncthing

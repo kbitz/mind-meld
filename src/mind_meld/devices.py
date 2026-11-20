@@ -865,7 +865,6 @@ def write_retirement_record(
         encrypted = crypto.encrypt(plaintext, passphrase, memory_kb)
     if len(encrypted) > MAX_SYNCTHING_RECORD_BYTES:
         raise StorageError("storage: retirement record exceeds its readable size limit")
-    backend.check_namespace(RETIRED_PREFIX)
     backend.put(key, encrypted)
     fsutil.fsync_dir(backend.root)
     return RetirementRecord(

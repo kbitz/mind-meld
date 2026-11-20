@@ -33,11 +33,13 @@ import stat
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
 from mind_meld import fsutil, safety
 from mind_meld.errors import StorageError, StorageNotFound
+from mind_meld.storage.keys import RETIRED_PREFIX
 
 # iCloud conflict pattern: "filename 2.ext", "filename 3.ext", or
 # extensionless like "mm-crypto-init 2" (no suffix).
@@ -72,7 +74,7 @@ _VANISH_BUDGET_S = 2.0
 # data/ blobs are hash-addressed and re-uploadable, so they skip fsync for
 # latency. See docs/invariants/sync.md "Atomic write publication failures"
 # for the durability model.
-_DURABLE_PREFIXES = ("manifests/", "devices/", "mm-crypto-init", "retired/")
+_DURABLE_PREFIXES = ("manifests/", "devices/", "mm-crypto-init", RETIRED_PREFIX)
 
 
 def _needs_fsync(key: str) -> bool:
@@ -121,11 +123,43 @@ class LocalBackend:
     def put(self, key: str, data: bytes) -> None:
         path = self.root / key
         fsutil.refuse_real_state_write_under_pytest(path)
+        if key.startswith(RETIRED_PREFIX):
+            if path.parent != self.root / RETIRED_PREFIX:
+                raise StorageError("storage: retirement record requires a flat storage key")
+            self._put_retirement(path, data)
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         # All storage keys hold encrypted secrets (blobs, manifests,
         # devices, crypto-init) — explicit 0600 so new files aren't
         # world-readable via umask.
         fsutil.atomic_write_bytes(path, data, fsync=_needs_fsync(key), mode=0o600)
+
+    def _put_retirement(self, path: Path, data: bytes) -> None:
+        """Publish a retirement record through the same no-follow directory descriptor."""
+        fsutil.refuse_real_state_write_under_pytest(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        temp = f"tmp{uuid.uuid4().hex}.tmp"
+        try:
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+                temp = ""
+                os.fsync(directory_fd)
+                if not os.path.samestat(os.fstat(directory_fd), path.parent.lstat()):
+                    raise StorageError("storage: retirement directory changed during publication")
+            finally:
+                if temp:
+                    try:
+                        os.unlink(temp, dir_fd=directory_fd)
+                    except OSError:
+                        pass
+        finally:
+            os.close(directory_fd)
 
     def put_exclusive(self, key: str, data: bytes) -> None:
         """Atomic create-only write. Fails StorageError if target already exists.
@@ -244,7 +278,8 @@ class LocalBackend:
                     continue
                 try:
                     if strict and entry.is_symlink():
-                        raise StorageError("storage: symlink in a device record directory")
+                        key = safety.safe_terminal_str(Path(entry.path).relative_to(self.root))
+                        raise StorageError(f"storage: symlink in device record directory: {key}")
                     if entry.is_dir(follow_symlinks=False):
                         # Walk a foreign directory only to count it; its files
                         # are never keys.
@@ -275,6 +310,11 @@ class LocalBackend:
         if not stat.S_ISDIR(mode):
             raise StorageError("storage: device record namespace is not a real directory")
         return True
+
+    def flush_namespace(self, prefix: str) -> None:
+        """Confirm directory persistence without deleting any entry."""
+        if self.check_namespace(prefix):
+            fsutil.fsync_dir(self.root / prefix)
 
     def delete(self, key: str, *, durable_flat: bool = False) -> None:
         path = self.root / key

@@ -1210,6 +1210,17 @@ def test_mesh_pass_retirement_removals_holds_introducer_and_device_renames(
     assert ret_st_id not in {
         d["deviceID"] for d in fake_syncthing.responses["/rest/config/folders"][0]["devices"]
     }
+    # An introducer can reinsert the retired device between two mesh passes.
+    fake_syncthing.set_folder(
+        storage_dir,
+        peers=[(ret_st_id, "mac-retired", False), (peer_b_st_id, "mac-b-renamed", True)],
+    )
+    fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = peer_b_st_id
+    fake_syncthing.bodies.clear()
+    res_again = runner.invoke(app, ["pull"])
+    assert res_again.exit_code == 0, res_again.output
+    assert "stays until mac-b-renamed drops it" in res_again.output
+    assert not any(method == "DELETE" for method, _, _ in fake_syncthing.bodies)
 
 
 @pytest.mark.parametrize("remove_fails", [False, True])
@@ -1268,7 +1279,10 @@ def test_attended_retirement_leaves_budget_for_both_renames(
         assert ("DELETE", f"/rest/config/devices/{retired_id}", None) in fake_syncthing.bodies
 
 
-@pytest.mark.parametrize("late_change", ["folder", "introducer", "registration", "listing-error"])
+@pytest.mark.parametrize(
+    "late_change",
+    ["folder", "introducer", "registration", "listing-error", "retirement", "connection"],
+)
 def test_retirement_rechecks_eligibility_after_initial_snapshot(
     fake_syncthing, tmp_path, monkeypatch, late_change
 ):
@@ -1297,6 +1311,20 @@ def test_retirement_rechecks_eligibility_after_initial_snapshot(
         elif late_change == "registration":
             register_device(backend, "dev-ret", "retired")
             devices.publish_record(backend, "dev-ret", retired_id, PASSPHRASE, TEST_MEMORY_KB)
+        elif late_change == "retirement":
+            from mind_meld.storage.keys import retired_record_key
+
+            backend.delete(retired_record_key("dev-ret"))
+        elif late_change == "connection":
+            read_retirements = devices.read_retirement_records
+
+            def reconnect_during_read(*args, **kwargs):
+                if kwargs.get("strict"):
+                    conns = fake_syncthing.responses["/rest/system/connections"]["connections"]
+                    conns[retired_id]["connected"] = True
+                return read_retirements(*args, **kwargs)
+
+            monkeypatch.setattr(devices, "read_retirement_records", reconnect_during_read)
         else:
             real_list = LocalBackend.list_keys
 
@@ -1319,3 +1347,69 @@ def test_retirement_rechecks_eligibility_after_initial_snapshot(
     )
     assert result.removed == []
     assert not any(method == "DELETE" for method, _, _ in fake_syncthing.bodies)
+
+
+@pytest.mark.parametrize("inventory", ["clean", "dropped", "vanished"])
+def test_retirement_with_no_vouched_peer_requires_complete_registry(
+    fake_syncthing, tmp_path, monkeypatch, inventory
+):
+    root, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    retired_id = _valid_syncthing_id("R")
+    fake_syncthing.set_folder(root, peers=[(retired_id, "retired", False)])
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {retired_id: {"connected": False}}
+    }
+    devices.write_retirement_record(
+        backend, "dev-ret", "retired", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    if inventory != "clean":
+        peer_key = device_key("dev-b")
+        backend.put(peer_key, b"unreadable")
+        if inventory == "vanished":
+            read = LocalBackend.get
+
+            def vanish(self, key, *, expected=False):
+                if key == peer_key:
+                    raise StorageNotFound(key, vanished=True)
+                return read(self, key, expected=expected)
+
+            monkeypatch.setattr(LocalBackend, "get", vanish)
+    result = meshflow.run(
+        config.load_config(),
+        PASSPHRASE,
+        TEST_MEMORY_KB,
+        verb="pull",
+        attended=False,
+        backend=backend,
+    )
+    if inventory == "clean":
+        assert result.removed == [("retired", retired_id)]
+    else:
+        assert result.removed == []
+        assert any(
+            "removals wait for" in detail and "dev-b" in detail for detail in result.degradations
+        )
+
+
+def test_autopush_neither_removes_connected_retired_device_nor_readds_knocker(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    root, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    retired_id = _valid_syncthing_id("R")
+    fake_syncthing.set_folder(root, peers=[(retired_id, "retired", False)])
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {retired_id: {"connected": True}}
+    }
+    devices.write_retirement_record(
+        backend, "dev-ret", "retired", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    first = runner.invoke(app, ["autopush"])
+    assert first.exit_code == 0 and not first.output
+    assert not any(method == "DELETE" for method, _, _ in fake_syncthing.bodies)
+
+    fake_syncthing.set_folder(root, peers=[])
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {retired_id: {"name": "retired"}}
+    fake_syncthing.bodies.clear()
+    second = runner.invoke(app, ["autopush"])
+    assert second.exit_code == 0 and not second.output
+    assert fake_syncthing.bodies == []

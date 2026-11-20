@@ -2192,6 +2192,14 @@ class SyncthingWriter:
         if target_dev is None:
             return WriteResult("unchanged", None)
 
+        introducer = target_dev.get("introducedBy", "")
+        if not isinstance(introducer, str):
+            return WriteResult("error", "bad-response")
+        if not any(entry.get("deviceID") == introducer for entry in devices):
+            introducer = ""
+        if still_retired is not None and not still_retired(introducer):
+            return WriteResult("refused", "retirement-held")
+
         out, sys_conns, cause = _get_json(
             endpoint.norm_addr,
             "/rest/system/connections",
@@ -2237,14 +2245,6 @@ class SyncthingWriter:
             _, problems = _extract_options(fleet_folder)
             if not isinstance(path, str) or _writer_path(path) != expected_path or problems:
                 return WriteResult("refused", "not-mm-folder")
-
-        introducer = target_dev.get("introducedBy", "")
-        if not isinstance(introducer, str):
-            return WriteResult("error", "bad-response")
-        if not any(entry.get("deviceID") == introducer for entry in devices):
-            introducer = ""
-        if still_retired is not None and not still_retired(introducer):
-            return WriteResult("refused", "retirement-held")
 
         w_out, w_cause = _send_json(
             endpoint,

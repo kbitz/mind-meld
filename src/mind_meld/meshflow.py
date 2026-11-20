@@ -946,6 +946,9 @@ def _run_inner(
             fresh = devices.read_fleet_records(
                 backend, passphrase, memory_kb, own_device_id=own_mm_id, strict=True
             )
+            current_retirement = devices.read_retirement_records(
+                backend, passphrase, memory_kb, strict=True
+            ).records.get(mm_id)
         except (OSError, StorageError):
             _record_degradation(
                 result,
@@ -955,6 +958,8 @@ def _run_inner(
             )
             return False
 
+        if current_retirement is None or current_retirement.syncthing_device_id != st_id:
+            return False
         assert fresh.inventory is not None
         registered = _registered_ids(fresh.inventory)
         if mm_id in registered or st_id in fresh.vouched:
@@ -1066,6 +1071,14 @@ def _run_inner(
             deadline=deadline,
         ).fleet_folder_members(_config_module.SYNCTHING_FOLDER_ID)
         for ret_name, st_id in result.removed:
+            if check_error is not None and check_error.cause == "timeout":
+                _record_degradation(
+                    result,
+                    "Syncthing deferred its retirement share check to the next push or pull",
+                    attended=attended,
+                    notice=False,
+                )
+                break
             if check_error is not None:
                 _record_degradation(
                     result,

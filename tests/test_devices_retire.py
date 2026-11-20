@@ -118,8 +118,9 @@ def test_retired_record_key_validation_and_generate_unique_id_avoids_retired(tmp
     assert picked == "cafebabe"
 
 
+@pytest.mark.parametrize("has_unreadable_record", [False, True])
 def test_retire_interactive_by_name_and_id_three_outcome_branches_and_idempotence(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, has_unreadable_record
 ):
     backend = _setup_retire_fleet(tmp_path, monkeypatch)
     monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
@@ -196,6 +197,9 @@ def test_retire_interactive_by_name_and_id_three_outcome_branches_and_idempotenc
             }
         ).encode("utf-8"),
     )
+    if has_unreadable_record:
+        backend.put(syncthing_record_key("cccc3333"), b"unreadable")
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: False)
     res_b1 = runner.invoke(app, ["devices", "retire", "cccc3333", "--yes"])
     assert res_b1.exit_code == 0, res_b1.output
     assert (
@@ -427,6 +431,15 @@ def test_retire_reactivation_resolves_live_name_and_flushes_before_ordered_delet
     calls = []
     fsync_dir = fsutil.fsync_dir
     delete = LocalBackend.delete
+    import os
+    import stat
+
+    real_fsync = os.fsync
+
+    def observe_fsync(fd):
+        kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        calls.append(("fsync", kind))
+        return real_fsync(fd)
 
     def observe_flush(path):
         calls.append(("flush", path.name))
@@ -437,15 +450,19 @@ def test_retire_reactivation_resolves_live_name_and_flushes_before_ordered_delet
         return delete(self, key, **kwargs)
 
     monkeypatch.setattr(fsutil, "fsync_dir", observe_flush)
+    monkeypatch.setattr(os, "fsync", observe_fsync)
     monkeypatch.setattr(LocalBackend, "delete", observe_delete)
     monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
     result = runner.invoke(app, ["devices", "retire", "mac-b"], input="y\n")
     assert result.exit_code == 0, result.output
-    assert calls == [
-        ("flush", "retired"),
+    assert calls[:3] == [
+        ("fsync", "file"),
+        ("fsync", "dir"),
         ("flush", backend.root.name),
-        ("delete", syncthing_record_key(live_id)),
-        ("delete", device_key(live_id)),
+    ]
+    assert [key for kind, key in calls if kind == "delete"] == [
+        syncthing_record_key(live_id),
+        device_key(live_id),
     ]
     records = devices.read_retirement_records(backend, PASSPHRASE, TEST_MEMORY_KB).records
     assert records[live_id].syncthing_device_id == live_syncthing
@@ -487,3 +504,25 @@ def test_retire_does_not_backfill_config_or_follow_namespace_symlink(tmp_path, m
     assert backend.exists(device_key(target))
     assert not backend.exists(retired_record_key(target))
     assert config.CONFIG_PATH.read_bytes() == before
+
+
+def test_retire_refuses_if_syncthing_record_arrives_during_confirmation(tmp_path, monkeypatch):
+    backend = _setup_retire_fleet(tmp_path, monkeypatch)
+    target = "bbbb2222"
+    register_device(backend, target, "mac-b")
+
+    def publish_before_confirming(prompt, *, default):
+        assert not default
+        devices.publish_record(
+            backend, target, _valid_syncthing_id("B"), PASSPHRASE, TEST_MEMORY_KB
+        )
+        return True
+
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
+    monkeypatch.setattr(core, "ask_yes_no", publish_before_confirming)
+    result = runner.invoke(app, ["devices", "retire", "mac-b"])
+    assert result.exit_code == 1
+    assert "retirement target changed during confirmation" in result.output
+    assert not backend.exists(retired_record_key(target))
+    assert backend.exists(syncthing_record_key(target))
+    assert backend.exists(device_key(target))

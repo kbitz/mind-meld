@@ -767,6 +767,16 @@ REVIEWED = {
             "path.parent.mkdir(parents=True, exist_ok=True)",
         ],
     ),
+    "storage/local.py:LocalBackend._put_retirement": (
+        *_GUARDED,
+        [
+            "path.parent.mkdir(parents=True, exist_ok=True)",
+            "os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)",
+            "os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 384, dir_fd=directory_fd)",
+            "os.replace(temp, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)",
+            "os.unlink(temp, dir_fd=directory_fd)",
+        ],
+    ),
     "storage/local.py:LocalBackend.put_exclusive": (
         *_GUARDED,
         [

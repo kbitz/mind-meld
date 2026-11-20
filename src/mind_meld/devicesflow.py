@@ -279,7 +279,16 @@ def _try_read_approve_fleet_context(*, include_fleet: bool) -> _ApproveContext:
         cfg = _config_module.load_config()
         backend = get_backend(cfg)
         context.storage_root = backend.root
+    except (ConfigError, OSError, StorageError):
+        return context
+    try:
         passphrase = crypto.get_passphrase(non_interactive=True)
+    except Exception:
+        # The optional probe also falls back on backend-specific keyring failures.
+        return context
+    if not passphrase:
+        return context
+    try:
         fetch = crypto.fetch_crypto_init(backend)
         if (
             fetch.status != "ok"
@@ -301,7 +310,10 @@ def _try_read_approve_fleet_context(*, include_fleet: bool) -> _ApproveContext:
     except (OSError, StorageError):
         pass
     if include_fleet:
-        own_mm_id = cfg["device"]["id"]
+        device = cfg.get("device")
+        own_mm_id = device.get("id") if isinstance(device, dict) else None
+        if not isinstance(own_mm_id, str) or not own_mm_id:
+            return context
         try:
             records = _devices_module.read_fleet_records(
                 backend, passphrase, memory_kb, own_device_id=own_mm_id
@@ -745,6 +757,11 @@ def approve(device_id: str | None = None) -> None:
             fix=f"mm devices approve {full_id}",
         )
     add_res = writer.add_device(full_id)
+    if add_res.outcome == "unchanged":
+        core._error(
+            "devices approve: the device was configured during approval. Nothing was changed.",
+            fix=f"mm devices approve {full_id}",
+        )
     if add_res.outcome in ("not-found", "refused"):
         _stop_unchanged(add_res.outcome, add_res.cause, full_id)
     if add_res.outcome not in ("ok", "unchanged"):
@@ -754,7 +771,7 @@ def approve(device_id: str | None = None) -> None:
             outcome=add_res.outcome,
             cause=add_res.cause,
         )
-    intro_res = writer.mark_introducer(full_id)
+    intro_res = writer.mark_introducer(full_id, require_writer_shape=True)
     if intro_res.outcome not in ("ok", "unchanged"):
         _stop_partial(
             full_id,
@@ -846,7 +863,7 @@ def retire(target: str, *, yes: bool = False) -> None:
     try:
         is_tty = core._both_streams_are_terminals()
         try:
-            passphrase = crypto.get_passphrase(non_interactive=not is_tty)
+            passphrase = core._get_passphrase_or_exit(non_interactive=not is_tty)
             memory_kb = core._init_crypto_session(backend, passphrase, config, read_only=True)
             fleet_records = _devices_module.read_fleet_records(
                 backend, passphrase, memory_kb, own_device_id=own_id, strict=True
@@ -1027,6 +1044,14 @@ def retire(target: str, *, yes: bool = False) -> None:
             )
 
         if already_retired_only:
+            try:
+                # A prior run can unlink the registration and fail its directory flush.
+                backend.flush_namespace("devices/")
+            except (OSError, StorageError):
+                core._error(
+                    "devices retire: could not confirm the device registry is durable.",
+                    fix=_devices_module.retire_command(target_id, yes=yes),
+                )
             rec = retirements.records[target_id]
             consequence = _retire_consequence_clause(
                 rec.syncthing_device_id,
@@ -1057,20 +1082,11 @@ def retire(target: str, *, yes: bool = False) -> None:
                 fix=_devices_module.retire_command(target_id, yes=yes),
             )
 
-        syncthing_id = (
-            fleet_records.by_mm_id.get(target_id)
-            or _devices_module.read_single_syncthing_record(
-                backend,
-                target_id,
-                passphrase,
-                memory_kb,
-            )
-            or (
-                retirements.records[target_id].syncthing_device_id
-                if target_id in retirements.records
-                else None
-            )
+        recorded_id = _devices_module.read_single_syncthing_record(
+            backend, target_id, passphrase, memory_kb
         )
+        prior_retirement = retirements.records.get(target_id)
+        syncthing_id = recorded_id or (prior_retirement and prior_retirement.syncthing_device_id)
 
         old_gc_peers = [
             safe_terminal_str(pid)
@@ -1145,6 +1161,33 @@ def retire(target: str, *, yes: bool = False) -> None:
             ):
                 core._print_outcome(outputstyle._outcome_line("retire", "Nothing was changed"))
                 return
+
+            try:
+                current = _devices_module.read_retirement_records(
+                    backend, passphrase, memory_kb, strict=True
+                )
+                backend.check_namespace("syncthing/")
+                current_id = _devices_module.read_single_syncthing_record(
+                    backend, target_id, passphrase, memory_kb
+                )
+            except (OSError, StorageError):
+                core._error(
+                    "devices retire: could not verify fleet records after confirmation. "
+                    "Nothing was changed.",
+                    fix="mm diag",
+                )
+            if (
+                current_id != recorded_id
+                or current.records.get(target_id) != prior_retirement
+                or target_id in current.unreadable
+                or target_id in current.newer_format
+                or target_id in current.vanished
+            ):
+                core._error(
+                    "devices retire: the retirement target changed during confirmation. "
+                    "Nothing was changed.",
+                    fix=_devices_module.retire_command(target_id),
+                )
 
         try:
             _devices_module.write_retirement_record(
