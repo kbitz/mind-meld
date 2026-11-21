@@ -2591,8 +2591,10 @@ def test_deadline_wording_follows_whether_the_caller_could_warm(
 
     monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
     if surface == "init":
-        events_tail._run_events_backfill(config, sources, "dev-a")
-        text = " ".join(capsys.readouterr().err.split())
+        notices = events_tail._run_events_backfill(config, sources, "dev-a")
+        assert len(notices) == 1
+        assert "host-usage snapshot skipped" not in capsys.readouterr().err
+        text = notices[0]
     else:
         degradations = events_tail._run_events_tail(
             config, sources, "dev-a", dry_run=False, quiet=surface == "autopush-tail"

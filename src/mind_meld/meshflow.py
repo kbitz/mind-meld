@@ -101,7 +101,10 @@ def compose_hook_breadcrumb(
         if d
     ]
     remaining = budget - sum(len(part) + 2 for part in parts)
-    mesh_detail = _join_within_budget(mesh_result.degradations, remaining)
+    non_wait_degradations = [
+        d for d in mesh_result.degradations if not d.startswith(attemptlog.MESH_WAIT_PREFIX)
+    ]
+    mesh_detail = _join_within_budget(non_wait_degradations, remaining)
     if mesh_detail:
         parts.append(mesh_detail)
         remaining -= len(mesh_detail) + 2
@@ -165,6 +168,8 @@ class MeshResult:
     vouched_ids: frozenset[str] | None = None
     ran: bool = False
     snapshot_taken: bool = False
+    removals_evaluated: bool = False
+    removal_waits_recorded: bool = False
     published: bool = False
     stop_cause: str | None = None
 
@@ -190,6 +195,15 @@ class MeshResult:
             budget=budget,
         )
 
+    def removal_wait_only(self, existing_degradations: Sequence[str]) -> bool:
+        """Identify hook degradations fully explained by the separate mesh record."""
+        return (
+            self.removal_waits_recorded
+            and bool(self.degradations)
+            and not any(existing_degradations)
+            and all(detail.startswith(attemptlog.MESH_WAIT_PREFIX) for detail in self.degradations)
+        )
+
 
 def _record_degradation(
     result: MeshResult,
@@ -201,9 +215,10 @@ def _record_degradation(
     safe_detail = safety.safe_terminal_str(detail)
     result.degradations.append(safe_detail)
     if attended:
-        state = core._SYNC_OUTPUT.get()
-        if state is not None and "diagnostics" in state:
-            state["diagnostics"].append(safe_detail)
+        if not safe_detail.startswith(attemptlog.MESH_WAIT_PREFIX):
+            state = core._SYNC_OUTPUT.get()
+            if state is not None and "diagnostics" in state:
+                state["diagnostics"].append(safe_detail)
         if notice:
             core._notice(safe_detail)
 
@@ -321,6 +336,7 @@ def run(
         )
     except Exception as exc:
         cls_name = type(exc).__name__
+        result.removals_evaluated = False
         result.stop_cause = "unexpected-error"
         result.stops.append(cls_name)
         if attended:
@@ -333,6 +349,15 @@ def run(
                 log_unexpected(verb, exc)
             detail = f"Syncthing mesh step failed ({cls_name}, see auto{verb}.log)"
             _record_degradation(result, detail, attended=False, notice=False)
+    if result.removals_evaluated:
+        try:
+            attemptlog.write_mesh_waits(
+                [d for d in result.degradations if d.startswith(attemptlog.MESH_WAIT_PREFIX)]
+            )
+        except (Exception, SystemExit):
+            pass
+        else:
+            result.removal_waits_recorded = True
     if attended:
         clauses = result.outcome_clauses
         if clauses:
@@ -382,6 +407,7 @@ def _retired_share_still_listed(
 
 
 def _stop_folder_steps(result: MeshResult, cause: str, *, attended: bool) -> None:
+    result.removals_evaluated = False
     result.stop_cause = cause
     result.stops.append(cause)
     _record_degradation(
@@ -465,6 +491,7 @@ def _run_inner(
             notice=True,
         )
 
+    retirements_listed = True
     try:
         retirements = devices.read_retirement_records(
             backend,
@@ -472,6 +499,7 @@ def _run_inner(
             memory_kb,
         )
     except (OSError, StorageError) as exc:
+        retirements_listed = False
         cause = _safe_detail_token(attemptlog.storage_errno(exc) or os_error_cause(exc))
         _record_degradation(
             result,
@@ -821,6 +849,8 @@ def _run_inner(
                             )
                             continue
                         executable_removals.append((ret_name, st_id, rec.mm_device_id))
+    if folder_ok and retirements_listed and not executable_removals:
+        result.removals_evaluated = True
 
     # 3. Plan own-device rename
     raw_own_cfg_name = dev_cfg.get("name") if isinstance(dev_cfg, dict) else None
@@ -1020,6 +1050,7 @@ def _run_inner(
         if rem_res.outcome == "refused" and rem_res.cause == "retirement-held":
             continue
         if rem_res.outcome == "refused" and rem_res.cause in ("no-folder", "not-mm-folder"):
+            folder_ok = False
             _stop_folder_steps(result, rem_res.cause, attended=attended)
             break
         if rem_res.outcome == "ok":
@@ -1076,6 +1107,8 @@ def _run_inner(
             attended=attended,
             notice=True,
         )
+    if folder_ok and retirements_listed:
+        result.removals_evaluated = True
 
     if result.removed:
         remaining = deadline - time.monotonic()

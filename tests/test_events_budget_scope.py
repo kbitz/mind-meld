@@ -336,9 +336,10 @@ class TestEventsBackfillBudgetScope:
 
         monkeypatch.setattr(_mm_events, "walk_session_metadata", slow_walk)
 
-        events_tail._run_events_backfill(config, sources, "dev-a")
+        notices = events_tail._run_events_backfill(config, sources, "dev-a")
 
-        assert "events backfill budget exceeded" in capsys.readouterr().err
+        assert notices == [events_tail._INIT_BACKFILL_BUDGET_NOTICE]
+        assert "events backfill budget exceeded" not in capsys.readouterr().err
 
 
 class TestRootDiscoveryHandoffAndDegradation:
@@ -441,14 +442,15 @@ class TestRootDiscoveryHandoffAndDegradation:
             lambda _events_dir, _device, rows, **kwargs: writes.append(rows),
         )
 
-        events_tail._run_events_backfill(config, sources, "dev-a")
+        notices = events_tail._run_events_backfill(config, sources, "dev-a")
         assert received == [discovery]
         # The healthy (completed-empty) host row is the only thing to write
         # here — git returned nothing and there is no claude source. The
         # load-bearing half of this pin is the absence of `mm-push`, not the
         # absence of writes.
         assert [row["type"] for rows in writes for row in rows] == ["host-usage-snapshot"]
-        assert "initial retro capture may omit repositories" in capsys.readouterr().err
+        assert notices == [events_tail._INIT_ROOT_DISCOVERY_NOTICE]
+        assert "initial retro capture may omit repositories" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("configured", [False, True])

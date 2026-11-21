@@ -174,6 +174,10 @@ class TestCheckHappy:
         # Command tracks the moving `latest` branch — version-independent, no
         # `@vX.Y.Z` pin (the pin is what froze `pipx upgrade`).
         assert result.install_cmd == upgrade.INSTALL_CMD
+        assert (
+            upgrade.INSTALL_CMD
+            == "UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest"
+        )
         assert "@latest" in result.install_cmd
         assert "@v0.9.4" not in result.install_cmd
         assert result.should_nudge is True

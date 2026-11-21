@@ -283,6 +283,7 @@ RUN_COUNTS = frozenset(
 _MAX_COUNT = 2**53
 _MAX_DETAILS = 8
 _MAX_DETAIL_CHARS = 384
+MESH_WAIT_PREFIX = "Syncthing device removals wait for "
 _MESH_DETAIL_RE = re.compile(
     r"Syncthing mesh step stopped \([a-z0-9_-]+\) after [0-9]+ of [1-9][0-9]* steps; "
     r"(?:nothing else changed|a write may have applied); retries on the next push or pull|"
@@ -308,7 +309,7 @@ _MESH_DETAIL_RE = re.compile(
     r"the next push or pull retries"
     r"|could not list retirement records \([A-Za-z0-9._ -]{1,64}\); "
     r"the next push or pull retries"
-    r"|Syncthing device removals wait for [^/~]{1,340}"
+    rf"|{MESH_WAIT_PREFIX}[^/~]{{1,340}}"
     r"|[^/~]{1,128} \([A-Z2-7]{7}\) is retired but still connected; "
     r"shut it down or stop Syncthing there, or remove it in Syncthing's web UI"
     r"|[^/~]{1,128} \([A-Z2-7]{7}\) is retired from Mind Meld but also shares another "
@@ -616,9 +617,13 @@ def _run_needs_action(run: dict) -> bool:
         return False
     from mind_meld import events_tail
 
-    # Finding no repositories is a fact, not lost work. Keep it in detail.
+    # An empty discovery and a separately reported removal wait do not imply
+    # incomplete content sync. Keep any other degradation actionable.
     return not (
-        run.get("degradations") == [events_tail._ROOT_DISCOVERY_EMPTY_DEGRADATION]
+        (
+            run.get("degradations") == [events_tail._ROOT_DISCOVERY_EMPTY_DEGRADATION]
+            or run.get("removal_wait_only") is True
+        )
         and not run.get("omitted_details")
         and not any(
             run.get("counts", {}).get(k)
@@ -634,7 +639,9 @@ def _run_needs_action(run: dict) -> bool:
     )
 
 
-def project_runs(auto: dict, attended: dict, *, now: datetime | None = None) -> dict:
+def project_runs(
+    auto: dict, attended: dict, *, now: datetime | None = None, mesh_waits_current: bool = False
+) -> dict:
     """Select one run per verb, retaining unknown ordering and coverage facts.
 
     Strict later success resolves an available earlier failure symmetrically.
@@ -657,6 +664,18 @@ def project_runs(auto: dict, attended: dict, *, now: datetime | None = None) -> 
                 run = dict(raw)
                 if run.get("ordering_unknown"):
                     unknown = "ambiguous"
+                if mesh_waits_current and run["degradations"]:
+                    run["degradations"] = [
+                        line
+                        for line in raw["degradations"]
+                        if not line.startswith(MESH_WAIT_PREFIX)
+                    ]
+                    # Older attended runs counted each wait in this total.
+                    # An excess count can still represent a different degradation.
+                    if not run["degradations"] and run["counts"].get(
+                        "events_degradations", 0
+                    ) <= len(raw["degradations"]):
+                        run["removal_wait_only"] = True
             else:
                 outcome = raw.get("outcome") if isinstance(raw, dict) else None
                 if not isinstance(outcome, str) or outcome not in {
@@ -708,6 +727,12 @@ def project_runs(auto: dict, attended: dict, *, now: datetime | None = None) -> 
                     "omitted_details": 0,
                     "errno": None,
                 }
+                if (
+                    mesh_waits_current
+                    and outcome == "degraded"
+                    and raw.get("removal_wait_only") is True
+                ):
+                    run["removal_wait_only"] = True
             timestamp = _timestamp(run["completed_at"])
             if timestamp is None or timestamp > now:
                 unknown = "ambiguous"
@@ -739,3 +764,297 @@ def project_runs(auto: dict, attended: dict, *, now: datetime | None = None) -> 
             "limited_coverage": bool(selected and selected[2]["scope"]),
         }
     return projection
+
+
+def mesh_waits_path() -> Path:
+    return sidecar.SIDECAR_DIR / "last-mesh.json"
+
+
+def mesh_wait_details(details: list[str]) -> tuple[list[str], int]:
+    """Retain only bounded, path-free ``Syncthing device removals wait for `` lines."""
+    if not details:
+        return [], 0
+    retained: list[str] = []
+    omitted = 0
+    for detail in details:
+        if not isinstance(detail, str) or not detail.startswith(MESH_WAIT_PREFIX):
+            omitted += 1
+            continue
+        kept, dropped = run_details([detail])
+        if kept and not dropped and len(retained) < _MAX_DETAILS:
+            retained.append(kept[0])
+        else:
+            omitted += 1
+    return retained, min(omitted, _MAX_COUNT)
+
+
+def _valid_mesh_waits(data: object) -> bool:
+    if not isinstance(data, dict) or set(data) != {
+        "version",
+        "completed_at",
+        "waits",
+        "omitted_details",
+    }:
+        return False
+    waits = data["waits"]
+    return (
+        type(data["version"]) is int
+        and data["version"] == 1
+        and _timestamp(data["completed_at"]) is not None
+        and _count(data["omitted_details"])
+        and isinstance(waits, list)
+        and len(waits) <= _MAX_DETAILS
+        and all(
+            isinstance(s, str)
+            and len(s) <= _MAX_DETAIL_CHARS
+            and s == safety.safe_terminal_str(s)
+            and "/" not in s
+            and "~" not in s
+            and s.startswith(MESH_WAIT_PREFIX)
+            and bool(_MESH_DETAIL_RE.fullmatch(s))
+            for s in waits
+        )
+    )
+
+
+def write_mesh_waits(waits: list[str], *, completed_at: str | None = None) -> None:
+    """Persist the latest evaluated Syncthing removal-wait lines.
+
+    Only readers: ``mm status`` and the ``mm diag`` state dict.
+    """
+    details, omitted = mesh_wait_details(list(waits))
+    record = {
+        "version": 1,
+        "completed_at": completed_at or datetime.now(timezone.utc).isoformat(),
+        "waits": details,
+        "omitted_details": omitted,
+    }
+    if not _valid_mesh_waits(record):
+        raise ValueError("invalid mesh waits")
+    path = mesh_waits_path()
+    fsutil.refuse_real_state_write_under_pytest(path)
+    sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+    with lockedjson.locked_json_rmw(
+        path, retry_intervals=(), on_contention="raise", mode=0o600, compact=True
+    ) as locked:
+        if not locked.is_locked:
+            raise OSError("mesh evidence lock unavailable")
+        if _valid_mesh_waits(locked.data) and _timestamp(locked.data["completed_at"]) > _timestamp(
+            record["completed_at"]
+        ):
+            locked.write_on_exit = False
+        else:
+            while len(json.dumps(record, sort_keys=True).encode()) > _MAX_RECORD_BYTES:
+                if not record["waits"]:
+                    raise ValueError("oversized mesh evidence")
+                record["waits"].pop()
+                record["omitted_details"] = min(_MAX_COUNT, record["omitted_details"] + 1)
+            locked.data = record
+    if locked.write_error is not None:
+        raise locked.write_error
+
+
+def read_mesh_waits() -> dict:
+    """Write-free read of the latest evaluated Syncthing removal-wait lines.
+
+    Only readers: ``mm status`` and the ``mm diag`` state dict.
+    """
+    path = mesh_waits_path()
+    empty = {"completed_at": None, "waits": [], "omitted_details": 0}
+    try:
+        if path.stat().st_size > _MAX_RECORD_BYTES:
+            return {"state": "oversized", **empty}
+        with lockedjson.locked_json_snapshot(path, blocking=False) as snapshot:
+            state = {
+                "lock_failed": "contended",
+                "empty": "corrupt",
+                "malformed": "corrupt",
+                "non_dict": "corrupt",
+            }.get(snapshot.state, snapshot.state)
+            if state != "valid":
+                return {"state": state, **empty}
+            data = snapshot.data
+            if not _valid_mesh_waits(data):
+                return {"state": "corrupt", **empty}
+            return {
+                "state": "valid",
+                "completed_at": data["completed_at"],
+                "waits": list(data["waits"]),
+                "omitted_details": data["omitted_details"],
+            }
+    except FileNotFoundError:
+        return {"state": "missing", **empty}
+    except OSError:
+        return {"state": "unreadable", **empty}
+    except (ValueError, RecursionError):
+        return {"state": "corrupt", **empty}
+
+
+def init_notices_path() -> Path:
+    return sidecar.SIDECAR_DIR / "last-init-notices.json"
+
+
+_INIT_PROGRESS_RE = re.compile(
+    rf"(?:{'|'.join(map(re.escape, events.HOST_USAGE_TOKEN_SOURCES))}) "
+    r"usage catching up \([1-9][0-9]* left\) — content sync and git and session capture "
+    r"unaffected\. The next attended mm push continues it; see mm diag\."
+)
+
+
+def _normalize_init_notice(detail: str, capture_url: str) -> str:
+    return detail.replace(capture_url, "mm diag").replace("git/session", "git and session")
+
+
+def _init_notice_vocabulary() -> set[str]:
+    from mind_meld import events_tail
+
+    return {
+        events_tail._INIT_BACKFILL_BUDGET_NOTICE,
+        events_tail._INIT_ROOT_DISCOVERY_NOTICE,
+    } | {
+        _normalize_init_notice(
+            events_tail._host_skip_phrase(
+                reader,
+                reason,
+                verb=verb,
+                readiness="ready",
+                no_release_reads=no_release_reads,
+                attended=attended,
+            ),
+            events_tail.HOST_USAGE_CAPTURE_URL,
+        )
+        for reader in (*events.HOST_USAGE_TOKEN_SOURCES, None)
+        for reason in (*get_args(host_usage.Reason), "unavailable", None)
+        for verb in ("push", "init")
+        for attended in (False, True)
+        for no_release_reads in ((), (reader,) if reader is not None else ())
+    }
+
+
+def _valid_init_notice(detail: object, known: set[str]) -> bool:
+    return (
+        isinstance(detail, str)
+        and len(detail) <= _MAX_DETAIL_CHARS
+        and detail == safety.safe_terminal_str(detail)
+        and "/" not in detail
+        and "~" not in detail
+        and (detail in known or _INIT_PROGRESS_RE.fullmatch(detail) is not None)
+    )
+
+
+def init_notice_details(details: list[str]) -> tuple[list[str], int]:
+    """Retain only known path-free init-backfill notice phrases."""
+    if not details:
+        return [], 0
+    from mind_meld import events_tail
+
+    known = _init_notice_vocabulary()
+    retained: list[str] = []
+    omitted = 0
+    for detail in details:
+        if not isinstance(detail, str):
+            omitted += 1
+            continue
+        detail = _normalize_init_notice(detail, events_tail.HOST_USAGE_CAPTURE_URL)
+        if len(retained) >= _MAX_DETAILS or not _valid_init_notice(detail, known):
+            omitted += 1
+        else:
+            retained.append(detail)
+    return retained, min(omitted, _MAX_COUNT)
+
+
+def _valid_init_notices(data: object) -> bool:
+    if not isinstance(data, dict) or set(data) != {
+        "version",
+        "completed_at",
+        "notices",
+        "omitted_details",
+    }:
+        return False
+    notices = data["notices"]
+    if not (
+        type(data["version"]) is int
+        and data["version"] == 1
+        and _timestamp(data["completed_at"]) is not None
+        and _count(data["omitted_details"])
+        and isinstance(notices, list)
+        and len(notices) <= _MAX_DETAILS
+    ):
+        return False
+    if not notices:
+        return True
+    known = _init_notice_vocabulary()
+    return all(_valid_init_notice(detail, known) for detail in notices)
+
+
+def write_init_notices(notices: list[str], *, completed_at: str | None = None) -> None:
+    """Persist no-action capture notices from ``mm init``'s events backfill.
+
+    Only readers: ``mm status`` and ``mm diag`` (state dict and plain text).
+    """
+    details, omitted = init_notice_details(list(notices))
+    record = {
+        "version": 1,
+        "completed_at": completed_at or datetime.now(timezone.utc).isoformat(),
+        "notices": details,
+        "omitted_details": omitted,
+    }
+    if not _valid_init_notices(record):
+        raise ValueError("invalid init notices")
+    path = init_notices_path()
+    fsutil.refuse_real_state_write_under_pytest(path)
+    sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+    with lockedjson.locked_json_rmw(
+        path, retry_intervals=(), on_contention="raise", mode=0o600, compact=True
+    ) as locked:
+        if not locked.is_locked:
+            raise OSError("init notices lock unavailable")
+        if _valid_init_notices(locked.data) and _timestamp(
+            locked.data["completed_at"]
+        ) > _timestamp(record["completed_at"]):
+            locked.write_on_exit = False
+        else:
+            while len(json.dumps(record, sort_keys=True).encode()) > _MAX_RECORD_BYTES:
+                if not record["notices"]:
+                    raise ValueError("oversized init notices")
+                record["notices"].pop()
+                record["omitted_details"] = min(_MAX_COUNT, record["omitted_details"] + 1)
+            locked.data = record
+    if locked.write_error is not None:
+        raise locked.write_error
+
+
+def read_init_notices() -> dict:
+    """Write-free read of no-action capture notices from ``mm init``.
+
+    Only readers: ``mm status`` and ``mm diag`` (state dict and plain text).
+    """
+    path = init_notices_path()
+    empty = {"completed_at": None, "notices": [], "omitted_details": 0}
+    try:
+        if path.stat().st_size > _MAX_RECORD_BYTES:
+            return {"state": "oversized", **empty}
+        with lockedjson.locked_json_snapshot(path, blocking=False) as snapshot:
+            state = {
+                "lock_failed": "contended",
+                "empty": "corrupt",
+                "malformed": "corrupt",
+                "non_dict": "corrupt",
+            }.get(snapshot.state, snapshot.state)
+            if state != "valid":
+                return {"state": state, **empty}
+            data = snapshot.data
+            if not _valid_init_notices(data):
+                return {"state": "corrupt", **empty}
+            return {
+                "state": "valid",
+                "completed_at": data["completed_at"],
+                "notices": list(data["notices"]),
+                "omitted_details": data["omitted_details"],
+            }
+    except FileNotFoundError:
+        return {"state": "missing", **empty}
+    except OSError:
+        return {"state": "unreadable", **empty}
+    except (ValueError, RecursionError):
+        return {"state": "corrupt", **empty}

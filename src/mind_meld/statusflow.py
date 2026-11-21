@@ -830,9 +830,13 @@ def status(
         except OSError:
             n_conflicts = 0
             blocking = "Conflict inspection incomplete. Restore read access, then run: mm status"
-        auto_evidence = _read_autorun_evidence()
+        mesh_evidence = attemptlog.read_mesh_waits()
+        mesh_valid = mesh_evidence["state"] == "valid"
+        auto_evidence = _read_autorun_evidence(hide_legacy_waits=mesh_valid)
         attended_evidence = attemptlog.read_runs()
-        projection = attemptlog.project_runs(auto_evidence, attended_evidence)
+        projection = attemptlog.project_runs(
+            auto_evidence, attended_evidence, mesh_waits_current=mesh_valid
+        )
         if fetch.status == "corrupt":
             blocking = (
                 core._newer_format_message(fetch.newer_version, "manifest")
@@ -1091,6 +1095,13 @@ def status(
                 and "git repository discovery" in detail
             ):
                 discovery_nag = True
+        if mesh_valid:
+            for wait in mesh_evidence["waits"]:
+                console.print(safe_str(f"    {wait}"))
+            if mesh_evidence["omitted_details"]:
+                console.print(
+                    f"    {mesh_evidence['omitted_details']} diagnostic detail(s) not retained."
+                )
         retro_nag = _print_retro_capture_status(sources_configs, device_id, scan=capture_rows)
         if discovery_nag and not retro_nag:
             console.print(
@@ -1669,6 +1680,13 @@ def _host_publication(
         manifest = None
     projected = events.project_host_publication(scan, readers, manifest)
     projected.update(attemptlog.project(readers, projected.get("ts")))
+    init_notices = attemptlog.read_init_notices()
+    if init_notices["state"] == "valid":
+        init_ts = attemptlog._timestamp(init_notices["completed_at"])
+        attempt_ts = attemptlog._timestamp(projected["latest_attempt_at"])
+        if init_ts is not None and attempt_ts is not None and attempt_ts >= init_ts:
+            init_notices.update(state="superseded", notices=[], omitted_details=0)
+    projected["init_notices"] = init_notices
     projected["readiness"] = _config_module.usage_capture_readiness(
         selected, sources, reader_consented=bool(readers)
     )
@@ -1717,6 +1735,14 @@ def _print_host_publication(
         )
     ):
         console.print(f"    {safe_str(line)}")
+    init_evidence = state.get("init_notices") or {}
+    if init_evidence.get("state") == "valid":
+        for notice in init_evidence["notices"]:
+            console.print(f"    {safe_str(notice)}")
+        if init_evidence["omitted_details"]:
+            console.print(
+                f"    {init_evidence['omitted_details']} diagnostic detail(s) not retained."
+            )
     if state.get("coverage_invalid"):
         console.print("    Coverage metadata is inconsistent; reader completeness is unknown.")
     if state["readiness"] != "ready" or (
@@ -2431,7 +2457,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     # Last autorun breadcrumb (ops-oriented: when did autopush/autopull
     # last fire and how did it end). Keyed per verb since v0.12.45 so
     # autopull cannot erase a degraded autopush crumb.
-    auto_evidence = _read_autorun_evidence()
+    mesh_evidence = attemptlog.read_mesh_waits()
+    mesh_valid = mesh_evidence["state"] == "valid"
+    auto_evidence = _read_autorun_evidence(hide_legacy_waits=mesh_valid)
     breadcrumb = (
         None
         if auto_evidence["state"] == "missing"
@@ -2471,7 +2499,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     host_usage_state["grok"]["consented"] = grok_consented
     capture_rows = _read_capture_rows(resolved_sources, dev_id)
     attended_evidence = attemptlog.read_runs()
-    run_projection = attemptlog.project_runs(auto_evidence, attended_evidence)
+    run_projection = attemptlog.project_runs(
+        auto_evidence, attended_evidence, mesh_waits_current=mesh_valid
+    )
     return {
         "mm_version": __version__,
         "config": {
@@ -2492,7 +2522,10 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         ),
         "sidecar": sidecar_info,
         "storage_inventory": storage_inv,
-        "syncthing": _syncthing_diag(_backend_storage_path(backend, cfg)),
+        "syncthing": {
+            **_syncthing_diag(_backend_storage_path(backend, cfg)),
+            "last_mesh": mesh_evidence,
+        },
         "project_index": _project_index_state(
             cfg, config_state, dev_id, backend, resolved_sources, device_inventory
         ),
@@ -3044,7 +3077,26 @@ def _breadcrumb_staleness_suffix(ts: object) -> str:
     return f" [yellow]stale — no autorun in {int(age_h)}h[/yellow]"
 
 
-def _read_autorun_evidence() -> dict:
+# Legacy hooks joined complete clauses. Match the old producers rather than
+# splitting on semicolons that can belong to the clause or the device name.
+_LEGACY_MESH_WAIT_CLAUSE = re.compile(
+    rf"(?:^|; ){attemptlog.MESH_WAIT_PREFIX}(?:"
+    r"device registry \([^)]{1,64}\); the next push or pull retries"
+    r"|device [A-Za-z0-9._-]{1,64} to finish syncing; the next push or pull retries"
+    r"|[A-Za-z0-9._-]{1,64}'s Syncthing record; the next push or pull retries"
+    r"|device [A-Za-z0-9._-]{1,64}'s (?:newer-format|unreadable) "
+    r"Syncthing record\. Run: mm (?:update|diag)"
+    r"|unreadable device entry [^/~]{1,256}?\. Run: mm diag"
+    r"|a complete fleet registry read\. Run: mm diag"
+    r"|superseded registration [^/~]{1,128}? \([A-Za-z0-9._-]{1,64}\)\. "
+    r"Run: mm devices retire (?:-- )?[A-Za-z0-9._-]{1,64}"
+    r"|(?P<device>[^/~]{1,128}?) \([A-Za-z0-9._-]{1,64}\) to publish its Syncthing ID; "
+    r"run 'mm update' and 'mm push' on (?P=device)"
+    r")(?=; |$)"
+)
+
+
+def _read_autorun_evidence(*, hide_legacy_waits: bool = False) -> dict:
     evidence = attemptlog.read_run_file(core._autorun_breadcrumb_path())
     if evidence["state"] == "valid":
         raw = evidence["runs"]
@@ -3053,5 +3105,20 @@ def _read_autorun_evidence() -> dict:
             verb in raw and verb not in normalized for verb in core._AUTORUN_VERBS
         ):
             evidence["state"] = "corrupt"
+        if hide_legacy_waits:
+            for entry in normalized.values():
+                detail = entry.get("detail")
+                outcome = entry.get("outcome")
+                if outcome not in ("degraded", "no-sources") or not isinstance(detail, str):
+                    continue
+                shown = _LEGACY_MESH_WAIT_CLAUSE.sub("", detail).removeprefix("; ")
+                if shown == detail:
+                    continue
+                if shown:
+                    entry["detail"] = shown
+                else:
+                    entry.pop("detail")
+                    if outcome == "degraded":
+                        entry["removal_wait_only"] = True
         evidence["runs"] = normalized
     return evidence

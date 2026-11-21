@@ -406,7 +406,7 @@ complete O7.2 acceptance for session metadata or the fleet.
 
 **Forensic-only invariant, and why stderr is NOT the load-bearing signal (v0.12.16).** The whole block is wrapped in `try / except Exception`; failures emit `mm: notice: events tail failed: <type>: <safe_str(msg)>` to stderr and the push continues. `safe_str(e)` defangs peer-controlled escapes per the v0.10.1 sanitization invariant (a corrupt peer manifest could otherwise smuggle ANSI through an exception's `__str__`).
 
-That stderr line is the *interactive* signal only. `_run_events_tail` runs from `mm autopush`, which fires unattended from a Claude Code hook, so its stderr reaches nobody — and pre-v0.12.16 `autopush` wrote `_write_autorun_breadcrumb("push", "success")` unconditionally, so `mm status` reported success no matter how badly the retro pipeline had degraded. **`_run_events_tail` therefore RETURNS `list[str]`** — one human-readable phrase per degradation, empty when healthy — which `_push_core` carries on `PushResult.events_degradations` and `autopush` turns into `_write_autorun_breadcrumb("push", "degraded", "; ".join(reasons))`. This mirrors the `degradations` list `autopull` has carried since v0.8.1, and it is the same argument [sync.md](sync.md#visible-failures-in-automatic-commands) makes for the `no-sources` breadcrumb: without it, `mm status` only ever sees `success` and monitoring built on top of it never catches the wedge. Conditions that populate the list: whole-tail exception, session-walk budget exceeded, token cache cold (tokens + skills omitted), root discovery time-budget expiry, a prober exception (`errors and not exceeded`), and complete discovery that found zero repositories (a prober ran). The budget phrase is fixed: `git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`; it contains no paths or raw probe errors or the `; ` separator used between breadcrumb reasons. Do not widen the exceeded gate to `bool(errors)` — the budget phrase would then be a lie. An ordinary rejected candidate stays silent. Init backfill has no `mm-push` row or autorun breadcrumb, so it prints the equivalent `initial retro capture` notice only. **Any new degradation detected in the tail MUST be appended to the returned list as well as printed** — a `mm: notice:` with no corresponding entry is invisible to the only surface the user actually reads. CHANGELOG v0.12.13 records the cost of getting this wrong: the unpriced-model breadcrumb "fired for four unpriced models across the whole v0.12.x line and nobody saw it." Pinned by `test_silent_failure_contract.py::test_autopush_breadcrumb_degraded_when_events_tail_fails`. `last-autorun.json` is keyed per verb (`{"push": {...}, "pull": {...}}`) so the documented autopull-at-start / autopush-at-end lifecycle cannot erase a degraded push crumb.
+That stderr line is the *interactive* signal only. `_run_events_tail` runs from `mm autopush`, which fires unattended from a Claude Code hook, so its stderr reaches nobody — and pre-v0.12.16 `autopush` wrote `_write_autorun_breadcrumb("push", "success")` unconditionally, so `mm status` reported success no matter how badly the retro pipeline had degraded. **`_run_events_tail` therefore RETURNS `list[str]`** — one human-readable phrase per degradation, empty when healthy — which `_push_core` carries on `PushResult.events_degradations` and `autopush` turns into `_write_autorun_breadcrumb("push", "degraded", "; ".join(reasons))`. This mirrors the `degradations` list `autopull` has carried since v0.8.1, and it is the same argument [sync.md](sync.md#visible-failures-in-automatic-commands) makes for the `no-sources` breadcrumb: without it, `mm status` only ever sees `success` and monitoring built on top of it never catches the wedge. Conditions that populate the list: whole-tail exception, session-walk budget exceeded, token cache cold (tokens + skills omitted), root discovery time-budget expiry, a prober exception (`errors and not exceeded`), and complete discovery that found zero repositories (a prober ran). The budget phrase is fixed: `git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`; it contains no paths or raw probe errors or the `; ` separator used between breadcrumb reasons. Do not widen the exceeded gate to `bool(errors)` — the budget phrase would then be a lie. An ordinary rejected candidate stays silent. Init backfill records the equivalent discovery notice in `last-init-notices.json` for `mm status` and `mm diag`. **Any new degradation detected in the tail MUST be appended to the returned list as well as printed** — a `mm: notice:` with no corresponding entry is invisible to the only surface the user actually reads. CHANGELOG v0.12.13 records the cost of getting this wrong: the unpriced-model breadcrumb "fired for four unpriced models across the whole v0.12.x line and nobody saw it." Pinned by `test_silent_failure_contract.py::test_autopush_breadcrumb_degraded_when_events_tail_fails`. `last-autorun.json` is keyed per verb (`{"push": {...}, "pull": {...}}`) so the documented autopull-at-start / autopush-at-end lifecycle cannot erase a degraded push crumb.
 
 **Tolerant binary reads across every jsonl reader on the push path (load-bearing, v0.12.16).** `_read_cwd_from_latest_jsonl`, `_iter_mm_push_objs`, `token_usage.is_cache_cold`, and `pullhistory._yield_lines` all read BINARY and tolerate a bad line rather than a bad file. Text mode decodes in ~8 KB **chunks**, not per line, and `UnicodeDecodeError` is a `ValueError` — NOT an `OSError` — so the `except OSError` these functions carried never caught it and one invalid byte took down the entire events tail on every push. (Chunked decoding is also why a `cwd` on line 1 did not protect against a bad byte on line 2; measured, it raises at 2 lines apart and returns cleanly at 80 KB apart.) `json.loads` accepts bytes, and both malformed JSON and invalid UTF-8 surface as `ValueError`, so the guard is `except ValueError: continue` per line. Two traps:
 
@@ -2020,14 +2020,23 @@ Grok Build, Muse and Antigravity)" for remedies and the three existing deferred-
 `_accept_host_usage_snapshot` does no key-set check and `_tie_break_key`
 excludes unknown top-level fields. The field carries reader names only.
 
-**Tail appends a degradation; init prints only.** Same rule as every other
+**Tail appends a degradation. Init records no-action capture notices (Track 156A).** Same rule as every other
 tail degradation: `_run_events_tail` writes the `mm: notice:` AND appends the
 phrase to its returned list, because an unattended hook's stderr reaches
 nobody and `mm status` is the only surface the user reads. It is NOT
 rate-limited — it describes the CURRENT state, and no-op pushes never reach
 the tail at all, so a stale `success` would be the misleading outcome.
-`_run_events_backfill` has no `mm-push` row and no autorun breadcrumb, so it
-emits the notice alone.
+`_run_events_backfill` writes neither an `mm-push` row nor an autorun
+breadcrumb. During `mm init`, non-deadline host skips and capture failures
+still print. The backfill returns no-action
+budget/deadline capture notices (`_INIT_BACKFILL_BUDGET_NOTICE`,
+`_INIT_ROOT_DISCOVERY_NOTICE`, and `deadline` host-skip phrases) for
+`initflow.init` to persist via `attemptlog.write_init_notices`
+(`last-init-notices.json`, read by `mm status` and `mm diag` until an
+attended push records a capture attempt at or after that timestamp).
+`mm diag --json` reports these notices under `host_publication.init_notices`.
+After replacement, the section reports `superseded` with its completion
+timestamp and an empty notice list.
 
 **Row order.** Tail: git rows, sessions row, optional host row, `mm-push`
 LAST (CT-4 unchanged). Backfill: git, sessions, optional host, never `mm-push`.
@@ -2693,9 +2702,9 @@ with `~/.grok/sessions` would see the healthy-tail control pin in
 
 **`mm-events`-resolved gate, mirrored from `_run_events_tail`.** A user who disabled mm-events per-machine (`disabled_sources: ["mm-events"]`) gets a silent no-op — no events dir created, no rows written. Same gate covers fresh installs (mm-events auto-included via `MM_INTERNAL_SOURCE_NAMES`), un-migrated upgraders (no mm-events source in config → no-op), and explicit opt-outs uniformly.
 
-**Forensic-only on failure.** Same `try / except Exception` wrapper as `_run_events_tail`; failures emit `mm: notice: events backfill failed: <type>: <safe_str(msg)>` to stderr. Init proceeds. A budget overrun emits `mm: notice: events backfill budget exceeded` and the partial events written so far stay on disk.
+**Forensic-only on failure.** Same `try / except Exception` wrapper as `_run_events_tail`; failures emit `mm: notice: events backfill failed: <type>: <safe_str(msg)>` to stderr. Init proceeds. A budget overrun (`_INIT_BACKFILL_BUDGET_NOTICE`), root-discovery budget hit (`_INIT_ROOT_DISCOVERY_NOTICE`), or `deadline` host-usage skip is returned from `_run_events_backfill` and persisted to `last-init-notices.json` (never printed during `mm init`), while partial events written so far stay on disk; `mm status` and `mm diag` display those recorded notices until an attended push records a capture attempt at or after the init record's `completed_at`.
 
-**No init-time subcommand, no marker.** Init backfill stays automatic. `mm recapture [WINDOW]` (Track 30A) is the explicit recovery verb for already-orphaned intervals; it is a git-only primitive, not a wrapper around this backfill (backfill also force-refreshes identity and warms the host cache, and returns `None`).
+**No init-time subcommand, no marker.** Init backfill stays automatic. `mm recapture [WINDOW]` (Track 30A) is the explicit recovery verb for already-orphaned intervals; it is a git-only primitive, not a wrapper around this backfill (backfill also force-refreshes identity and warms the host cache, and returns the list of no-action notices).
 
 ## Sessions snapshot v=2 full-inventory (load-bearing, v0.11.0)
 
@@ -4015,9 +4024,11 @@ mode 0600; status/diag do not write it or create an evidence lock. Normal
 missing upgrade history requires no seeding runs. Contention/damage is unknown,
 not success; recovery never recommends deleting a live lock or blind sync retry.
 
-Projection retains all available raw evidence in diag (last_autorun,
-last_attended_runs, sync_run_projection in JSON and text). Each auto/attended
-store retains only its latest record per verb; later writes overwrite it, so
+Diag includes `last_autorun`, `last_attended_runs`, and `sync_run_projection`
+in JSON and text. With valid `last-mesh.json` evidence, both formats filter
+old removal-wait clauses from `last_autorun`, as `mm status` does. The on-disk
+hook breadcrumb and the raw `last_attended_runs` retain historical detail.
+Each auto/attended store retains only its latest record per verb. Later writes overwrite it, so
 this projection cannot recover overwritten failures. Strict later completed
 success can resolve an available earlier same-verb failure in either direction;
 a skip cannot. Routine lock-skip alone need not block a healthy local

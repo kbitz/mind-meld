@@ -311,7 +311,7 @@ and `project_index.machines` shows which other machines have switched.
 - Rollback past the switch is unsupported: an older mm refuses its own new-form manifest, and
   a regression ships as a new release.
 - Below v1.3.0 there is no `mm update`, and `pipx upgrade` leaves a tag-pinned install frozen,
-  so use `pipx install --force git+https://github.com/kbitz/mind-meld.git@latest`.
+  so use `UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest`.
 
 A two-machine recipe (Mac A updates first, then Linux B):
 
@@ -590,7 +590,7 @@ Under the hood it runs `pipx upgrade mind-meld`. Because the install tracks the 
 **Stuck on an old version?** If you ever installed or upgraded with the old `--force …@vX.Y.Z` form, your install is pinned to that exact tag — pipx re-resolves the frozen ref on every `pipx upgrade` and reports your current version as "latest" forever. A git tag never moves; a branch does. `mm update` detects the pin and, when a newer release exists, reinstalls onto the `latest` branch for you. On an mm older than v1.3.0, run this once instead:
 
 ```bash
-pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
+UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
 ```
 
 (This is exactly the command mm's upgrade nudge prints.)
@@ -622,7 +622,7 @@ with the running package's copy. If the store exists, move it aside first:
 `mm install-skills` never overwrites a newer stored skill with an older one.
 
 ```bash
-pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.14.18
+UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.14.18
 mv "$HOME/.local/share/mind-meld/agent-skills/retro-fleet" "$HOME/.local/share/mind-meld/agent-skills/retro-fleet.pre-rollback-$(date +%Y%m%d-%H%M%S)"
 mm install-skills
 ```
@@ -771,7 +771,12 @@ mm status
 ```
 
 <a id="syncthing-mesh-causes"></a>
-Syncthing mesh diagnostics appear in `mm status` and `mm diag` under the latest run evidence. An attended run prints a line when it shares the folder and a notice when you need to act. Hooks record those details silently.
+Syncthing mesh diagnostics appear in `mm status` and `mm diag`. `mm status`
+shows removal waits from the latest push, pull, or hook that evaluated removals.
+A later evaluation with no waits clears those lines. `mm diag --json` reports
+that evaluation under `syncthing.last_mesh`. An attended run prints a line
+when it shares the folder and a notice when you need to act. Hooks record
+their outcomes silently.
 
 - **`unreachable`** — local Syncthing did not answer. The next push or pull retries.
 - **`timeout`** — local Syncthing exceeded the per-request or pass deadline. The next push or pull retries.
@@ -872,7 +877,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error, so they do not block Claude Code (except for the keyring residuals noted [above](#claude-code-integration): other Linux keyring backends, macOS Keychain access dialogs, a stalled D-Bus session).
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest (including this Mac's own manifest vanishing mid-pull), unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. Autopush also records `degraded` when it holds a file that changed, vanished or grew while being read: the previous version, if any, stays published, and the detail says the file is not yet synced ([Snapshot failures](#snapshot-failures)). A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
 - Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery keeps a private local project index, and per-repository cursors resume unfinished Git walks on later attended `mm push` runs, including pushes with no user-file edits. Unchanged projects avoid rescanning their session logs. Autopush keeps its own small budgets. An attended push uses one `[retro] capture_budget_ms` (default 5,000 ms) for host capture and activity capture together, and can spend up to `[retro] attended_capture_cap_ms` (default 30,000 ms, range `capture_budget_ms`–60,000) to finish remaining host warm retries, repository discovery, Git walks and session scans before stopping. On a terminal, an attended push that runs longer than 3 seconds shows a transient progress line with the step and count that clears before the single outcome line. A host reader or Git walk stopped by its deadline or budget with items left reports `catching up (N left)` on the attended push and in `mm status`, with `N` matching `mm diag`'s `host_usage.codex.pending` (or `files_on_disk - files_cached`) and `git_capture.fresh.pending_repos`. Persistent failures (three incomplete captures), empty discovery, Git errors, or gaps beyond the 90-day retained event window advise explicit `mm recapture`. Historical degradation breadcrumbs retain their original diagnostic text. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does not mean fleet retro received a new activity event.
-- **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available. Run: pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
+- **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available. Run: UV_VENV_CLEAR=1 pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
 
 ## Codex Integration
 
@@ -1246,12 +1251,14 @@ their own per-verb record; overwritten failures are not retained. Discovery
 finding no repositories is advisory detail, not lost work. No additional history or consecutive-hold
 escalation is inferred.
 
-`mm diag --json` retains raw `last_autorun`, distinct `last_attended_runs`
-(`state`, `runs`), and `sync_run_projection`. Each projected verb has `kind`,
+`mm diag --json` reports `last_autorun`, `last_attended_runs` (`state`, `runs`),
+and `sync_run_projection`. Each projected verb has `kind`,
 `selected`, `superseded`, `unknown_reason`, `unresolved`, and `limited_coverage`.
-Plain diag prints these too. Raw autorun age still describes when hooks ran;
-an attended run's age is not “no autorun.” Supersession hides obsolete status
-rows without deleting the underlying latest records. Capture/publication
+Plain diag prints these too. When a valid mesh record exists, both forms
+filter older removal-wait clauses from `last_autorun`. The on-disk hook
+breadcrumb and the raw attended records retain their original detail. Autorun
+age describes when hooks ran. Supersession hides obsolete status rows without
+deleting the underlying latest records. Capture/publication
 evidence stays separate; only its existing `latest_attempt_superseded` proof hides an obsolete capture
 attempt from status, and diag retains it.
 
@@ -1288,7 +1295,7 @@ be recorded.
 | <a id="run-evidence-write-unavailable"></a>`run-evidence-write-unavailable` | Sync's primary result is unchanged. The stderr notice names push/pull, known content side effects and a bounded errno/code. Do not repeat sync solely to record history; restore local access/storage if needed, then run `mm diag`. |
 | <a id="run-evidence-contended"></a>`run-evidence-contended` | Read was busy and changed nothing. Retry read-only `mm status` once; if still busy, use `mm diag` and inspect local access. Never delete a live lock. |
 | <a id="run-evidence-corrupt"></a><a id="run-evidence-oversized"></a><a id="run-evidence-unreadable"></a>`run-evidence-corrupt`, `run-evidence-oversized`, `run-evidence-unreadable` | History is unknown. Use `mm diag`; no deletion or blind sync retry is prescribed. Missing history needs no repair. |
-| <a id="run-evidence-ambiguous"></a><a id="run-evidence-limited-coverage"></a>`run-evidence-ambiguous`, `run-evidence-limited-coverage` | Ordering or scope cannot prove recovery. Inspect raw evidence and the selected scope with `mm diag`. |
+| <a id="run-evidence-ambiguous"></a><a id="run-evidence-limited-coverage"></a>`run-evidence-ambiguous`, `run-evidence-limited-coverage` | Ordering or scope cannot prove recovery. Inspect run evidence and the selected scope with `mm diag`. |
 | `ok`, `no-changes` | Completed content execution; capture and publication remain independent. |
 | `setup-error`, `authentication-error`, `crypto-error`, `storage-error`, `snapshot-refused`, `command-refused`, `unexpected-error` | The callback stopped; use current diagnostics and the original fixing instruction. A bare command refusal has unknown side effects. |
 | `lock-held`, `interrupted`, `result-degraded` | No execution, interruption, or typed partial/degraded result. Inspect `mm diag` and its counts before choosing a sync retry. |
@@ -2001,7 +2008,7 @@ fix, confirm with `mm diag`, then rerun `mm autopull` / `mm autopush`.
 
 Not corruption. A peer updated and now publishes shared project names (manifest byte
 0x03), which an older mm cannot read, so it skips that whole manifest. **Delete nothing.**
-Update this machine (`mm update`; below v1.3.0 use the `pipx install --force ...@latest`
+Update this machine (`mm update`; below v1.3.0 use the `UV_VENV_CLEAR=1 pipx install --force ...@latest`
 command above), then check `mm status`. See [Upgrading](#upgrading).
 
 ### Retiring a dead machine
@@ -2051,7 +2058,7 @@ If mm reports a newer format, leave every `mm-crypto-init` copy in place and
 upgrade this Mac with:
 
 ```bash
-pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
+UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
 ```
 
 `mm diag --json` reports the detected byte as `crypto_init.newer_version`;
@@ -2630,7 +2637,7 @@ If `mm --version` does not change after `pipx upgrade`, see [Upgrading](#upgradi
 No cache migration is needed for 0.14.16. To roll back this change:
 
 ```bash
-pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.14.15
+UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.14.15
 ```
 
 That pins an older release; use the `@latest` reinstall in Upgrading to resume

@@ -94,6 +94,12 @@ CACHE_PATH = CACHE_DIR / "upgrade-state.json"
 # The `--force` reinstall both lands the latest release AND rewrites a
 # previously tag-pinned install's recorded URL onto `@latest`, after which a
 # plain `pipx upgrade mind-meld` works.
+# `pipx install --force` recreates the venv in place: pipx's default venv
+# backend (`python -m venv`) tolerates the existing directory, while its uv
+# backend (`uv venv`) refuses unless `UV_VENV_CLEAR=1` is set. Setting
+# `UV_VENV_CLEAR=1` is inert on the venv backend and older pipx, so one
+# printed command and one forced-reinstall environment work on both backends
+# without branching on `pipx_metadata.json`.
 # Tag checks list `refs/tags/*` directly from `REPO_URL` with `git ls-remote`
 # so the check uses the same git configuration, `insteadOf` rewrites, and
 # credentials as pip's clone of `INSTALL_SPEC`, with no pagination cap.
@@ -101,7 +107,7 @@ CACHE_PATH = CACHE_DIR / "upgrade-state.json"
 REPO_SPEC = "git+https://github.com/kbitz/mind-meld.git"
 REPO_URL = REPO_SPEC.removeprefix("git+")
 INSTALL_SPEC = f"{REPO_SPEC}@latest"
-INSTALL_CMD = f"pipx install --force {INSTALL_SPEC}"
+INSTALL_CMD = f"UV_VENV_CLEAR=1 pipx install --force {INSTALL_SPEC}"
 
 DEFAULT_THROTTLE = timedelta(hours=24)
 DEFAULT_NUDGE_GAP = timedelta(hours=24)
@@ -1094,7 +1100,7 @@ def reinstall_cmd(install: InstallInfo) -> str:
     if install.suffix:
         argv.append(f"--suffix={install.suffix}")
     home = shlex.quote(str(_install_prefix().parent.parent))
-    return f"PIPX_HOME={home} {shlex.join(argv)}"
+    return f"UV_VENV_CLEAR=1 PIPX_HOME={home} {shlex.join(argv)}"
 
 
 # ── Self-update: running pipx ─────────────────────────────────────────────
@@ -1438,6 +1444,7 @@ def _pipx_environment(argv: list[str]) -> dict[str, str]:
         install = detect_install()
         if install.kind != "pinned":
             raise OSError("the install changed before reinstall; retry mm update")
+        env["UV_VENV_CLEAR"] = "1"
         # pipx force-exposes apps too. A different home/bin selection must
         # never redirect a sibling install's executable to this venv.
         bin_dir = Path(env.get("PIPX_BIN_DIR") or Path.home() / ".local" / "bin").expanduser()

@@ -2217,6 +2217,23 @@ JSON <=16 KiB, <=8 details of <=384 chars. No raw exceptions, credentials,
 absolute user paths or host logs are retained. Missing custom mm-events paths
 normalize to their source label. Unknown/unsafe detail is omitted truthfully.
 See README's run-evidence table and events-retro.md for causes and counter units.
+`attemptlog` also owns private local `last-mesh.json` (`mesh_waits_path`,
+`write_mesh_waits`, `read_mesh_waits`), written at the end of `meshflow.run`
+from every `push`, `pull`, `autopush` and `autopull` only when
+`MeshResult.removals_evaluated` is true (the mesh snapshot succeeded, the fleet
+folder is valid, and retirement-record listing succeeded; an unevaluated pass
+writes nothing so a stopped run never clears a standing wait). Its only readers
+are `mm status` and the `mm diag` state dict (`syncthing.last_mesh`). Wait
+lines (`Syncthing device removals wait for ...`) are rendered from
+`last-mesh.json` after the attended/auto run block (and omitted from new
+attended-run `degradations` and autorun breadcrumb text). A hook with only
+removal waits still records a `degraded` breadcrumb. It sets `removal_wait_only`
+after a successful record write. When the record is valid,
+`attemptlog.project_runs` keeps the wait out of the status verdict while
+retaining the recorded outcome. The inspection projection also uses the valid
+record to hide earlier wait clauses in hook breadcrumbs
+and attended status lines. It keeps any other diagnostics and leaves the
+underlying records intact.
 
 Use `locked_json_rmw(retry_intervals=(), on_contention="raise", mode=0o600)`;
 check is_locked and write_error. Capture completion once before locking. A delayed

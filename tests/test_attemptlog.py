@@ -816,3 +816,115 @@ def test_mesh_vocabulary_retained_and_path_free():
     bad_retained, bad_omitted = attemptlog.run_details(bad_details)
     assert bad_retained == []
     assert bad_omitted == len(bad_details)
+
+
+def test_mesh_waits_roundtrip_newest_wins_and_rejects_unsafe_or_non_wait_details(tmp_path):
+    assert attemptlog.read_mesh_waits() == {
+        "state": "missing",
+        "completed_at": None,
+        "waits": [],
+        "omitted_details": 0,
+    }
+    wait_a = (
+        "Syncthing device removals wait for cachyos (dev-c) to publish "
+        "its Syncthing ID; run 'mm update' and 'mm push' on cachyos"
+    )
+    wait_b = (
+        "Syncthing device removals wait for superseded registration "
+        "linux-b (old11111). Run: mm devices retire old11111"
+    )
+    t_old = "2026-11-20T10:00:00+00:00"
+    t_new = "2026-11-20T11:00:00+00:00"
+
+    attemptlog.write_mesh_waits(
+        [
+            wait_a,
+            "Syncthing device removals wait for /Users/user/secret",
+            "Syncthing mesh step stopped (unauthorized). Run: mm diag",
+            wait_b,
+        ],
+        completed_at=t_new,
+    )
+    read_new = attemptlog.read_mesh_waits()
+    assert read_new == {
+        "state": "valid",
+        "completed_at": t_new,
+        "waits": [wait_a, wait_b],
+        "omitted_details": 2,
+    }
+
+    # Older completion never overwrites newer completion
+    attemptlog.write_mesh_waits([], completed_at=t_old)
+    assert attemptlog.read_mesh_waits() == read_new
+
+    # Newer completion clears the waits
+    t_latest = "2026-11-20T12:00:00+00:00"
+    attemptlog.write_mesh_waits([], completed_at=t_latest)
+    assert attemptlog.read_mesh_waits() == {
+        "state": "valid",
+        "completed_at": t_latest,
+        "waits": [],
+        "omitted_details": 0,
+    }
+
+
+def test_init_notices_roundtrip_newest_wins_and_normalizes_closed_vocabulary():
+    from mind_meld import events_tail
+
+    assert attemptlog.read_init_notices() == {
+        "state": "missing",
+        "completed_at": None,
+        "notices": [],
+        "omitted_details": 0,
+    }
+    deadline_phrase = events_tail._host_skip_phrase(
+        "codex", "deadline", verb="init", readiness="ready", attended=True
+    )
+    t_old = "2026-11-20T09:00:00+00:00"
+    t_new = "2026-11-20T10:00:00+00:00"
+    attemptlog.write_init_notices(
+        [
+            events_tail._INIT_BACKFILL_BUDGET_NOTICE,
+            events_tail._INIT_ROOT_DISCOVERY_NOTICE,
+            deadline_phrase,
+            "events backfill failed: RuntimeError: /Users/user/secret",
+        ],
+        completed_at=t_new,
+    )
+    read_new = attemptlog.read_init_notices()
+    expected_deadline = deadline_phrase.replace(
+        events_tail.HOST_USAGE_CAPTURE_URL, "mm diag"
+    ).replace("git/session", "git and session")
+    assert read_new == {
+        "state": "valid",
+        "completed_at": t_new,
+        "notices": [
+            events_tail._INIT_BACKFILL_BUDGET_NOTICE,
+            events_tail._INIT_ROOT_DISCOVERY_NOTICE,
+            expected_deadline,
+        ],
+        "omitted_details": 1,
+    }
+    assert all("/" not in item and "~" not in item for item in read_new["notices"])
+
+    # Older completion never overwrites newer completion
+    attemptlog.write_init_notices([], completed_at=t_old)
+    assert attemptlog.read_init_notices() == read_new
+
+
+def test_init_notices_reader_requires_a_closed_host_phrase():
+    attemptlog.init_notices_path().write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "completed_at": "2026-11-20T10:00:00+00:00",
+                "notices": [
+                    "host-usage snapshot skipped (codex deadline) — "
+                    "content sync and git and session capture unaffected. Unrecognized advice."
+                ],
+                "omitted_details": 0,
+            }
+        )
+    )
+
+    assert attemptlog.read_init_notices()["state"] == "corrupt"
