@@ -3,10 +3,10 @@
 Status: designed on 2026-11-21 from the developer's decisions of 2026-11-20
 and 2026-11-21. This is [docs/SPEC.md](../SPEC.md) O9, planned now and a
 condition of 2.0.0, with its own MINOR checkpoint for a 1.x release that
-lands it first. Qualified on 2026-11-21 on `linux-a`
-([qualification](#qualification)): Q1 and Q2 passed on the first run and Q3
-kept the default Codex copy set; Tracks 157A, 159A and 160A may start. This
-design replaces the 2026-10-29
+lands it first. On 2026-11-21, Q1 and Q2 passed on `linux-a` and Q3 kept the
+default Codex copy set ([qualification](#qualification)). This clears the
+qualification prerequisite for Tracks 157A, 159A and 160A. The Tracks still
+follow their roadmap dependency order. This design replaces the 2026-10-29
 design ([archived](../archive/cross-model-memory-2026-10-29.md)), which
 carried only Codex memory and pointed agents at grep. The developer rejected
 it: "o9 - why just codex? current design seems like we should throw out and
@@ -49,7 +49,7 @@ Verified on 2026-11-20 on `linux-a` (Arch, mm 1.12.73), unless noted.
 | Claude Code | `~/.claude/projects/<project>/memory/*.md` (344 files on `linux-a`) | Yes, per project by git remote since 1.12.0 |
 | Grok Build | `~/.grok/memory-v2/global/topics/` and `~/.grok/memory-v2/workspaces/<scope>/topics/` (28 topic files). `MEMORY.md` and the SQLite files stay local | Yes, topics only (`manifest.GROK_MEMORY_ROOT`) |
 | Muse | `memory/` under the Muse source root, by default `~/.local/share/muse` (`config.DEFAULT_MUSE_DIR`). None on `linux-a` | Yes, when enabled |
-| Codex | Under `CODEX_HOME/memories/`, written only when the `memories` feature is on. codex-cli 0.171.0 lists it as `memories stable false`, so it is off by default, and it is off on `linux-a`. With codex-cli 0.164.0 on `mac-a` (2026-10-29), the folder held `memory_summary.md`, `MEMORY.md` (in `# Task Group: <project> <task>` sections), `raw_memories.md`, `rollout_summaries/`, `extensions/` and a `.git` that Codex commits to itself. Codex regenerates `MEMORY.md` and `memory_summary.md` wholesale. It also keeps `memories_1.sqlite` (consolidation jobs) | No |
+| Codex | Codex CLI 0.171.0 lists `memories stable false`. The feature is off by default and off on `linux-a` outside the qualification. With it enabled, [Q3](#qualification) observed `CODEX_HOME/memories_v2/`. Codex CLI 0.164.0 on `mac-a` (2026-10-29) used `CODEX_HOME/memories/` and regenerated `MEMORY.md` and `memory_summary.md` wholesale. That older folder also held `raw_memories.md`, `rollout_summaries/`, `extensions/` and a `.git` that Codex commits to itself. `MEMORY.md` used `# Task Group: <project> <task>` sections. Codex kept consolidation jobs in `memories_1.sqlite`. | No |
 | Antigravity | No memory store, only rules and skills | Not applicable |
 
 qmd 2.8.3 is the npm package `@tobilu/qmd`. It needs Node 22 or newer and
@@ -91,13 +91,16 @@ Each machine regenerates its own Codex memory, so syncing those files as
 shared files would conflict on every pull. Instead, a new `codex-memory`
 source works like this:
 
-- At push, mm reads this machine's Codex memory files from
-  `CODEX_HOME/memories/` without changing them, and publishes them as this
-  machine's files. The default file set is `memory_summary.md`, `MEMORY.md`
-  and `rollout_summaries/*.md`. Codex's `.git`, its SQLite files and anything
-  else outside that set never sync. Q3 kept this default set on 2026-11-21
-  ([qualification](#qualification)); codex-cli 0.171.0 also initializes
-  `CODEX_HOME/memories_v2/` with the same layout.
+- At push, mm reads this machine's active Codex memory directory without
+  changing it, and publishes the files under this machine's device ID. Q3
+  kept the default file set of `memory_summary.md`, `MEMORY.md` and
+  `rollout_summaries/*.md` ([qualification](#qualification)). Codex's `.git`,
+  its SQLite files and anything else outside that set stay local.
+- Track 157A resolves the active directory for the installed Codex version,
+  including when both `memories/` and `memories_v2/` exist. Q3 observed only
+  `memories_v2/` on a fresh 0.171.0 home. It did not exercise an upgrade
+  with both directories. Source detection, publishing and the local qmd
+  collection use the same resolved directory.
 - At pull, mm places each peer's files under
   `~/.local/share/mind-meld/codex-memory/<device id>/`. That folder is mm's,
   outside every native store.
@@ -108,7 +111,7 @@ source works like this:
 - Copies from a machine that leaves the fleet (`mm devices retire`) leave
   every peer.
 - mm never writes into `CODEX_HOME`.
-- `mm init` offers the source when `CODEX_HOME/memories/` exists, with Enter
+- `mm init` offers the source when the resolved directory exists, with Enter
   = yes, as for other detected sources. `mm enable-source codex-memory`
   enables it later.
 - A machine with Codex memories off publishes nothing. Its agents still find
@@ -123,7 +126,7 @@ When the memory index is on, mm keeps qmd collections in qmd's default index:
 | `mm-claude` | `~/.claude/projects` | `*/memory/**/*.md` |
 | `mm-grok` | `~/.grok/memory-v2` | `**/topics/**/*.md` |
 | `mm-muse` | `<Muse root>/memory` | `**/*.md` |
-| `mm-codex-<this machine's name>` | `CODEX_HOME/memories` | the Q3 file set (default set kept: `memory_summary.md`, `MEMORY.md`, `rollout_summaries/*.md`) |
+| `mm-codex-<this machine's name>` | The active Codex memory directory from section 2 | `memory_summary.md`, `MEMORY.md`, `rollout_summaries/*.md` |
 | `mm-codex-<peer name>` | `~/.local/share/mind-meld/codex-memory/<peer id>` | `**/*.md` |
 
 - A collection exists only for an enabled source whose folder exists.
@@ -345,27 +348,29 @@ qmd collection add "$ROOT/home/.local/share/mind-meld/codex-memory/mac-a-0000000
 qmd update
 ```
 
-Control searches from the harness returned
-`qmd://mm-claude/-home-user-ledger/memory/export.md:2 #be9616` for
-`"ledger nightly export"`,
-`qmd://mm-codex-mac-a/MEMORY.md:1 #8aa6a7` for `"ledger fixtures"`, and both
-`qmd://mm-claude/-home-user-ledger/memory/db.md:2 #627ce9` and
-`qmd://mm-codex-mac-a/MEMORY.md:5 #cea051` for `"ledger database"` and
-`"ledger"`.
+Control searches from the harness found
+`qmd://mm-claude/-home-user-ledger/memory/export.md` for
+`"ledger nightly export"`, `qmd://mm-codex-mac-a/MEMORY.md` for
+`"ledger fixtures"`, and both `qmd://mm-claude/-home-user-ledger/memory/db.md`
+and `qmd://mm-codex-mac-a/MEMORY.md` for `"ledger database"` and `"ledger"`.
 
 #### Q1 and Q2 sessions
 
+The final pointer line below was the sole content of
+`$ROOT/home/.codex/AGENTS.md` and `$ROOT/home/.claude/CLAUDE.md`.
+
 Codex sessions ran via
 `codex exec --skip-git-repo-check -C "$ROOT/work" --json -o <file> -s workspace-write --add-dir "$ROOT/home/.cache/qmd"`
-(note for Track 160A: `qmd search` and `qmd get` succeeded inside
-`workspace-write` with `--add-dir` for the qmd cache folder). Claude Code
-sessions ran in `$ROOT/work` via
+(on `linux-a`, `qmd search` and `qmd get` succeeded with that cache grant).
+For Track 160A, this evidence covers the granted-cache configuration on
+Linux. Claude Code sessions ran in `$ROOT/work` via
 `claude -p --output-format stream-json --verbose --no-session-persistence --allowedTools "Bash(qmd *)" "Bash(qmd:*)" -- <prompt>`
 (an initial CLI invocation without `--` before the prompt exited immediately
 with a flag-parsing error before starting a session, because `--allowedTools`
-is variadic). Neither agent ran `qmd query`, `qmd vsearch`, or `qmd embed`,
-and transcript scans showed no file access outside `$ROOT` other than
-`/usr/bin/bash` and `/dev/null`.
+is variadic). The allow rule preapproved the matching Bash calls. The
+recorded commands also include directory and file checks inside `$ROOT`.
+The transcripts showed no tool call accessing the owner's stores and no
+`qmd query`, `qmd vsearch`, or `qmd embed` calls.
 
 | Session | Prompt | Commands run (from transcript) | Answer excerpt | Verdict |
 |---|---|---|---|---|
@@ -394,11 +399,15 @@ at commit `d04dc37 Initialize Codex git baseline`), `memories_1.sqlite`,
 `memories_v2_1.sqlite` (with one completed `memory_consolidate_global` job and
 `0` rows in `stage1_outputs`), and `memories_v2.lock`; no `CODEX_HOME/memories/`
 directory was created. `git -C memories_v2 log --oneline` remained at
-`d04dc37 Initialize Codex git baseline` after S1 through S4:
+`d04dc37 Initialize Codex git baseline` after S1 through S4. The table
+summarizes selected paths from the full snapshots. A change is classified
+as appended when the prior bytes are a prefix of the new bytes. Other byte
+changes say nothing about whether Codex replaced the file or edited it in
+place.
 
 | Path under `CODEX_HOME` | S0 → S1 | S1 → S2 | S2 → S3 | S3 → S4 |
 |---|---|---|---|---|
-| `auth.json` | unchanged (name only) | unchanged (name only) | unchanged (name only) | unchanged (name only) |
+| `auth.json` | present (name only) | present (name only) | present (name only) | present (name only) |
 | `memories_1.sqlite` | new (45056 B, `62a1452a`) | unchanged | unchanged | unchanged |
 | `memories_v2_1.sqlite` | new (45056 B, `23024163`) | unchanged | unchanged | unchanged |
 | `memories_v2.lock` | new (0 B, `e3b0c442`) | unchanged | unchanged | unchanged |
@@ -410,17 +419,18 @@ directory was created. `git -C memories_v2 log --oneline` remained at
 | `history.jsonl` | — | — | new (366 B, `d1b0dbfa`) | appended (536 B, `4588a2e4`) |
 | `session_index.jsonl` | — | — | new (135 B, `c28e0f97`) | appended (277 B, `58f81059`) |
 | `sessions/2026/11/21/rollout-*.jsonl` (1 per session) | S1 new (154456 B, `f4f9e8bc`) | S2 new (141393 B, `98567fd6`) | S3 new (149766 B, `39dd9395`) | S4 new (140260 B, `82889027`) |
-| `models_cache.json` | new (604152 B, `307bffc5`) | regenerated wholesale (`399d9d98`) | regenerated wholesale (`5ad5d9e2`) | regenerated wholesale (`765e0957`) |
-| `state_5.sqlite` | new (307200 B, `2ee7bb81`) | regenerated wholesale (`006ef6b5`) | unchanged (WAL active) | regenerated wholesale (315392 B, `03d52580`) |
-| `thread_history_1.sqlite` | new (118784 B, `86f93e8e`) | regenerated wholesale (122880 B, `80da121f`) | regenerated wholesale (126976 B, `fffd3fc7`) | regenerated wholesale (131072 B, `f4a3db8e`) |
-| `logs_2.sqlite` | new (49152 B, `b5dcf171`) | unchanged | unchanged (WAL active) | regenerated wholesale (503808 B, `6923e2e4`) |
+| `models_cache.json` | new (604152 B, `307bffc5`) | non-append change (`399d9d98`) | non-append change (`5ad5d9e2`) | non-append change (`765e0957`) |
+| `state_5.sqlite` | new (307200 B, `2ee7bb81`) | non-append change (`006ef6b5`) | main file unchanged (WAL active) | non-append change (315392 B, `03d52580`) |
+| `thread_history_1.sqlite` | new (118784 B, `86f93e8e`) | non-append change (122880 B, `80da121f`) | non-append change (126976 B, `fffd3fc7`) | non-append change (131072 B, `f4a3db8e`) |
+| `logs_2.sqlite` | new (49152 B, `b5dcf171`) | unchanged | main file unchanged (WAL active) | non-append change (503808 B, `6923e2e4`) |
+| SQLite `-wal` and `-shm` sidecars | — | — | new for state, logs and both memory databases | changed for state and logs, removed for both memory databases |
 
-Because Codex extracted no rollout into `stage1_outputs` and wrote no new
-memory markdown within the four-session budget, the default copy set
-(`memory_summary.md`, `MEMORY.md`, `rollout_summaries/*.md`) is kept, excluding
-`.git`, `.codex-baseline`, SQLite databases, lockfiles, `raw_memories.md`, and
-static `extensions/ad_hoc/instructions.md` boilerplate. Track 157A should
-note that `codex-cli 0.171.0` initialized `CODEX_HOME/memories_v2/` on disk.
+Codex left `stage1_outputs` empty and its bootstrap `memory_summary.md`
+unchanged after S1. The four sessions produced no consolidated memory from
+the seeded facts or observed markdown regeneration. Q3 kept the default
+copy set of `memory_summary.md`, `MEMORY.md` and `rollout_summaries/*.md`.
+`.git`, `.codex-baseline`, SQLite databases, lockfiles, `raw_memories.md`
+and static `extensions/ad_hoc/instructions.md` stay local.
 
 #### Final pointer line and outcome
 
@@ -432,7 +442,11 @@ Final pointer line (settled without revision):
 > the owner each one with its path and ask which is right; never pick one
 > silently.
 
-All credential files inside `$ROOT` and `$ROOT` itself were deleted after the
-runs; raw transcripts and snapshots are kept off the repository on `linux-a`.
-**Outcome:** Q1 and Q2 passed and Q3 kept the default copy set. Tracks 157A,
-159A and 160A may start.
+All credential files inside `$ROOT` and `$ROOT` itself were deleted after
+the runs. The retained transcripts and snapshot metadata were screened for
+credentials and kept outside the repository on `linux-a`. The provider
+sessions can remain valid after local deletion. The owner can revoke them
+in the provider account settings.
+
+**Outcome:** Q1 and Q2 passed and Q3 kept the default copy set. The
+qualification prerequisite for Tracks 157A, 159A and 160A is met.
