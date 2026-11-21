@@ -2337,7 +2337,9 @@ places peers' copies under `config.CODEX_MEMORY_COPIES_DIR`
   and `codex-memory` at mode `0700`. Apply, deletion, retirement and conflict
   discovery refuse linked directories below the home directory. An absent or
   refused copies root does not pause deletion propagation in other sources.
-  An unusable root fails this source's incoming files with a warning. No source walks
+  An unusable root fails this source's incoming files with a warning. A publisher's
+  ID must match any existing directory's name exactly, including on a case-insensitive
+  volume. No source walks
   `codex-memory/` on push (`mm-events` lists only `events/`).
   `resolveflow._synced_scan_dirs` returns the copies root (never `~/.codex`) so
   `mm conflicts` and `mm resolve` find conflict sidecars created if a copy is

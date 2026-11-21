@@ -1990,7 +1990,7 @@ def _deletion_candidates(
     taken: set[tuple[str, str]] = set()
     taken_paths: set[tuple[tuple[int, int], str]] = set()
     source_roots: dict[tuple[int, int], list[str]] = {}
-    codex_copies_available = False
+    codex_peer_dirs: set[str] = set()
     for name, info in local_sources_map.items():
         if name not in MM_INTERNAL_SOURCE_NAMES:
             try:
@@ -1998,9 +1998,9 @@ def _deletion_candidates(
                     if _config_module.codex_memory_copy_dirs_missing(info["path"]):
                         continue
                     root = info["path"].lstat()
-                    codex_copies_available = stat.S_ISDIR(root.st_mode)
-                    if not codex_copies_available:
+                    if not stat.S_ISDIR(root.st_mode):
                         continue
+                    codex_peer_dirs = {p.name for p in info["path"].iterdir()}
                 else:
                     root = info["path"].stat()
             except (OSError, RuntimeError):
@@ -2055,7 +2055,7 @@ def _deletion_candidates(
             if (
                 src_name not in local_sources_map
                 or src_name in MM_INTERNAL_SOURCE_NAMES
-                or (src_name == manifest.CODEX_MEMORY_SOURCE_NAME and not codex_copies_available)
+                or (src_name == manifest.CODEX_MEMORY_SOURCE_NAME and did not in codex_peer_dirs)
                 or (source_filter and src_name != source_filter)
                 or (did, src_name) in blocked
                 or (src_name, rel_path) in taken
@@ -2175,6 +2175,27 @@ def _remove_copy_dirs(created: list[Path]) -> None:
         fsutil.refuse_real_state_write_under_pytest(directory)
         with suppress(OSError):
             directory.rmdir()
+
+
+def _gc_pull_recovery_copies() -> int:
+    """Reap expired recovery copies and report maintenance failures."""
+    try:
+        cleanup = retention._gc_deleted_copies(False, False, quiet=True)
+    except Exception as exc:
+        core._print_apply_warning(
+            "mm: warning: recovery cleanup failed under "
+            f"{safety.safe_terminal_str(statedb.deleted_copies_dir())}: "
+            f"{safety.safe_terminal_str(exc)}. Check folder access, then run mm gc."
+        )
+        return 1
+    if cleanup.failed:
+        core._print_apply_warning(
+            f"mm: warning: recovery cleanup failed for {cleanup.failed} "
+            "operation(s) under "
+            f"{safety.safe_terminal_str(statedb.deleted_copies_dir())}. "
+            "Expired folders may be partly removed. Check folder access, then run mm gc."
+        )
+    return cleanup.failed
 
 
 class _UnlinkFailed(OSError):
@@ -2827,7 +2848,7 @@ def _plan_pull(
             copies_unavailable = False
             if src_name == manifest.CODEX_MEMORY_SOURCE_NAME and src_data.get("files"):
                 try:
-                    _config_module.codex_memory_copy_dirs_missing(base_path)
+                    _check_codex_memory_peer_dir(base_path, did)
                 except OSError:
                     copies_unavailable = True
             for path, info in src_data.get("files", {}).items():
@@ -3017,7 +3038,7 @@ def _pull_one_source(
 
     if src_type == "codex-memory":
         try:
-            _config_module.codex_memory_copy_dirs_missing(base_path)
+            _check_codex_memory_peer_dir(base_path, did)
         except OSError as e:
             core._print_apply_warning(
                 f"mm: warning: {safety.safe_terminal_str(_codex_copies_error(e))}"
@@ -3035,6 +3056,10 @@ def _pull_one_source(
         local_files: dict[str, dict] = {}
         for rel_path in remote_files:
             local_path = base_path / rel_path
+            if src_type == "codex-memory" and manifest.path_has_descendant_symlink(
+                local_path, base_path
+            ):
+                continue  # The apply boundary records the preserved link.
             try:
                 if local_path.exists():
                     sha = hash_file(local_path)
@@ -3278,6 +3303,19 @@ def _codex_copies_error(exc: OSError) -> SnapshotError:
             next_action="Restore a writable, real Codex memory copies directory, then run mm pull.",
         )
     )
+
+
+def _check_codex_memory_peer_dir(copies_root: Path, publisher_id: str) -> None:
+    """Refuse a copies path already owned by a differently spelled ID."""
+    if _config_module.codex_memory_copy_dirs_missing(copies_root):
+        return
+    peer_dir = copies_root / publisher_id
+    try:
+        peer_dir.lstat()
+    except FileNotFoundError:
+        return
+    if not any(path.name == publisher_id for path in copies_root.iterdir()):
+        raise FileExistsError(errno.EEXIST, "publisher ID aliases another copy", str(peer_dir))
 
 
 def _ensure_codex_memory_copies_dir(
@@ -4142,11 +4180,15 @@ def _pull_core(
             retired_names: list[str] = []
             retired_folder: str | None = None
             retired_fsync_warnings: list[_FsyncWarning] = []
+            recovery_cleanup_failures = 0
             if (
                 not dry_run
                 and "codex-memory" in local_sources_map
                 and (source_filter is None or source_filter == "codex-memory")
             ):
+                # The last peer can retire, leaving nobody to pull from. The
+                # recovery folders still expire on later Codex memory pulls.
+                recovery_cleanup_failures = _gc_pull_recovery_copies()
                 retired_touched: set[Path] = set()
                 retired_removed, retired_names, retired_folder = (
                     _remove_retired_codex_memory_copies(
@@ -4182,6 +4224,7 @@ def _pull_core(
                 no_sources=not pull_resolution.selected,
                 elapsed=time.time() - start,
                 durability_fsync_failures=len(retired_fsync_warnings),
+                maintenance_failures=recovery_cleanup_failures,
                 waiting=_waiting_peers([], [], vanished_entries),
                 retired_copies_removed=retired_removed,
                 retired_copies_names=retired_names,
@@ -4633,25 +4676,7 @@ def _pull_core(
 
             if not dry_run:
                 # Hooks never run `mm gc`; copies only grow when a pull deletes.
-                try:
-                    cleanup = retention._gc_deleted_copies(False, False, quiet=True)
-                    maintenance_failures += cleanup.failed
-                except Exception as exc:
-                    maintenance_failures += 1
-                    core._print_apply_warning(
-                        "mm: warning: recovery cleanup failed under "
-                        f"{safety.safe_terminal_str(statedb.deleted_copies_dir())}: "
-                        f"{safety.safe_terminal_str(exc)}. Check folder access, then run mm gc."
-                    )
-                else:
-                    if cleanup.failed:
-                        core._print_apply_warning(
-                            f"mm: warning: recovery cleanup failed for {cleanup.failed} "
-                            "operation(s) under "
-                            f"{safety.safe_terminal_str(statedb.deleted_copies_dir())}. "
-                            "Expired folders may be partly removed. Check folder access, "
-                            "then run mm gc."
-                        )
+                maintenance_failures += _gc_pull_recovery_copies()
                 blocked = {
                     (r.device_id, r.src_name)
                     for r in per_source_results

@@ -2085,16 +2085,21 @@ def _home_relative_path(path: Path) -> str:
 
 def _resolve_all_configured_sources(config: dict) -> list[dict[str, Any]]:
     """Return the resolution-time view of configured sources, BYPASSING the
-    [sync].disabled_sources filter (path-existence filter still applies).
+    [sync].disabled_sources filter. Include receive-only Codex memory.
 
     Used by `mm sources` so the table can show disabled rows alongside
-    active ones with an Enabled column. Mutating-via-copy preserves
-    `get_sources()` as the only authoritative resolver.
+    active ones with an Enabled column. Resolve the same source configuration
+    while treating its missing Codex home as an empty local publication.
     """
     sync = dict(config.get("sync", {}) or {})
     sync["disabled_sources"] = []
     config_no_disable = {**config, "sync": sync}
-    return get_sources(config_no_disable)
+    resolution = _config_module.resolve_sources(config_no_disable)
+    return [
+        src
+        for src in resolution.selected
+        if src in resolution.available or src["name"] == manifest.CODEX_MEMORY_SOURCE_NAME
+    ]
 
 
 def _both_streams_are_terminals() -> bool:

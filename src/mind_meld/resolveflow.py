@@ -124,11 +124,11 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
     if src_type == "codex-memory":
         copies_root = Path(_config_module.CODEX_MEMORY_COPIES_DIR).expanduser().absolute()
         try:
-            return (
-                [] if _config_module.codex_memory_copy_dirs_missing(copies_root) else [copies_root]
-            )
+            if not _config_module.codex_memory_copy_dirs_missing(copies_root):
+                return [copies_root.resolve()]
         except OSError:
-            return []
+            pass
+        return []
     # generic: include_dirs (resolved) + base for single-file includes
     dirs = []
     for d in src_cfg.get("include_dirs", []):
@@ -1275,7 +1275,11 @@ def _resolve_interactive_loop(
             # surface (an include_files source matches only exact configured
             # names -- a from-/local- name will never be one of them).
             src_cfg = sources_by_name.get(src_name)
-            if src_cfg is not None and not _promote_target_will_sync(src_cfg, promoted_target):
+            if src_name == manifest.CODEX_MEMORY_SOURCE_NAME:
+                core._notice(
+                    f"{safe_terminal_str(promoted_target.name)} stays local to this machine."
+                )
+            elif src_cfg is not None and not _promote_target_will_sync(src_cfg, promoted_target):
                 core._warning(
                     f"{promoted_target.name} is under an include_files source and will not "
                     "sync until you add it to config."

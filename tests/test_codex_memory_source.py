@@ -37,7 +37,7 @@ from mind_meld import (
 )
 from mind_meld.errors import ConfigError, ManifestError, SnapshotError, StorageError
 from mind_meld.storage import keys as storage_keys
-from mind_meld.storage.local import LocalBackend
+from mind_meld.storage import local as local_storage
 
 PASSPHRASE = "codex-memory-test-passphrase"
 MEMORY_KB = 8192
@@ -60,7 +60,7 @@ def _snapshot_tree(root: Path) -> dict[str, tuple[bytes, int]]:
     return out
 
 
-def _decrypt_raw_manifest(backend: LocalBackend, device_id: str) -> dict:
+def _decrypt_raw_manifest(backend: local_storage.LocalBackend, device_id: str) -> dict:
     """Decrypt a stored manifest without running ``codex_memory_from_wire``."""
     raw = backend.get(storage_keys.manifest_key(device_id))
     plaintext = crypto.decrypt_manifest(raw, PASSPHRASE, MEMORY_KB)
@@ -83,7 +83,7 @@ class _MultiDeviceCodexMemoryEnv:
         self.tmp_path = tmp_path
         self.monkeypatch = monkeypatch
         self.storage_dir = tmp_path / "storage"
-        self.backend = LocalBackend(self.storage_dir)
+        self.backend = local_storage.LocalBackend(self.storage_dir)
         boot = crypto.bootstrap_crypto_init(self.backend, PASSPHRASE, MEMORY_KB)
         crypto.set_crypto_session(boot.root_salt, MEMORY_KB)
 
@@ -497,6 +497,43 @@ class TestCodexMemoryPublication:
         assert f"codex-memory:{DEV_B}/MEMORY.md" not in wire["tombstones"]
         assert f"codex-memory:{DEV_A}/rollout_summaries/old.md" in wire["tombstones"]
 
+    def test_peer_recovery_publishes_only_usable_records(self, tmp_path, monkeypatch):
+        # Value: protects=peer recovery publication; fails_when=foreign records
+        # are republished or block a viable recovery; why_new=codec tests alone
+        # miss the recovery path; seam=none; no_claim=live fleet transport.
+        env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch)
+        origin, peer = env.devices[DEV_A], env.devices[DEV_B]
+        origin_mem = origin.codex / "memories_v2"
+        origin_mem.mkdir()
+        (origin_mem / "MEMORY.md").write_text("own memory\n")
+        peer_mem = peer.codex / "memories_v2"
+        peer_mem.mkdir()
+        peer_summary = peer_mem / "memory_summary.md"
+        peer_summary.write_text("peer memory\n")
+        note = peer.home / "note.md"
+        note.write_text("notes\n")
+        peer.cfg["sync"]["sources"].append(
+            {
+                "name": "notes",
+                "type": "generic",
+                "path": str(peer.home),
+                "include_files": ["note.md"],
+            }
+        )
+        env.push(DEV_B)
+        peer_summary.unlink()
+        note.unlink()
+        env.push(DEV_B)
+        raw_peer = _decrypt_raw_manifest(env.backend, DEV_B)
+        assert f"codex-memory:{DEV_B}/memory_summary.md" in raw_peer["tombstones"]
+        assert "notes:note.md" in raw_peer["tombstones"]
+
+        env.backend.put(storage_keys.manifest_key(DEV_A), b"unreadable")
+        env.push(DEV_A)
+        raw_origin = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert f"{DEV_A}/MEMORY.md" in raw_origin["sources"]["codex-memory"]["files"]
+        assert set(raw_origin["tombstones"]) == {"notes:note.md"}
+
 
 # ── T4: Pull, confinement, mode 0700, retirement, conflicts, mm-events ─
 
@@ -565,6 +602,9 @@ class TestCodexMemoryPullAndConfinement:
         assert (dev_b.copies_dir / DEV_A / "memory_summary.md").read_text() == "summary A\n"
         assert not dev_b.codex.exists()
         monkeypatch.setattr(statusflow, "_syncthing_status_lines", lambda *a, **k: [])
+        sources = runner.invoke(cli.app, ["sources"], env={"COLUMNS": "180"})
+        assert sources.exit_code == 0, sources.output
+        assert "codex-memory" in sources.output
         status = runner.invoke(cli.app, ["status", "--source", "codex-memory"])
         assert status.exit_code == 0, status.output
         assert "Source 'codex-memory'" in status.output
@@ -749,6 +789,30 @@ class TestCodexMemoryPullAndConfinement:
         env.push(DEV_C)
         assert env.pull(DEV_B).retired_copies_removed == 0
         assert (dev_b.copies_dir / DEV_C / "MEMORY.md").read_text() == "C after rejoining\n"
+
+    def test_last_retired_peer_copies_expire_after_recovery(self, tmp_path, monkeypatch):
+        env = _MultiDeviceCodexMemoryEnv(
+            tmp_path, monkeypatch, ((DEV_A, "Mac A"), (DEV_B, "Linux B"))
+        )
+        a, b = env.devices[DEV_A], env.devices[DEV_B]
+        active = a.codex / "memories_v2"
+        active.mkdir()
+        (active / "MEMORY.md").write_text("last peer memory\n")
+        env.push(DEV_A)
+        env.pull(DEV_B)
+        devicesflow.retire(DEV_A, yes=True)
+
+        retired = env.pull(DEV_B)
+        assert retired.retired_copies_removed == 1
+        assert not (b.copies_dir / DEV_A).exists()
+        recovery = Path(retired.retired_copies_folder)
+        assert (recovery / "codex-memory" / DEV_A / "MEMORY.md").read_text() == "last peer memory\n"
+        expired = recovery.with_name("20000101-000000-abcd")
+        recovery.rename(expired)
+        env.pull(DEV_B, dry_run=True)
+        assert expired.exists()
+        env.pull(DEV_B)
+        assert not expired.exists()
 
     def test_edited_copy_conflict_found_by_resolveflow_and_mm_events_ignores_copies(
         self, tmp_path, monkeypatch
