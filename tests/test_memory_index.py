@@ -5,9 +5,12 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
+from contextlib import nullcontext
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +24,7 @@ from mind_meld import (
     crypto,
     devices,
     memoryindex,
+    meshflow,
     pullflow,
     sidecar,
     statedb,
@@ -419,6 +423,10 @@ def test_slug_sanitization_and_fallbacks() -> None:
 def test_desired_collections_matrix_and_collision_disambiguation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Value: protects=peer collections stay within the real copies tree;
+    # fails_when=qmd receives a collection for a linked copies root;
+    # why_new=an empty symlink target could never produce the unwanted collection;
+    # seam=none; no_claim=the fixture checks collection selection before qmd runs.
     env = _setup_device_env(
         tmp_path,
         monkeypatch,
@@ -493,7 +501,7 @@ def test_desired_collections_matrix_and_collision_disambiguation(
 
     # Symlinked copies root yields no peer collections without crashing.
     real_other = tmp_path / "elsewhere"
-    real_other.mkdir()
+    (real_other / "cccc3333").mkdir(parents=True)
     for sub in list(copies_root.iterdir()):
         sub.rmdir()
     copies_root.rmdir()
@@ -506,6 +514,11 @@ def test_desired_collections_matrix_and_collision_disambiguation(
 def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Value: protects=refresh reconciles mismatches and records bounded local outcomes;
+    # fails_when=it reuses stale collections, updates after reconciliation fails,
+    # resets the deadline per call, or persists fields outside the record contract;
+    # why_new=existing cases use matching collections, then fail one command;
+    # seam=none; no_claim=qmd responses and cumulative elapsed time use fixtures.
     stub = _make_qmd_stub(tmp_path, monkeypatch)
     claude_dir = tmp_path / "claude"
     (claude_dir / "projects" / "proj1" / "memory").mkdir(parents=True)
@@ -549,6 +562,40 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
     assert rec["state"] == "recorded"
     assert rec["result"] == "ok"
     assert rec["collections"] == ["mm-claude"]
+    stored = json.loads(memoryindex.state_path().read_text(encoding="utf-8"))
+    assert stored == {
+        "version": 1,
+        "result": "ok",
+        "at": res_ok.at,
+        "qmd_version": "2.8.3",
+        "collections": ["mm-claude"],
+    }
+    assert datetime.fromisoformat(stored["at"]).utcoffset() == timedelta(0)
+
+    projects = claude_dir / "projects"
+    claude_mask = "*/memory/**/*.md"
+    old_projects = tmp_path / "old-projects"
+    old_projects.mkdir()
+    for wrong_path, wrong_mask in ((old_projects, claude_mask), (projects, "**/*.md")):
+        stub.seed_collection("mm-claude", wrong_path, wrong_mask)
+        assert memoryindex.refresh(env.cfg).status == "ok"
+        assert stub.state()["collections"]["mm-claude"] == {
+            "path": str(projects.resolve()),
+            "mask": claude_mask,
+        }
+        assert "qmd://mm-claude/proj1/memory/note.md" in stub.search("claude-fact-alpha")
+        assert "personal-notes" in stub.state()["collections"]
+
+    for subcommand in ("list", "show", "remove", "add"):
+        stub.seed_collection("mm-claude", old_projects, claude_mask)
+        before = len(stub.calls())
+        with monkeypatch.context() as mp:
+            mp.setenv("QMD_STUB_FAIL", f"collection {subcommand}")
+            assert memoryindex.refresh(env.cfg).status == "failed"
+        calls = stub.calls()[before:]
+        assert calls[-1][:2] == ["collection", subcommand]
+        assert ["update"] not in calls
+        assert memoryindex.read_state()["result"] == "failed"
 
     # A provider scan failure replaces the last success in the record.
     with monkeypatch.context() as mp:
@@ -613,6 +660,40 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
     assert memoryindex.read_state()["result"] == "failed"
     monkeypatch.setenv("QMD_STUB_VERSION", "qmd 2.8.3")
 
+    # Each qmd call needs 20 seconds, so only the first fits in one 30-second budget.
+    clock = SimpleNamespace(now=100.0)
+    timeouts: list[float] = []
+    stopped_groups: list[object] = []
+    process_group = object()
+
+    def fixture_qmd(argv, **_kwargs):
+        def communicate(*, timeout):
+            timeouts.append(timeout)
+            if timeout < 20.0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            clock.now += 20.0
+            output = "qmd 2.8.3" if argv[-1] == "--version" else "No collections found."
+            return output, None
+
+        return nullcontext(
+            SimpleNamespace(pid=process_group, communicate=communicate, returncode=0)
+        )
+
+    def stop_process_group(group, signum):
+        assert group is process_group
+        assert signum == signal.SIGKILL
+        assert memoryindex.read_state()["state"] == "lock_failed"
+        stopped_groups.append(group)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(memoryindex, "time", SimpleNamespace(monotonic=lambda: clock.now))
+        mp.setattr(subprocess, "Popen", fixture_qmd)
+        mp.setattr(os, "killpg", stop_process_group)
+        assert memoryindex.refresh(env.cfg).status == "timed-out"
+    assert timeouts == [30.0, 10.0]
+    assert stopped_groups == [process_group]
+    assert memoryindex.read_state()["result"] == "timed-out"
+
     # Timeout records timed-out.
     monkeypatch.setattr(memoryindex, "REFRESH_DEADLINE_S", 0.15)
     monkeypatch.setenv("QMD_STUB_SLEEP", "0.5")
@@ -632,6 +713,10 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
 
 
 def test_memory_index_command_bare_on_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Value: protects=memory-index toggles persist when qmd fails and can retry;
+    # fails_when=on rolls back after update failure or off fails to disable and clean up;
+    # why_new=the earlier cases only fail on preflight and use working qmd for removal;
+    # seam=none; no_claim=qmd command failures and collection storage use a fixture.
     stub = _make_qmd_stub(tmp_path, monkeypatch)
     claude_dir = tmp_path / "claude"
     (claude_dir / "projects" / "p" / "memory").mkdir(parents=True)
@@ -671,6 +756,15 @@ def test_memory_index_command_bare_on_off(tmp_path: Path, monkeypatch: pytest.Mo
     assert config.memory_index_enabled(config.load_config(env.cfg_path)) is False
     monkeypatch.setenv("QMD_STUB_VERSION", "qmd 2.8.3")
 
+    # On persists the owner's choice even when an initial refresh fails.
+    with monkeypatch.context() as mp:
+        mp.setenv("QMD_STUB_FAIL", "update")
+        r_on_fail = runner.invoke(cli.app, ["memory-index", "on"])
+    assert r_on_fail.exit_code == 1, r_on_fail.output
+    assert "Run: mm memory-index on" in r_on_fail.stderr
+    assert config.load_config(env.cfg_path)["memory_index"] == {"enabled": True, "embeddings": True}
+    assert memoryindex.read_state()["result"] == "failed"
+
     # `on` succeeds, preserves embeddings=True, prints outcome + off fix.
     r_on = runner.invoke(cli.app, ["memory-index", "on"])
     assert r_on.exit_code == 0, r_on.output
@@ -682,19 +776,54 @@ def test_memory_index_command_bare_on_off(tmp_path: Path, monkeypatch: pytest.Mo
     assert "keep-me" in stub.state()["collections"]
 
     # Bare form now shows on, version, mm-claude (not keep-me), and last refresh.
-    r_bare = runner.invoke(cli.app, ["memory-index"])
+    observed_files = (env.cfg_path, memoryindex.state_path(), stub.state_path)
+    before_bare = [path.read_bytes() for path in observed_files]
+    bare_calls: list[list[str]] = []
+    real_popen = subprocess.Popen
+
+    def observe_bare_call(argv, **kwargs):
+        bare_calls.append(list(argv))
+        return real_popen(argv, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(subprocess, "Popen", observe_bare_call)
+        r_bare = runner.invoke(cli.app, ["memory-index"])
     assert r_bare.exit_code == 0, r_bare.output
     assert "enabled:       on" in r_bare.output
     assert "mm-claude" in r_bare.output
     assert "keep-me" not in r_bare.output
-    assert stub.calls()[-2:] == [["--version"], ["collection", "show", "mm-claude"]]
+    assert bare_calls == [
+        [str(stub.script), "--version"],
+        [str(stub.script), "--index", "index", "collection", "show", "mm-claude"],
+    ]
+    assert [path.read_bytes() for path in observed_files] == before_bare
 
-    # `off` disables config, removes only mm- collections, preserves embeddings=True.
+    # Off succeeds without qmd and explains why it could not remove the collection.
+    off_with_embeddings = {"enabled": False, "embeddings": True}
+    with monkeypatch.context() as mp:
+        mp.setenv("PATH", str(empty_bin))
+        r_off_missing = runner.invoke(cli.app, ["memory-index", "off"])
+    assert r_off_missing.exit_code == 0, r_off_missing.output
+    assert "existing mm- collections could not be removed" in r_off_missing.stderr
+    assert config.load_config(env.cfg_path)["memory_index"] == off_with_embeddings
+    assert {"mm-claude", "keep-me"} <= set(stub.state()["collections"])
+
+    # If removal fails, off remains saved and the same command can retry cleanup.
+    r_on_again = runner.invoke(cli.app, ["memory-index", "on"])
+    assert r_on_again.exit_code == 0, r_on_again.output
     stale_config = config.load_config(env.cfg_path)
+    with monkeypatch.context() as mp:
+        mp.setenv("QMD_STUB_FAIL", "collection remove")
+        r_off_fail = runner.invoke(cli.app, ["memory-index", "off"])
+    assert r_off_fail.exit_code == 1, r_off_fail.output
+    assert "Run: mm memory-index off" in r_off_fail.stderr
+    assert config.load_config(env.cfg_path)["memory_index"] == off_with_embeddings
+    assert {"mm-claude", "keep-me"} <= set(stub.state()["collections"])
+
     r_off = runner.invoke(cli.app, ["memory-index", "off"])
     assert r_off.exit_code == 0, r_off.output
     reloaded2 = config.load_config(env.cfg_path)
-    assert reloaded2["memory_index"] == {"enabled": False, "embeddings": True}
+    assert reloaded2["memory_index"] == off_with_embeddings
     assert "mm-claude" not in stub.state()["collections"]
     assert "keep-me" in stub.state()["collections"]
     assert memoryindex.refresh(stale_config).status == "skipped-off"
@@ -865,6 +994,10 @@ def test_two_machine_attended_push_pull_refreshes_qmd_after_add_edit_and_delete(
 def test_attended_lock_order_dry_run_failure_and_missing_qmd_isolation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Value: protects=sync outcomes survive qmd failure, and interrupted sync skips refresh;
+    # fails_when=the refresh tail changes either output stream or runs on an interrupted sync;
+    # why_new=the earlier CLI coverage only exercised missing qmd on push and pre-core refusal;
+    # seam=none; no_claim=deterministic core outcomes isolate the CLI tail in output comparisons.
     fleet = _init_two_machine_env(tmp_path, monkeypatch)
     dev_a = fleet.activate("aaaaaaaa")
     (dev_a.codex / "memories_v2").mkdir(parents=True)
@@ -905,22 +1038,58 @@ def test_attended_lock_order_dry_run_failure_and_missing_qmd_isolation(
         assert r_pull_dry.exit_code == 0, r_pull_dry.output
         assert events == ["release"]
 
+        with mp.context() as interrupt:
+
+            def interrupt_after_sync(*_args, **_kwargs):
+                events.append("interrupt")
+                raise KeyboardInterrupt
+
+            def spy_spawn(_cfg):
+                events.append("spawn")
+                return True
+
+            interrupt.setattr(meshflow, "run", interrupt_after_sync)
+            interrupt.setattr(memoryindex, "start_detached_refresh", spy_spawn)
+            for command in ("push", "pull", "autopush", "autopull"):
+                events.clear()
+                interrupted = runner.invoke(cli.app, [command])
+                assert interrupted.exit_code != 0, interrupted.output
+                expected = ["interrupt"] if command.startswith("auto") else ["interrupt", "release"]
+                assert events == expected, command
+
         events.clear()
         mp.setattr(pullflow, "_pull_core", lambda *a, **kw: pullflow.PullResult(total_failed=1))
         r_pull_failed = runner.invoke(cli.app, ["pull"])
         assert r_pull_failed.exit_code == 1, r_pull_failed.output
         assert events == ["release"]
 
-    # Missing qmd never changes push/pull exit code or adds output lines.
+    # Compare both streams and exit status against a healthy qmd refresh.
     fleet2 = _init_two_machine_env(tmp_path / "f2", monkeypatch)
     dev_a2 = fleet2.activate("aaaaaaaa")
+    _make_qmd_stub(tmp_path / "sync-qmd", monkeypatch)
     empty_bin = tmp_path / "no-qmd-bin"
     empty_bin.mkdir()
-    monkeypatch.setenv("PATH", str(empty_bin))
-    r_push_miss = runner.invoke(cli.app, ["push"])
-    assert r_push_miss.exit_code == 0, r_push_miss.output
-    assert "qmd" not in r_push_miss.output.lower()
-    assert memoryindex.read_state()["result"] == "qmd-missing"
+    with monkeypatch.context() as mp:
+        # Keep content outcomes stable while the real CLI invokes the qmd stub.
+        mp.setattr(cli, "_push_core", lambda *_a, **_kw: cli.PushResult())
+        mp.setattr(pullflow, "_pull_core", lambda *_a, **_kw: pullflow.PullResult())
+        for command in ("push", "pull"):
+            healthy = runner.invoke(cli.app, [command])
+            assert healthy.exit_code == 0, healthy.output
+            assert memoryindex.read_state()["result"] == "ok"
+            expected = (healthy.exit_code, healthy.stdout, healthy.stderr)
+            for failure in ("qmd-missing", "failed", "timed-out"):
+                with mp.context() as condition:
+                    if failure == "qmd-missing":
+                        condition.setenv("PATH", str(empty_bin))
+                    elif failure == "failed":
+                        condition.setenv("QMD_STUB_FAIL", "update")
+                    else:
+                        condition.setattr(memoryindex, "REFRESH_DEADLINE_S", 0.3)
+                        condition.setenv("QMD_STUB_SLEEP", "1.0")
+                    result = runner.invoke(cli.app, [command])
+                assert (result.exit_code, result.stdout, result.stderr) == expected, failure
+                assert memoryindex.read_state()["result"] == failure
 
     # Snapshot-refused push does not refresh.
     refresh_called = False
@@ -1159,9 +1328,13 @@ def test_status_memory_index_reporting_and_no_qmd_subprocess(
 def test_diag_memory_index_json_off_on_and_sanitization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Value: protects=diagnostics honor the toggle and retain refresh evidence if qmd is missing;
+    # fails_when=disabled status warns about stale history or enabled diag drops it;
+    # why_new=the earlier cases exercise healthy enabled diag and an off device with no history;
+    # seam=none; no_claim=isolated fixtures model qmd availability and local record data.
     stub = _make_qmd_stub(tmp_path, monkeypatch)
 
-    # Off: no qmd subprocess, memory_index shows disabled.
+    # Off ignores stale failure in status and preserves it in diag without invoking qmd.
     env_off = _setup_device_env(
         tmp_path,
         monkeypatch,
@@ -1169,12 +1342,37 @@ def test_diag_memory_index_json_off_on_and_sanitization(
         enabled=False,
         sources=[],
     )
+    backend = local_storage.LocalBackend(env_off.storage_dir)
+    boot = crypto.bootstrap_crypto_init(backend, PASSPHRASE, MEMORY_KB)
+    crypto.set_crypto_session(boot.root_salt, MEMORY_KB)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    devices.register_device(backend, "dg000001", "Mac A")
+    previous_at = "2026-11-21T12:00:00+00:00"
+    memoryindex.state_path().write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "result": "failed",
+                "at": previous_at,
+                "qmd_version": "2.8.3",
+                "collections": ["mm-claude"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    status = runner.invoke(cli.app, ["status"])
+    assert status.exit_code == 0, status.output
+    assert "Memory index:" not in status.output
     r_off = runner.invoke(cli.app, ["diag", "--json"])
     assert r_off.exit_code == 0, r_off.output
     data_off = json.loads(r_off.output)
-    assert data_off["memory_index"]["enabled"] is False
-    assert data_off["memory_index"]["qmd_version"] is None
-    assert data_off["memory_index"]["collections"] == []
+    assert data_off["memory_index"] == {
+        "enabled": False,
+        "embeddings": False,
+        "qmd_version": None,
+        "collections": [],
+        "last_refresh": {"state": "recorded", "result": "failed", "at": previous_at},
+    }
     assert stub.calls() == []
     assert env_off.cfg_path.exists()
 
@@ -1188,16 +1386,31 @@ def test_diag_memory_index_json_off_on_and_sanitization(
         enabled=True,
         sources=[{"name": "claude", "path": str(claude_dir), "type": "claude"}],
     )
-    assert memoryindex.refresh(env_on.cfg).status == "ok"
+    refresh = memoryindex.refresh(env_on.cfg)
+    assert refresh.status == "ok"
     r_on = runner.invoke(cli.app, ["diag", "--json"])
     assert r_on.exit_code == 0, r_on.output
     data_on = json.loads(r_on.output)
     mi = data_on["memory_index"]
-    assert mi["enabled"] is True
-    assert mi["qmd_version"] == "2.8.3"
-    assert mi["collections"] == ["mm-claude"]
-    assert mi["last_refresh"]["state"] == "recorded"
-    assert mi["last_refresh"]["result"] == "ok"
+    assert mi == {
+        "enabled": True,
+        "embeddings": False,
+        "qmd_version": "2.8.3",
+        "collections": ["mm-claude"],
+        "last_refresh": {"state": "recorded", "result": "ok", "at": refresh.at},
+    }
+
+    empty_bin = tmp_path / "diag-no-qmd"
+    empty_bin.mkdir()
+    with monkeypatch.context() as mp:
+        mp.setenv("PATH", str(empty_bin))
+        unavailable = runner.invoke(cli.app, ["diag", "--json"])
+    assert unavailable.exit_code == 0, unavailable.output
+    assert json.loads(unavailable.output)["memory_index"] == {
+        **mi,
+        "qmd_version": None,
+        "collections": [],
+    }
 
     # Invalid collection names in the local record cannot become qmd arguments.
     state_path = memoryindex.state_path()
