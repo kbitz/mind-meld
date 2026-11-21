@@ -94,6 +94,51 @@ class SyncthingState:
     pending_device_names: dict[str, str] = field(default_factory=dict, repr=False)
 
 
+_DELIVERY_NOTICE_PREFIX = "Syncthing is still delivering "
+_DELIVERY_NOTICE_FIX = ". Run: mm pull"
+
+
+def delivery_files(count: int | None) -> str:
+    """Label the pending count, or use an uncounted label while it is unknown."""
+    if type(count) is not int or count <= 0:
+        return "files"
+    return f"{count} {'file' if count == 1 else 'files'}"
+
+
+def delivery_notice(count: int | None, *, with_retry: bool = True) -> str:
+    notice = f"{_DELIVERY_NOTICE_PREFIX}{delivery_files(count)}"
+    return f"{notice}{_DELIVERY_NOTICE_FIX}" if with_retry else notice
+
+
+def historical_delivery_detail(detail: str) -> str:
+    """Render a past hook observation without repeating the live retry advice."""
+    parts = []
+    for part in detail.split("; "):
+        if part.startswith(_DELIVERY_NOTICE_PREFIX) and part.endswith(_DELIVERY_NOTICE_FIX):
+            files = part.removeprefix(_DELIVERY_NOTICE_PREFIX).removesuffix(_DELIVERY_NOTICE_FIX)
+            part = f"Syncthing reported {files} pending"
+        parts.append(part)
+    return "; ".join(parts)
+
+
+def delivery_pending(state: SyncthingState) -> bool:
+    """Return True when the matched Syncthing folder is still delivering files."""
+    if (
+        state.state != "ok"
+        or state.folder_id is None
+        or "no-folder" in state.problems
+        or state.folder_paused is True
+    ):
+        return False
+    if (
+        isinstance(state.files_to_fetch, int)
+        and not isinstance(state.files_to_fetch, bool)
+        and state.files_to_fetch > 0
+    ):
+        return True
+    return state.folder_state in ("syncing", "sync-preparing")
+
+
 PENDING_JOIN_FIX = "mm devices approve"
 
 

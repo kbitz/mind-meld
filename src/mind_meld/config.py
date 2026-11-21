@@ -576,6 +576,8 @@ CAPTURE_BUDGET_MIN_MS = 250
 CAPTURE_BUDGET_MAX_MS = 60000
 DEFAULT_ATTENDED_CAPTURE_CAP_MS = 30000
 ATTENDED_CAPTURE_CAP_MAX_MS = 60000
+DEFAULT_PULL_SYNCTHING_WAIT_MS = 15000
+PULL_SYNCTHING_WAIT_MAX_MS = 60000
 
 
 def _validate(config: dict[str, Any]) -> None:
@@ -596,6 +598,14 @@ def _validate(config: dict[str, Any]) -> None:
             _validate_sources(sync["sources"])
         if "disabled_sources" in sync:
             _validate_disabled_sources(sync["disabled_sources"])
+        if "pull_syncthing_wait_ms" in sync:
+            value = sync["pull_syncthing_wait_ms"]
+            if type(value) is not int or not (0 <= value <= PULL_SYNCTHING_WAIT_MAX_MS):
+                raise ConfigError(
+                    f"config: sync.pull_syncthing_wait_ms must be an integer between 0 and "
+                    f"{PULL_SYNCTHING_WAIT_MAX_MS}, got {value}. "
+                    f"Fix [sync] pull_syncthing_wait_ms in ~/.config/mind-meld/config.toml."
+                )
 
     retro = config.get("retro")
     if isinstance(retro, dict):
@@ -670,6 +680,7 @@ def _apply_defaults(config: dict[str, Any]) -> None:
     """Fill in optional fields with defaults."""
     sync = config.setdefault("sync", {})
     sync.setdefault("max_file_size", DEFAULT_MAX_FILE_SIZE)
+    sync.setdefault("pull_syncthing_wait_ms", DEFAULT_PULL_SYNCTHING_WAIT_MS)
 
     crypto = config.setdefault("crypto", {})
     crypto.setdefault("argon2_memory_kb", DEFAULT_ARGON2_MEMORY_KB)

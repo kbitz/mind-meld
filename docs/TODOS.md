@@ -77,6 +77,50 @@ here by hand, use the H3 form.
 - **Context:** Filed by /review-and-prep on PR #368 at `eeeda4e` (2026-11-21).
 - **Effort:** ?
 
+### [review:files=src/mind_meld/syncthing.py|tests/test_pullflow.py] Test gap: Pin the delivery notice for a syncing folder with zero needed files
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The stand-in tests cover a positive count on an idle folder and a zero count while Syncthing prepares to sync.
+- **Hypothesis (untested):** Extend the zero-count case to cover the syncing state and check the same uncounted notice.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `syncthing.delivery_pending`.
+- **Evidence:** Track 158A coverage audit at `ccb3565`.
+- **Context:** Revisit when a track next changes these paths.
+- **Effort:** ?
+
+### [review:files=src/mind_meld/syncthing.py|src/mind_meld/statusflow.py|tests/test_statusflow.py] Test gap: Preserve adjacent details when rendering past Syncthing delivery
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The catch-up test records a delivery detail on its own.
+- **Hypothesis (untested):** Include another hook detail in the fixture and verify that it survives the past-tense delivery rendering.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `syncthing.historical_delivery_detail`.
+- **Evidence:** Track 158A coverage audit at `ccb3565`.
+- **Context:** Revisit when a track next changes these paths.
+- **Effort:** ?
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Pin a changed pending count between Syncthing rechecks
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The deadline tests cover catch-up, clipped timeouts and unavailable results. They leave a sequence of positive counts untested.
+- **Hypothesis (untested):** Use the existing fake clock with a count that drops before the deadline. Verify that pull keeps polling and reports the latest count.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `pullflow._wait_for_syncthing_delivery`.
+- **Evidence:** Track 158A coverage audit at `ccb3565`.
+- **Context:** Revisit when a track next changes these paths.
+- **Effort:** ?
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Pin cursor and history records when a pending pull applies a file
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Existing tests cover ordinary cursor updates and the absence of a history row for a pending no-op.
+- **Hypothesis (untested):** Extend the expiry case to assert the normal history row and applied cursor when one peer has delivered every file its manifest needs.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `pullflow._record_peer_cursors`.
+- **Evidence:** Track 158A coverage audit at `ccb3565`.
+- **Context:** Revisit when a track next changes these paths.
+- **Effort:** ?
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-21 (O9 rewritten as one local qmd index, moved before 2.0; four bugs carded)

@@ -1151,8 +1151,11 @@ PULLFLOW_DEFINITIONS = frozenset(
     _record_inline_bump
     _record_source_bookkeeping
     _select_devices
+    _wait_for_syncthing_delivery
     _warn_apply_failure
     conflict_filename
+    delivering_clause
+    delivering_detail
     """.split()
 )
 
@@ -1585,7 +1588,7 @@ def test_status_core_single_ownership_and_qualified_calls():
         assert _unqualified_owner_calls(source, module) == []
     assert len(CORE_DEFINITIONS) == 39 + len(PULL_CORE_DEFINITIONS)
     assert len(STATUSFLOW_DEFINITIONS) == 30
-    assert len(PULLFLOW_DEFINITIONS) == 47
+    assert len(PULLFLOW_DEFINITIONS) == 50
 
 
 def test_init_single_ownership_and_qualified_calls():

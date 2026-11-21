@@ -303,7 +303,7 @@ def test_push_publishes_missing_and_stale_skips_equal_and_autopush_no_change_pub
     assert fake_syncthing.bodies == []
 
 
-def test_owner_managed_machine_sends_zero_writes_and_zero_requests_when_record_is_current(
+def test_owner_managed_machine_only_probes_folder_delivery_on_pull(
     fake_syncthing, tmp_path, monkeypatch
 ):
     storage_dir, backend, _ = _setup_fleet(
@@ -324,9 +324,24 @@ def test_owner_managed_machine_sends_zero_writes_and_zero_requests_when_record_i
     fake_syncthing.bodies.clear()
 
     for cmd in ("push", "pull", "autopush", "autopull"):
+        fake_syncthing.requests.clear()
+        fake_syncthing.bodies.clear()
         res = runner.invoke(app, [cmd])
         assert res.exit_code == 0, res.output
-        assert fake_syncthing.requests == [], f"{cmd} sent unexpected requests"
+        if cmd in ("pull", "autopull"):
+            # Track 158A: pull and autopull probe folder delivery read-only
+            # even on owner-managed machines, never querying pending devices.
+            assert all(req[0] == "GET" for req in fake_syncthing.requests), (
+                f"{cmd} sent non-GET requests: {fake_syncthing.requests}"
+            )
+            assert "/rest/cluster/pending/devices" not in [
+                req[1] for req in fake_syncthing.requests
+            ]
+            assert (
+                sum(req[1].startswith("/rest/db/status?") for req in fake_syncthing.requests) == 1
+            )
+        else:
+            assert fake_syncthing.requests == [], f"{cmd} sent unexpected requests"
         assert fake_syncthing.bodies == []
 
 
@@ -452,8 +467,9 @@ def test_mesh_pass_steady_state_request_ceiling_and_unvouched_or_own_or_paused_s
     res = runner.invoke(app, ["autopull"])
     assert res.exit_code == 0
     assert res.output == ""
-    # Steady state: exactly 4 GETs (mesh_snapshot) and 0 non-GET writes
-    assert [r[0] for r in fake_syncthing.requests] == ["GET", "GET", "GET", "GET"]
+    # Steady state: 5 GETs for Track 158A's pre-pull delivery probe + 4 GETs
+    # for mesh_snapshot, and 0 non-GET writes.
+    assert [r[0] for r in fake_syncthing.requests] == ["GET"] * 9
     assert fake_syncthing.bodies == []
 
 

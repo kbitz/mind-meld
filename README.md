@@ -399,6 +399,26 @@ file (attended `mm pull` exit 1, autopull `degraded`). It is now **waiting**:
 Waiting files are not applied; other available files still apply. The next pull
 picks up the waiting files once they sync. A failed file still means a real
 error (decrypt, write, permission).
+
+Before reading peer manifests, `mm pull` checks delivery for the whole folder
+through Syncthing's local read-only API, including on owner-managed folders.
+The initial probe has a 2 s REST budget. If delivery is pending, a terminal
+pull shows a transient `Waiting for Syncthing to deliver N files` line while
+waiting up to `[sync] pull_syncthing_wait_ms` (default 15,000 ms) after the probe.
+A non-terminal pull or a pull with the setting at `0` proceeds after one probe.
+If delivery still appears pending, pull applies what has arrived and adds
+`Pull: Syncthing is still delivering N files. Run: mm pull.` Pending delivery
+alone keeps exit 0. If a file fails to apply, the error also includes the
+pending delivery observation and ends with the repair command.
+
+`mm autopull` makes one probe with a 500 ms REST budget and records pending
+delivery in a successful run without printing anything for it. `mm status`
+clears the live pending verdict when the folder catches up. The `Last auto-pull`
+line shows recorded delivery as a past observation. `mm pull --dry-run` and
+the `mm init` join pull skip the delivery check. If the initial check finds
+the API unreachable, unauthorized or unconfigured, or finds no Syncthing folder
+matching the storage path (for example, iCloud Drive), pull adds no delivery output.
+
 `mm pull` and `mm status` ignore Syncthing's temporary files and `.stversions`
 folder and retry observed canonical files that disappear during a read. Device
 listing ignores conflict copies and counts a `devices/` file only when its name
@@ -1090,8 +1110,9 @@ pausing cleanly for mid-run warnings or conflict prompts on the push/pull
 paths and clearing before the final outcome lines; `mm update` and an
 automatic update during an attended terminal `mm push` or `mm pull` share the
 same transient spinner (`Updating mm <old> → <new>`, then installer phases and
-counters). Redirected output (even with `FORCE_COLOR`), `--verbose`,
-`--dry-run`, `autopush`, and `autopull` omit the spinner.
+counters). Redirected output (even with `FORCE_COLOR`), `--dry-run`, `autopush`,
+and `autopull` omit the spinner. A verbose terminal pull shows it during a
+Syncthing delivery wait.
 
 Default and verbose commands end with the same final outcome lines; a narrow
 terminal may wrap a line visually. Success is on stdout, failure on stderr.
@@ -1214,6 +1235,7 @@ Representative first lines:
 
 ```text
 In sync with this device's last push.
+Syncthing is still delivering 2 files. Run: mm pull
 Waiting more than 24 h for Mac B's push of 2026-06-14. Run: mm pull
 2 new, 1 modified and 3 deleted waiting to push. Run: mm push
 Project memory ready to publish under shared names. Run: mm push
@@ -2583,12 +2605,20 @@ deleted its files; `mm status` names `[retro] attended_capture_cap_ms` as the at
 Set budgets in this machine's `~/.config/mind-meld/config.toml`:
 
 ```toml
+[sync]
+pull_syncthing_wait_ms = 15000
+
 [retro]
 capture_budget_ms = 5000
 attended_capture_cap_ms = 30000
 host_usage_autopush_budget_ms = 750
 host_usage_interactive_budget_ms = 3000
 ```
+
+`[sync] pull_syncthing_wait_ms` is an integer in milliseconds (range **0–60,000**,
+default **15,000**). It bounds the wait after the initial Syncthing probe in
+an attended terminal `mm pull`. Set it to `0` to keep the one-shot probe and
+still-delivering notice without waiting.
 
 `capture_budget_ms` (range **250–60,000**, default **5,000**) is the initial
 budget for an attended push's usage and activity capture, and

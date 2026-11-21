@@ -267,6 +267,11 @@ class PullResult:
     # picks it up. Attended runs do not record it.
     total_waiting: int = 0
     waiting: list[WaitingPeer] = field(default_factory=list)
+    # Track 158A: folder-level Syncthing delivery still in flight after the
+    # pre-pull probe/wait. Never a failure, never a degradation, and never
+    # blocks per-peer cursors or writes pull-history rows.
+    syncthing_still_delivering: bool = False
+    syncthing_pending_files: int | None = None
     # Track 90A: another home's files from peers still on path names, and the
     # projects whose checkout is not on this machine. Never a failure.
     old_form_peers: list[OldFormPeer] = field(default_factory=list)
@@ -3253,6 +3258,19 @@ def waiting_detail(result: PullResult) -> str:
     return "; ".join(_waiting_items(result, detail=True))
 
 
+def delivering_clause(result: PullResult, *, with_retry: bool = True) -> str:
+    """The outcome-line clause when Syncthing is still delivering folder files,
+    or "" when delivery is not pending."""
+    if not result.syncthing_still_delivering:
+        return ""
+    return syncthing.delivery_notice(result.syncthing_pending_files, with_retry=with_retry)
+
+
+def delivering_detail(result: PullResult) -> str:
+    """The autopull breadcrumb detail for pending Syncthing delivery, or ""."""
+    return delivering_clause(result)
+
+
 def _old_form_text(result: PullResult) -> str:
     peers = result.old_form_peers
     if not peers:
@@ -3881,6 +3899,8 @@ def _print_pull_summary(
         console.print("  nothing to apply")
     if clause := waiting_clause(result):
         console.print(f"  [yellow]{safe_str(clause)}[/yellow]; run 'mm pull' again once it syncs.")
+    if clause := delivering_clause(result):
+        console.print(f"  [yellow]{safe_str(clause)}[/yellow]")
     if clause := old_form_clause(result):
         # Waits on a person updating a machine, not on delivery: no re-pull remedy.
         console.print(f"  [yellow]{safe_str(clause)}[/yellow]")
@@ -4057,6 +4077,63 @@ def _record_peer_cursors(
         )
 
 
+_delivery_sleep = time.sleep
+_delivery_now = time.monotonic
+_DELIVERY_PROBE_BUDGET_S = 2.0
+_HOOK_DELIVERY_PROBE_BUDGET_S = 0.5
+
+
+def _wait_for_syncthing_delivery(
+    config: dict,
+    *,
+    mode: Literal["off", "probe", "wait", "hook"],
+    verbose: bool,
+) -> tuple[bool, int | None]:
+    """Probe Syncthing folder delivery before reading manifests; optionally wait."""
+    if mode == "off":
+        return False, None
+    storage_root = Path(config["storage"]["path"]).expanduser()
+    budget = _HOOK_DELIVERY_PROBE_BUDGET_S if mode == "hook" else _DELIVERY_PROBE_BUDGET_S
+    state = syncthing.read_state(storage_root, timeout=min(1.0, budget), budget=budget)
+    if not syncthing.delivery_pending(state):
+        return False, None
+    if mode == "wait":
+        wait_ms = config.get("sync", {}).get(
+            "pull_syncthing_wait_ms", _config_module.DEFAULT_PULL_SYNCTHING_WAIT_MS
+        )
+        deadline = _delivery_now() + wait_ms / 1000.0
+        # Verbose pulls skip the usual spinner. Give just this wait its own phase.
+        progress = core._SyncProgress(enabled=True, delay=0.0) if verbose and wait_ms else None
+        show_phase = progress.start if progress is not None else core._sync_progress_phase
+        try:
+            while _delivery_now() < deadline:
+                files = syncthing.delivery_files(state.files_to_fetch)
+                show_phase(f"Waiting for Syncthing to deliver {files}")
+                _delivery_sleep(min(1.0, max(0.0, deadline - _delivery_now())))
+                remaining = deadline - _delivery_now()
+                if remaining <= 0:
+                    break
+                observed = syncthing.read_state(
+                    storage_root, timeout=1.0, budget=min(budget, remaining)
+                )
+                # A poll cut short by our wait deadline leaves the prior observation in place.
+                if (
+                    remaining < budget
+                    and observed.state == "unreachable"
+                    and observed.cause == "timeout"
+                ):
+                    break
+                if not syncthing.delivery_pending(observed):
+                    return False, None
+                state = observed
+        finally:
+            if progress is not None:
+                progress.stop()
+    nf = state.files_to_fetch
+    pending_files = nf if type(nf) is int and nf > 0 else None
+    return True, pending_files
+
+
 def _pull_core(
     config: dict,
     passphrase: str,
@@ -4070,6 +4147,7 @@ def _pull_core(
     *,
     diagnostics: bool | None = None,
     result_observer: Callable[[PullResult], None] | None = None,
+    syncthing_delivery: Literal["off", "probe", "wait", "hook"] = "off",
 ) -> PullResult:
     """Core pull logic shared by pull and autopull.
 
@@ -4100,6 +4178,11 @@ def _pull_core(
         start = time.time()
         my_device_id = config["device"]["id"]
         backend = get_backend(config)
+        syncthing_still_delivering, syncthing_pending_files = _wait_for_syncthing_delivery(
+            config,
+            mode=syncthing_delivery,
+            verbose=verbose,
+        )
         # Track 90A: only the pull paths (mm pull, its dry run, mm autopull and the
         # join's pull) let the current directory's main checkout own a project
         # nobody else owns. Called before the first decode.
@@ -4231,10 +4314,14 @@ def _pull_core(
                 durability_fsync_failures=len(retired_fsync_warnings),
                 maintenance_failures=recovery_cleanup_failures + retirement_failures,
                 waiting=_waiting_peers([], [], vanished_entries),
+                syncthing_still_delivering=syncthing_still_delivering,
+                syncthing_pending_files=syncthing_pending_files,
                 retired_copies_removed=retired_removed,
                 retired_copies_names=retired_names,
                 retired_copies_folder=retired_folder,
             )
+            if show and core._SYNC_OUTPUT.get() is None and (clause := delivering_clause(result)):
+                console.print(f"  [yellow]{safe_str(clause)}[/yellow]")
             _save_pull_observations(
                 result, dry_run=dry_run, complete=not from_device and not vanished_entries
             )
@@ -4845,6 +4932,8 @@ def _pull_core(
                 corrupt_peer_count=len(corrupt_peers),
                 total_waiting=total_waiting,
                 waiting=_waiting_peers(per_source_results, vanished_manifests, vanished_entries),
+                syncthing_still_delivering=syncthing_still_delivering,
+                syncthing_pending_files=syncthing_pending_files,
                 retired_copies_removed=retired_copies_removed,
                 retired_copies_names=retired_copies_names,
                 retired_copies_folder=retired_copies_folder,

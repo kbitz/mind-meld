@@ -1151,3 +1151,105 @@ def test_status_and_diag_display_init_notices_until_attended_capture_replaces_th
         "notices": [],
         "omitted_details": 0,
     }
+
+
+def test_status_verdict_syncthing_pending_priority():
+    from mind_meld import statusflow
+
+    clean_projection = {
+        "pull": {"unknown_reason": None, "unresolved": False, "selected": None},
+        "push": {"unknown_reason": None, "unresolved": False, "selected": None},
+    }
+    base = dict(
+        source=None,
+        blocking=None,
+        conflicts=0,
+        projection=clean_projection,
+        counts=(0, 0, 0),
+        metadata=False,
+        first_push=False,
+    )
+    pending_msg = "Syncthing is still delivering 3 files. Run: mm pull"
+
+    # Empty string keeps today's verdict byte-identical.
+    assert statusflow._status_verdict(**base) == "In sync with this device's last push."
+    # Pending delivery wins over in-sync and overdue peers.
+    assert statusflow._status_verdict(**base, syncthing_pending=pending_msg) == pending_msg
+    assert (
+        statusflow._status_verdict(
+            **base,
+            syncthing_pending=pending_msg,
+            peers_overdue="Waiting more than 24 h for Mac B's push of 2026-01-01. Run: mm pull",
+        )
+        == pending_msg
+    )
+    # Higher-priority verdicts still win over pending delivery.
+    assert (
+        statusflow._status_verdict(
+            **{**base, "blocking": "Blocked. Run: mm diag"}, syncthing_pending=pending_msg
+        )
+        == "Blocked. Run: mm diag"
+    )
+    assert (
+        statusflow._status_verdict(**{**base, "conflicts": 2}, syncthing_pending=pending_msg)
+        == "2 unresolved conflicts. Run: mm resolve"
+    )
+    assert (
+        statusflow._status_verdict(
+            **base,
+            capture_action="Capture needs attention. Run: mm recapture",
+            syncthing_pending=pending_msg,
+        )
+        == "Capture needs attention. Run: mm recapture"
+    )
+    assert (
+        statusflow._status_verdict(**base, left_out="1 file held", syncthing_pending=pending_msg)
+        == "Not everything is published: 1 file held"
+    )
+
+
+def test_status_shows_pending_syncthing_delivery_and_clears_on_catchup(inspection, fake_syncthing):
+    from mind_meld import cli
+
+    backend, _ = inspection
+    cfg = config.load_config()
+    memory_kb = core._init_crypto_session(backend, "contract-passphrase", cfg, read_only=True)
+    own = manifest.build_manifest_v2(
+        cfg["device"]["id"], cfg["device"]["name"], config.resolve_sources(cfg).available
+    )
+    backend.put(
+        manifest_key(cfg["device"]["id"]),
+        crypto.encrypt(manifest.serialize_manifest(own), "contract-passphrase", memory_kb),
+    )
+    fake_syncthing.set_folder(backend.root, state="syncing", need_files=3, need_bytes=120)
+    auto = runner.invoke(cli.app, ["autopull"])
+    assert auto.exit_code == 0, auto.output
+    assert not auto.stdout and not auto.stderr
+    assert (
+        "Syncthing is still delivering 3 files."
+        in statusflow._read_autorun_evidence()["runs"]["pull"]["detail"]
+    )
+    fake_syncthing.set_folder(backend.root, state="syncing", need_files=2, need_bytes=80)
+    fake_syncthing.requests.clear()
+
+    res_pending = runner.invoke(app, ["status"])
+    assert res_pending.exit_code == 0, res_pending.output
+    assert "Syncthing is still delivering 2 files. Run: mm pull" in res_pending.stdout
+    assert "Syncthing reported 3 files pending" in " ".join(res_pending.stdout.split())
+    assert "2 files to fetch" in res_pending.stdout
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
+
+    # Catching up clears the verdict without another pull.
+    fake_syncthing.set_folder(backend.root, state="idle", need_files=0, need_bytes=0)
+    fake_syncthing.requests.clear()
+
+    res_idle = runner.invoke(app, ["status"])
+    assert res_idle.exit_code == 0, res_idle.output
+    assert "Syncthing is still delivering" not in res_idle.stdout
+    assert "files to fetch" not in res_idle.stdout
+    assert "Last auto-pull" in res_idle.stdout
+    assert "Syncthing reported 3 files pending" in " ".join(res_idle.stdout.split())
+    assert "up to date" in res_idle.stdout
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []

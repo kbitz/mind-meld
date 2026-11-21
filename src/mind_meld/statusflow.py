@@ -211,6 +211,7 @@ def _status_verdict(
     names_ready: bool = False,
     names_held: bool = False,
     left_out: str = "",
+    syncthing_pending: str = "",
     peers_overdue: str = "",
 ) -> str:
     """Pure priority selector over explicit current observations and run evidence."""
@@ -262,6 +263,8 @@ def _status_verdict(
                 )
             elif left_out:
                 verdict = f"Not everything is published: {left_out}"
+            elif syncthing_pending:
+                verdict = syncthing_pending
             elif peers_overdue:
                 verdict = peers_overdue
             else:
@@ -968,6 +971,11 @@ def status(
             datetime.now(timezone.utc),
         )
         peers_overdue = _overdue_peers_line(peer_states)
+        syncthing_pending = (
+            syncthing.delivery_notice(syncthing_state.files_to_fetch)
+            if syncthing.delivery_pending(syncthing_state)
+            else ""
+        )
 
         verdict = _status_verdict(
             source=source,
@@ -982,6 +990,7 @@ def status(
             names_ready=names_ready,
             names_held=names_held,
             left_out=left_out_clause,
+            syncthing_pending=syncthing_pending,
             peers_overdue=peers_overdue,
         )
         report["verdict"] = verdict
@@ -1061,6 +1070,8 @@ def status(
             # `mm status` is the command the v0.12.16 degradation signal is
             # designed to reach, and it runs far more often than `mm diag`.
             detail = crumb.get("detail")
+            if verb == "pull" and isinstance(detail, str):
+                detail = syncthing.historical_delivery_detail(detail)
             outcome_str = (
                 f"{safe_str(safety.safe_terminal_str(outcome))}: "
                 f"{safe_str(safety.safe_terminal_str(detail))}"
