@@ -289,6 +289,9 @@ class PullResult:
     retired_copies_removed: int = 0
     retired_copies_names: list[str] = field(default_factory=list)
     retired_copies_folder: str | None = None
+    # A registered peer can have no manifest yet, independently of corruption
+    # or a manifest that vanished mid-read. Join setup checks all three cases.
+    missing_peer_manifests: bool = False
 
     @property
     def total_applied(self) -> int:
@@ -4364,6 +4367,12 @@ def _pull_core(
             and p.device_id not in inventory.vanished
             and (not from_device or p.device_id == from_device)
         ]
+        known_manifest_failures = {peer.device_id for peer in (*vanished_manifests, *corrupt_peers)}
+        missing_peer_manifests = any(
+            manifest_cache[peer["device_id"]] is None
+            and peer["device_id"] not in known_manifest_failures
+            for peer in pull_targets
+        )
         core._sync_progress_phase("Checking local files")
 
         # Consumer-boundary exclude_patterns filter for pull. Drops excluded
@@ -4932,6 +4941,7 @@ def _pull_core(
                 corrupt_peer_count=len(corrupt_peers),
                 total_waiting=total_waiting,
                 waiting=_waiting_peers(per_source_results, vanished_manifests, vanished_entries),
+                missing_peer_manifests=missing_peer_manifests,
                 syncthing_still_delivering=syncthing_still_delivering,
                 syncthing_pending_files=syncthing_pending_files,
                 retired_copies_removed=retired_copies_removed,

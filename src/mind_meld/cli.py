@@ -2984,6 +2984,7 @@ def _attended_pull(
                 if finish_memory_setup is not None:
                     incomplete_delivery = bool(
                         pulled.no_peers
+                        or pulled.missing_peer_manifests
                         or pulled.total_failed
                         or pulled.total_waiting
                         or pulled.waiting

@@ -46,7 +46,7 @@ from mind_meld import (
     syncthing,
 )
 from mind_meld.errors import StorageError
-from mind_meld.storage.keys import blob_key
+from mind_meld.storage.keys import blob_key, manifest_key
 from mind_meld.storage.local import LocalBackend
 
 PASSPHRASE = "initflow-contract-test-only"
@@ -2938,7 +2938,7 @@ class TestInitMemorySetup160A:
         assert claude_md.read_text(encoding="utf-8") == "# Claude\n"
         assert memoryindex.POINTER_LINE in codex_md.read_text(encoding="utf-8")
 
-    @pytest.mark.parametrize("delivery", ["ready", "waiting", "failed"])
+    @pytest.mark.parametrize("delivery", ["ready", "waiting", "manifest", "failed"])
     def test_join_pulls_codex_instructions_before_appending_and_refreshes_once(
         self, env, real_memory_setup_gate, tmp_path, monkeypatch, delivery
     ):
@@ -2979,6 +2979,10 @@ class TestInitMemorySetup160A:
             assert len(delayed) == 1
             for key in delayed:
                 backend.delete(key)
+        elif delivery == "manifest":
+            key = manifest_key(PEER)
+            delayed[key] = backend.get(key)
+            backend.delete(key)
         elif delivery == "failed":
             from mind_meld.errors import MindMeldError
 
