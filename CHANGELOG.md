@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.73] - 2026-11-20
+
+Mind Meld now asks whether you are starting or joining a fleet, then lets you approve and retire Syncthing devices while managed machines keep their fleet names.
+
+### Added
+
+- `mm devices approve` offers a terminal chooser and accepts device names or short Syncthing IDs, and `mm init` prints both approval commands.
+- `mm devices retire` records retirement so managed peers can remove a disconnected device once fleet records permit it.
+
+### Changed
+
+- `mm init` requires an explicit new-or-join answer and explains which Syncthing setting makes a configuration owner-managed.
+- Yes/no prompts display their Enter defaults, detected Grok and Muse sources default to yes, and CLI help preserves bracketed choices and settings.
+- `mm status` and `mm pull` give actionable guidance for pending joins and superseded registrations.
+- Managed machines restore Mind Meld names in Syncthing for themselves and vouched peers.
+
 ## [1.12.72] - 2026-11-19
 
 Mind Meld now names a managed Syncthing device during setup and only asks you to approve join requests that no fleet machine vouches for.

@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.73 | 2026-11-20 | Mind Meld now asks whether you are starting or joining a fleet, then lets you approve and retire Syncthing devices while managed machines keep their fleet names. |
 | 1.12.72 | 2026-11-19 | Mind Meld now names a managed Syncthing device during setup and only asks you to approve join requests that no fleet machine vouches for. |
 | 1.12.71 | 2026-11-19 | Mind Meld now publishes encrypted Syncthing device IDs, pairs vouched pending peers on managed machines during sync, and reports how that pairing went. |
 | 1.12.70 | 2026-11-19 | Plain `mm init` now asks whether to start a fleet or join one, waits in the same run for approval, and resumes a stopped join from its saved answers. |
