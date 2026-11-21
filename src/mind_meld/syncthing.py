@@ -94,6 +94,20 @@ class SyncthingState:
     pending_device_names: dict[str, str] = field(default_factory=dict, repr=False)
 
 
+DELIVERY_NOTICE_PREFIX = "Syncthing is still delivering "
+
+
+def delivery_files(count: int | None) -> str:
+    """Label the pending count, or use an uncounted label while it is unknown."""
+    if type(count) is not int or count <= 0:
+        return "files"
+    return f"{count} {'file' if count == 1 else 'files'}"
+
+
+def delivery_notice(count: int | None) -> str:
+    return f"{DELIVERY_NOTICE_PREFIX}{delivery_files(count)}. Run: mm pull"
+
+
 def delivery_pending(state: SyncthingState) -> bool:
     """Return True when the matched Syncthing folder is still delivering files."""
     if (

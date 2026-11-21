@@ -303,7 +303,7 @@ def test_push_publishes_missing_and_stale_skips_equal_and_autopush_no_change_pub
     assert fake_syncthing.bodies == []
 
 
-def test_owner_managed_machine_sends_zero_writes_and_zero_requests_when_record_is_current(
+def test_owner_managed_machine_only_probes_folder_delivery_on_pull(
     fake_syncthing, tmp_path, monkeypatch
 ):
     storage_dir, backend, _ = _setup_fleet(
@@ -337,6 +337,9 @@ def test_owner_managed_machine_sends_zero_writes_and_zero_requests_when_record_i
             assert "/rest/cluster/pending/devices" not in [
                 req[1] for req in fake_syncthing.requests
             ]
+            assert (
+                sum(req[1].startswith("/rest/db/status?") for req in fake_syncthing.requests) == 1
+            )
         else:
             assert fake_syncthing.requests == [], f"{cmd} sent unexpected requests"
         assert fake_syncthing.bodies == []

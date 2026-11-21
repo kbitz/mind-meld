@@ -402,14 +402,16 @@ error (decrypt, write, permission).
 On a Syncthing folder, an attended `mm pull` on a terminal also checks
 Syncthing's local read-only API before reading peer manifests (whether mm or the
 owner manages Syncthing): while Syncthing still has files to deliver, pull shows
-a transient `Waiting for Syncthing to deliver N files` progress line and waits
-up to `[sync] pull_syncthing_wait_ms` (default 15,000 ms; `0` disables the wait)
-before pulling. If files are still on their way when the wait ends — or on a
-non-terminal `mm pull`, which probes without waiting — pull applies what has
-arrived, adds `Pull: Syncthing is still delivering N files. Run: mm pull.`, and
-exits 0. `mm autopull` probes without waiting, stays silent, and records the
-pending delivery in its `success` breadcrumb; `mm status` shows it until a later
-pull or the folder catches up. When Syncthing's API is unreachable,
+a transient `Waiting for Syncthing to deliver N files` progress line. After the
+initial probe, it waits up to `[sync] pull_syncthing_wait_ms` (default 15,000 ms,
+with `0` disabling the wait) before pulling. If the wait expires while files
+are still on their way, pull applies what has arrived, adds
+`Pull: Syncthing is still delivering N files. Run: mm pull.`, and
+exits 0. `mm autopull` makes one probe with a 500 ms REST budget, stays silent,
+and records pending delivery in its `success` breadcrumb. `mm status` uses live
+folder state and clears the pending notice when the folder catches up.
+Non-terminal `mm pull` probes once and reports the same outcome without waiting.
+When Syncthing's API is unreachable,
 unauthorized, unconfigured, or the storage folder is not a Syncthing folder
 (such as iCloud Drive), pull behaves as before with no extra output.
 `mm pull` and `mm status` ignore Syncthing's temporary files and `.stversions`
@@ -1103,8 +1105,9 @@ pausing cleanly for mid-run warnings or conflict prompts on the push/pull
 paths and clearing before the final outcome lines; `mm update` and an
 automatic update during an attended terminal `mm push` or `mm pull` share the
 same transient spinner (`Updating mm <old> → <new>`, then installer phases and
-counters). Redirected output (even with `FORCE_COLOR`), `--verbose`,
-`--dry-run`, `autopush`, and `autopull` omit the spinner.
+counters). Redirected output (even with `FORCE_COLOR`), `--dry-run`, `autopush`,
+and `autopull` omit the spinner. A verbose terminal pull shows it during a
+Syncthing delivery wait.
 
 Default and verbose commands end with the same final outcome lines; a narrow
 terminal may wrap a line visually. Success is on stdout, failure on stderr.

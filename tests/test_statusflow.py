@@ -1209,8 +1209,7 @@ def test_status_verdict_syncthing_pending_priority():
 
 
 def test_status_shows_pending_syncthing_delivery_and_clears_on_catchup(inspection, fake_syncthing):
-    from mind_meld import crypto, manifest
-    from mind_meld.storage.keys import manifest_key
+    from mind_meld import cli
 
     backend, _ = inspection
     cfg = config.load_config()
@@ -1223,6 +1222,13 @@ def test_status_shows_pending_syncthing_delivery_and_clears_on_catchup(inspectio
         crypto.encrypt(manifest.serialize_manifest(own), "contract-passphrase", memory_kb),
     )
     fake_syncthing.set_folder(backend.root, state="syncing", need_files=3, need_bytes=120)
+    auto = runner.invoke(cli.app, ["autopull"])
+    assert auto.exit_code == 0, auto.output
+    assert not auto.stdout and not auto.stderr
+    assert (
+        "Syncthing is still delivering 3 files."
+        in statusflow._read_autorun_evidence()["runs"]["pull"]["detail"]
+    )
     fake_syncthing.requests.clear()
 
     res_pending = runner.invoke(app, ["status"])
@@ -1240,6 +1246,7 @@ def test_status_shows_pending_syncthing_delivery_and_clears_on_catchup(inspectio
     assert res_idle.exit_code == 0, res_idle.output
     assert "Syncthing is still delivering" not in res_idle.stdout
     assert "files to fetch" not in res_idle.stdout
+    assert "Last auto-pull" in res_idle.stdout
     assert "up to date" in res_idle.stdout
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []

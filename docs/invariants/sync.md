@@ -1918,20 +1918,25 @@ totals count valid keys only.
 
 **Pre-pull Syncthing delivery probe and wait (Track 158A).** Before reading peer
 manifests (`inventory_devices`), `_pull_core` inspects the fleet folder's live
-Syncthing state through `syncthing.read_state(storage_root, timeout=1.0,
-budget=2.0)` (GET-only, whether mm or the owner manages Syncthing) behind the
-pure predicate `syncthing.delivery_pending(state)` (true iff `state == "ok"`, a
+Syncthing state through the GET-only `syncthing.read_state` API whether mm or
+the owner manages Syncthing. The pure predicate
+`syncthing.delivery_pending(state)` is true iff `state.state == "ok"`, a
 matched folder is not paused, `"no-folder"` is absent, and either
-`files_to_fetch > 0` or `folder_state in ("syncing", "sync-preparing")`). The
+`files_to_fetch > 0` or `folder_state in ("syncing", "sync-preparing")`. The
 `cli.py` shells choose `syncthing_delivery`: `"wait"` for an attended terminal
 `mm pull` (non-`--dry-run`, non-join), `"probe"` for an attended non-terminal
-`mm pull` and `mm autopull`, and `"off"` for `--dry-run`, `mm init`'s join pull
-and direct `_pull_core` callers. In `"wait"` mode, while `delivery_pending`
-holds up to `sync.pull_syncthing_wait_ms` (default 15,000 ms, range 0–60,000 ms;
-`0` disables waiting while keeping the probe), `_pull_core` sets the transient
-progress phase `Waiting for Syncthing to deliver N files` (or `... files` when
-the count is unknown) and polls every 1 s through injectable `_delivery_sleep` /
-`_delivery_now` seams. If delivery is still pending after the probe or bound,
+`mm pull`, `"hook"` for `mm autopull`, and `"off"` for `--dry-run`, `mm init`'s
+join pull and direct `_pull_core` callers. The attended probe allows 1 s per
+REST request within a 2 s budget. The hook probe has a 500 ms REST budget and
+never sleeps or retries. After the initial probe, a pending terminal pull sets
+the transient phase `Waiting for Syncthing to deliver N files` (or `... files`
+without a count). It polls at 1 s intervals between reads through injectable
+`_delivery_sleep` / `_delivery_now` seams. The budget for every retry fits
+within the remaining `sync.pull_syncthing_wait_ms` (default 15,000 ms, range
+0–60,000 ms). A timed-out retry keeps the last observed pending count. Setting
+the wait to zero keeps just the initial probe. The wait holds the mm lock, so
+another hook that reaches that lock records `lock-held` and exits silently.
+If delivery is still pending after the probe or bound,
 pull still applies what has arrived, records `PullResult.syncthing_still_delivering`
 and `syncthing_pending_files` (without touching `waiting`/`WaitingPeer`,
 `_record_peer_cursors`, the ledger or `pullhistory`, and never failing or
@@ -1942,8 +1947,10 @@ delivering N files. Run: mm pull`, or countless form) is appended by
 or `no-folder` (iCloud Drive) states leave pull output unchanged. `mm autopull`
 prints nothing for pending delivery and records `delivering_detail` in its
 `success` breadcrumb; `mm status` surfaces live pending delivery in
-`_status_verdict(syncthing_pending=)` (after `left_out`, before `peers_overdue`)
-so it clears automatically when the folder catches up.
+`_status_verdict(syncthing_pending=)` (after `left_out`, before `peers_overdue`).
+Once the folder catches up, the live verdict and the rendered pending clause
+in the last auto-pull line clear. The recorded breadcrumb remains available
+to diagnostics.
 
 ## Syncthing state and each peer's push (Track 92A)
 

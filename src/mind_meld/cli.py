@@ -4764,7 +4764,7 @@ def autopull() -> None:
                 setup.memory_kb,
                 quiet=True,
                 conflict_mode="keep-both",
-                syncthing_delivery="probe",
+                syncthing_delivery="hook",
             )
 
             if result.total_conflicted:

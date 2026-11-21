@@ -971,16 +971,11 @@ def status(
             datetime.now(timezone.utc),
         )
         peers_overdue = _overdue_peers_line(peer_states)
-        syncthing_pending = ""
-        if syncthing.delivery_pending(syncthing_state):
-            nf = syncthing_state.files_to_fetch
-            if isinstance(nf, int) and not isinstance(nf, bool) and nf > 0:
-                syncthing_pending = (
-                    f"Syncthing is still delivering "
-                    f"{core._count(nf, 'file', 'files')}. Run: mm pull"
-                )
-            else:
-                syncthing_pending = "Syncthing is still delivering files. Run: mm pull"
+        syncthing_pending = (
+            syncthing.delivery_notice(syncthing_state.files_to_fetch)
+            if syncthing.delivery_pending(syncthing_state)
+            else ""
+        )
 
         verdict = _status_verdict(
             source=source,
@@ -1075,6 +1070,12 @@ def status(
             # `mm status` is the command the v0.12.16 degradation signal is
             # designed to reach, and it runs far more often than `mm diag`.
             detail = crumb.get("detail")
+            if verb == "pull" and not syncthing_pending and isinstance(detail, str):
+                detail = "; ".join(
+                    part
+                    for part in detail.split("; ")
+                    if not part.startswith(syncthing.DELIVERY_NOTICE_PREFIX)
+                )
             outcome_str = (
                 f"{safe_str(safety.safe_terminal_str(outcome))}: "
                 f"{safe_str(safety.safe_terminal_str(detail))}"

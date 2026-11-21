@@ -4707,17 +4707,28 @@ def test_syncthing_delivery_wait_bound_expiry_reports_clause_and_applies_arrived
         folder_paused=False,
         files_to_fetch=3,
     )
-    monkeypatch.setattr(pullflow.syncthing, "read_state", lambda *a, **kw: pending_state)
+    fleet.config["sync"]["pull_syncthing_wait_ms"] = 1500
     clock = [10.0]
+    budgets: list[float] = []
+
+    def read_state(_root: Path, *, timeout: float, budget: float) -> syncthing.SyncthingState:
+        budgets.append(budget)
+        if len(budgets) == 1:
+            return pending_state
+        clock[0] += budget
+        return syncthing.SyncthingState(state="unreachable", cause="timeout")
 
     def fake_sleep(secs: float) -> None:
-        clock[0] += 20.0  # jump past the 15 s bound
+        clock[0] += secs
 
+    monkeypatch.setattr(pullflow.syncthing, "read_state", read_state)
     monkeypatch.setattr(pullflow, "_delivery_now", lambda: clock[0])
     monkeypatch.setattr(pullflow, "_delivery_sleep", fake_sleep)
 
     result, summaries, _ = _run(fleet, monkeypatch, "direct", syncthing_delivery="wait")
 
+    assert budgets == [2.0, 0.5]
+    assert clock[0] == 11.5
     assert (fleet.local / "arrived.md").read_bytes() == b"here already\n"
     assert result.total_written == 1
     assert result.total_failed == 0
@@ -4734,6 +4745,7 @@ def test_syncthing_delivery_wait_bound_expiry_reports_clause_and_applies_arrived
 
     # Second pull applies nothing while Syncthing is still delivering:
     # neither direct summary nor attended outcome prints only "nothing to apply"/"no changes".
+    budgets.clear()
     clock[0] = 100.0
     result2, summaries2, _ = _run(fleet, monkeypatch, "direct", syncthing_delivery="wait")
     assert result2.total_applied == 0
@@ -4908,11 +4920,47 @@ def test_cli_pull_delivery_mode_wiring_for_terminal_pipe_dry_run_join_and_autopu
         join=True,
     )
 
-    # 5. autopull -> "probe"
+    # 5. autopull -> "hook" (one probe with a smaller budget)
     res_auto = CliRunner().invoke(cli.app, ["autopull"])
     assert res_auto.exit_code == 0, res_auto.output
 
-    assert seen_modes == ["wait", "probe", "off", "off", "probe"]
+    assert seen_modes == ["wait", "probe", "off", "off", "hook"]
+
+
+@pytest.mark.parametrize("terminal", (False, True), ids=("pipe", "verbose-terminal"))
+def test_cli_pull_reports_pending_delivery(fleet, fake_syncthing, monkeypatch, terminal):
+    from typer.testing import CliRunner
+
+    from mind_meld import cli
+    from mind_meld import config as config_mod
+
+    cfg_path = fleet.root / "config.toml"
+    fleet.config["sync"]["pull_syncthing_wait_ms"] = 1000
+    config_mod.save_config(fleet.config, cfg_path)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", cfg_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    monkeypatch.setattr(core, "_console_is_terminal", lambda: terminal)
+    fake_syncthing.set_folder(fleet.backend.root, state="idle", need_files=2)
+    clock = [20.0]
+    phases: list[str] = []
+    monkeypatch.setattr(core._SyncProgress, "start", lambda self, phase: phases.append(phase))
+    monkeypatch.setattr(pullflow, "_delivery_now", lambda: clock[0])
+
+    def advance_clock(seconds: float) -> None:
+        assert terminal
+        clock[0] += seconds
+
+    monkeypatch.setattr(pullflow, "_delivery_sleep", advance_clock)
+    args = ["pull", "--verbose"] if terminal else ["pull"]
+    result = CliRunner().invoke(cli.app, args)
+
+    assert result.exit_code == 0, result.output
+    assert "Pull: no changes." in result.stdout
+    assert "Pull: Syncthing is still delivering 2 files. Run: mm pull." in result.stdout
+    assert result.stderr == ""
+    assert history_rows() == []
+    assert ("Waiting for Syncthing to deliver 2 files" in phases) is terminal
+    assert clock[0] == (21.0 if terminal else 20.0)
 
 
 def test_cli_autopull_records_pending_syncthing_delivery_in_success_breadcrumb_silently(
@@ -4928,16 +4976,25 @@ def test_cli_autopull_records_pending_syncthing_delivery_in_success_breadcrumb_s
     monkeypatch.setattr(config_mod, "CONFIG_PATH", cfg_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
-    fake_syncthing.set_folder(fleet.backend.root, state="syncing", need_files=2, need_bytes=90)
+    fake_syncthing.set_folder(fleet.backend.root, state="idle", need_files=2, need_bytes=90)
     fake_syncthing.requests.clear()
     sleeps: list[float] = []
     monkeypatch.setattr(pullflow, "_delivery_sleep", sleeps.append)
+    budgets: list[tuple[float, float]] = []
+    read_state = pullflow.syncthing.read_state
+
+    def observe_probe(storage_path, *, timeout, budget):
+        budgets.append((timeout, budget))
+        return read_state(storage_path, timeout=timeout, budget=budget)
+
+    monkeypatch.setattr(pullflow.syncthing, "read_state", observe_probe)
 
     res = CliRunner().invoke(cli.app, ["autopull"])
     assert res.exit_code == 0, (res.stdout, res.stderr)
     assert res.stdout == ""
     assert res.stderr == ""
     assert sleeps == []
+    assert budgets == [(0.5, 0.5)]
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []
 
@@ -4997,7 +5054,10 @@ def test_deletion_only_pull_has_no_per_source_header_and_never_says_nothing_to_a
     _put_local(fleet, "gone.md", content, 1_600_000_000)
     _record(("gone.md", content))
 
-    result, summaries, (out, err) = _run(fleet, monkeypatch, mode, verbose=True)
+    # Keep the recovery path whole even under a long test-runner temporary root.
+    result, summaries, (out, err) = _run(
+        fleet, monkeypatch, mode, verbose=True, console_width=len(str(fleet.root)) + 200
+    )
 
     assert result.total_deleted == 1
     assert result.total_applied == 0
@@ -5041,10 +5101,20 @@ def test_plural_older_peer_edits_held_label_and_clause(fleet, monkeypatch, mode)
 def test_mixed_source_outcomes_up_to_date_line_for_held_only_but_not_applied(
     fleet, monkeypatch, verbose
 ):
-    # Peer B/notes is held-only; Peer C/notes writes a new file.
-    _seed(fleet, {"held.md": b"peer older\n"}, mtime=1_700_000_000)
+    # Peer B holds notes and has an unchanged reference; Peer C writes a note.
+    peer, _ = _seed(fleet, {"held.md": b"peer older\n"}, mtime=1_700_000_000)
     _put_local(fleet, "held.md", b"local newer\n", 1_800_000_000)
     _record(("held.md", b"local newer\n"))
+    reference = fleet.root / "reference"
+    reference.mkdir()
+    (reference / "held.md").write_bytes(b"peer older\n")
+    fleet.config["sync"]["sources"].append(
+        {"name": "reference", "type": "generic", "path": str(reference), "include_dirs": ["."]}
+    )
+    peer["sources"]["reference"] = peer["sources"]["notes"].copy()
+    fleet.backend.put(
+        manifest_key(PEER), crypto.encrypt(manifest.serialize_manifest(peer), PASSPHRASE, MEMORY_KB)
+    )
     _, c_transferred = _seed_third(fleet, {"fresh.md": b"new from c\n"}, mtime=1_700_000_000)
 
     result, summaries, (out, err) = _run(fleet, monkeypatch, "attended", verbose=verbose)
@@ -5060,10 +5130,12 @@ def test_mixed_source_outcomes_up_to_date_line_for_held_only_but_not_applied(
     lines = out.splitlines()
     if verbose:
         assert "  Up to date with Peer B/notes." in lines
+        assert "  Up to date with Peer B/reference." in lines
         assert "  Up to date with Peer C/notes." not in lines
         assert "  Peer B/notes: 1 older peer edit held" in lines
         assert "  Peer C/notes: 1 written" in lines
     else:
         assert "  Up to date with Peer B/notes." not in lines
+        assert "  Up to date with Peer B/reference." not in lines
         assert "  Up to date with Peer C/notes." not in lines
         assert summaries == [("", "")]

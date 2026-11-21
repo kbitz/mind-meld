@@ -3263,12 +3263,7 @@ def delivering_clause(result: PullResult) -> str:
     or "" when delivery is not pending."""
     if not result.syncthing_still_delivering:
         return ""
-    pending = result.syncthing_pending_files
-    if isinstance(pending, int) and not isinstance(pending, bool) and pending > 0:
-        return (
-            f"Syncthing is still delivering {core._count(pending, 'file', 'files')}. Run: mm pull"
-        )
-    return "Syncthing is still delivering files. Run: mm pull"
+    return syncthing.delivery_notice(result.syncthing_pending_files)
 
 
 def delivering_detail(result: PullResult) -> str:
@@ -4084,38 +4079,54 @@ def _record_peer_cursors(
 
 _delivery_sleep = time.sleep
 _delivery_now = time.monotonic
+_DELIVERY_PROBE_BUDGET_S = 2.0
+_HOOK_DELIVERY_PROBE_BUDGET_S = 0.5
 
 
 def _wait_for_syncthing_delivery(
-    storage_root: Path,
+    config: dict,
     *,
-    mode: Literal["off", "probe", "wait"],
-    wait_ms: int,
+    mode: Literal["off", "probe", "wait", "hook"],
+    verbose: bool,
 ) -> tuple[bool, int | None]:
     """Probe Syncthing folder delivery before reading manifests; optionally wait."""
     if mode == "off":
         return False, None
-    state = syncthing.read_state(storage_root, timeout=1.0, budget=2.0)
+    storage_root = Path(config["storage"]["path"]).expanduser()
+    budget = _HOOK_DELIVERY_PROBE_BUDGET_S if mode == "hook" else _DELIVERY_PROBE_BUDGET_S
+    state = syncthing.read_state(storage_root, timeout=min(1.0, budget), budget=budget)
     if not syncthing.delivery_pending(state):
         return False, None
-    if mode == "wait" and wait_ms > 0:
-        deadline = _delivery_now() + (wait_ms / 1000.0)
-        while True:
-            nf = state.files_to_fetch
-            if isinstance(nf, int) and not isinstance(nf, bool) and nf > 0:
-                phase = f"Waiting for Syncthing to deliver {core._count(nf, 'file', 'files')}"
-            else:
-                phase = "Waiting for Syncthing to deliver files"
-            core._sync_progress_phase(phase)
-            remaining = deadline - _delivery_now()
-            if remaining <= 0:
-                break
-            _delivery_sleep(min(1.0, remaining))
-            state = syncthing.read_state(storage_root, timeout=1.0, budget=2.0)
-            if not syncthing.delivery_pending(state):
-                return False, None
+    if mode == "wait":
+        wait_ms = config.get("sync", {}).get(
+            "pull_syncthing_wait_ms", _config_module.DEFAULT_PULL_SYNCTHING_WAIT_MS
+        )
+        deadline = _delivery_now() + wait_ms / 1000.0
+        # Verbose pulls skip the usual spinner. Give just this wait its own phase.
+        progress = core._SyncProgress(enabled=True, delay=0.0) if verbose and wait_ms else None
+        show_phase = progress.start if progress is not None else core._sync_progress_phase
+        try:
+            while _delivery_now() < deadline:
+                files = syncthing.delivery_files(state.files_to_fetch)
+                show_phase(f"Waiting for Syncthing to deliver {files}")
+                _delivery_sleep(min(1.0, max(0.0, deadline - _delivery_now())))
+                remaining = deadline - _delivery_now()
+                if remaining <= 0:
+                    break
+                observed = syncthing.read_state(
+                    storage_root, timeout=1.0, budget=min(budget, remaining)
+                )
+                # An incomplete timeout sample cannot disprove the last observation.
+                if observed.state == "unreachable" and observed.cause == "timeout":
+                    continue
+                if not syncthing.delivery_pending(observed):
+                    return False, None
+                state = observed
+        finally:
+            if progress is not None:
+                progress.stop()
     nf = state.files_to_fetch
-    pending_files = nf if isinstance(nf, int) and not isinstance(nf, bool) and nf > 0 else None
+    pending_files = nf if type(nf) is int and nf > 0 else None
     return True, pending_files
 
 
@@ -4132,7 +4143,7 @@ def _pull_core(
     *,
     diagnostics: bool | None = None,
     result_observer: Callable[[PullResult], None] | None = None,
-    syncthing_delivery: Literal["off", "probe", "wait"] = "off",
+    syncthing_delivery: Literal["off", "probe", "wait", "hook"] = "off",
 ) -> PullResult:
     """Core pull logic shared by pull and autopull.
 
@@ -4163,13 +4174,10 @@ def _pull_core(
         start = time.time()
         my_device_id = config["device"]["id"]
         backend = get_backend(config)
-        wait_ms = config.get("sync", {}).get(
-            "pull_syncthing_wait_ms", _config_module.DEFAULT_PULL_SYNCTHING_WAIT_MS
-        )
         syncthing_still_delivering, syncthing_pending_files = _wait_for_syncthing_delivery(
-            Path(config["storage"]["path"]).expanduser(),
+            config,
             mode=syncthing_delivery,
-            wait_ms=wait_ms,
+            verbose=verbose,
         )
         # Track 90A: only the pull paths (mm pull, its dry run, mm autopull and the
         # join's pull) let the current directory's main checkout own a project
