@@ -44,114 +44,41 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/events.py|src/mind_meld/projectid.py] Base issue: Local Git origins can disclose directory names
-
-- **Base issue:** Present at `cf5edc0`. The Git activity walker canonicalizes an absolute local `origin` into a remote label that still contains its directory components.
-- **Evidence:** The base and reviewed candidate use the same canonicalizer for `projects[].remote`. Track 155A’s projection removes the two explicit checkout-path fields and preserves the remote label.
-- **Context:** Track 155A review at `1f36308`. Changing remote labels needs a separate decision about how fleet reports identify repositories.
-- **Revisit:** When a machine uses a local Git origin or the next Track changes usage metadata.
-
-### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: Resolve handles a pre-prompt stat failure
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** A failed identity read before the prompt should use the existing read-failure path and preserve both files. Existing cases inject read errors after successful stats.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/resolveflow.py:819`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: Resolve continues after a stale pair
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** A stale pair should count as failed while the following pair can resolve. The current stale-pair cases each use one conflict.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/resolveflow.py:1053`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-### [review:files=src/mind_meld/events.py|tests/test_events.py] Test gap: Git append size ceiling uses projected bytes
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Exercise a batch that fits the ceiling after the checkout path fields are removed. Existing size-boundary tests use a push marker.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events.py:4073`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_events.py] Test gap: Push journals roots before the append
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Check that the matching local journal entry exists at append time and that an entry without a terminal row cannot replay. The existing interruption fixture interrupts cursor commit.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events_tail.py:1939`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-### [review:files=src/mind_meld/events.py|tests/test_events.py] Test gap: Push appends when the journal cannot be written
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Inject an OSError in the added local journal write and verify the event append remains usable. Existing fault cases target the event writer.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events.py:3313`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-### [review:files=src/mind_meld/events.py|tests/test_events.py] Test gap: Git capture journal rejects malformed entries
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Use a local cache with valid and malformed entries and verify the valid outcomes survive normalization.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events.py:584`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-### [review:files=src/mind_meld/events.py|tests/test_events.py] Test gap: Git capture journal prunes by age and commit order
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Exercise the age cutoff, eight-entry cap, and preservation of newer entries after committing an older batch. Existing tests clear a single batch.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events.py:3301`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-### [review:files=src/mind_meld/events.py|tests/test_events_budget_scope.py] Test gap: Legacy git rows restore cursors without a journal
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Replay a retained older own-device batch that still carries path fields, then verify completed and skipped roots. The two no-journal paths now need distinct fixtures.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events.py:3476`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_recapture.py] Test gap: Recapture refuses a different recorded snapshot
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Place a different persisted git snapshot in the event file and verify it cannot authorize a cursor commit for the current batch. Existing coverage uses an empty file or an exact match.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events_tail.py:2271`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-### [review:files=src/mind_meld/recaptureflow.py|tests/test_recapture.py] Test gap: Recapture reports the projected payload size
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Compare the reported estimate with the encoded pathless JSON payload. Existing tests assert preview labels and cursor state.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/recaptureflow.py:177`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: New fleet init preserves a tilde storage setting
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Assert the saved form retains its tilde and still expands at load time. The new-fleet relative-path fixture checks a bare relative answer.
-- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/initflow.py:1142`. The six approved criteria have existing assertions.
-- **Revisit:** On the next Track that touches the named files.
-
-
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-21 (O9 rewritten as one local qmd index, moved before 2.0; four bugs carded)
 
-Run by `/project-spec` with a full `/roadmap` regeneration, from the Factory Manager's brief relaying the developer's decisions of 2026-11-20 and 2026-11-21. Verified against `cf5edc0` (v1.12.73). docs/SPEC.md O9 is rewritten: one local qmd index per machine over every provider's memory, with Codex memory roaming as per-machine copies. The developer's answers to the run's three questions, verbatim: "1 c / 2 a / 3 a". That moves O9 before 2.0 (then "3 yes, gate", confirmed directly by the owner: O9 is a condition of 2.0.0), places the three observed bugs on the Current Plan under the 2026-11-09 rule instead of the brief's Future, and makes keyword search the baseline with embeddings opt-in. docs/designs/cross-model-memory.md is replaced, and the 2026-10-29 design moves to docs/archive/cross-model-memory-2026-10-29.md. Track 154A shipped as v1.12.73 (PR #362) and is recorded in shipped history. No inbox item was waiting. Track 155A (the deepsec fixes) is in progress, declared by the Factory Manager: factory item `008f1cf4`, branch `mmm/008f1cf4`, draft PR #364. Its ID and Group 155 are pinned, and the qualification backfills as Track 155B in that Group.
+Run by `/project-spec` with a full `/roadmap` regeneration, from the Factory Manager's brief relaying the developer's decisions of 2026-11-20 and 2026-11-21. Verified against `cf5edc0` (v1.12.73). docs/SPEC.md O9 is rewritten: one local qmd index per machine over every provider's memory, with Codex memory roaming as per-machine copies. The developer's answers to the run's three questions, verbatim: "1 c / 2 a / 3 a". That moves O9 before 2.0 (then "3 yes, gate", confirmed directly by the owner: O9 is a condition of 2.0.0), places the three observed bugs on the Current Plan under the 2026-11-09 rule instead of the brief's Future, and makes keyword search the baseline with embeddings opt-in. docs/designs/cross-model-memory.md is replaced, and the 2026-10-29 design moves to docs/archive/cross-model-memory-2026-10-29.md. Track 154A shipped as v1.12.73 (PR #362) and is recorded in shipped history. No inbox item was waiting. Track 155A (the deepsec fixes) was declared in progress during this run (factory item `008f1cf4`, PR #364), merged as v1.12.74 before this PR landed, and is recorded in shipped history; Group 155 retires and the remainder is repacked into Groups 156 to 160. PR #364 also filed 12 review items in the inbox, drained below.
 
 | Item | Disposition |
 |---|---|
-| Brief: rewrite O9 around a local qmd index over every provider's memory, with setup installing qmd and recommending a pointer line | SPEC O9 rewritten; place (Tracks 155B, 158A, 159A, 160A), before 2.0 on the developer's "1 c" |
-| Brief: `mm pull` reports nothing while Syncthing still delivers a peer's push (SPEC O3.1) | place (Track 157A); verified: the waiting clause counts only blobs of manifests that have already arrived, and pull reads `syncthing.read_state` only after applying |
+| Brief: rewrite O9 around a local qmd index over every provider's memory, with setup installing qmd and recommending a pointer line | SPEC O9 rewritten; place (Tracks 156B, 157A, 159A, 160A), before 2.0 on the developer's "1 c" |
+| Brief: `mm pull` reports nothing while Syncthing still delivers a peer's push (SPEC O3.1) | place (Track 158A); verified: the waiting clause counts only blobs of manifests that have already arrived, and pull reads `syncthing.read_state` only after applying |
 | Brief backlog (a): `pipx install --force` fails on pipx's uv backend | place (Track 156A, task 1), on the developer's "2 a" and the 2026-11-09 rule; verified: `upgrade.INSTALL_CMD`, `update_argv` and `reinstall_cmd` |
 | Brief backlog (b): `mm status` keeps a resolved removal-wait line until the next attended push | place (Track 156A, task 2); also in PR #362's review backlog |
 | Brief backlog (c): `mm init` prints no-action capture notices | place (Track 156A, task 3); verified in `events_tail._run_events_backfill`; also in PR #362's review backlog |
-| Future: "Implement cross-model memory (docs/SPEC.md O9)" | promoted, with its scope replaced by the 2026-11-21 design (Tracks 158A, 159A, 160A) |
-| Future: "Qualify cross-model memory in isolated homes (Track 96A)" | promoted as Track 155B, re-scoped to recall through qmd, contradiction and the Codex file set |
+| Future: "Implement cross-model memory (docs/SPEC.md O9)" | promoted, with its scope replaced by the 2026-11-21 design (Tracks 157A, 159A, 160A) |
+| Future: "Qualify cross-model memory in isolated homes (Track 96A)" | promoted as Track 156B, re-scoped to recall through qmd, contradiction and the Codex file set |
 | Current Plan: Track 154A | shipped in v1.12.73 (PR #362); independent receipt in docs/roadmap-shipped.md |
-| Current Plan: Track 155A (deepsec C1 to C3) | stays as Track 155A in Group 155, now In Progress (pinned: PR #364); given a numbered Acceptance list taken from its Done-when, scope unchanged. Track 156A carries `_blocked-by: Track 155A` because they change the same files |
+| Current Plan: Track 155A (deepsec C1 to C3) | shipped in v1.12.74 (PR #364, merged while this PR was open); independent receipt in docs/roadmap-shipped.md. Track 156A keeps `_blocked-by: Track 155A` as a satisfied prerequisite |
 | Future test gaps "init's no-release notice when reading the cached upgrade view fails" and "Mesh breadcrumbs with several omitted details" | place (Track 156A, S tasks) |
-| Future test gaps "summary counts across peers and deletion-only pulls" and "plural held counts and mixed source outcomes" | place (Track 157A, S tasks) |
+| Future test gaps "summary counts across peers and deletion-only pulls" and "plural held counts and mixed source outcomes" | place (Track 158A, S tasks) |
 | Future test gap "bootstrap Arch install paths" | place (Track 160A, S task) |
 | Other Future test gaps whose `_touches:` triggers the new Tracks meet (bootstrap version, ordering and upgrade checks; SSH config fallback; the `mm resolve` and `mm init` gaps; pending-join and pull-count gaps; help and events-folder gaps) | stay deferred: placing more would push each Track past the session-weight cap |
+| Inbox (Track 155A review, PR #364): "Base issue: Local Git origins can disclose directory names" | defer: changing remote labels needs an owner decision on how fleet reports identify repositories (the review's own note); unobserved on the owner's machines; trigger: a machine uses a local Git origin, or the owner decides how fleet reports identify repositories |
+| Inbox (Track 155A review, PR #364): "Test gap: Resolve handles a pre-prompt stat failure" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/resolveflow.py, tests/test_conflict_copy.py |
+| Inbox (Track 155A review, PR #364): "Test gap: Resolve continues after a stale pair" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/resolveflow.py, tests/test_conflict_copy.py |
+| Inbox (Track 155A review, PR #364): "Test gap: Git append size ceiling uses projected bytes" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/events.py, tests/test_events.py |
+| Inbox (Track 155A review, PR #364): "Test gap: Push journals roots before the append" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/events_tail.py, tests/test_events.py |
+| Inbox (Track 155A review, PR #364): "Test gap: Push appends when the journal cannot be written" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/events.py, tests/test_events.py |
+| Inbox (Track 155A review, PR #364): "Test gap: Git capture journal rejects malformed entries" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/events.py, tests/test_events.py |
+| Inbox (Track 155A review, PR #364): "Test gap: Git capture journal prunes by age and commit order" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/events.py, tests/test_events.py |
+| Inbox (Track 155A review, PR #364): "Test gap: Legacy git rows restore cursors without a journal" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/events.py, tests/test_events_budget_scope.py |
+| Inbox (Track 155A review, PR #364): "Test gap: Recapture refuses a different recorded snapshot" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/events_tail.py, tests/test_recapture.py |
+| Inbox (Track 155A review, PR #364): "Test gap: Recapture reports the projected payload size" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/recaptureflow.py, tests/test_recapture.py |
+| Inbox (Track 155A review, PR #364): "Test gap: New fleet init preserves a tilde storage setting" | stay deferred: no remaining Track's `_touches:` cover both files, or placing it would push 157A or 160A past the session-weight cap; trigger: a Track's `_touches:` cover src/mind_meld/initflow.py, tests/test_initflow.py |
 
-7 Future entries placed; Future goes from 110 to 103 entries. 0 killed, 0 discharged. No bump: documentation only, under SPEC's release policy.
+7 Future entries placed and 12 inbox items deferred; Future goes from 110 to 115 entries. 0 killed, 0 discharged. No bump: documentation only, under SPEC's release policy.
 
 ### Roadmap card run — 2026-11-20 (join, prompt and fleet-device UX carded as Track 154A)
 

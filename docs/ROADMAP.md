@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Everything carded through Track 154A (the join, prompt and fleet-device UX) shipped by v1.12.73 (independent receipts in shipped history), so SPEC O2 as amended on 2026-11-20 is built. Track 155A, the three deepsec-confirmed bugs, is in progress (draft PR #364). The plan below also carries three bugs the owner hit on 2026-11-20 (Track 156A), `mm pull` reporting nothing while Syncthing still delivers a peer's push (Track 157A), and cross-model memory, which the developer moved before 2.0 and made a condition of 2.0.0 on 2026-11-21 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)): a qualification in isolated homes (Track 155B), then per-machine Codex memory copies (158A), one local qmd index over every provider's memory (159A), and qmd setup with the recommended pointer line (160A). The owner will decide the path to 2.0 after using the Syncthing fleet for a while.
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Everything carded through Track 155A (the deepsec fixes) shipped by v1.12.74 (independent receipts in shipped history). The plan below carries three bugs the owner hit on 2026-11-20 (Track 156A), `mm pull` reporting nothing while Syncthing still delivers a peer's push (Track 158A), and cross-model memory, which the developer moved before 2.0 and made a condition of 2.0.0 on 2026-11-21 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)): a qualification in isolated homes (Track 156B), then per-machine Codex memory copies (157A), one local qmd index over every provider's memory (159A), and qmd setup with the recommended pointer line (160A). The owner will decide the path to 2.0 after using the Syncthing fleet for a while.
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -22,66 +22,21 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 
 ## In Progress
 
-Group 155 is active (declared by the Factory Manager, 2026-11-21): Track 155A is factory item `008f1cf4` on branch `mmm/008f1cf4`, draft PR #364, in its final gate. Its ID and Group label are pinned. Track 155B shares the Group because the packer bins it with 155A (no file in common); it has not started and may launch now.
-
-### Group 155: Fixes from the deepsec scan ∥ cross-model memory qualification
-
-_Depends on: none_
-
-**This group delivers:** an edit made to a conflicted file while `mm resolve` waits at its prompt is no longer overwritten; the synced git-activity rows carry no local repository paths; a new fleet started with a relative storage path saves it as an absolute path. Separately, the owner learns whether fresh Codex and Claude Code sessions find each other's memory through qmd with only the recommended line, before any O9 code is written.
-
-#### Track 155A: Keep edits made during `mm resolve`, keep repository paths off the synced git rows, and save an absolute new-fleet storage path
-_3 tasks . ~250 LOC . medium risk . 13 files_
-**Outcome:** the owner can resolve a conflict while an agent keeps working in that project without losing the agent's edit; the fleet's synced event log stops naming the folders where the owner keeps repositories; and a new fleet works from every directory whatever form of path the owner typed.
-**Supports:** O1.1 (when two machines change the same file, mm keeps both versions until `mm resolve`), the docs/SPEC.md constraint that usage capture publishes "never ... filesystem paths", and O2's `mm init` new-fleet path. The developer admitted all three on 2026-11-20 (option (a): card the three confirmed bugs as one Track). None has been reported from real use yet.
-**Done when:** tests show that an edit to the canonical file or the conflict copy after `mm resolve` showed the conflict survives each (l), (r) and (m) choice in both conflict-copy layouts, with both files left and a run-again line; a written `git-snapshot` row holds no `local_path` and no `skipped[].path`, while repository cursors still advance, an interrupted capture still reconciles and `mm recapture --dry-run` still names skipped repositories; and `mm init` in new-fleet mode saves a relative answer such as `Sync/mind-meld` as an absolute path.
-**Acceptance:**
-1. Suppose the canonical file or the conflict copy is edited after `mm resolve` shows the conflict and before the owner chooses (l), (r) or (m). Then that choice changes nothing, in both conflict-copy layouts (before and after the inversion): both files stay, and one O8 line names the changed file and `mm resolve` to run again.
-2. A `git-snapshot` row written to the synced `mm-events` log holds no `local_path` and no `skipped[].path`. It keeps the remote URL, the commits and the typed skip reasons.
-3. Repository cursors still advance, an interrupted cache commit still reconciles from this device's own event files, and `mm recapture --dry-run` still names skipped repositories. All three get the paths from local state, never from the wire.
-4. `mm init` starting a new fleet saves a relative storage answer such as `Sync/mind-meld` as an absolute path, as joins already do.
-5. docs/invariants/conflicts.md, docs/invariants/events-retro.md and docs/invariants/init-devices.md record the three rules, and README's `mm recapture --dry-run` wording matches if it changes.
-_touches: src/mind_meld/resolveflow.py, src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/recaptureflow.py, src/mind_meld/initflow.py, tests/test_conflict_copy.py, tests/test_events.py, tests/test_recapture.py, tests/test_initflow.py, docs/invariants/conflicts.md, docs/invariants/events-retro.md, docs/invariants/init-devices.md, README.md_
-_read-first: docs/invariants/conflicts.md (the `mm resolve` walk, `(p)romote` on the canonical-exists path, loop the parse not the dispatch), docs/invariants/events-retro.md (git-walk repository loss, recapture walks, cursor reconciliation), docs/invariants/init-devices.md (join record), docs/SPEC.md Constraints and O1, src/mind_meld/pullflow.py `_unchanged_since`, tests/test_module_boundaries.py_
-
-_Source: deepsec 2.3.16 security scan of 2026-11-20 (Codex model, partial coverage: about 25 of 75 source files), triage outside the repository, confirmed items C1 to C3; the developer's decision the same day, relayed by the Factory Manager. Verified at `ab86b98`. C1: `resolveflow._resolve_interactive_loop` reads both files, waits at `typer.prompt("  Choice", ...)`, then (r) post-inversion runs `cpath.rename(canonical)`, (l) pre-inversion renames over canonical, (l) post-inversion and (r) pre-inversion unlink the conflict copy, and (m) runs `fsutil.atomic_write_bytes(canonical, merged_bytes, ...)`; none compares either file with what was shown, and no recovery copy is kept. The inline pull path re-checks with `pullflow._unchanged_since` (size, mtime, ctime, inode). C2: `events.walk_git_projects` builds each project with `"local_path": str(root)` and each skip with `{"path": str(root), ...}`; `events_tail` writes `capture.git_rows` into the synced `mm-events` log; docs/SPEC.md Constraints say usage capture publishes "never ... filesystem paths". [challenge] The triage names one local reader of these fields; there are three: `events._apply_repo_cursors_to_cache`, the own-file replay that reads `git-snapshot` rows back from this device's event files to reconcile an interrupted cache commit, and `recaptureflow`'s dry-run, which prints each skipped path. docs/invariants/events-retro.md already records that "these paths already ride the synced git-snapshot row". The paths must reach those readers locally, not over the wire. Rows already published keep their paths; whether to rewrite this device's own event files is for the plan stage, under the rule that no storage file is rewritten by more than one machine. C3: `initflow.init` absolutizes a relative storage answer only `if not new_fleet`, and saves `storage_path` into `config["storage"]["path"]`; `config.py` resolves that path against the working directory on every load. [challenge] The triage says the condition "came in with #355". Before #355 (`0bec1e4`) neither mode absolutized; #355 fixed joins and left new fleets as they were. The root cause is older than #355. The default `~/Sync/mind-meld` is unaffected. The triage's lower-priority millisecond windows in pre-inversion migration and promotion are deferred to Future with the pull-apply windows. Recorded test gaps in Future whose triggers name `resolveflow.py`, `initflow.py` or `events_tail.py` with their test files stay there: one more S task would put this Track over the session-weight cap of 6._
-
-- **Re-check the conflict pair before `mm resolve` writes** -- in `resolveflow._resolve_interactive_loop`, record the `lstat` identity of the canonical file and the conflict copy when the conflict is shown, and compare both (as `pullflow._unchanged_since` does; share the helper without breaking tests/test_module_boundaries.py) immediately before each rename, unlink and merge write of the (l), (r) and (m) choices. On a mismatch, change nothing, keep both files and print one O8 line naming the file that changed and `mm resolve` to run again. Tests in tests/test_conflict_copy.py cover each choice in both conflict-copy layouts. Update docs/invariants/conflicts.md. _resolveflow.py, tests/test_conflict_copy.py, docs/invariants/conflicts.md, ~110 lines._ (M)
-- **Keep repository paths off the synced git-snapshot rows** -- stop writing `local_path` and `skipped[].path` into `git-snapshot` rows, keeping the remote URL, commits and typed skip reasons. Give the three local readers (`_apply_repo_cursors_to_cache`, the own-file replay and the recapture dry-run) the paths through local state, the in-memory capture or the local cursor cache, never the wire. Test that a written row holds no path while cursors, reconciliation and the dry-run list still work. Update docs/invariants/events-retro.md and README's `mm recapture --dry-run` wording if it changes. _events.py, events_tail.py, recaptureflow.py, tests/test_events.py, tests/test_recapture.py, docs/invariants/events-retro.md, README.md, ~120 lines._ (M)
-- **Save an absolute storage path when starting a new fleet** -- in `initflow.init`, absolutize a relative storage answer in both modes, and add a new-fleet test with a relative answer in tests/test_initflow.py. Note the rule beside the join record's in docs/invariants/init-devices.md. _initflow.py, tests/test_initflow.py, docs/invariants/init-devices.md, ~20 lines._ (S)
-
-#### Track 155B: Qualify cross-model memory through qmd in isolated homes
-_1 task . ~150 LOC . low risk . 1 file_
-**Outcome:** before any O9 code is written, the owner knows whether fresh Codex and Claude Code sessions, given only the recommended pointer line, find another agent's memory through `qmd search` and surface a contradiction instead of hiding it, and which Codex memory files the per-machine copies should carry.
-**Supports:** docs/SPEC.md O9.6 (qualification before implementation), planned before 2.0 on the developer's word (2026-11-21: "1 c"). It replaces the Future card for the 2026-10-29 design's qualification (formerly Track 96A), which was retired with that design.
-**Done when:** docs/designs/cross-model-memory.md records Q1, Q2 and Q3, run in temporary `HOME`, `CODEX_HOME` and XDG folders, with the observed codex-cli, Claude Code and qmd versions, the commands the agents ran and the final pointer line. A failed Q1 or Q2 is written up for the owner, and no product code changes.
-**Acceptance:**
-1. Every check runs with a temporary `HOME`, `CODEX_HOME` and XDG folders. Nothing reads or writes the owner's real Claude, Codex, Grok or Muse stores, qmd index or credential files. Sessions authenticate through an API key in the environment or a fresh login inside the temporary home.
-2. Q1: a fresh Codex session, with only the pointer line in its `AGENTS.md`, answers a question that only a seeded Claude-origin memory answers, by running `qmd search`. A fresh Claude Code session, with only the line in its `CLAUDE.md`, finds a seeded Codex-origin memory the same way. The result is recorded either way, with the commands each session ran.
-3. Q2: with two contradicting memories seeded from different providers, each session reports both, with their paths, and asks the owner instead of choosing one.
-4. Q3: in an isolated `CODEX_HOME` with Codex's `memories` feature on, the design records the files Codex writes and which it regenerates wholesale, and chooses the copy set. If Codex writes no memory within the session budget, the default set (`memory_summary.md`, `MEMORY.md`, `rollout_summaries/*.md`) is kept and the reason recorded.
-5. docs/designs/cross-model-memory.md records the results and versions and the final pointer line. A failed Q1 or Q2 sends the design back to the owner, and Tracks 158A, 159A and 160A stay blocked. No product code changes.
-_touches: docs/designs/cross-model-memory.md_
-_out: 158A_
-_read-first: docs/designs/cross-model-memory.md (Qualification, Design 5 and 6), docs/SPEC.md O9_
-
-_Source: the developer's decisions of 2026-11-20 and 2026-11-21 quoted in docs/SPEC.md's 2026-11-21 amendment, and the Factory Manager's brief: "fresh Codex and Claude sessions in isolated homes (temporary HOME and CODEX_HOME, never the owner's real stores) find another agent's memory through qmd with only the recommended pointer line". Verified 2026-11-20 on `linux-a`: qmd 2.8.3 is installed (`qmd --version`); `qmd search` returned two contradicting memories from two collections in a temporary `HOME`; codex-cli 0.171.0 lists `memories stable false`._
-
-- **Run Q1 to Q3 and record them** -- seed the memories, build the planned `mm-` collections in the temporary home's qmd index, run the fresh sessions, and write the results into the design's Qualification section. Session: fresh, effort medium; verify `./bin/check tests/test_docs_routing.py`. _docs/designs/cross-model-memory.md, ~150 lines._ (M)
+None declared (2026-11-21). Track 155A, declared in progress earlier in this PR, merged as v1.12.74 (PR #364) and is recorded in shipped history; no branch, session or open pull request is active for any remaining Track.
 
 ## Current Plan
 
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154_
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155_
 
-The plan carries two kinds of work beside Group 155. The first is bugs the owner hit: the reinstall command that fails on pipx's uv backend, a stale removal-wait line in `mm status` and `mm init`'s non-actionable notices (Track 156A, placed on the developer's word: "2 a"), and `mm pull` printing nothing to apply while Syncthing still delivers a peer's push (Track 157A). Track 156A waits for Track 155A, which is in flight and changes the same files.
+The plan carries two kinds of work. The first is bugs the owner hit: the reinstall command that fails on pipx's uv backend, a stale removal-wait line in `mm status` and `mm init`'s non-actionable notices (Track 156A, placed on the developer's word: "2 a"), and `mm pull` printing nothing to apply while Syncthing still delivers a peer's push (Track 158A).
 
-The second is cross-model memory (docs/SPEC.md O9), which the developer moved before 2.0 and made a condition of 2.0.0 ("1 c", then "3 yes, gate"). Its qualification (Track 155B) gates the three implementation Tracks, which run in a chain: per-machine Codex memory copies (158A), one local qmd index over every provider's memory (159A), and qmd setup with the recommended pointer line (160A). Keyword search is the baseline and embeddings are opt-in ("3 a").
+The second is cross-model memory (docs/SPEC.md O9), which the developer moved before 2.0 and made a condition of 2.0.0 ("1 c", then "3 yes, gate"). Its qualification (Track 156B) gates the three implementation Tracks, which run in a chain: per-machine Codex memory copies (157A), one local qmd index over every provider's memory (159A), and qmd setup with the recommended pointer line (160A). Keyword search is the baseline and embeddings are opt-in ("3 a").
 
-### Group 156: Observed sync and setup bugs
+### Group 156: Observed sync and setup bugs ∥ cross-model memory qualification
 
-_Depends on: Group 155_
+_Depends on: none_
 
-**This group delivers:** mm's printed reinstall command and the automatic pinned reinstall work on pipx's uv backend; `mm status` drops a removal-wait line once the removal is done; `mm init` stops printing capture notices the owner cannot act on.
+**This group delivers:** mm's printed reinstall command and the automatic pinned reinstall work on pipx's uv backend; `mm status` drops a removal-wait line once the removal is done; `mm init` stops printing capture notices the owner cannot act on. Separately, the owner learns whether fresh Codex and Claude Code sessions find each other's memory through qmd with only the recommended line, before any O9 code is written.
 
 #### Track 156A: Reinstall through pipx's uv backend, clear resolved removal waits from `mm status`, and keep init's capture notices out of its output
 _5 tasks . ~260 LOC . low risk . 14 files_
@@ -107,13 +62,61 @@ _Source: the developer's observations of 2026-11-20, relayed by the Factory Mana
 - **Test gap: init's no-release notice when reading the cached upgrade view fails** -- add a case beside `test_incomplete_scan_uses_no_release_notice_when_upgrade_cache_is_current` that makes `upgrade.cached_upgrade_view` raise, and assert init succeeds and its advice keeps `mm update`. _Source: Future entry of the same title (`[review:files=src/mind_meld/events_tail.py|tests/test_init_events_backfill.py]`, Track 135A)._ _tests/test_init_events_backfill.py, ~25 lines._ (S)
 - **Test gap: Mesh breadcrumbs with several omitted details** -- add several complete diagnostic clauses and long device names to the `meshflow.compose_hook_breadcrumb` fixtures, and check the detail priority and how status displays the omissions. _Source: Future entry of the same title (`[review:files=src/mind_meld/meshflow.py|tests/test_mesh.py]`, Track 152A)._ _tests/test_mesh.py, ~30 lines._ (S)
 
-### Group 157: Pull waits for Syncthing delivery
+#### Track 156B: Qualify cross-model memory through qmd in isolated homes
+_1 task . ~150 LOC . low risk . 1 file_
+**Outcome:** before any O9 code is written, the owner knows whether fresh Codex and Claude Code sessions, given only the recommended pointer line, find another agent's memory through `qmd search` and surface a contradiction instead of hiding it, and which Codex memory files the per-machine copies should carry.
+**Supports:** docs/SPEC.md O9.6 (qualification before implementation), planned before 2.0 on the developer's word (2026-11-21: "1 c"). It replaces the Future card for the 2026-10-29 design's qualification (formerly Track 96A), which was retired with that design.
+**Done when:** docs/designs/cross-model-memory.md records Q1, Q2 and Q3, run in temporary `HOME`, `CODEX_HOME` and XDG folders, with the observed codex-cli, Claude Code and qmd versions, the commands the agents ran and the final pointer line. A failed Q1 or Q2 is written up for the owner, and no product code changes.
+**Acceptance:**
+1. Every check runs with a temporary `HOME`, `CODEX_HOME` and XDG folders. Nothing reads or writes the owner's real Claude, Codex, Grok or Muse stores, qmd index or credential files. Sessions authenticate through an API key in the environment or a fresh login inside the temporary home.
+2. Q1: a fresh Codex session, with only the pointer line in its `AGENTS.md`, answers a question that only a seeded Claude-origin memory answers, by running `qmd search`. A fresh Claude Code session, with only the line in its `CLAUDE.md`, finds a seeded Codex-origin memory the same way. The result is recorded either way, with the commands each session ran.
+3. Q2: with two contradicting memories seeded from different providers, each session reports both, with their paths, and asks the owner instead of choosing one.
+4. Q3: in an isolated `CODEX_HOME` with Codex's `memories` feature on, the design records the files Codex writes and which it regenerates wholesale, and chooses the copy set. If Codex writes no memory within the session budget, the default set (`memory_summary.md`, `MEMORY.md`, `rollout_summaries/*.md`) is kept and the reason recorded.
+5. docs/designs/cross-model-memory.md records the results and versions and the final pointer line. A failed Q1 or Q2 sends the design back to the owner, and Tracks 157A, 159A and 160A stay blocked. No product code changes.
+_touches: docs/designs/cross-model-memory.md_
+_out: 157A_
+_read-first: docs/designs/cross-model-memory.md (Qualification, Design 5 and 6), docs/SPEC.md O9_
 
-_Depends on: Group 155_
+_Source: the developer's decisions of 2026-11-20 and 2026-11-21 quoted in docs/SPEC.md's 2026-11-21 amendment, and the Factory Manager's brief: "fresh Codex and Claude sessions in isolated homes (temporary HOME and CODEX_HOME, never the owner's real stores) find another agent's memory through qmd with only the recommended pointer line". Verified 2026-11-20 on `linux-a`: qmd 2.8.3 is installed (`qmd --version`); `qmd search` returned two contradicting memories from two collections in a temporary `HOME`; codex-cli 0.171.0 lists `memories stable false`._
+
+- **Run Q1 to Q3 and record them** -- seed the memories, build the planned `mm-` collections in the temporary home's qmd index, run the fresh sessions, and write the results into the design's Qualification section. Session: fresh, effort medium; verify `./bin/check tests/test_docs_routing.py`. _docs/designs/cross-model-memory.md, ~150 lines._ (M)
+
+### Group 157: Per-machine Codex memory copies
+
+_Depends on: Group 156_
+
+**This group delivers:** each machine's Codex memory reaches every other machine as a read-only, per-machine copy in mm's own folder, which forgets what the source machine's Codex forgets and never touches any machine's Codex store.
+
+#### Track 157A: Publish each machine's Codex memory as per-machine copies
+_3 tasks . ~420 LOC . medium risk . 12 files_
+**Outcome:** what Codex remembers on one of the owner's machines is on disk on every other machine, in mm's own folder, ready for the memory index, without conflicts and without mm writing into any Codex store.
+**Supports:** docs/SPEC.md O9.1 (Codex memories roam as per-machine copies, one writer per file, outside every native store). The developer, 2026-11-20: "o9 - why just codex?". The other providers already sync.
+**Done when:** tests show a push publishing only this machine's Codex memory files under its device ID, a pull placing each peer's files in that peer's copies folder, a source-side deletion or rewrite propagating with no conflict copy, a forged path refused, a retired machine's copies removed, and nothing written under any `CODEX_HOME`.
+**Acceptance:**
+1. A new `codex-memory` source reads this machine's Codex memory files (the set Track 156B chose) from `CODEX_HOME/memories/` without writing there, and publishes them under this machine's device ID. Codex's `.git`, its SQLite files and files outside the set never sync.
+2. At pull, each peer's files land under `~/.local/share/mind-meld/codex-memory/<peer device id>/`. A file in a peer's manifest whose path does not start with that peer's own device ID is refused, so each file has one writer. Nothing is written into any `CODEX_HOME`.
+3. When the source machine's Codex drops or rewrites a memory, the next push and pull remove or replace that copy on every peer with no conflict copy. Regenerating identical content publishes nothing.
+4. The copies of a machine retired with `mm devices retire` are removed from every peer at its next pull.
+5. `mm init` offers the source when `CODEX_HOME/memories/` exists (Enter = yes, as for other detected sources). `mm enable-source codex-memory` and `mm disable-source codex-memory` work, and disabling it on one machine deletes nothing fleet-wide.
+6. `mm sources` and `mm status` list the source. docs/SPEC.md's table (the Codex row and the intentional-gaps line), root SPEC.md, README's Codex section and docs/invariants/sync.md describe it.
+_touches: src/mind_meld/config.py, src/mind_meld/manifest.py, src/mind_meld/pullflow.py, src/mind_meld/initflow.py, src/mind_meld/sourceflow.py, tests/test_codex_memory_source.py (new), tests/test_initflow.py, tests/test_sourceflow.py, docs/invariants/sync.md, docs/SPEC.md, SPEC.md, README.md_
+_blocked-by: Track 156B_
+_out: 159A_
+_read-first: docs/designs/cross-model-memory.md (Design 2), docs/SPEC.md O1.1 and O9, docs/invariants/README.md rows for the touched modules, docs/invariants/sync.md (truth-based manifests, tombstone suppression), src/mind_meld/manifest.py (`MUSE_SYNCED_SUBDIRS`, `GROK_MEMORY_ROOT` and the source walkers), src/mind_meld/config.py (`DEFAULT_CODEX_DIR`, `DEFAULT_SOURCES`)_
+
+_Source: the developer's decisions of 2026-11-20 and 2026-11-21 (docs/SPEC.md O9) and the brief: "Codex memories, which each machine regenerates, roam as per-machine copies (one writer per file) in an mm-owned directory outside every native store". Codex observations: 2026-10-29 with codex-cli 0.164.0 on `mac-a` (archived design) and 2026-11-20 with codex-cli 0.171.0 on `linux-a` (`memories stable false`). `~/.local/share/mind-meld/` is mm's existing data folder (`retention.DEFAULT_RETROS_DIR`, the retro-fleet skill target)._
+
+- **Publish this machine's Codex memory under its device ID** -- add the `codex-memory` source: a walker that reads the chosen set from `CODEX_HOME/memories/` and publishes relative paths prefixed with this device's ID, never walking the copies folder, and its config entry. _config.py, manifest.py, tests/test_codex_memory_source.py, ~180 lines._ (M)
+- **Place peers' copies in mm's folder, one writer per file** -- for this source, apply peer files under `~/.local/share/mind-meld/codex-memory/<peer id>/`, refuse a path outside the peer's own prefix, remove a retired machine's copies, and test deletion and rewrite propagation with no conflict copy. _pullflow.py, tests/test_codex_memory_source.py, ~180 lines._ (M)
+- **Offer it in `mm init` and the source commands, and document it** -- detection in `initflow._prompt_sources` and `sourceflow`, plus the docs listed above. _initflow.py, sourceflow.py, tests/test_initflow.py, tests/test_sourceflow.py, docs/invariants/sync.md, docs/SPEC.md, SPEC.md, README.md, ~60 lines._ (S)
+
+### Group 158: Pull waits for Syncthing delivery
+
+_Depends on: Group 156_
 
 **This group delivers:** after a peer pushes, one `mm pull` waits briefly for Syncthing to deliver the files and applies them, or says Syncthing is still delivering and to run it again, instead of printing nothing to apply.
 
-#### Track 157A: Tell the owner when Syncthing is still delivering a peer's push instead of reporting nothing to pull
+#### Track 158A: Tell the owner when Syncthing is still delivering a peer's push instead of reporting nothing to pull
 _4 tasks . ~280 LOC . medium risk . 9 files_
 **Outcome:** the owner runs `mm pull` once after a peer pushes. While Syncthing is still delivering, pull waits a few seconds and applies what arrives, or ends by saying Syncthing is still delivering N files and to run `mm pull` again. It never reports nothing to apply while files are still on their way.
 **Supports:** MVP-1 on Syncthing; docs/SPEC.md O3.1 ("Pull applies what has arrived and says what it is still waiting for") and O8.1. The developer (verbatim, 2026-11-20): "I have never had mm pull fail or say waiting, it just says 0 files pulled, and then you have to run it several times in succession until they show up". Admitted under the standing rule on reproducible bugs the owner hit.
@@ -136,38 +139,9 @@ _Source: the developer's report of 2026-11-20, relayed by the Factory Manager th
 - **Test gap: summary counts across peers and deletion-only pulls** -- extend the two-peer and deletion fixtures to pin count-bearing labels, and check that a deletion-only result produces no source header. _Source: Future entry of the same title (`[review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py]`, Track 151B)._ _tests/test_pullflow.py, ~25 lines._ (S)
 - **Test gap: plural held counts and mixed source outcomes** -- exercise one peer and source with several held files, and check the plural count and when `Up to date with` appears beside other outcomes. _Source: Future entry of the same title (`[review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py]`, Track 151B)._ _tests/test_pullflow.py, ~25 lines._ (S)
 
-### Group 158: Per-machine Codex memory copies
-
-_Depends on: Group 155, Group 156_
-
-**This group delivers:** each machine's Codex memory reaches every other machine as a read-only, per-machine copy in mm's own folder, which forgets what the source machine's Codex forgets and never touches any machine's Codex store.
-
-#### Track 158A: Publish each machine's Codex memory as per-machine copies
-_3 tasks . ~420 LOC . medium risk . 12 files_
-**Outcome:** what Codex remembers on one of the owner's machines is on disk on every other machine, in mm's own folder, ready for the memory index, without conflicts and without mm writing into any Codex store.
-**Supports:** docs/SPEC.md O9.1 (Codex memories roam as per-machine copies, one writer per file, outside every native store). The developer, 2026-11-20: "o9 - why just codex?". The other providers already sync.
-**Done when:** tests show a push publishing only this machine's Codex memory files under its device ID, a pull placing each peer's files in that peer's copies folder, a source-side deletion or rewrite propagating with no conflict copy, a forged path refused, a retired machine's copies removed, and nothing written under any `CODEX_HOME`.
-**Acceptance:**
-1. A new `codex-memory` source reads this machine's Codex memory files (the set Track 155B chose) from `CODEX_HOME/memories/` without writing there, and publishes them under this machine's device ID. Codex's `.git`, its SQLite files and files outside the set never sync.
-2. At pull, each peer's files land under `~/.local/share/mind-meld/codex-memory/<peer device id>/`. A file in a peer's manifest whose path does not start with that peer's own device ID is refused, so each file has one writer. Nothing is written into any `CODEX_HOME`.
-3. When the source machine's Codex drops or rewrites a memory, the next push and pull remove or replace that copy on every peer with no conflict copy. Regenerating identical content publishes nothing.
-4. The copies of a machine retired with `mm devices retire` are removed from every peer at its next pull.
-5. `mm init` offers the source when `CODEX_HOME/memories/` exists (Enter = yes, as for other detected sources). `mm enable-source codex-memory` and `mm disable-source codex-memory` work, and disabling it on one machine deletes nothing fleet-wide.
-6. `mm sources` and `mm status` list the source. docs/SPEC.md's table (the Codex row and the intentional-gaps line), root SPEC.md, README's Codex section and docs/invariants/sync.md describe it.
-_touches: src/mind_meld/config.py, src/mind_meld/manifest.py, src/mind_meld/pullflow.py, src/mind_meld/initflow.py, src/mind_meld/sourceflow.py, tests/test_codex_memory_source.py (new), tests/test_initflow.py, tests/test_sourceflow.py, docs/invariants/sync.md, docs/SPEC.md, SPEC.md, README.md_
-_blocked-by: Track 155B_
-_out: 159A_
-_read-first: docs/designs/cross-model-memory.md (Design 2), docs/SPEC.md O1.1 and O9, docs/invariants/README.md rows for the touched modules, docs/invariants/sync.md (truth-based manifests, tombstone suppression), src/mind_meld/manifest.py (`MUSE_SYNCED_SUBDIRS`, `GROK_MEMORY_ROOT` and the source walkers), src/mind_meld/config.py (`DEFAULT_CODEX_DIR`, `DEFAULT_SOURCES`)_
-
-_Source: the developer's decisions of 2026-11-20 and 2026-11-21 (docs/SPEC.md O9) and the brief: "Codex memories, which each machine regenerates, roam as per-machine copies (one writer per file) in an mm-owned directory outside every native store". Codex observations: 2026-10-29 with codex-cli 0.164.0 on `mac-a` (archived design) and 2026-11-20 with codex-cli 0.171.0 on `linux-a` (`memories stable false`). `~/.local/share/mind-meld/` is mm's existing data folder (`retention.DEFAULT_RETROS_DIR`, the retro-fleet skill target)._
-
-- **Publish this machine's Codex memory under its device ID** -- add the `codex-memory` source: a walker that reads the chosen set from `CODEX_HOME/memories/` and publishes relative paths prefixed with this device's ID, never walking the copies folder, and its config entry. _config.py, manifest.py, tests/test_codex_memory_source.py, ~180 lines._ (M)
-- **Place peers' copies in mm's folder, one writer per file** -- for this source, apply peer files under `~/.local/share/mind-meld/codex-memory/<peer id>/`, refuse a path outside the peer's own prefix, remove a retired machine's copies, and test deletion and rewrite propagation with no conflict copy. _pullflow.py, tests/test_codex_memory_source.py, ~180 lines._ (M)
-- **Offer it in `mm init` and the source commands, and document it** -- detection in `initflow._prompt_sources` and `sourceflow`, plus the docs listed above. _initflow.py, sourceflow.py, tests/test_initflow.py, tests/test_sourceflow.py, docs/invariants/sync.md, docs/SPEC.md, SPEC.md, README.md, ~60 lines._ (S)
-
 ### Group 159: Local memory index
 
-_Depends on: Group 158_
+_Depends on: Group 157_
 
 **This group delivers:** every machine where the owner turns it on keeps one qmd index over every provider's memory and the Codex copies, refreshed after each sync, so any agent can search everything any agent learned on any machine.
 
@@ -185,7 +159,7 @@ _2 tasks . ~480 LOC . medium risk . 11 files_
 6. `mm memory-index` shows the index state. `mm memory-index on` and `mm memory-index off` turn it on and off, and off removes only `mm-` collections. The choice and the embeddings choice live in this machine's `config.toml` and never sync. The command is added to AGENTS.md's command list and to the integration tests' `COMMAND_INTENTS62`.
 7. The new `memoryindex.py` module is listed in the docs/invariants/README.md module map and passes tests/test_module_boundaries.py. The `cli` shells call it module-qualified, beside `_sync_update`. docs/invariants/sync.md states the refresh rule, and README documents the index and the optional `claude mcp add qmd -- qmd mcp` and `codex mcp add qmd -- qmd mcp` commands, which mm never runs.
 _touches: src/mind_meld/memoryindex.py (new), src/mind_meld/cli.py, src/mind_meld/config.py, src/mind_meld/statusflow.py, tests/test_memory_index.py (new), tests/test_integration.py, tests/test_module_boundaries.py, docs/invariants/README.md, docs/invariants/sync.md, AGENTS.md, README.md_
-_blocked-by: Track 158A_
+_blocked-by: Track 157A_
 _out: 160A_
 _read-first: docs/designs/cross-model-memory.md (Design 3, 4, 5 and 8), docs/SPEC.md O8 and O9, docs/invariants/README.md (module map and boundaries), src/mind_meld/cli.py `_sync_update` and the `push`, `pull`, `autopush` and `autopull` shells, tests/test_module_boundaries.py_
 
@@ -229,28 +203,24 @@ A Group may launch when every Group in its ← set has landed, regardless of doc
 
 Adjacency list (from the packer / GROUP_DEPS — not document order):
 ```
-- Group 155 ← {}
-- Group 156 ← {155}
-- Group 157 ← {155}
-- Group 158 ← {155, 156}
-- Group 159 ← {158}
+- Group 156 ← {}
+- Group 157 ← {156}
+- Group 158 ← {156}
+- Group 159 ← {157}
 - Group 160 ← {159}
 ```
 
 Track detail per group:
 ```
-Group 155: Fixes from the deepsec scan ∥ cross-model memory qualification   (in progress)
-  +-- Track 155A ........... ~L . 3 tasks
-  +-- Track 155B ........... ~M . 1 task
-
-Group 156: Observed sync and setup bugs
+Group 156: Observed sync and setup bugs ∥ cross-model memory qualification
   +-- Track 156A ........... ~L . 5 tasks
+  +-- Track 156B ........... ~M . 1 task
 
-Group 157: Pull waits for Syncthing delivery
-  +-- Track 157A ........... ~L . 4 tasks
+Group 157: Per-machine Codex memory copies
+  +-- Track 157A ........... ~L . 3 tasks
 
-Group 158: Per-machine Codex memory copies
-  +-- Track 158A ........... ~L . 3 tasks
+Group 158: Pull waits for Syncthing delivery
+  +-- Track 158A ........... ~L . 4 tasks
 
 Group 159: Local memory index
   +-- Track 159A ........... ~L . 2 tasks
@@ -259,15 +229,15 @@ Group 160: qmd setup and the pointer line
   +-- Track 160A ........... ~L . 3 tasks
 ```
 
-**Total: 6 groups . 7 tracks remaining.**
+**Total: 5 groups . 6 tracks remaining.**
 
-Tracks 135A to 154A shipped in v1.12.51 to v1.12.73, and Track 135B (Track 124B's real-machine automatic-update observation) merged as a documentation-only change between them (independent receipts in shipped history). IDs 95A and 96A stay unused because Future entries and old records cite them; the qualification formerly carded as 96A returns as Track 155B.
+Tracks 135A to 155A shipped in v1.12.51 to v1.12.74, and Track 135B (Track 124B's real-machine automatic-update observation) merged as a documentation-only change between them (independent receipts in shipped history). IDs 95A and 96A stay unused because Future entries and old records cite them; the qualification formerly carded as 96A returns as Track 155B.
 
 ---
 
 ## Future
 
-Deferred: docs/roadmap-future.md (103 items)
+Deferred: docs/roadmap-future.md (115 items)
 
 ## Shipped
 
