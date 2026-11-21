@@ -557,8 +557,9 @@ def test_recapture_partial_walk_exits_4(tmp_path, monkeypatch):
     _setup_events_tail_config(tmp_path, monkeypatch)
     repo_a = tmp_path / "a"
     repo_b = tmp_path / "b"
-    repo_a.mkdir()
-    repo_b.mkdir()
+    for repo in (repo_a, repo_b):
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
 
     def fake_walk(roots, since, total_budget_ms, **_kw):
         return [
@@ -580,10 +581,34 @@ def test_recapture_partial_walk_exits_4(tmp_path, monkeypatch):
             (repo_a, repo_b), (), False, (), (), (), ("claude",)
         ),
     )
+    real_push_core = cli._push_core
+    cursors_after_recapture_commit: dict[str, str] = {}
+
+    def spy_push_core(*args, **kwargs):
+        cursors_after_recapture_commit.update(events.read_git_capture_cache()["repo_cursors"])
+        return real_push_core(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_push_core", spy_push_core)
     r = runner.invoke(app, ["recapture", "7d"])
     assert r.exit_code == 4, (r.stdout, r.stderr)
     assert "Push complete" not in (r.stdout or "").splitlines()[-1:]
     assert "incomplete" in (r.stdout or "").lower() or "skipped" in (r.stdout or "").lower()
+    events_dir = tmp_path / "mm-events" / "events"
+    written_rows = [
+        json.loads(line)
+        for p in sorted(events_dir.glob("*.jsonl"))
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    git_rows = [row for row in written_rows if row.get("type") == "git-snapshot"]
+    recap_rows = [
+        row for row in git_rows if row.get("origin") == events.GIT_SNAPSHOT_ORIGIN_RECAPTURE
+    ]
+    assert len(recap_rows) == 1
+    for row in git_rows:
+        assert row["projects"] == [{"remote": "", "commits": []}]
+        assert row["skipped"] == [{"reason": events.WALK_SKIP_BUDGET_ABORT}]
+    assert cursors_after_recapture_commit == {str(repo_a): recap_rows[0]["ts"]}
 
 
 def test_successful_recapture_clears_held_cursor(tmp_path, monkeypatch):

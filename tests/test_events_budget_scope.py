@@ -751,6 +751,7 @@ def test_repo_cursor_reconcile_recovers_skips_after_append_before_cache_commit(t
         },
         {"v": 1, "type": "mm-push", "ts": ts.isoformat(), "device": "dev-a", "git_capture": cap},
     ]
+    _mm_events.record_uncommitted_push_roots(rows, push_ts=ts.isoformat())
     _mm_events.write_push_event(events_dir, "dev-a", rows)
     _mm_events.reconcile_uncommitted_push_cursors(events_dir, "dev-a")
     cache = _mm_events.read_git_capture_cache()

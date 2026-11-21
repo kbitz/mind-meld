@@ -2667,3 +2667,26 @@ def test_default_device_name_darwin_local_hostname_and_fallbacks(monkeypatch):
             lambda *_a, err=exc, **_kw: (_ for _ in ()).throw(err),
         )
         assert initflow._default_device_name() == "fallback-hostname"
+
+
+@pytest.mark.parametrize("mode", ["flag", "interactive"])
+def test_new_fleet_saves_relative_storage_path_as_absolute(env, tmp_path, monkeypatch, mode):
+    storage, _ = env
+    monkeypatch.chdir(tmp_path)
+    if mode == "flag":
+        result, text = _new_fleet(
+            f"{storage.name}\nMac A\n{PASSPHRASE}\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}"
+        )
+    else:
+        result, text = _run(
+            f"new\n{storage.name}\nMac A\n{PASSPHRASE}\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}"
+        )
+
+    assert result.exit_code == 0, text
+    assert tomllib.loads(config.CONFIG_PATH.read_text())["storage"]["path"] == str(storage)
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert config.load_config()["storage"]["path"] == str(storage)
+    assert not (elsewhere / storage.name).exists()
