@@ -1916,6 +1916,35 @@ detail (`mm status` prints it). Attended runs record no waiting count in
 `mm diag` adds `ignored_storage_files`; its manifest and device
 totals count valid keys only.
 
+**Pre-pull Syncthing delivery probe and wait (Track 158A).** Before reading peer
+manifests (`inventory_devices`), `_pull_core` inspects the fleet folder's live
+Syncthing state through `syncthing.read_state(storage_root, timeout=1.0,
+budget=2.0)` (GET-only, whether mm or the owner manages Syncthing) behind the
+pure predicate `syncthing.delivery_pending(state)` (true iff `state == "ok"`, a
+matched folder is not paused, `"no-folder"` is absent, and either
+`files_to_fetch > 0` or `folder_state in ("syncing", "sync-preparing")`). The
+`cli.py` shells choose `syncthing_delivery`: `"wait"` for an attended terminal
+`mm pull` (non-`--dry-run`, non-join), `"probe"` for an attended non-terminal
+`mm pull` and `mm autopull`, and `"off"` for `--dry-run`, `mm init`'s join pull
+and direct `_pull_core` callers. In `"wait"` mode, while `delivery_pending`
+holds up to `sync.pull_syncthing_wait_ms` (default 15,000 ms, range 0–60,000 ms;
+`0` disables waiting while keeping the probe), `_pull_core` sets the transient
+progress phase `Waiting for Syncthing to deliver N files` (or `... files` when
+the count is unknown) and polls every 1 s through injectable `_delivery_sleep` /
+`_delivery_now` seams. If delivery is still pending after the probe or bound,
+pull still applies what has arrived, records `PullResult.syncthing_still_delivering`
+and `syncthing_pending_files` (without touching `waiting`/`WaitingPeer`,
+`_record_peer_cursors`, the ledger or `pullhistory`, and never failing or
+degrading the pull), and exits 0. `delivering_clause` (`Syncthing is still
+delivering N files. Run: mm pull`, or countless form) is appended by
+`cli._sync_success` and `_print_pull_summary` so `Pull: no changes.` /
+`nothing to apply` never stands alone. Unreachable, unauthorized, unconfigured
+or `no-folder` (iCloud Drive) states leave pull output unchanged. `mm autopull`
+prints nothing for pending delivery and records `delivering_detail` in its
+`success` breadcrumb; `mm status` surfaces live pending delivery in
+`_status_verdict(syncthing_pending=)` (after `left_out`, before `peers_overdue`)
+so it clears automatically when the folder catches up.
+
 ## Syncthing state and each peer's push (Track 92A)
 
 `syncthing.py` is a standard-library-only leaf module (enforced by

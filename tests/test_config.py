@@ -2774,6 +2774,59 @@ def _retro_config(retro):
     }
 
 
+@pytest.mark.parametrize("bad", [True, False, 1.5, "15000", -1, 60001, None])
+def test_invalid_pull_syncthing_wait_ms(bad, tmp_path):
+    cfg = {
+        "device": {"id": "dev", "name": "Mac"},
+        "storage": {"path": str(tmp_path)},
+        "sync": {"pull_syncthing_wait_ms": bad},
+    }
+    with pytest.raises(ConfigError) as err:
+        _validate(cfg)
+    msg = str(err.value)
+    assert "sync.pull_syncthing_wait_ms must be an integer between 0 and 60000" in msg
+    assert f"got {bad}" in msg
+    assert "Fix [sync] pull_syncthing_wait_ms in ~/.config/mind-meld/config.toml." in msg
+
+
+@pytest.mark.parametrize("good", [0, 1, 15000, 60000])
+def test_valid_pull_syncthing_wait_ms_and_default(good, tmp_path):
+    from mind_meld import config as mm_config
+
+    assert mm_config.DEFAULT_PULL_SYNCTHING_WAIT_MS == 15000
+    assert mm_config.PULL_SYNCTHING_WAIT_MAX_MS == 60000
+    cfg = {
+        "device": {"id": "dev", "name": "Mac"},
+        "storage": {"path": str(tmp_path)},
+        "sync": {"pull_syncthing_wait_ms": good},
+    }
+    _validate(cfg)
+
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        f'[device]\nid = "abc"\nname = "Mac"\n\n[storage]\npath = "{tmp_path}"\n',
+        encoding="utf-8",
+    )
+    loaded = mm_config.load_config(cfg_file)
+    assert loaded["sync"]["pull_syncthing_wait_ms"] == 15000
+
+    cfg_file.write_text(
+        f'[device]\nid = "abc"\nname = "Mac"\n\n[storage]\npath = "{tmp_path}"\n\n'
+        "[sync]\npull_syncthing_wait_ms = 0\n",
+        encoding="utf-8",
+    )
+    loaded_zero = mm_config.load_config(cfg_file)
+    assert loaded_zero["sync"]["pull_syncthing_wait_ms"] == 0
+
+    cfg_file.write_text(
+        f'[device]\nid = "abc"\nname = "Mac"\n\n[storage]\npath = "{tmp_path}"\n\n'
+        "[sync]\npull_syncthing_wait_ms = -5\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="sync.pull_syncthing_wait_ms"):
+        mm_config.load_config(cfg_file)
+
+
 @pytest.mark.parametrize("bad", [True, 1.5, "5000", 249, 60001, None])
 def test_invalid_capture_budget(bad):
     with pytest.raises(ConfigError, match="retro.capture_budget_ms must be an integer between"):

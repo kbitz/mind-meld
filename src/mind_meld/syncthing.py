@@ -94,6 +94,24 @@ class SyncthingState:
     pending_device_names: dict[str, str] = field(default_factory=dict, repr=False)
 
 
+def delivery_pending(state: SyncthingState) -> bool:
+    """Return True when the matched Syncthing folder is still delivering files."""
+    if (
+        state.state != "ok"
+        or state.folder_id is None
+        or "no-folder" in state.problems
+        or state.folder_paused is True
+    ):
+        return False
+    if (
+        isinstance(state.files_to_fetch, int)
+        and not isinstance(state.files_to_fetch, bool)
+        and state.files_to_fetch > 0
+    ):
+        return True
+    return state.folder_state in ("syncing", "sync-preparing")
+
+
 PENDING_JOIN_FIX = "mm devices approve"
 
 

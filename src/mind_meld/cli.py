@@ -1026,6 +1026,8 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
         parts.append(clause)
     if clause := pullflow.waiting_clause(result):
         parts.append(clause)
+    if clause := pullflow.delivering_clause(result):
+        parts.append(clause)
     if clause := pullflow.old_form_clause(result):
         parts.append(clause)
     return [outputstyle._outcome_line(verb, part) for part in parts]
@@ -2938,6 +2940,9 @@ def _attended_pull(
                 except MindMeldError as e:
                     run["cause"] = "crypto-error" if isinstance(e, CryptoError) else "setup-error"
                     core._error(str(e) + refusal_suffix)
+                delivery_mode: Literal["off", "probe", "wait"] = (
+                    "off" if dry_run or join else "wait" if core._console_is_terminal() else "probe"
+                )
                 pulled = pullflow._pull_core(
                     config,
                     passphrase,
@@ -2949,6 +2954,7 @@ def _attended_pull(
                     conflict_mode=conflict_mode,
                     diagnostics=verbose or dry_run,
                     result_observer=lambda result: run.__setitem__("result", result),
+                    syncthing_delivery=delivery_mode,
                 )
                 run["result"] = pulled
                 if not dry_run:
@@ -4758,6 +4764,7 @@ def autopull() -> None:
                 setup.memory_kb,
                 quiet=True,
                 conflict_mode="keep-both",
+                syncthing_delivery="probe",
             )
 
             if result.total_conflicted:
@@ -4835,6 +4842,7 @@ def autopull() -> None:
                     pullflow.retired_copies_detail(result),
                     pullflow.older_clause(result),
                     pullflow.waiting_detail(result),
+                    pullflow.delivering_detail(result),
                     pullflow.old_form_detail(result),
                 ),
             )

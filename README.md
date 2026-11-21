@@ -399,6 +399,19 @@ file (attended `mm pull` exit 1, autopull `degraded`). It is now **waiting**:
 Waiting files are not applied; other available files still apply. The next pull
 picks up the waiting files once they sync. A failed file still means a real
 error (decrypt, write, permission).
+On a Syncthing folder, an attended `mm pull` on a terminal also checks
+Syncthing's local read-only API before reading peer manifests (whether mm or the
+owner manages Syncthing): while Syncthing still has files to deliver, pull shows
+a transient `Waiting for Syncthing to deliver N files` progress line and waits
+up to `[sync] pull_syncthing_wait_ms` (default 15,000 ms; `0` disables the wait)
+before pulling. If files are still on their way when the wait ends — or on a
+non-terminal `mm pull`, which probes without waiting — pull applies what has
+arrived, adds `Pull: Syncthing is still delivering N files. Run: mm pull.`, and
+exits 0. `mm autopull` probes without waiting, stays silent, and records the
+pending delivery in its `success` breadcrumb; `mm status` shows it until a later
+pull or the folder catches up. When Syncthing's API is unreachable,
+unauthorized, unconfigured, or the storage folder is not a Syncthing folder
+(such as iCloud Drive), pull behaves as before with no extra output.
 `mm pull` and `mm status` ignore Syncthing's temporary files and `.stversions`
 folder and retry observed canonical files that disappear during a read. Device
 listing ignores conflict copies and counts a `devices/` file only when its name
@@ -2583,12 +2596,20 @@ deleted its files; `mm status` names `[retro] attended_capture_cap_ms` as the at
 Set budgets in this machine's `~/.config/mind-meld/config.toml`:
 
 ```toml
+[sync]
+pull_syncthing_wait_ms = 15000
+
 [retro]
 capture_budget_ms = 5000
 attended_capture_cap_ms = 30000
 host_usage_autopush_budget_ms = 750
 host_usage_interactive_budget_ms = 3000
 ```
+
+`[sync] pull_syncthing_wait_ms` (range **0–60,000**, default **15,000**) bounds
+how long an attended terminal `mm pull` waits for Syncthing to finish delivering
+files before reading peer manifests; set it to `0` to turn the wait off while
+keeping the one-shot probe and still-delivering notice.
 
 `capture_budget_ms` (range **250–60,000**, default **5,000**) is the initial
 budget for an attended push's usage and activity capture, and

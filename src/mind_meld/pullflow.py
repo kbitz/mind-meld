@@ -267,6 +267,11 @@ class PullResult:
     # picks it up. Attended runs do not record it.
     total_waiting: int = 0
     waiting: list[WaitingPeer] = field(default_factory=list)
+    # Track 158A: folder-level Syncthing delivery still in flight after the
+    # pre-pull probe/wait. Never a failure, never a degradation, and never
+    # blocks per-peer cursors or writes pull-history rows.
+    syncthing_still_delivering: bool = False
+    syncthing_pending_files: int | None = None
     # Track 90A: another home's files from peers still on path names, and the
     # projects whose checkout is not on this machine. Never a failure.
     old_form_peers: list[OldFormPeer] = field(default_factory=list)
@@ -3253,6 +3258,24 @@ def waiting_detail(result: PullResult) -> str:
     return "; ".join(_waiting_items(result, detail=True))
 
 
+def delivering_clause(result: PullResult) -> str:
+    """The outcome-line clause when Syncthing is still delivering folder files,
+    or "" when delivery is not pending."""
+    if not result.syncthing_still_delivering:
+        return ""
+    pending = result.syncthing_pending_files
+    if isinstance(pending, int) and not isinstance(pending, bool) and pending > 0:
+        return (
+            f"Syncthing is still delivering {core._count(pending, 'file', 'files')}. Run: mm pull"
+        )
+    return "Syncthing is still delivering files. Run: mm pull"
+
+
+def delivering_detail(result: PullResult) -> str:
+    """The autopull breadcrumb detail for pending Syncthing delivery, or ""."""
+    return delivering_clause(result)
+
+
 def _old_form_text(result: PullResult) -> str:
     peers = result.old_form_peers
     if not peers:
@@ -3881,6 +3904,8 @@ def _print_pull_summary(
         console.print("  nothing to apply")
     if clause := waiting_clause(result):
         console.print(f"  [yellow]{safe_str(clause)}[/yellow]; run 'mm pull' again once it syncs.")
+    if clause := delivering_clause(result):
+        console.print(f"  [yellow]{safe_str(clause)}[/yellow]")
     if clause := old_form_clause(result):
         # Waits on a person updating a machine, not on delivery: no re-pull remedy.
         console.print(f"  [yellow]{safe_str(clause)}[/yellow]")
@@ -4057,6 +4082,43 @@ def _record_peer_cursors(
         )
 
 
+_delivery_sleep = time.sleep
+_delivery_now = time.monotonic
+
+
+def _wait_for_syncthing_delivery(
+    storage_root: Path,
+    *,
+    mode: Literal["off", "probe", "wait"],
+    wait_ms: int,
+) -> tuple[bool, int | None]:
+    """Probe Syncthing folder delivery before reading manifests; optionally wait."""
+    if mode == "off":
+        return False, None
+    state = syncthing.read_state(storage_root, timeout=1.0, budget=2.0)
+    if not syncthing.delivery_pending(state):
+        return False, None
+    if mode == "wait" and wait_ms > 0:
+        deadline = _delivery_now() + (wait_ms / 1000.0)
+        while True:
+            nf = state.files_to_fetch
+            if isinstance(nf, int) and not isinstance(nf, bool) and nf > 0:
+                phase = f"Waiting for Syncthing to deliver {core._count(nf, 'file', 'files')}"
+            else:
+                phase = "Waiting for Syncthing to deliver files"
+            core._sync_progress_phase(phase)
+            remaining = deadline - _delivery_now()
+            if remaining <= 0:
+                break
+            _delivery_sleep(min(1.0, remaining))
+            state = syncthing.read_state(storage_root, timeout=1.0, budget=2.0)
+            if not syncthing.delivery_pending(state):
+                return False, None
+    nf = state.files_to_fetch
+    pending_files = nf if isinstance(nf, int) and not isinstance(nf, bool) and nf > 0 else None
+    return True, pending_files
+
+
 def _pull_core(
     config: dict,
     passphrase: str,
@@ -4070,6 +4132,7 @@ def _pull_core(
     *,
     diagnostics: bool | None = None,
     result_observer: Callable[[PullResult], None] | None = None,
+    syncthing_delivery: Literal["off", "probe", "wait"] = "off",
 ) -> PullResult:
     """Core pull logic shared by pull and autopull.
 
@@ -4100,6 +4163,14 @@ def _pull_core(
         start = time.time()
         my_device_id = config["device"]["id"]
         backend = get_backend(config)
+        wait_ms = config.get("sync", {}).get(
+            "pull_syncthing_wait_ms", _config_module.DEFAULT_PULL_SYNCTHING_WAIT_MS
+        )
+        syncthing_still_delivering, syncthing_pending_files = _wait_for_syncthing_delivery(
+            Path(config["storage"]["path"]).expanduser(),
+            mode=syncthing_delivery,
+            wait_ms=wait_ms,
+        )
         # Track 90A: only the pull paths (mm pull, its dry run, mm autopull and the
         # join's pull) let the current directory's main checkout own a project
         # nobody else owns. Called before the first decode.
@@ -4231,10 +4302,14 @@ def _pull_core(
                 durability_fsync_failures=len(retired_fsync_warnings),
                 maintenance_failures=recovery_cleanup_failures + retirement_failures,
                 waiting=_waiting_peers([], [], vanished_entries),
+                syncthing_still_delivering=syncthing_still_delivering,
+                syncthing_pending_files=syncthing_pending_files,
                 retired_copies_removed=retired_removed,
                 retired_copies_names=retired_names,
                 retired_copies_folder=retired_folder,
             )
+            if show and core._SYNC_OUTPUT.get() is None and (clause := delivering_clause(result)):
+                console.print(f"  [yellow]{safe_str(clause)}[/yellow]")
             _save_pull_observations(
                 result, dry_run=dry_run, complete=not from_device and not vanished_entries
             )
@@ -4845,6 +4920,8 @@ def _pull_core(
                 corrupt_peer_count=len(corrupt_peers),
                 total_waiting=total_waiting,
                 waiting=_waiting_peers(per_source_results, vanished_manifests, vanished_entries),
+                syncthing_still_delivering=syncthing_still_delivering,
+                syncthing_pending_files=syncthing_pending_files,
                 retired_copies_removed=retired_copies_removed,
                 retired_copies_names=retired_copies_names,
                 retired_copies_folder=retired_copies_folder,
