@@ -48,21 +48,21 @@ here by hand, use the H3 form.
 
 ### Roadmap regeneration — 2026-11-21 (O9 rewritten as one local qmd index, moved before 2.0; four bugs carded)
 
-Run by `/project-spec` with a full `/roadmap` regeneration, from the Factory Manager's brief relaying the developer's decisions of 2026-11-20 and 2026-11-21. Verified against `cf5edc0` (v1.12.73). docs/SPEC.md O9 is rewritten: one local qmd index per machine over every provider's memory, with Codex memory roaming as per-machine copies. The developer's answers to the run's three questions, verbatim: "1 c / 2 a / 3 a". That moves O9 before 2.0, places the three observed bugs on the Current Plan under the 2026-11-09 rule instead of the brief's Future, and makes keyword search the baseline with embeddings opt-in. docs/designs/cross-model-memory.md is replaced, and the 2026-10-29 design moves to docs/archive/cross-model-memory-2026-10-29.md. Track 154A shipped as v1.12.73 (PR #362) and is recorded in shipped history. No inbox item was waiting. Nothing is in progress.
+Run by `/project-spec` with a full `/roadmap` regeneration, from the Factory Manager's brief relaying the developer's decisions of 2026-11-20 and 2026-11-21. Verified against `cf5edc0` (v1.12.73). docs/SPEC.md O9 is rewritten: one local qmd index per machine over every provider's memory, with Codex memory roaming as per-machine copies. The developer's answers to the run's three questions, verbatim: "1 c / 2 a / 3 a". That moves O9 before 2.0, places the three observed bugs on the Current Plan under the 2026-11-09 rule instead of the brief's Future, and makes keyword search the baseline with embeddings opt-in. docs/designs/cross-model-memory.md is replaced, and the 2026-10-29 design moves to docs/archive/cross-model-memory-2026-10-29.md. Track 154A shipped as v1.12.73 (PR #362) and is recorded in shipped history. No inbox item was waiting. Track 155A (the deepsec fixes) is in progress, declared by the Factory Manager: factory item `008f1cf4`, branch `mmm/008f1cf4`, draft PR #364. Its ID and Group 155 are pinned, and the qualification backfills as Track 155B in that Group.
 
 | Item | Disposition |
 |---|---|
-| Brief: rewrite O9 around a local qmd index over every provider's memory, with setup installing qmd and recommending a pointer line | SPEC O9 rewritten; place (Tracks 155B, 156A, 158A, 160A), before 2.0 on the developer's "1 c" |
-| Brief: `mm pull` reports nothing while Syncthing still delivers a peer's push (SPEC O3.1) | place (Track 159A); verified: the waiting clause counts only blobs of manifests that have already arrived, and pull reads `syncthing.read_state` only after applying |
-| Brief backlog (a): `pipx install --force` fails on pipx's uv backend | place (Track 155A, task 1), on the developer's "2 a" and the 2026-11-09 rule; verified: `upgrade.INSTALL_CMD`, `update_argv` and `reinstall_cmd` |
-| Brief backlog (b): `mm status` keeps a resolved removal-wait line until the next attended push | place (Track 155A, task 2); also in PR #362's review backlog |
-| Brief backlog (c): `mm init` prints no-action capture notices | place (Track 155A, task 3); verified in `events_tail._run_events_backfill`; also in PR #362's review backlog |
-| Future: "Implement cross-model memory (docs/SPEC.md O9)" | promoted, with its scope replaced by the 2026-11-21 design (Tracks 156A, 158A, 160A) |
+| Brief: rewrite O9 around a local qmd index over every provider's memory, with setup installing qmd and recommending a pointer line | SPEC O9 rewritten; place (Tracks 155B, 158A, 159A, 160A), before 2.0 on the developer's "1 c" |
+| Brief: `mm pull` reports nothing while Syncthing still delivers a peer's push (SPEC O3.1) | place (Track 157A); verified: the waiting clause counts only blobs of manifests that have already arrived, and pull reads `syncthing.read_state` only after applying |
+| Brief backlog (a): `pipx install --force` fails on pipx's uv backend | place (Track 156A, task 1), on the developer's "2 a" and the 2026-11-09 rule; verified: `upgrade.INSTALL_CMD`, `update_argv` and `reinstall_cmd` |
+| Brief backlog (b): `mm status` keeps a resolved removal-wait line until the next attended push | place (Track 156A, task 2); also in PR #362's review backlog |
+| Brief backlog (c): `mm init` prints no-action capture notices | place (Track 156A, task 3); verified in `events_tail._run_events_backfill`; also in PR #362's review backlog |
+| Future: "Implement cross-model memory (docs/SPEC.md O9)" | promoted, with its scope replaced by the 2026-11-21 design (Tracks 158A, 159A, 160A) |
 | Future: "Qualify cross-model memory in isolated homes (Track 96A)" | promoted as Track 155B, re-scoped to recall through qmd, contradiction and the Codex file set |
 | Current Plan: Track 154A | shipped in v1.12.73 (PR #362); independent receipt in docs/roadmap-shipped.md |
-| Current Plan: Track 155A (deepsec C1 to C3) | stays; relabeled Track 157A by the packer, and given a numbered Acceptance list taken from its Done-when |
-| Future test gaps "init's no-release notice when reading the cached upgrade view fails" and "Mesh breadcrumbs with several omitted details" | place (Track 155A, S tasks) |
-| Future test gaps "summary counts across peers and deletion-only pulls" and "plural held counts and mixed source outcomes" | place (Track 159A, S tasks) |
+| Current Plan: Track 155A (deepsec C1 to C3) | stays as Track 155A in Group 155, now In Progress (pinned: PR #364); given a numbered Acceptance list taken from its Done-when, scope unchanged. Track 156A carries `_blocked-by: Track 155A` because they change the same files |
+| Future test gaps "init's no-release notice when reading the cached upgrade view fails" and "Mesh breadcrumbs with several omitted details" | place (Track 156A, S tasks) |
+| Future test gaps "summary counts across peers and deletion-only pulls" and "plural held counts and mixed source outcomes" | place (Track 157A, S tasks) |
 | Future test gap "bootstrap Arch install paths" | place (Track 160A, S task) |
 | Other Future test gaps whose `_touches:` triggers the new Tracks meet (bootstrap version, ordering and upgrade checks; SSH config fallback; the `mm resolve` and `mm init` gaps; pending-join and pull-count gaps; help and events-folder gaps) | stay deferred: placing more would push each Track past the session-weight cap |
 
