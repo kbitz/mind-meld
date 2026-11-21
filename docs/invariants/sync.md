@@ -2441,7 +2441,9 @@ markdown files remain the source of truth.
   `memory-index.json` bounded by one 30-second deadline (contended runs skip
   silently without writing) and persists a closed-vocabulary record
   (`version`, `result`, `at`, `qmd_version`, `collections`).
-  The on/off commands take the same flock and report a retry if it is busy.
+  The on/off commands take the same flock. Off waits up to the refresh budget
+  for an active refresh to finish. A busy lock at the deadline produces a
+  retry message.
   Refresh rechecks the saved toggle under that lock so a completed off command
   also stops refreshes launched with older sync config.
 - **Write-free previews and inspection.** Previews (`--dry-run`) never refresh,

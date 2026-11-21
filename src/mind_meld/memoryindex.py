@@ -54,10 +54,11 @@ VALID_RESULTS: frozenset[str] = frozenset({"ok", "qmd-missing", "failed", "timed
 
 _MAX_SLUG_LEN = 64
 _MAX_COLLECTION_NAME_LEN = 256
+_STATE_COLLECTION_RE = re.compile(r"mm-[a-z0-9-]+")
 _VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _QMD_VERSION_RE = re.compile(r"\bv?(" + _VERSION_RE.pattern + r")([^\s]*)")
 _COLLECTION_COUNT_RE = re.compile(r"Collections \(([0-9]+)\):")
-_COLLECTION_LIST_RE = re.compile(r"^(.+?) \(qmd://")
+_COLLECTION_LIST_RE = re.compile(r"^\s*(\S.*?)\s+\(qmd://")
 _SHOW_PATH_RE = re.compile(r"^\s*Path:\s*(.+?)\s*$")
 _SHOW_PATTERN_RE = re.compile(r"^\s*Pattern:\s*(.+?)\s*$")
 
@@ -245,6 +246,16 @@ def desired_collections(cfg: dict[str, Any]) -> list[Collection]:
     return collections
 
 
+def _qmd_env(*, inspect: bool = False) -> dict[str, str]:
+    env = {**os.environ, "NO_COLOR": "1"}
+    # Select the machine database for writes even if the caller set a temporary
+    # SQLite override. Preserve QMD's config and XDG directory settings.
+    env.pop("INDEX_PATH", None)
+    if inspect:
+        env["INDEX_PATH"] = ":memory:"
+    return env
+
+
 def _run_qmd(
     qmd: str,
     args: Sequence[str],
@@ -261,16 +272,13 @@ def _run_qmd(
     # An explicit index bypasses QMD's project-local index discovery. Its
     # --version path opens no index, even without the flag.
     command = [qmd, *args] if args == ["--version"] else [qmd, *_GLOBAL_INDEX, *args]
-    env = {**os.environ, "NO_COLOR": "1"}
-    if inspect:
-        # collection show only reads the YAML config. Avoid even creating the
-        # default SQLite cache directory during --index argument parsing.
-        env["INDEX_PATH"] = ":memory:"
     try:
         with subprocess.Popen(
             command,
             cwd="/",
-            env=env,
+            # For collection show, the in-memory path also prevents creating
+            # the default cache directory during --index argument parsing.
+            env=_qmd_env(inspect=inspect),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -292,7 +300,7 @@ def _run_qmd(
         return ("qmd-missing", None)
     except subprocess.TimeoutExpired:
         return ("timed-out", None)
-    except OSError:
+    except (OSError, ValueError):
         return ("failed", None)
     return ("ok", subprocess.CompletedProcess(command, proc.returncode, stdout))
 
@@ -309,14 +317,14 @@ def _qmd_version(
     match = _QMD_VERSION_RE.search(proc.stdout)
     if match is None:
         return ("failed", None)
-    ver_str = match.group(1)
+    ver_str = match.group(0).removeprefix("v")
     try:
-        parsed = Version(ver_str + match.group(2))
+        parsed = Version(ver_str)
     except InvalidVersion:
-        return ("failed", None)
+        parsed = Version(match.group(1))
     if parsed < MIN_QMD_VERSION:
-        return ("version-too-old", ver_str)
-    return ("ok", ver_str)
+        return ("version-too-old", str(parsed))
+    return ("ok", match.group(1))
 
 
 def _list_mm_collection_names(
@@ -438,8 +446,8 @@ def _validate_state_record(data: dict[str, Any]) -> dict[str, Any] | None:
     for item in raw_collections:
         if (
             not isinstance(item, str)
-            or not item.startswith(MM_COLLECTION_PREFIX)
             or len(item) > _MAX_COLLECTION_NAME_LEN
+            or not _STATE_COLLECTION_RE.fullmatch(item)
         ):
             return None
         collections.append(item)
@@ -527,6 +535,9 @@ def _refresh_locked(
         else:
             version_status, qmd_version = _qmd_version(qmd, deadline)
             status = "failed" if version_status == "version-too-old" else version_status
+            if version_status == "version-too-old":
+                release = _VERSION_RE.match(qmd_version or "")
+                qmd_version = release.group() if release else None
             if status == "ok":
                 status, collections = _reconcile(qmd, desired_collections(cfg), deadline)
             if status == "ok":
@@ -537,6 +548,7 @@ def _refresh_locked(
                 subprocess.Popen(
                     [qmd, *_GLOBAL_INDEX, "embed"],
                     cwd="/",
+                    env=_qmd_env(),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -558,14 +570,16 @@ def _refresh_locked(
 
 
 @contextmanager
-def _index_lock() -> Iterator[lockedjson.LockedJson]:
+def _index_lock(*, wait: bool = False) -> Iterator[lockedjson.LockedJson]:
     path = state_path()
     try:
         if not stat.S_ISREG(path.lstat().st_mode):
             raise OSError("memory-index state is not a regular file")
     except FileNotFoundError:
         pass
-    with lockedjson.locked_json_rmw(path, on_contention="raise", retry_intervals=()) as cache:
+    retry_interval = 0.1
+    retries = (retry_interval,) * int(REFRESH_DEADLINE_S / retry_interval) if wait else ()
+    with lockedjson.locked_json_rmw(path, on_contention="raise", retry_intervals=retries) as cache:
         cache.write_on_exit = False
         yield cache
 
@@ -785,7 +799,7 @@ def _enable_index() -> None:
 
 def _disable_index() -> None:
     try:
-        with _index_lock() as cache:
+        with _index_lock(wait=True) as cache:
             was_enabled = config.memory_index_enabled(config.load_config())
             if was_enabled:
                 _set_enabled(False)

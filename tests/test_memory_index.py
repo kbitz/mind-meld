@@ -149,7 +149,7 @@ _QMD_STUB_SOURCE = textwrap.dedent(
                     return
                 print(f"Collections ({len(cols)}):")
                 for name in sorted(cols):
-                    print(f"{name} (qmd://{name}/)")
+                    print(f"  {name}  (qmd://{name}/)")
                 return
 
             if sub == "show":
@@ -570,6 +570,7 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
 
     monkeypatch.setattr(subprocess, "Popen", spy_popen)
     config.patch_config_on_disk({"memory_index": {"embeddings": True}})
+    monkeypatch.setenv("INDEX_PATH", str(tmp_path / "separate.sqlite"))
     res_emb = memoryindex.refresh(env.cfg)
     assert res_emb.status == "ok"
     embed_calls = [c for c in popen_calls if c[0][1:] == ["--index", "index", "embed"]]
@@ -578,6 +579,7 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
     assert embed_calls[0][1]["stdin"] is subprocess.DEVNULL
     assert embed_calls[0][1]["stdout"] is subprocess.DEVNULL
     assert embed_calls[0][1]["stderr"] is subprocess.DEVNULL
+    assert all("INDEX_PATH" not in kw["env"] for cmd, kw in popen_calls if "show" not in cmd)
     monkeypatch.setattr(subprocess, "Popen", real_popen)
 
     # Single-flight contention: holding flock returns skipped-running without writing.
@@ -587,7 +589,9 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         res_busy = memoryindex.refresh(env.cfg)
         assert res_busy.status == "skipped-running"
-        off_busy = runner.invoke(cli.app, ["memory-index", "off"])
+        with monkeypatch.context() as mp:
+            mp.setattr(memoryindex, "REFRESH_DEADLINE_S", 0.05)
+            off_busy = runner.invoke(cli.app, ["memory-index", "off"])
         assert off_busy.exit_code == 1
         assert "Run: mm memory-index off" in off_busy.output
         assert config.memory_index_enabled(config.load_config(env.cfg_path))
@@ -975,6 +979,7 @@ def test_hooks_spawn_detached_after_lock_release_and_child_records_state(
         events.clear()
         mp.setattr(pullflow, "_pull_core", lambda *a, **kw: pullflow.PullResult(total_failed=1))
         r_apull_failed = runner.invoke(cli.app, ["autopull"])
+        assert r_apull_failed.exit_code == 0, r_apull_failed.output
         assert "1 file(s) failed to apply" in r_apull_failed.output
         assert events == ["release"]
 
@@ -1193,6 +1198,18 @@ def test_diag_memory_index_json_off_on_and_sanitization(
     assert mi["collections"] == ["mm-claude"]
     assert mi["last_refresh"]["state"] == "recorded"
     assert mi["last_refresh"]["result"] == "ok"
+
+    # Invalid collection names in the local record cannot become qmd arguments.
+    state_path = memoryindex.state_path()
+    record = json.loads(state_path.read_text())
+    record["collections"] = ["mm-invalid name"]
+    state_path.write_text(json.dumps(record), encoding="utf-8")
+    invalid = runner.invoke(cli.app, ["diag", "--json"])
+    assert invalid.exit_code == 0, invalid.output
+    invalid_state = json.loads(invalid.output)["memory_index"]
+    assert invalid_state["last_refresh"]["state"] == "malformed"
+    assert invalid_state["collections"] == []
+    assert stub.calls()[-1] == ["--version"]
 
     # Plain-text diag sanitizes hostile collection names.
     hostile = "mm-\x1b[31mevil\x1b[0m[bold]name"
