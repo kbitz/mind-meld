@@ -28,7 +28,7 @@ import stat
 import sys
 import time
 import unicodedata
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -77,6 +77,7 @@ from mind_meld.devices import (
     compose_pending_syncthing_join_items,
     inventory_devices,
     lookup_device_by_short_id,
+    read_retirement_records,
 )
 from mind_meld.devices import (
     compose_pending_syncthing_join_message as compose_pending_syncthing_join_message,
@@ -92,6 +93,8 @@ from mind_meld.errors import (
     SnapshotError,
     StorageError,
     StorageNotFound,
+    os_error_cause,
+    snapshot_refusal,
 )
 from mind_meld.manifest import (
     CONFLICT_INFIX,
@@ -116,6 +119,7 @@ from mind_meld.merge import (
 )
 from mind_meld.safety import safe_str
 from mind_meld.storage import get_backend
+from mind_meld.storage import keys as storage_keys
 from mind_meld.storage.keys import blob_key, is_content_hash
 from mind_meld.storage.local import LocalBackend
 from mind_meld.synclog import write_sync_log
@@ -276,6 +280,10 @@ class PullResult:
     deleted_folder: str | None = None
     older: list[OlderEdit] = field(default_factory=list)
     ledger_cause: str | None = None
+    # Track 157A: Codex memory copies removed for retired fleet machines.
+    retired_copies_removed: int = 0
+    retired_copies_names: list[str] = field(default_factory=list)
+    retired_copies_folder: str | None = None
 
     @property
     def total_applied(self) -> int:
@@ -337,6 +345,11 @@ def _detect_pull_case_collisions(
     collisions: dict[str, dict[str, list[str]]] = {}
     for src_name, src_info in local_sources_map.items():
         base_path = src_info["path"]
+        if src_name == manifest.CODEX_MEMORY_SOURCE_NAME:
+            try:
+                _config_module.codex_memory_copy_dirs_missing(base_path)
+            except OSError:
+                continue  # Apply reports the refused destination.
         # Probe the filesystem the files actually land on, not the symlink's
         # own location — local_sources_map keeps mm-events' custom roots
         # unresolved for ownership checks, but a link can cross a volume
@@ -1508,7 +1521,7 @@ def _apply_incoming_file(
         # The file changed under us between the read and the replace: both changed.
         verdict = "both"
 
-    if should_merge(rel_path):
+    if reporter.src_name != manifest.CODEX_MEMORY_SOURCE_NAME and should_merge(rel_path):
         merged_outcome = _apply_merge(
             local_path, rel_path, plain_data, verbose=verbose, reporter=reporter
         )
@@ -1588,8 +1601,9 @@ def _apply_incoming_file(
             # never reaches the mtime gate at all, so the bump can't close the
             # resolve->pull loop for THAT peer -- it still helps every
             # mtime-bearing peer.
-            peer_ts = remote_mtime.timestamp() if remote_mtime else 0.0
-            _record_inline_bump(pending_inline_bumps, resolved_local, peer_ts)
+            if reporter.src_name != manifest.CODEX_MEMORY_SOURCE_NAME:
+                peer_ts = remote_mtime.timestamp() if remote_mtime else 0.0
+                _record_inline_bump(pending_inline_bumps, resolved_local, peer_ts)
             reporter.defer_settle()
             if verbose:
                 console.print(f"  [dim]= {safe_str(rel_path)} (kept local by user)[/dim]")
@@ -1976,11 +1990,22 @@ def _deletion_candidates(
     taken: set[tuple[str, str]] = set()
     taken_paths: set[tuple[tuple[int, int], str]] = set()
     source_roots: dict[tuple[int, int], list[str]] = {}
+    codex_peer_dirs: set[str] = set()
     for name, info in local_sources_map.items():
         if name not in MM_INTERNAL_SOURCE_NAMES:
             try:
-                root = info["path"].stat()
+                if name == manifest.CODEX_MEMORY_SOURCE_NAME:
+                    if _config_module.codex_memory_copy_dirs_missing(info["path"]):
+                        continue
+                    root = info["path"].lstat()
+                    if not stat.S_ISDIR(root.st_mode):
+                        continue
+                    codex_peer_dirs = {p.name for p in info["path"].iterdir()}
+                else:
+                    root = info["path"].stat()
             except (OSError, RuntimeError):
+                if name == manifest.CODEX_MEMORY_SOURCE_NAME:
+                    continue
                 # An unresolvable root cannot safely participate in this pass.
                 return []
             source_roots.setdefault((root.st_dev, root.st_ino), []).append(name)
@@ -2030,6 +2055,7 @@ def _deletion_candidates(
             if (
                 src_name not in local_sources_map
                 or src_name in MM_INTERNAL_SOURCE_NAMES
+                or (src_name == manifest.CODEX_MEMORY_SOURCE_NAME and did not in codex_peer_dirs)
                 or (source_filter and src_name != source_filter)
                 or (did, src_name) in blocked
                 or (src_name, rel_path) in taken
@@ -2117,13 +2143,19 @@ def _copy_folder_name(now: datetime) -> str:
     return f"{now:%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
 
 
-def _make_copy_dirs(folder: Path, deletions: list[_Deletion]) -> list[Path]:
+def _make_copy_dirs(
+    folder: Path,
+    deletions: Sequence[_Deletion] = (),
+    *,
+    additional_paths: Iterable[Path] = (),
+) -> list[Path]:
     """Create the 0700 recovery folders for one pull; return every folder created."""
     fsutil.refuse_real_state_write_under_pytest(folder)
     created: list[Path] = []
     wanted = {folder}
     for d in deletions:
         wanted.add((folder / d.src_name / d.rel_path).parent)
+    wanted.update((folder / rel).parent for rel in additional_paths)
     for target in sorted(wanted, key=lambda p: len(p.parts)):
         missing: list[Path] = []
         current = target
@@ -2143,6 +2175,27 @@ def _remove_copy_dirs(created: list[Path]) -> None:
         fsutil.refuse_real_state_write_under_pytest(directory)
         with suppress(OSError):
             directory.rmdir()
+
+
+def _gc_pull_recovery_copies() -> int:
+    """Reap expired recovery copies and report maintenance failures."""
+    try:
+        cleanup = retention._gc_deleted_copies(False, False, quiet=True)
+    except Exception as exc:
+        core._print_apply_warning(
+            "mm: warning: recovery cleanup failed under "
+            f"{safety.safe_terminal_str(statedb.deleted_copies_dir())}: "
+            f"{safety.safe_terminal_str(exc)}. Check folder access, then run mm gc."
+        )
+        return 1
+    if cleanup.failed:
+        core._print_apply_warning(
+            f"mm: warning: recovery cleanup failed for {cleanup.failed} "
+            "operation(s) under "
+            f"{safety.safe_terminal_str(statedb.deleted_copies_dir())}. "
+            "Expired folders may be partly removed. Check folder access, then run mm gc."
+        )
+    return cleanup.failed
 
 
 class _UnlinkFailed(OSError):
@@ -2389,7 +2442,10 @@ def _run_deletions(
             try:
                 before_move = d.local_path.lstat()
                 move_started = True
-                outcome = _move_into_copy(d.local_path, copy_path, d.sha)
+                if d.src_type == "codex-memory" and before_move.st_nlink > 1:
+                    outcome = _copy_then_unlink(d.local_path, copy_path, d.sha)
+                else:
+                    outcome = _move_into_copy(d.local_path, copy_path, d.sha)
             except _UnlinkFailed as e:
                 # The copy exists but the original stays: not retried. Delete it by hand,
                 # or keep it and this machine republishes it (its next push clears the stamp).
@@ -2788,11 +2844,23 @@ def _plan_pull(
             if src_name not in local_sources_map:
                 unknown.append(_UnknownSourceWarning(src_name, dname))
                 continue
+            base_path = local_sources_map[src_name]["path"]
+            copies_unavailable = False
+            if src_name == manifest.CODEX_MEMORY_SOURCE_NAME and src_data.get("files"):
+                try:
+                    _check_codex_memory_peer_dir(base_path, did)
+                except OSError:
+                    copies_unavailable = True
             for path, info in src_data.get("files", {}).items():
                 if not is_tombstoned(src_name, path, all_tombstones):
-                    planner.predict(
-                        did, dname, src_name, path, info, local_sources_map[src_name]["path"]
-                    )
+                    if copies_unavailable:
+                        planner.predictions.append(
+                            pullplan.PullPrediction(
+                                did, dname, src_name, path, "may fail", "copies root unavailable"
+                            )
+                        )
+                        continue
+                    planner.predict(did, dname, src_name, path, info, base_path)
     if ledger is not None and ledger.readable:
         for d in _deletion_candidates(
             pull_targets=pull_targets,
@@ -2968,6 +3036,16 @@ def _pull_one_source(
     if not remote_files:
         return base_result
 
+    if src_type == "codex-memory":
+        try:
+            _check_codex_memory_peer_dir(base_path, did)
+        except OSError as e:
+            core._print_apply_warning(
+                f"mm: warning: {safety.safe_terminal_str(_codex_copies_error(e))}"
+            )
+            reporter.outcomes["failed"].extend(remote_files)
+            return base_result
+
     if reporter.ledger is not None and reporter.ledger.readable:
         to_download = _classify_with_ledger(
             remote_files, base_path, src_name, did, all_tombstones, reporter
@@ -2978,6 +3056,10 @@ def _pull_one_source(
         local_files: dict[str, dict] = {}
         for rel_path in remote_files:
             local_path = base_path / rel_path
+            if src_type == "codex-memory" and manifest.path_has_descendant_symlink(
+                local_path, base_path
+            ):
+                continue  # The apply boundary records the preserved link.
             try:
                 if local_path.exists():
                     sha = hash_file(local_path)
@@ -3004,6 +3086,13 @@ def _pull_one_source(
             _config_module._bootstrap_mm_events_path(
                 str(base_path), strict=True, on_created=reporter.created_ancestor
             )
+        except SnapshotError as e:
+            core._print_apply_warning(f"mm: warning: {safety.safe_terminal_str(e)}")
+            reporter.outcomes["failed"].extend(to_download)
+            return base_result
+    elif src_type == "codex-memory":
+        try:
+            _ensure_codex_memory_copies_dir(base_path, on_created=reporter.created_ancestor)
         except SnapshotError as e:
             core._print_apply_warning(f"mm: warning: {safety.safe_terminal_str(e)}")
             reporter.outcomes["failed"].extend(to_download)
@@ -3203,6 +3292,284 @@ def ledger_notice(result: PullResult) -> str:
 def _origin_text(result: PullResult) -> str:
     names = [safety.safe_terminal_str(n) for n in result.deleted_origins]
     return names[0] if len(names) == 1 else "peers"
+
+
+def _codex_copies_error(exc: OSError) -> SnapshotError:
+    return SnapshotError(
+        snapshot_refusal(
+            source=manifest.CODEX_MEMORY_SOURCE_NAME,
+            problem="could not access the copies directory",
+            cause=os_error_cause(exc),
+            next_action="Restore a writable, real Codex memory copies directory, then run mm pull.",
+        )
+    )
+
+
+def _check_codex_memory_peer_dir(copies_root: Path, publisher_id: str) -> None:
+    """Refuse a copies path already owned by a differently spelled ID."""
+    if _config_module.codex_memory_copy_dirs_missing(copies_root):
+        return
+    peer_dir = copies_root / publisher_id
+    try:
+        peer_dir.lstat()
+    except FileNotFoundError:
+        return
+    if not any(path.name == publisher_id for path in copies_root.iterdir()):
+        raise FileExistsError(errno.EEXIST, "publisher ID aliases another copy", str(peer_dir))
+
+
+def _ensure_codex_memory_copies_dir(
+    copies_root: Path,
+    *,
+    on_created: Callable[[Path], None] | None = None,
+) -> None:
+    """Create ``~/.local/share/mind-meld`` and ``codex-memory`` at 0700 without following symlinks.
+
+    Raises ``SnapshotError`` if either directory is a symlink, not a directory,
+    or cannot be created or accessed.
+    """
+    try:
+        missing = _config_module.codex_memory_copy_dirs_missing(copies_root)
+        if missing:
+            fsutil.refuse_real_state_write_under_pytest(copies_root)
+            for directory in missing:
+                try:
+                    directory.mkdir(mode=0o700)
+                except FileExistsError:
+                    st = directory.lstat()
+                    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                        raise
+                else:
+                    if on_created is not None:
+                        on_created(directory)
+
+        target = copies_root
+        st = target.lstat()
+        if not stat.S_ISDIR(st.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "expected a real directory", str(target))
+        if st.st_mode & 0o077:
+            fsutil.refuse_real_state_write_under_pytest(target)
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+            try:
+                if os.fstat(fd).st_uid != os.getuid():
+                    raise PermissionError(
+                        errno.EACCES, "copies directory is not private", str(target)
+                    )
+                os.fchmod(fd, 0o700)
+            finally:
+                os.close(fd)
+        if not os.access(target, os.W_OK | os.X_OK):
+            raise PermissionError(errno.EACCES, "copies directory is unwritable", str(target))
+    except OSError as e:
+        raise _codex_copies_error(e) from e
+
+
+def _walk_regular_files_no_follow(root: Path) -> tuple[list[Path], list[Path]]:
+    """Return ``(regular_files, dirs_deepest_first)`` under ``root`` without following symlinks."""
+    files: list[Path] = []
+    dirs: list[Path] = []
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        dirs.append(current)
+        try:
+            with os.scandir(current) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                est = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISLNK(est.st_mode):
+                continue
+            if stat.S_ISDIR(est.st_mode):
+                stack.append(Path(entry.path))
+            elif stat.S_ISREG(est.st_mode):
+                files.append(Path(entry.path))
+    dirs.sort(key=lambda p: len(p.parts), reverse=True)
+    return files, dirs
+
+
+def _remove_retired_codex_memory_copies(
+    backend: LocalBackend,
+    passphrase: str,
+    memory_kb: int,
+    copies_root: Path,
+    *,
+    registered_ids: Collection[str],
+    touched_parents: set[Path],
+    fsync_warnings: list[_FsyncWarning],
+    folder: Path | None = None,
+) -> tuple[int, list[str], str | None, int]:
+    """Recover retired copies and return removed count, peer names, folder, and failures."""
+    try:
+        if _config_module.codex_memory_copy_dirs_missing(copies_root):
+            return 0, [], None, 0
+        peer_dirs = {p.name: p for p in copies_root.iterdir()}
+    except OSError:
+        return 0, [], None, 0
+    try:
+        retired = read_retirement_records(backend, passphrase, memory_kb)
+    except (OSError, MindMeldError):
+        return 0, [], None, 0
+    if not retired.records:
+        return 0, [], None, 0
+
+    plan: list[tuple[str, list[Path], list[Path]]] = []
+    for rec in retired.records.values():
+        rid = rec.mm_device_id
+        try:
+            storage_keys._validate_component(rid, "device_id")
+        except ValueError:
+            continue
+        if rid in registered_ids or (peer_dir := peer_dirs.get(rid)) is None:
+            continue
+        try:
+            pst = peer_dir.lstat()
+        except OSError:
+            continue
+        if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+            continue
+        reg_files, subdirs = _walk_regular_files_no_follow(peer_dir)
+        plan.append((rec.device_name or rid, reg_files, subdirs))
+
+    if not plan:
+        return 0, [], None, 0
+
+    has_files = any(files for _, files, _ in plan)
+    recovery_folder: Path | None = None
+    recovery_dirs: set[Path] = set()
+    if has_files:
+        recovery_folder = folder or (
+            statedb.deleted_copies_dir() / _copy_folder_name(datetime.now(timezone.utc))
+        )
+        try:
+            created = _make_copy_dirs(
+                recovery_folder,
+                additional_paths=(
+                    Path("codex-memory") / local_path.relative_to(copies_root)
+                    for _, reg_files, _ in plan
+                    for local_path in reg_files
+                ),
+            )
+        except (OSError, StorageError) as exc:
+            core._print_apply_warning(
+                "mm: warning: could not prepare recovery folder for retired Codex memory copies: "
+                f"{safety.safe_terminal_str(exc)}. Restore folder access, then run mm pull."
+            )
+            return 0, [], None, 1
+        warnings = _fsync_touched_parents(
+            set(created) | ({created[0].parent} if created else set())
+        )
+        if warnings:
+            fsync_warnings.extend(warnings)
+            _remove_copy_dirs(created)
+            return 0, [], None, 0
+
+    removed_count = 0
+    failures = 0
+    retired_names: list[str] = []
+    for dname, reg_files, subdirs in plan:
+        peer_removed = 0
+        for local_path in reg_files:
+            assert recovery_folder is not None
+            rel = local_path.relative_to(copies_root).as_posix()
+            copy_path = recovery_folder / "codex-memory" / rel
+            try:
+                if manifest.path_has_descendant_symlink(local_path, copies_root):
+                    continue
+                local_stat = local_path.lstat()
+                if not stat.S_ISREG(local_stat.st_mode):
+                    continue
+                sha = hash_file(local_path)
+                # A chmod after rename would also change surviving hard links.
+                if local_stat.st_nlink > 1:
+                    outcome = _copy_then_unlink(local_path, copy_path, sha)
+                else:
+                    outcome = _move_into_copy(local_path, copy_path, sha)
+            except _RestoredCopyError as exc:
+                outcome = "restored"
+                touched_parents.add(local_path.parent)
+                recovery_dirs.add(copy_path.parent)
+                core._print_apply_warning(
+                    f"mm: warning: restored retired Codex memory copy "
+                    f"{safety.safe_terminal_str(local_path)}: {safety.safe_terminal_str(exc)}. "
+                    "Run mm pull to retry."
+                )
+            except _MovedCopyError as exc:
+                outcome = "kept-copy"
+                core._print_apply_warning(
+                    "mm: warning: moved retired Codex memory copy could not be verified: "
+                    f"{safety.safe_terminal_str(exc)}. Check {safety.safe_terminal_str(copy_path)}."
+                )
+            except (OSError, StorageError) as exc:
+                failures += 1
+                core._print_apply_warning(
+                    "mm: warning: failed to move retired Codex memory copy "
+                    f"{safety.safe_terminal_str(local_path)}: {safety.safe_terminal_str(exc)}. "
+                    "Restore folder access, then run mm pull."
+                )
+                continue
+            if outcome != "deleted":
+                failures += 1
+            if outcome in ("deleted", "kept-copy"):
+                peer_removed += 1
+                removed_count += 1
+                touched_parents.add(local_path.parent)
+                recovery_dirs.add(copy_path.parent)
+        for directory in subdirs:
+            fsutil.refuse_real_state_write_under_pytest(directory)
+            with suppress(OSError):
+                directory.rmdir()
+                touched_parents.discard(directory)
+                touched_parents.add(directory.parent)
+        if peer_removed and dname not in retired_names:
+            retired_names.append(dname)
+
+    if recovery_dirs:
+        fsync_warnings.extend(_fsync_touched_parents(recovery_dirs))
+    folder_out = str(recovery_folder) if removed_count and recovery_folder else None
+    return removed_count, retired_names, folder_out, failures
+
+
+def retired_copies_clause(result: PullResult) -> str:
+    """Pull-summary clause for retired machines' Codex memory copies removed into recovery."""
+    if not result.retired_copies_removed:
+        return ""
+    names = (
+        ", ".join(safety.safe_terminal_str(n) for n in result.retired_copies_names)
+        or "retired peers"
+    )
+    where = (
+        f"copies in {safety.safe_terminal_str(result.retired_copies_folder)} for 30 days"
+        if result.retired_copies_folder
+        else "copies kept for 30 days"
+    )
+    count = core._count(
+        result.retired_copies_removed,
+        "retired Codex memory copy",
+        "retired Codex memory copies",
+    )
+    return f"{count} removed ({names}); {where}; see {DELETED_FILES_URL}"
+
+
+def retired_copies_detail(result: PullResult) -> str:
+    """Autopull breadcrumb detail for retired Codex memory copies removed, or ""."""
+    if not result.retired_copies_removed:
+        return ""
+    names = (
+        ", ".join(safety.safe_terminal_str(n) for n in result.retired_copies_names)
+        or "retired peers"
+    )
+    count = core._count(
+        result.retired_copies_removed,
+        "retired Codex memory copy",
+        "retired Codex memory copies",
+    )
+    folder = safety.safe_terminal_str(result.retired_copies_folder)
+    return f"{count} removed ({names}); copies in {folder}"
 
 
 def deleted_clause(result: PullResult) -> str:
@@ -3523,6 +3890,8 @@ def _print_pull_summary(
     console.print(f"  Completed in {result.elapsed:.1f}s")
     if result.total_deleted:
         console.print(f"  [yellow]{safe_str(deleted_clause(result))}[/yellow]")
+    if result.retired_copies_removed:
+        console.print(f"  [yellow]{safe_str(retired_copies_clause(result))}[/yellow]")
     if result.total_conflicted:
         console.print(
             "  [yellow]Run [bold]mm conflicts[/bold] to review, "
@@ -3735,6 +4104,7 @@ def _pull_core(
         # join's pull) let the current directory's main checkout own a project
         # nobody else owns. Called before the first decode.
         projectid.allow_cwd_candidate()
+        core._configure_codex_memory(config)
 
         if dry_run and verbose and not quiet:
             _print_this_directory()
@@ -3781,17 +4151,23 @@ def _pull_core(
         pull_sources.extend(
             src
             for src in pull_resolution.selected
-            if src["name"] in MM_INTERNAL_SOURCE_NAMES and src not in pull_sources
+            if (src["name"] in MM_INTERNAL_SOURCE_NAMES or src.get("type") == "codex-memory")
+            and src not in pull_sources
         )
         local_sources_map: dict[str, dict[str, Any]] = {
             src_cfg["name"]: {
-                "path": Path(src_cfg["path"]).expanduser().absolute(),
+                "path": (
+                    Path(_config_module.CODEX_MEMORY_COPIES_DIR).expanduser().absolute()
+                    if src_cfg["type"] == "codex-memory"
+                    else Path(src_cfg["path"]).expanduser().absolute()
+                ),
                 "type": src_cfg["type"],
             }
             for src_cfg in pull_sources
         }
 
         all_devices, pull_targets = _select_devices(backend, my_device_id, from_device, inventory)
+        registered_ids = {my_device_id, *inventory.vanished, *(d["device_id"] for d in all_devices)}
         # A device entry that vanished mid-read is waiting, not corrupt and not
         # unknown. Its id stays in the manifest set (its tombstones still
         # apply); only its version check and its files are skipped.
@@ -3804,15 +4180,60 @@ def _pull_core(
             if not quiet:
                 core._error(f"Device not found: {from_device}" + refusal_suffix)
         if not pull_targets:
+            retired_removed = 0
+            retired_names: list[str] = []
+            retired_folder: str | None = None
+            retired_fsync_warnings: list[_FsyncWarning] = []
+            recovery_cleanup_failures = 0
+            retirement_failures = 0
+            if (
+                not dry_run
+                and "codex-memory" in local_sources_map
+                and (source_filter is None or source_filter == "codex-memory")
+            ):
+                # The last peer can retire, leaving nobody to pull from. The
+                # recovery folders still expire on later Codex memory pulls.
+                recovery_cleanup_failures = _gc_pull_recovery_copies()
+                retired_touched: set[Path] = set()
+                retired_removed, retired_names, retired_folder, retirement_failures = (
+                    _remove_retired_codex_memory_copies(
+                        backend,
+                        passphrase,
+                        memory_kb,
+                        local_sources_map["codex-memory"]["path"],
+                        registered_ids=registered_ids,
+                        touched_parents=retired_touched,
+                        fsync_warnings=retired_fsync_warnings,
+                    )
+                )
+                retired_fsync_warnings.extend(_fsync_touched_parents(retired_touched))
+                for w in retired_fsync_warnings:
+                    core._warning(f"durability fsync failed on {w.parent_dir} \u2014 {w.error}")
             if show:
-                console.print("[yellow]No other devices found to pull from.[/yellow]")
+                if retired_removed:
+                    retired_preview = PullResult(
+                        retired_copies_removed=retired_removed,
+                        retired_copies_names=retired_names,
+                        retired_copies_folder=retired_folder,
+                    )
+                    console.print(
+                        f"  [yellow]{safe_str(retired_copies_clause(retired_preview))}[/yellow]"
+                    )
+                else:
+                    console.print("[yellow]No other devices found to pull from.[/yellow]")
             if dry_run and not quiet:
                 console.print("No changes predicted.")
             result = PullResult(
-                no_peers=not (from_device and from_device in inventory.vanished),
+                no_peers=not retired_removed
+                and not (from_device and from_device in inventory.vanished),
                 no_sources=not pull_resolution.selected,
                 elapsed=time.time() - start,
+                durability_fsync_failures=len(retired_fsync_warnings),
+                maintenance_failures=recovery_cleanup_failures + retirement_failures,
                 waiting=_waiting_peers([], [], vanished_entries),
+                retired_copies_removed=retired_removed,
+                retired_copies_names=retired_names,
+                retired_copies_folder=retired_folder,
             )
             _save_pull_observations(
                 result, dry_run=dry_run, complete=not from_device and not vanished_entries
@@ -3892,9 +4313,18 @@ def _pull_core(
         ]
         # Pull never walks local trees for nested checkouts: it probes only the
         # local ancestors of incoming peer paths, so it never writes into one.
-        nested_roots = core._incoming_nested_roots(pull_sources, manifest_cache.values())
-        exclude_map, skip_prefixes = core._build_exclude_map(config, nested_roots=nested_roots)
-        include_map = core._build_include_map(config)
+        nested_sources = [src for src in pull_sources if src["name"] != "codex-memory"]
+        if codex_copies := local_sources_map.get("codex-memory"):
+            try:
+                if not _config_module.codex_memory_copy_dirs_missing(codex_copies["path"]):
+                    nested_sources.append({"name": "codex-memory", **codex_copies})
+            except OSError:
+                pass  # The source-specific apply path reports the unavailable root.
+        nested_roots = core._incoming_nested_roots(nested_sources, manifest_cache.values())
+        exclude_map, skip_prefixes = core._build_exclude_map(
+            config, pull_sources, nested_roots=nested_roots
+        )
+        include_map = core._build_include_map(config, pull_sources)
         # Always run: conflict-shaped names and `.extend-root` are stripped even
         # when no source declares exclude_patterns (claude-only installs).
         filtered_cache: dict[str, dict | None] = {}
@@ -3902,6 +4332,15 @@ def _pull_core(
             if m is None:
                 filtered_cache[did] = None
                 continue
+            if did != my_device_id:
+                m, refused = manifest.confine_codex_memory(m, did)
+                if refused:
+                    peer_label = safety.safe_terminal_str(device_labels.get(did, did))
+                    core._print_apply_warning(
+                        f"mm: warning: refused {core._count(refused, 'path', 'paths')} in "
+                        f"codex-memory from {peer_label}; these paths were skipped. "
+                        "Fix: upgrade mm on that machine."
+                    )
             filtered = core._filter_excluded_paths(m, exclude_map, skip_prefixes, include_map)
             # Log "excluded" per peer-path so `mm log --action excluded`
             # shows what the user is NOT pulling because of their config.
@@ -4079,6 +4518,9 @@ def _pull_core(
         total_waiting = 0
         maintenance_failures = 0
         deleted_folder: str | None = None
+        retired_copies_removed = 0
+        retired_copies_names: list[str] = []
+        retired_copies_folder: str | None = None
 
         in_flight: _ApplyReporter | None = None
         per_source: _PerSourceResult | None = None
@@ -4239,25 +4681,7 @@ def _pull_core(
 
             if not dry_run:
                 # Hooks never run `mm gc`; copies only grow when a pull deletes.
-                try:
-                    cleanup = retention._gc_deleted_copies(False, False, quiet=True)
-                    maintenance_failures += cleanup.failed
-                except Exception as exc:
-                    maintenance_failures += 1
-                    core._print_apply_warning(
-                        "mm: warning: recovery cleanup failed under "
-                        f"{safety.safe_terminal_str(statedb.deleted_copies_dir())}: "
-                        f"{safety.safe_terminal_str(exc)}. Check folder access, then run mm gc."
-                    )
-                else:
-                    if cleanup.failed:
-                        core._print_apply_warning(
-                            f"mm: warning: recovery cleanup failed for {cleanup.failed} "
-                            "operation(s) under "
-                            f"{safety.safe_terminal_str(statedb.deleted_copies_dir())}. "
-                            "Expired folders may be partly removed. Check folder access, "
-                            "then run mm gc."
-                        )
+                maintenance_failures += _gc_pull_recovery_copies()
                 blocked = {
                     (r.device_id, r.src_name)
                     for r in per_source_results
@@ -4298,6 +4722,25 @@ def _pull_core(
                     for r in per_source_results:
                         if r.deleted_folder is not None:
                             _record_source_bookkeeping(r, {}, quiet=quiet, verbose=verbose)
+                if "codex-memory" in local_sources_map and (
+                    source_filter is None or source_filter == "codex-memory"
+                ):
+                    (
+                        retired_copies_removed,
+                        retired_copies_names,
+                        retired_copies_folder,
+                        retirement_failures,
+                    ) = _remove_retired_codex_memory_copies(
+                        backend,
+                        passphrase,
+                        memory_kb,
+                        local_sources_map["codex-memory"]["path"],
+                        registered_ids=registered_ids,
+                        touched_parents=touched_parents,
+                        fsync_warnings=fsync_warnings,
+                        folder=Path(deleted_folder) if deleted_folder else None,
+                    )
+                    maintenance_failures += retirement_failures
                 _tidy_line_indexes(
                     line_indexes,
                     pending=pending_files,
@@ -4402,6 +4845,9 @@ def _pull_core(
                 corrupt_peer_count=len(corrupt_peers),
                 total_waiting=total_waiting,
                 waiting=_waiting_peers(per_source_results, vanished_manifests, vanished_entries),
+                retired_copies_removed=retired_copies_removed,
+                retired_copies_names=retired_copies_names,
+                retired_copies_folder=retired_copies_folder,
             )
             _save_pull_observations(
                 _partial_result,

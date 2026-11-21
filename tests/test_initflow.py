@@ -52,8 +52,8 @@ from mind_meld.storage.local import LocalBackend
 PASSPHRASE = "initflow-contract-test-only"
 MEMORY_KB = 1024
 PEER = "bbbbbbbb"
-SOURCES_CLAUDE_ONLY = "Y\nn\nn\nn\nn\nn\nn\n"
-SOURCES_NONE = "n\nn\nn\nn\nn\nn\nn\n"
+SOURCES_CLAUDE_ONLY = "Y\nn\nn\nn\nn\nn\nn\nn\n"
+SOURCES_NONE = "n\nn\nn\nn\nn\nn\nn\nn\n"
 NEW_FLEET_OUTCOME = (
     "as the root of a Syncthing folder, run 'mm init' on the other machines, and run 'mm push'."
 )

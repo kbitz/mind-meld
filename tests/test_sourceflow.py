@@ -328,7 +328,7 @@ def test_reconfigure_abort_exits_1_and_writes_nothing(cfg, monkeypatch):
 
 
 def test_reconfigure_accepting_defaults_updates_the_configuration(cfg):
-    result = runner.invoke(app, ["reconfigure-sources"], input="\n" * 8)
+    result = runner.invoke(app, ["reconfigure-sources"], input="\n" * 9)
     assert "Sync 'claude' source" in result.stdout
     assert "Sync 'codex' source at ~/.codex? (not detected) [y/n] (Enter = n)" in result.stdout
     assert result.exit_code == 0, result.output

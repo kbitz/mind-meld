@@ -236,8 +236,8 @@ pull rule and propagated deletions need. Older readers ignore them.
   versions this machine built that file on. Omitted when empty; an unchanged entry keeps its list. Its only reader is the
   pull rule; a diff ignores it. Invalid shapes read as absent. See [conflict invariants](docs/invariants/conflicts.md#the-pull-rule-last-synced-base-ancestry-and-the-mtime-guard-load-bearing-track-91a).
 - `sources[...]["root_ids"]`: per scan root, the random token in that folder's `.mind-meld-anchor` file, renewed by
-  every publishing push. A push mints a deletion record only for a file under a scan root whose token still matches.
-  Peers ignore it; mm-events has none.
+  every publishing push. For anchored sources, a push mints a deletion record only under a scan root whose token still matches.
+  Peers ignore these tokens. The `mm-events` source has no anchors. The Codex memory source uses the [anchorless mint guards](docs/invariants/sync.md#codex-memory-copies-track-157a).
 - `tombstones[...]["sha256"]`: the newest held version's full sha256, resolved from the prior entry or local peer bases. If its full hash is unknown or ambiguous, no record is minted; without a held row the accepted prior digest is used.
   A peer deletes its copy only when its bytes equal it and its last-synced base for that peer equals it; a record
   without a valid 64-hex `sha256` (every record from before Track 91A) only suppresses re-download and never deletes.
@@ -511,8 +511,8 @@ attended push's conditional activity tail and exit contract, read
 6. Apply tombstones: files in the remote manifest tombstone set are skipped (and, in step 12, may be deleted).
 7. For each incoming file, re-read the local hash and mtime, then decide per the pull rule (`pullplan.decide`, via `_apply_incoming_file`): write / matched / skip / fast-forward / older (held) / stale / union-merge / conflict-copy, using this machine's last-synced base for that peer and the `from` ancestry the peer published. A file the rule skips reads no blob. See Conflict Resolution for the rule.
 8. Download + decrypt changed blobs. Decompress (gzip). Missing blobs count as waiting, not failed; continue applying available files and retain the peer's manifest conflict copies while any files wait.
-9. Line-merge `.jsonl` and `MEMORY.md` files on both-changed and no-base fallback decisions, and when a peer edit built on the local version carries an older mtime. Fast-forward replaces them with the peer's bytes.
-10. Write files to their respective source paths using atomic writes (write to a `.tmp` sibling, then `os.replace`; a caught write error unlinks the sibling best-effort and a crash can strand it; see [atomic write publication failures](docs/invariants/sync.md#atomic-write-publication-failures)).
+9. Line-merge eligible `.jsonl` and `MEMORY.md` files on both-changed and no-base fallback decisions, and when a peer edit built on the local version carries an older mtime. Fast-forward replaces them with the peer's bytes.
+10. Write files to their local sync destinations using atomic writes (write to a `.tmp` sibling, then `os.replace`; a caught write error unlinks the sibling best-effort and a crash can strand it; see [atomic write publication failures](docs/invariants/sync.md#atomic-write-publication-failures)). Codex memory uses its [separate copies root](#source-types-and-synced-paths).
 11. For conflict-copy decisions, leave local at the canonical path and write remote to `<stem>.sync-conflict-<ts>-v1-<device>.<ext>`. Publish a replacement before cleaning up prior copies for that same file and peer; a failed replacement preserves them. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight via `pullplan` and exit **3** before applying any file if a conflict or local failure is predicted (mergeable changes from multiple peers no longer cause a false conflict); combine with `--dry-run` for a write-free CI gate. (Exit 3, not 2 — see Conflict mode below for why the distinction from typer's usage-error exit is load-bearing.)
 12. **Propagated deletions.** A local file absent from a remote manifest is never deleted just because it is absent. Only a peer's own, active, hash-carrying tombstone deletes it, and only when this machine's last-synced base for that peer equals the hash and the local bytes hash to it (and the guards in sync invariants hold). The file is moved into `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>` and kept at least 30 days; a record without a hash, or a file whose bytes differ, is never deleted. The deleting machine holds the only record; a machine that followed it mints none.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
@@ -550,7 +550,7 @@ The command body and own-device blob collection (`gc`, `_do_gc`) live in `gcflow
 ### `mm sources`
 
 1. Load `config.toml` read-only (`core._get_config(read_only=True)`).
-2. Resolve configured sources as push would, but bypass `[sync].disabled_sources` (`core._resolve_all_configured_sources`, calling `config.get_sources` with `disabled_sources` cleared). Path-availability filtering in `resolve_sources` still applies, so a source whose path is missing on disk is not listed, except mm's own default `mm-events` root (`MM_INTERNAL_SOURCE_NAMES` when `_preview_mm_events_bootstrap` reports `would_create`), which is listed as an empty walk before its directory exists.
+2. Resolve configured sources and include disabled rows (`core._resolve_all_configured_sources` calls `config.resolve_sources` with `disabled_sources` cleared). List available paths, including the default `mm-events` root before bootstrap when `_preview_mm_events_bootstrap` reports `would_create`. A configured `codex-memory` source appears even when its Codex home is absent.
 3. Print one `Configured Sources` table with columns `Name`, `Path`, `Type`, `Enabled` (`N` and row dimmed when the name is in `disabled_sources`, `Y` otherwise), `Files` (files kept after the source's `exclude_patterns` and `include_patterns`), and `Excluded` (how many files those per-source patterns removed after global junk exclusions, or `—` when the source has neither `exclude_patterns` nor `include_patterns`). It does not print `include_dirs`, `include_files`, or a path-exists column.
 
 ---
@@ -625,8 +625,8 @@ Behavior is decided per file at apply time by the pull rule, one pure function (
 1. **Write (W):** the local file is missing and was not knowingly removed here — write the remote version to the canonical path. (A file this machine held and removed by hand stays missing: **held**.)
 2. **Update-base (U):** remote hash matches local hash — no content write; flush the canonical file and its parent before recording any new last-synced rows.
 3. **Skip:** the remote equals this peer's base — nothing changed on the peer. No download, no union, no prompt. A version this machine already moved past is **stale**: silent.
-4. **Fast-forward (F):** the local file has not been changed here since it was last synced, and the peer's version was built on it. Write the remote bytes and restore its mtime, with **no recovery copy** of the replaced bytes. When the peer's mtime is older, merge eligible files and report the other edits as **older**.
-5. **Merge (M):** union `.jsonl` and `MEMORY.md` files when both sides changed or a peer's edit built on the local version has an older mtime. A union can bring back a deleted line. The `MEMORY.md` tidy removes duplicate pointers and links to missing files that the pull did not leave waiting or failed.
+4. **Fast-forward (F):** the local file has not been changed here since it was last synced, and the peer's version was built on it. Write the remote bytes and restore its mtime, with **no recovery copy** of the replaced bytes. A clean Codex memory copy also fast-forwards when its publisher's successor has an older mtime. For other sources, merge eligible older edits and report the remaining edits as **older**.
+5. **Merge (M):** union eligible `.jsonl` and `MEMORY.md` files when both sides changed or a peer's edit built on the local version has an older mtime. A union can bring back a deleted line. The `MEMORY.md` tidy removes duplicate pointers and links to missing files that the pull did not leave waiting or failed.
 6. **Conflict-copy (C, INVERTED in v0.9.2):** both changed and the file isn't mergeable — keep local at canonical, write the REMOTE bytes to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` (Syncthing convention, collision suffix on clash). Local edits stay at canonical; remote bytes are preserved alongside. A sidecar that already holds the peer's bytes is **kept** (no count, no warning).
 7. **No-base fallback:** a path with no base for that peer where the peer published no ancestry runs the older rule exactly: merge if mergeable, else **skip (S)** when the local mtime is newer, else conflict-copy.
 
@@ -700,7 +700,11 @@ SYNCED_SUBDIRS = ["memory", "todos"]
 
 **`muse` type** — Claude-shaped walker for `~/.local/share/muse`. Hardcodes `memory/` at the source root; Muse's `.muse-memory.lock` is excluded on push and pull. Sessions, the session index and bundled skills are never entered, and `~/.config/muse` is not a source. See [host parity](docs/designs/host-parity.md#muse-1x-minor-2026-10-14).
 
-**Nested git checkouts (all types).** Every walker skips a directory strictly below the source root that contains a `.git` file or a `.git` directory holding `HEAD`, so a repository cloned inside a synced folder is not published; an empty or HEAD-less `.git` directory is not a checkout, and nothing inside a `.git` directory (in any letter case) is published. A folder that was already published and later becomes a checkout is frozen, not deleted. See [Nested git repositories](README.md#nested-git-repositories) and [the sync invariant](docs/invariants/sync.md#nested-git-checkouts-are-frozen-never-published).
+**`codex-memory` type** — Claude-shaped, opt-in walker for a machine's Codex home (`~/.codex` by default). Hardcodes the active memory folder (`memories_v2/` when present as a real directory, else `memories/`) and copy set (`memory_summary.md`, `MEMORY.md`, and direct `.md` children of `rollout_summaries/`), accepting only singly-linked regular files and never entering `.git`, `.codex-baseline`, `extensions/`, or SQLite stores. Local push paths use `<memdir>/<sub>` and are encoded at `core.encode_manifest` to wire form `<device id>/<sub>` (decoded back to local form only for this machine's own manifest at `load_manifest`).
+
+On pull, peers' files land in `~/.local/share/mind-meld/codex-memory/<peer device id>/`. Mind Meld creates the `codex-memory/` root with mode 0700 and leaves the Codex home untouched. Peer paths and deletion records must match the publisher's device ID and the copy set. Edits that conflict with the publisher's update use the configured conflict mode. With the default mode, the publisher's version lands in a conflict sidecar. Because Codex tracks its memory folder in Git, `scan_roots` is empty and deletions propagate without `.mind-meld-anchor` files while retaining the remaining mint-guard checks.
+
+**Nested git checkouts.** Walkers skip a directory strictly below the source root that contains a `.git` file or a `.git` directory holding `HEAD`. The `codex-memory` walker treats Codex's own Git-tracked memory folder as its scan boundary and reads only the hardcoded copy set. An empty or HEAD-less `.git` directory is not a checkout. Nothing inside a `.git` directory (in any letter case) is published. A folder that was already published and later becomes a nested checkout is frozen. See [Nested git repositories](README.md#nested-git-repositories) and [the sync invariant](docs/invariants/sync.md#nested-git-checkouts-are-frozen-never-published).
 
 ### Excluded Patterns
 
@@ -823,6 +827,7 @@ Mind Meld supports syncing multiple data sources beyond `~/.claude`. Each source
 
 - **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present. Session jsonls under `projects/` are never synced.
 - **`muse`** — Claude-shaped walker. Scans `memory/` at `~/.local/share/muse`. Sessions and the session index are never synced. Background resolution never auto-activates it without an explicit `[[sync.sources]]` entry: `mm init` defaults to yes (`[y/n] (Enter = y)`) when `memory/` is a real directory containing at least one non-excluded regular file and no (`[y/n] (Enter = n)`) otherwise, and `mm reconfigure-sources` defaults to the current setting (or to detected on a legacy config without explicit sources).
+- **`codex-memory`** — Opt-in source for [per-device Codex memory copies](#source-types-and-synced-paths). `mm init` defaults to yes when the active memory directory exists and no otherwise. Enabling this source alone lets a machine receive peer copies.
 - **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively (never into a nested git checkout) and picks up `include_files` at the source root. A non-empty `include_patterns` allowlist narrows that set, and a directory holding a regular, non-symlink `Local State` file is skipped. Used for `~/.gstack`, `mm-events`, and the Codex and Antigravity customization allowlists.
 
 Default generic sources (see `config.py:DEFAULT_SOURCES`):
@@ -833,7 +838,7 @@ Default generic sources (see `config.py:DEFAULT_SOURCES`):
 
 ### JSONL Merge on Pull
 
-Pull merges `.jsonl` files when both sides changed, when a peer edit built on the local version has an older mtime, or when the no-base fallback applies. Fast-forward takes the peer's bytes directly. The same merge conditions apply to `MEMORY.md`, which sorts lines lexically without using `ts`, deduplicates relative `.md` pointers, and cleans up missing targets after pull. [Conflict invariants](docs/invariants/conflicts.md#the-pull-rule-last-synced-base-ancestry-and-the-mtime-guard-load-bearing-track-91a).
+Pull merges `.jsonl` files when both sides changed, when a peer edit built on the local version has an older mtime, or when the no-base fallback applies. Fast-forward takes the peer's bytes directly. The same merge conditions apply to eligible `MEMORY.md` files. The merge sorts lines lexically without using `ts`, deduplicates relative `.md` pointers, and cleans up missing targets after pull. Codex memory copies use the [one-writer pull rule](docs/invariants/sync.md#codex-memory-copies-track-157a). [Conflict invariants](docs/invariants/conflicts.md#the-pull-rule-last-synced-base-ancestry-and-the-mtime-guard-load-bearing-track-91a).
 
 1. Union of unique normalized lines from local and remote (UTF-8 replacement, trailing-whitespace strip, blank lines dropped, byte-exact dedup). Original line text is kept; lines are not reserialized.
 2. Records whose decoded JSON is an object with a **string** `ts` (including empty) sort first, by `(ts, original line)`. Comparison is lexical — not chronological, and not numeric-epoch.
@@ -875,7 +880,7 @@ The Agents table orders Claude, Codex, Grok, Muse, Antigravity and Unclassified.
 | Host | Context sync and consent |
 |---|---|
 | Claude Code | Project `memory/` and `todos/`; session transcripts stay local. |
-| Codex | `skills/`, `plugins/`, `AGENTS.md`; enabling the source also authorizes usage capture. |
+| Codex | `codex` syncs `skills/`, `plugins/`, and `AGENTS.md` and authorizes usage capture. Enable `codex-memory` to exchange per-device memory copies. |
 | Muse | `memory/` only; explicit opt-in authorizes local usage capture. |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config`; `mm enable-source agy` also authorizes conversation-step usage capture. |
 

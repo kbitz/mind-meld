@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.76 | 2026-11-21 | Opt-in Codex memory sharing publishes this machine's summaries, stores every other machine's copies outside Codex, and keeps a retired machine's copies in local recovery for 30 days. |
 | 1.12.75 | 2026-11-21 | Reinstall commands that `mm` prints now work for both pipx backends, `mm status` drops a Syncthing removal wait once a later sync finds nothing waiting, and routine capture notices show in `mm status` and `mm diag` until the next attended push. |
 | 1.12.74 | 2026-11-20 | Mind Meld leaves conflicted files untouched when one changes after the prompt, omits repository folders from new synced event rows, and saves a new fleet's storage path as an absolute path. |
 | 1.12.73 | 2026-11-20 | Mind Meld now asks whether you are starting or joining a fleet, then lets you approve and retire Syncthing devices while managed machines keep their fleet names. |

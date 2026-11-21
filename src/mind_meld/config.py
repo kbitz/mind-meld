@@ -34,6 +34,7 @@ DEFAULT_MAX_FILE_SIZE = 52_428_800  # 50MB
 DEFAULT_ARGON2_MEMORY_KB = 65_536  # 64MB
 DEFAULT_CLAUDE_DIR = "~/.claude"
 DEFAULT_CODEX_DIR = "~/.codex"
+CODEX_MEMORY_COPIES_DIR = "~/.local/share/mind-meld/codex-memory"
 DEFAULT_GROK_DIR = "~/.grok"
 DEFAULT_MUSE_DIR = "~/.local/share/muse"
 DEFAULT_AGY_DIR = "~/.gemini/config"
@@ -46,7 +47,7 @@ RETIRED_SOURCE_NAMES: frozenset[str] = frozenset({"opencode"})
 
 # Only `mm enable-source`, or explicit inclusion at `mm init` or
 # `mm reconfigure-sources`, activates these sources.
-OPT_IN_SOURCE_NAMES: frozenset[str] = frozenset({"grok", "muse", "agy"})
+OPT_IN_SOURCE_NAMES: frozenset[str] = frozenset({"grok", "muse", "agy", "codex-memory"})
 
 UsageCaptureReadiness = Literal["ready", "disabled", "unavailable", "no-reader", "unknown"]
 
@@ -477,6 +478,17 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
     },
     {
         # Same Claude-shaped entry: name/path/type only. The walker
+        # hardcodes the active memory folder (memories_v2/ or memories/)
+        # and file set — not user-editable include_dirs — so a config edit
+        # cannot widen the walk onto sessions/, .git/, or SQLite stores.
+        # Pull places peers' copies under CODEX_MEMORY_COPIES_DIR/<peer id>/
+        # and never writes into ~/.codex.
+        "name": "codex-memory",
+        "path": DEFAULT_CODEX_DIR,
+        "type": "codex-memory",
+    },
+    {
+        # Same Claude-shaped entry: name/path/type only. The walker
         # hardcodes skills/, commands/, and rules/ — not user-editable
         # include_dirs — so a config edit cannot widen the walk onto
         # sessions/, memory-v2/, config.toml, auth.json, or plugins/.
@@ -750,6 +762,22 @@ def _validate_sources(sources: Any) -> None:
                     "config: source 'muse' does not support include_dirs or include_files; "
                     "it syncs memory/ only."
                 )
+        if src["type"] == "codex-memory" and name != "codex-memory":
+            raise ConfigError(
+                "config: type 'codex-memory' is reserved for source name 'codex-memory' so only "
+                "its hardcoded memory allowlist is walked."
+            )
+        if name == "codex-memory":
+            if src["type"] != "codex-memory":
+                raise ConfigError(
+                    "config: source 'codex-memory' must use type 'codex-memory' so only its "
+                    "hardcoded memory allowlist is walked."
+                )
+            if "include_dirs" in src or "include_files" in src:
+                raise ConfigError(
+                    "config: source 'codex-memory' does not support include_dirs or "
+                    "include_files; it syncs Codex memory files only."
+                )
         if name in seen_names:
             raise ConfigError(f"config: duplicate source name '{name}'.")
         seen_names.add(name)
@@ -976,6 +1004,25 @@ def _optional_host_present(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def codex_memory_copy_dirs_missing(copies_root: Path) -> list[Path]:
+    """Inspect the copies path from the home directory down, without following links."""
+    dirs = [copies_root]
+    home = Path.home().absolute()
+    for parent in copies_root.parents:
+        if parent == home or parent == parent.parent:
+            break
+        dirs.append(parent)
+    dirs.reverse()
+    for index, directory in enumerate(dirs):
+        try:
+            st = directory.lstat()
+        except FileNotFoundError:
+            return dirs[index:]
+        if not stat.S_ISDIR(st.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "expected a real directory", str(directory))
+    return []
 
 
 def _source_path_available(path_str: str, *, strict: bool, source_name: str) -> bool:

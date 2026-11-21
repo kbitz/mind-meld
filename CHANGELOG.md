@@ -2,6 +2,27 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.76] - 2026-11-21
+
+Opt-in Codex memory sharing publishes this machine's summaries, stores every other machine's copies outside Codex, and keeps a retired machine's copies in local recovery for 30 days.
+
+### Added
+
+- `mm enable-source codex-memory` (or a yes at `mm init` when Codex memories are on) publishes this machine's Codex memory summaries and places every other machine's copies in `~/.local/share/mind-meld/codex-memory/`, without writing into `~/.codex`.
+- Enable `codex-memory` during `mm init` or with `mm enable-source codex-memory` to share Codex memory summaries on push and receive separate copies from peers on pull.
+
+### Changed
+
+- `mm pull` moves a retired machine’s Codex memory copies into 30-day local recovery.
+
+### Fixed
+
+- A failed move of a retired machine's Codex memory copies into local recovery is reported.
+
+### Upgrade notes
+
+- Machines still on an older mm skip another machine's `codex-memory` source as an unknown source until they upgrade.
+
 ## [1.12.75] - 2026-11-21
 
 Reinstall commands that `mm` prints now work for both pipx backends, `mm status` drops a Syncthing removal wait once a later sync finds nothing waiting, and routine capture notices show in `mm status` and `mm diag` until the next attended push.

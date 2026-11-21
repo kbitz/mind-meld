@@ -162,7 +162,7 @@ first install sets Syncthing up so it just works.
 | Agent | Synced between machines | Usage in `retro-fleet` |
 |---|---|---|
 | Claude Code | Project memory and `todos/` under `~/.claude` (CLAUDE.md, agents and commands stay in git) | Tokens, cost, sessions and skills from local session logs |
-| Codex | `skills/`, `plugins/`, `AGENTS.md` | Tokens and cost from session rollouts, archived ones included |
+| Codex | `skills/`, `plugins/`, `AGENTS.md`; when enabled (`mm enable-source codex-memory`), each machine's Codex memory summaries reach the other machines as read-only per-machine copies in `~/.local/share/mind-meld/codex-memory/<machine>/` | Tokens and cost from session rollouts, archived ones included |
 | Grok Build | `skills/`, `commands/` and `rules/` under `~/.grok`, and its memory topics (each scope's `topics/` Markdown, global and per repository). `mm init` offers Grok Build and defaults to yes when it detects customizations. To enable it later, run `mm enable-source grok`. Pending observations stay on the machine that captured them | Tokens and cost from local session records, runs through Paseo (ACP) included, in the Grok row |
 | Muse | `memory/`. `mm init` offers Muse and defaults to yes when it finds an eligible memory file. To enable it later, run `mm enable-source muse` | Tokens and cost, as its own `muse` family |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config` | Tokens and cost from conversation steps, as its own `agy` family |
@@ -170,9 +170,8 @@ first install sets Syncthing up so it just works.
 | mmm-factory | Nothing: `~/.mmm/` stays local, and the factory moves between hosts with mmm-factory's own tool ([factory handover](#factory-handover)) | — (factory workers' tokens count under their host's row) |
 | mm | Its activity log, which `retro-fleet` reads | Git commits per machine |
 
-Intentional gaps: Codex memory does not sync until cross-model memory (O9),
-which carries it as per-machine copies, never into another machine's Codex
-store; session transcripts and credentials never sync. Grok
+Intentional gaps: Codex's memory folder is never written, and its `.git`,
+databases and files outside the copy set stay local; session transcripts and credentials never sync. Grok
 Build's `config.toml`, credentials, hooks and plugins stay local, as Claude
 Code's and Codex's whole-file settings do; its generated memory index
 (`MEMORY.md`) and memory databases are rebuilt on each machine and never sync.

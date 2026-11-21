@@ -44,6 +44,39 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/pullflow.py|tests/test_codex_memory_source.py] Test gap: Refuse an unusable Codex copies destination
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The tests cover creation of the private copies root and separate publishers. They do not exercise a refused destination or an existing publisher directory with another spelling.
+- **Hypothesis (untested):** Check that a refused destination leaves copies intact and the pull reports the affected source.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `pullflow._check_codex_memory_peer_dir` and `pullflow._pull_one_source`.
+- **Evidence:** Track 157A coverage audit found no test for these refusal branches.
+- **Context:** Filed by /review-and-prep on PR #368 at `eeeda4e` (2026-11-21).
+- **Effort:** ?
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_codex_memory_source.py] Test gap: Preserve copies when retirement evidence is unavailable
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The copies integration tests start with a readable retirement record. They do not assert preservation when the record cannot be read.
+- **Hypothesis (untested):** Pull after a retirement record becomes unavailable and confirm the peer's files stay in place.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `pullflow._remove_retired_codex_memory_copies`.
+- **Evidence:** Track 157A coverage audit traced the existing retirement reader and found no copies-specific test for this branch.
+- **Context:** Filed by /review-and-prep on PR #368 at `eeeda4e` (2026-11-21).
+- **Effort:** ?
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_codex_memory_source.py] Test gap: Keep hard-link metadata during Codex copy recovery
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The recovery tests use singly linked files.
+- **Hypothesis (untested):** Verify that recovery leaves the mode and bytes of another link to a retired or deleted copy intact.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `pullflow._run_deletions` and `pullflow._remove_retired_codex_memory_copies`.
+- **Evidence:** Track 157A coverage audit found no direct assertion for the guarded copy-and-unlink path.
+- **Context:** Filed by /review-and-prep on PR #368 at `eeeda4e` (2026-11-21).
+- **Effort:** ?
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-21 (O9 rewritten as one local qmd index, moved before 2.0; four bugs carded)

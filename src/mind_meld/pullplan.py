@@ -24,6 +24,7 @@ from pathlib import Path
 
 from mind_meld import conflictmtime
 from mind_meld.manifest import (
+    CODEX_MEMORY_SOURCE_NAME,
     hash_file,
     mtime_from_manifest,
     mtime_from_path,
@@ -410,7 +411,9 @@ def decide(
             return "skip"
 
     def forward() -> str:
-        if _remote_is_older(local, remote_mtime):
+        # A clean copy has only one publisher. Its successor is authoritative
+        # even when it carries an older timestamp.
+        if source != CODEX_MEMORY_SOURCE_NAME and _remote_is_older(local, remote_mtime):
             return "both" if should_merge(path) else "older"
         return "fast-forward"
 
@@ -616,7 +619,7 @@ class PullPlanner:
 
     def _both(self, device_id, src_name, rel_path, state, remote_info):
         local_before = state.sha256
-        if should_merge(rel_path):
+        if src_name != CODEX_MEMORY_SOURCE_NAME and should_merge(rel_path):
             state.sha256, state.mtime = None, self.now
             self._settle(
                 device_id,
@@ -640,7 +643,7 @@ class PullPlanner:
         """No base and no ancestry: today's rule exactly."""
         if state.sha256 is not None and state.sha256 == remote_info.get("sha256"):
             return "unchanged", ""
-        if should_merge(rel_path):
+        if src_name != CODEX_MEMORY_SOURCE_NAME and should_merge(rel_path):
             local_before = state.sha256
             state.sha256, state.mtime = None, self.now
             self._settle(

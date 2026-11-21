@@ -316,6 +316,21 @@ def enable_source(name: str, *, force: bool = False) -> None:
             highlight=False,
             soft_wrap=True,
         )
+    elif name == "codex-memory":
+        console.print(
+            "[dim]Publishes this machine's Codex memory summaries and places peers' copies in "
+            "~/.local/share/mind-meld/codex-memory/. Nothing is written into ~/.codex.[/dim]"
+        )
+        console.print(
+            "[dim]Codex keeps memories off until enabled in Codex; this machine still receives "
+            "other machines' copies.[/dim]"
+        )
+        console.print(
+            outputstyle._fix_line("mm disable-source codex-memory"),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
 
 
 def reconfigure_sources() -> None:

@@ -246,6 +246,19 @@ REVIEWED = {
             "os.chmod(directory, 448)",
         ],
     ),
+    "pullflow.py:_ensure_codex_memory_copies_dir": (
+        *_GUARDED,
+        [
+            "directory.mkdir(mode=448)",
+            "os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)",
+        ],
+    ),
+    "pullflow.py:_remove_retired_codex_memory_copies": (
+        *_GUARDED,
+        [
+            "directory.rmdir()",
+        ],
+    ),
     "pullflow.py:_remove_copy_dirs": (
         *_GUARDED,
         [

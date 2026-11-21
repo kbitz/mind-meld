@@ -847,7 +847,7 @@ class TestDefaultSources:
         monkeypatch.setenv("HOME", str(tmp_path))
         for src in DEFAULT_SOURCES:
             Path(src["path"].replace("~", str(tmp_path), 1)).mkdir(parents=True, exist_ok=True)
-        assert OPT_IN_SOURCE_NAMES == frozenset({"grok", "muse", "agy"})
+        assert OPT_IN_SOURCE_NAMES == frozenset({"grok", "muse", "agy", "codex-memory"})
         cfg = {
             "device": {"id": "abc123", "name": "review"},
             "storage": {"path": str(tmp_path / "store")},
