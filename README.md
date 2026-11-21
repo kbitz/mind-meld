@@ -705,7 +705,7 @@ A project's Claude memory lands only where mm can place it: in a Claude project 
 
 Push and pull on each machine to exchange changes according to each file's sync rules:
 
-- **`.jsonl` files and `MEMORY.md`** merge by deduplicating and combining lines when both sides changed, when a peer edit built on your version has an older mtime, or when the no-base fallback applies. Fast-forward takes the peer's bytes directly. In `.jsonl`, records with a string `ts` sort first by that string, then by the full line. Every other line follows in lexical order. `MEMORY.md` sorts by line and ignores `ts`. Entries from all machines accumulate through these merges, keeping telemetry, learnings, and timeline files coherent across devices.
+- **Eligible `.jsonl` and `MEMORY.md` files** merge by deduplicating and combining lines when both sides changed, when a peer edit built on your version has an older mtime, or when the no-base fallback applies. Fast-forward takes the peer's bytes directly. In `.jsonl`, records with a string `ts` sort first by that string, then by the full line. Every other line follows in lexical order. `MEMORY.md` sorts by line and ignores `ts`. Entries from all machines accumulate through these merges, keeping telemetry, learnings, and timeline files coherent across devices. [Handling conflicts](#handling-conflicts) describes the rule for per-device Codex memory copies.
 - **Other files** follow what each Mac last synced. If only the peer changed a file, pull fast-forwards to the peer's bytes without a recovery copy. It holds the edit if the peer's mtime is older. If you changed it and the peer did not, pull leaves yours. If both changed it, with the default `keep-both` mode your local file stays at the canonical path and the remote version is saved as `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` sitting next to it (Syncthing convention). If this machine has no base for the peer and the peer publishes no ancestry, pull uses the older rule, where a local file newer than the remote is left alone. See [Handling conflicts](#handling-conflicts) below.
 - **Deletions** propagate. A tombstone in the manifest carries the sha256 of the version that was deleted: it stops a missing file from being restored from an older peer snapshot, and a receiving Mac whose copy has exactly those bytes, last synced from the deleting Mac, moves it into `~/.config/mind-meld/deleted/` for at least 30 days instead of keeping it. A file you changed, or a record from a release before 91A (no hash), is never deleted. See [Recovering a deleted file](#recovering-a-deleted-file).
 
@@ -884,7 +884,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 Mind Meld treats Codex as a first-class peer of Claude Code. Grok Build, Muse and Antigravity are also usage-reader hosts (see [Grok Build](#grok-build), [Muse](#muse) and [Antigravity](#antigravity-agy)).
 
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`, except Codex's own installed plugin versions (`plugins/cache/*` and `plugins/.remote-plugin-install-staging/*`): Codex installs and removes those itself, and a removal there would otherwise delete the same files on your other Macs.
-- `codex-memory` (opt-in via `mm enable-source codex-memory`, or during `mm init`) publishes this machine's Codex memory summaries (`memory_summary.md`, `MEMORY.md`, and `rollout_summaries/*.md` from `~/.codex/memories_v2/` or `~/.codex/memories/`) under this machine's device ID and places every other machine's copies in `~/.local/share/mind-meld/codex-memory/<peer device id>/`. Nothing is ever written into `~/.codex`, and `.git`, SQLite stores, and files outside the set stay local. Copies are read-only — to correct a Codex memory, fix it on the machine that wrote it and let the next push and pull replace the copies.
+- Enable `codex-memory` with `mm enable-source codex-memory` or select it during `mm init`. On `mm push` it publishes `memory_summary.md`, `MEMORY.md`, and direct `rollout_summaries/*.md` files from `~/.codex/memories_v2/`, with `~/.codex/memories/` as the fallback. This source leaves the Codex home untouched. Git metadata, SQLite stores, and files outside the copy set stay local. Each publisher's copies land in `~/.local/share/mind-meld/codex-memory/<peer device id>/` on machines that enable the source, including machines without their own Codex memory folder. Treat the copies as read-only. To correct a memory, fix it on the machine that wrote it, then push from that machine and pull on its peers.
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
 - Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source agy` is the corresponding verb: it adds a scoped Antigravity source (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`) and opts this Mac into reading step token totals from local conversation databases. Session databases, settings, and chat history stay on the Mac.
 - The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`.
@@ -1332,12 +1332,14 @@ device has already collected; this repair does not solve every arrival order.
 
 ### Nested git repositories
 
-Sync walkers skip nested directories containing a `.git` directory with `HEAD`
+Source walkers that traverse directory trees skip nested directories containing a `.git` directory with `HEAD`
 or a gitlink `.git` file by default; an empty `.git` directory is not a
 checkout and its folder syncs normally. A folder that an earlier release froze
-only because of an empty `.git` directory resumes syncing on the next `mm push`. This applies to every source type, including explicit includes
+only because of an empty `.git` directory resumes syncing on the next `mm push`. The rule covers explicit includes
 that point inside a checkout. The source root's own `.git` keeps its existing
 behavior. Ordinary directories still sync; there is no opt-out setting.
+
+The [`codex-memory` source](#codex-integration) reads its fixed file set from Codex's Git-tracked memory directory. Its Git metadata stays local.
 
 Attended `mm push --verbose` and the `--dry-run` preview report each skipped root once:
 `skipped: nested git repository <source>:<relative-root>`. `mm status` shows
@@ -1709,9 +1711,11 @@ Discovery is local. Track 29A's live gap was one repo (8 commits, 15%), not "10 
 
 ## Handling conflicts
 
-A conflict means **both machines changed the file** since they last synced it. If only the peer changed it, `mm pull` normally fast-forwards to the peer's bytes, without a recovery copy, so a bad edit on one Mac can spread to the others. See the older-mtime case below. If only you changed it, pull leaves yours and your next push shares it. For a both-changed file that cannot auto-merge, the default `mm pull --conflict-mode keep-both` leaves your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it, whichever file is newer. `.jsonl` files and `MEMORY.md` are line-unioned instead, and because mm keeps the last-synced hash and not the old text, **a line one Mac deleted comes back when both Macs changed the file** (delete it again; in `MEMORY.md`, pointers to missing files not left waiting or failed, and duplicate pointers for the same file, are dropped). If this machine has no base for the peer and the peer publishes no ancestry, pull falls back to a line merge for `.jsonl` files and `MEMORY.md`. For other files, it leaves the local file alone if its mtime is newer and otherwise writes a conflict copy.
+A conflict means **both machines changed the file** since they last synced it. If only the peer changed it, `mm pull` normally fast-forwards to the peer's bytes, without a recovery copy, so a bad edit on one Mac can spread to the others. See the older-mtime case below. If only you changed a publishable file, pull leaves yours and your next push shares it. For a both-changed file that cannot auto-merge, the default `mm pull --conflict-mode keep-both` leaves your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it, whichever file is newer. Auto-merge unions lines in eligible `.jsonl` and `MEMORY.md` files. Mind Meld only keeps the last-synced hash, so **a line one Mac deleted comes back when both Macs changed the file** (delete it again; in `MEMORY.md`, pointers to missing files not left waiting or failed, and duplicate pointers for the same file, are dropped). If this machine has no base for the peer and the peer publishes no ancestry, pull falls back to a line merge for eligible `.jsonl` and `MEMORY.md` files. For other files, it leaves the local file alone if its mtime is newer and otherwise writes a conflict copy.
 
-A peer edit built on your version with an **older mtime** is line-merged for `.jsonl` files and `MEMORY.md`. A union can retain lines the peer deleted and keep your wording when both `MEMORY.md` entries link to the same file. If the union leaves your file unchanged, `mm pull --verbose` shows a merge no-op. For other files, pull holds the edit and says `N older peer edits not applied`. Use `mm pull --verbose` to list the held paths, compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
+A peer edit built on your version with an **older mtime** is line-merged for eligible `.jsonl` and `MEMORY.md` files. A union can retain lines the peer deleted and keep your wording when both `MEMORY.md` entries link to the same file. If the union leaves your file unchanged, `mm pull --verbose` shows a merge no-op. Pull reports held edits as `N older peer edits not applied`. Use `mm pull --verbose` to list the held paths, compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
+
+A clean [Codex memory copy](#codex-integration) takes its publisher's update even when the update has an older mtime. When a local edit conflicts with the publisher's update, the default mode keeps the local copy and saves the publisher's version beside it as a conflict file.
 
 **Conflict copies that exist when you upgrade do not clear by themselves.** A pull on the new release no longer counts or reports a copy it already holds, but `mm conflicts` keeps listing it until you run `mm resolve` on each one; it needs a terminal. After `(l)ocal`, `(r)emote` or `(m)erge` the file stops conflicting.
 
@@ -2017,6 +2021,8 @@ command above), then check `mm status`. See [Upgrading](#upgrading).
 
 Run `mm devices retire <name|id>` from any remaining fleet machine to retire a decommissioned machine or an old registration left behind after re-running `mm init`. Retirement writes an encrypted retirement record (`retired/<id>.enc`), removes `syncthing/<id>.enc` and `devices/<id>.json` under the mm lock, drops the machine's `mm status` and `retro-fleet` rows, and lets each fleet machine where `mm` manages Syncthing automatically remove the retired Syncthing device on its next `mm push`, `mm pull`, `mm autopush`, or `mm autopull` once the retired machine stops connecting.
 
+Once a machine receives the retirement record, its next pull with `codex-memory` enabled moves the retired device's copies into the [30-day recovery folder](#recovering-a-deleted-file).
+
 1. Update any machine at 1.7.1 or older first (`mm update`): its GC deletes an unregistered machine's blobs, including the only copy of a file only that machine had.
 2. On a machine with the **same home folder** as the dead one, run `mm pull` first so its project memory is on disk.
 3. Shut down the retired machine or stop Syncthing there first (stopping `mm` alone does not stop Syncthing, and a machine that is still running re-registers on its next `mm push`).
@@ -2043,8 +2049,9 @@ uses that same Syncthing ID.
 If mm cannot identify a registration because its `devices/<id>.json` is
 unreadable, locate it by filename in `storage.path` and move it out of the
 shared folder. If mm reports an unreadable `retired/<id>.enc` that stays
-unreadable after sync, remove that retirement file by hand. It only holds
-the removal target, so finish removing the device in Syncthing where needed.
+unreadable after sync, remove that retirement file by hand and finish removing
+the device in Syncthing where needed. Codex memory copies stay in place while
+the retirement record is unavailable.
 Keep `manifests/<id>/` and `data/<id>/` to preserve memory the fleet has
 yet to pull.
 
