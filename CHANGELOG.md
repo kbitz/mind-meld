@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.75] - 2026-11-21
+
+Reinstall commands that `mm` prints now work for both pipx backends, `mm status` drops a Syncthing removal wait once a later sync finds nothing waiting, and routine capture notices show in `mm status` and `mm diag` until the next attended push.
+
+### Changed
+
+- `mm status` now drops the Syncthing removal-wait line once any later sync finds nothing waiting.
+- `mm init` no longer prints capture budget notices that need no action; `mm status` and `mm diag` show them until the next attended `mm push`.
+- `mm status` clears Syncthing removal waits after a later sync evaluates removals and finds nothing waiting.
+- Routine `mm init` capture notices appear in `mm status` and `mm diag` until an attended push replaces them.
+
+### Fixed
+
+- Reinstall commands that `mm` prints now start with `UV_VENV_CLEAR=1`, so they work when `pipx` uses its `uv` backend as well as its default backend.
+- Pinned pipx installs can be reinstalled with either the uv or default backend.
+
 ## [1.12.74] - 2026-11-20
 
 Mind Meld leaves conflicted files untouched when one changes after the prompt, omits repository folders from new synced event rows, and saves a new fleet's storage path as an absolute path.
