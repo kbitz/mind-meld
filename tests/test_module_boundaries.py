@@ -44,6 +44,7 @@ EXTRACTED = [
     "sourceflow",
     "devicesflow",
     "meshflow",
+    "memoryindex",
     "diffflow",
     "gcflow",
     "recaptureflow",
@@ -984,6 +985,7 @@ def test_command_set_is_unchanged_by_the_decomposition() -> None:
         "init",
         "install-skills",
         "log",
+        "memory-index",
         "migrate-config",
         "pull",
         "push",
@@ -1369,6 +1371,22 @@ GCFLOW_DEFINITIONS = frozenset(
     """.split()
 )
 
+MEMORYINDEX_DEFINITIONS = frozenset(
+    """
+    RefreshResult
+    RemoveResult
+    desired_collections
+    diag_state
+    memory_index
+    problem_text
+    read_state
+    refresh
+    remove_mm_collections
+    start_detached_refresh
+    state_path
+    """.split()
+)
+
 RECAPTUREFLOW_DEFINITIONS = frozenset(
     """
     RECAPTURE_EXIT_PARTIAL
@@ -1390,6 +1408,7 @@ STALE_PULL_CLI_BINDINGS |= (
     | (SOURCEFLOW_DEFINITIONS - SOURCE_SHELLS)
     | (DEVICESFLOW_DEFINITIONS - {"devices"})
     | (GCFLOW_DEFINITIONS - {"gc"})
+    | (MEMORYINDEX_DEFINITIONS - {"memory_index"})
     | (RECAPTUREFLOW_DEFINITIONS - {"recapture"})
     | {"safe_text", "_read_autorun_breadcrumbs"}
 )
@@ -1441,6 +1460,7 @@ def _unqualified_owner_calls(
         owners.update(dict.fromkeys(DEVICESFLOW_DEFINITIONS, "devicesflow"))
         owners.update(dict.fromkeys(DIFFFLOW_DEFINITIONS, "diffflow"))
         owners.update(dict.fromkeys(GCFLOW_DEFINITIONS, "gcflow"))
+        owners.update(dict.fromkeys(MEMORYINDEX_DEFINITIONS, "memoryindex"))
         owners.update(dict.fromkeys(RECAPTUREFLOW_DEFINITIONS, "recaptureflow"))
     owners.update(dict.fromkeys(PULLFLOW_DEFINITIONS, "pullflow"))
     tree = ast.parse(source)
@@ -1455,6 +1475,7 @@ def _unqualified_owner_calls(
             "devicesflow",
             "diffflow",
             "gcflow",
+            "memoryindex",
             "recaptureflow",
         )
     }
@@ -1653,6 +1674,17 @@ def test_gcflow_single_ownership_and_qualified_calls():
     assert len(GCFLOW_DEFINITIONS) == 3
 
 
+def test_memoryindex_single_ownership_and_qualified_calls():
+    inventories = {"cli": {"memory_index"}, "memoryindex": MEMORYINDEX_DEFINITIONS}
+    for module, expected in inventories.items():
+        source = (SRC / f"{module}.py").read_text()
+        assert _top_level_definitions(source) & MEMORYINDEX_DEFINITIONS == expected, (
+            f"{module}: expected owner inventory {expected}"
+        )
+        assert _unqualified_owner_calls(source, module) == []
+    assert len(MEMORYINDEX_DEFINITIONS) == 11
+
+
 def test_recaptureflow_single_ownership_and_qualified_calls():
     inventories = {"cli": {"recapture"}, "recaptureflow": RECAPTUREFLOW_DEFINITIONS}
     for module, expected in inventories.items():
@@ -1714,6 +1746,7 @@ def test_owner_call_gate_rejects_dead_aliases(source, consumer, flags):
         "meshflow",
         "diffflow",
         "gcflow",
+        "memoryindex",
         "recaptureflow",
     ],
 )
@@ -1817,6 +1850,20 @@ def test_gcflow_import_does_not_register_cli():
             sys.executable,
             "-c",
             "import sys; from mind_meld import gcflow; assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_memoryindex_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import memoryindex; "
+            "assert 'mind_meld.cli' not in sys.modules",
         ],
         capture_output=True,
         text=True,
@@ -2458,6 +2505,8 @@ def _pull_owner_hint(name: str) -> str:
         if name in DEVICESFLOW_DEFINITIONS - {"devices"}
         else ("gcflow",)
         if name in GCFLOW_DEFINITIONS - {"gc"}
+        else ("memoryindex",)
+        if name in MEMORYINDEX_DEFINITIONS - {"memory_index"}
         else ("recaptureflow",)
         if name in RECAPTUREFLOW_DEFINITIONS - {"recapture"}
         else ("safety",)

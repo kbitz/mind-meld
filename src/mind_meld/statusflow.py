@@ -29,6 +29,7 @@ from mind_meld import (
     host_registry,
     initflow,
     manifest,
+    memoryindex,
     outputstyle,
     projectid,
     resolveflow,
@@ -1182,6 +1183,23 @@ def status(
                 rendered = f"{rendered}, then restart the agent so it reloads SKILL.md"
             console.print(f"  [yellow]Skill links broken:[/yellow] {rendered}")
 
+        if _config_module.memory_index_enabled(config):
+            mi_state = memoryindex.read_state()
+            mi_rec_state = mi_state["state"]
+            mi_result = mi_state["result"]
+            problem_key: str | None = None
+            if mi_rec_state == "recorded":
+                if mi_result in ("qmd-missing", "failed", "timed-out"):
+                    problem_key = mi_result
+            elif mi_rec_state in ("missing", "malformed", "empty", "non_dict", "unreadable"):
+                problem_key = mi_rec_state
+            if problem_key is not None:
+                problem, fix = memoryindex.problem_text(problem_key)
+                console.print(
+                    f"  [yellow]Memory index:[/yellow] {safe_str(problem)}. Run: {safe_str(fix)}",
+                    soft_wrap=True,
+                )
+
         # Seam 3 — status inspects cached upgrade knowledge without refreshing it
         # (the view was read once, before the usage-capture verdict).
         install_failed_shown = False
@@ -2308,6 +2326,32 @@ def _print_syncthing_diag(st: dict[str, Any]) -> None:
     console.print("  mm only reads Syncthing; change these settings in Syncthing.")
 
 
+def _print_memory_index_diag(mi: dict[str, Any]) -> None:
+    console.print("\n[bold]Memory index[/bold]")
+    enabled = bool(mi.get("enabled"))
+    embeddings = bool(mi.get("embeddings"))
+    console.print(f"  enabled:                 {'on' if enabled else 'off'}")
+    console.print(f"  embeddings:              {'on' if embeddings else 'off'}")
+    qmd_ver = mi.get("qmd_version")
+    ver_shown = str(qmd_ver) if qmd_ver else "unavailable"
+    console.print(f"  qmd version:             {safe_str(safety.safe_terminal_str(ver_shown))}")
+    cols = mi.get("collections") or []
+    if cols:
+        cols_shown = ", ".join(safe_str(safety.safe_terminal_str(c)) for c in cols)
+    else:
+        cols_shown = "none"
+    console.print(f"  collections:             {cols_shown}")
+    last = mi.get("last_refresh") if isinstance(mi.get("last_refresh"), dict) else {}
+    lstate = last.get("state") or "missing"
+    lresult = last.get("result")
+    lat = last.get("at")
+    if lstate == "recorded" and lresult:
+        last_shown = f"{lresult} ({lat})" if lat else str(lresult)
+    else:
+        last_shown = str(lstate)
+    console.print(f"  last refresh:            {safe_str(safety.safe_terminal_str(last_shown))}")
+
+
 def _collect_diag_state(backend: LocalBackend) -> dict:
     """Gather non-secret state for support triage.
 
@@ -2342,6 +2386,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         names (only state, cause, home-relative config/folder paths, GUI
         address, folder id/label/state, fetch counts, peer counts, option
         values, problems and .stignore state; Track 92A)
+      * memory_index values other than enabled/embeddings bools, the parsed qmd
+        version, mm- collection names (locally visible in qmd; no paths, no
+        peer device ids), and the last refresh's state/result/at (Track 159A)
 
     Uses existing tri-state helpers (`fetch_crypto_init`, `sidecar.read`)
     rather than re-sampling raw blob bytes — the tri-state branches are
@@ -2568,6 +2615,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         ),
         "discovery": discovery,
         "git_capture": _collect_git_capture_diag(cfg, dev_id, discovery, scan=capture_rows),
+        "memory_index": memoryindex.diag_state(cfg if config_state == "ok" else None),
     }
 
 
@@ -2779,6 +2827,8 @@ def diag(
             console.print(f"    maintain_links: {safe_str(str(policy))}")
         if status not in ("ok", "absent") and target:
             console.print(f"    {target}")
+
+    _print_memory_index_diag(state.get("memory_index") or {})
 
     try:
         # The cached view only: no fetch, no cache write. diag runs on broken

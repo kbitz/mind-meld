@@ -1126,6 +1126,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "git_capture",
     "fast_forward",
     "syncthing",
+    "memory_index",
 )
 _SKILL_LINKS_ROW_FIELDS = (
     "key",

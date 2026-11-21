@@ -9969,6 +9969,7 @@ COMMAND_INTENTS62 = {
         "disable-source",
         "enable-source",
         "reconfigure-sources",
+        "memory-index",
         "migrate-config",
         "install-skills",
         "recapture",

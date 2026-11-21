@@ -1,7 +1,7 @@
 """Mind Meld CLI — built with Typer.
 
 Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
-          sources, conflicts, resolve, retro-fleet, recapture, update.
+          sources, conflicts, resolve, memory-index, retro-fleet, recapture, update.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from mind_meld import (
     identity,
     initflow,
     manifest,
+    memoryindex,
     meshflow,
     outputstyle,
     projectid,
@@ -941,6 +942,13 @@ def _report_usage_publication(
     return published
 
 
+def _sync_memory_index(config: dict) -> None:
+    try:
+        memoryindex.refresh(config)
+    except Exception:
+        return
+
+
 def _sync_update(config: dict, *, verbose: bool) -> None:
     state = core._SYNC_OUTPUT.get()
     display: upgrade.SyncUpdateDisplay | None = None
@@ -1629,6 +1637,12 @@ def push(
                             )
                 finally:
                     core._release_sync_lock()
+                if (
+                    not dry_run
+                    and core_finished
+                    and not isinstance(sys.exception(), (KeyboardInterrupt, typer.Abort))
+                ):
+                    _sync_memory_index(config)
                 # Failed attended attempts need the update or nudge too; previews never
                 # fetch, install or write it.
                 if not dry_run and not isinstance(
@@ -3008,6 +3022,7 @@ def _attended_pull(
                                 mesh_res.superseded_registrations if mesh_res is not None else ()
                             ),
                         )
+                _sync_memory_index(config)
                 _sync_update(config, verbose=verbose)
 
 
@@ -3293,6 +3308,32 @@ def reconfigure_sources() -> None:
     reconfigured state is committed in a single patch_config_on_disk call.
     """
     sourceflow.reconfigure_sources()
+
+
+@app.command(name="memory-index")
+@_literal_help
+def memory_index(
+    action: str | None = typer.Argument(
+        None,
+        help="Optional action: 'on' to enable and index, 'off' to disable and remove collections.",
+    ),
+) -> None:
+    """Show or toggle the local qmd memory index on this machine.
+
+    With no argument, shows whether the index and embeddings are enabled, the
+    qmd version, current mm- collections, and the last refresh result without
+    changing config or index state.
+
+    `mm memory-index on` verifies qmd 2.8.3+ is on PATH, enables [memory_index]
+    in this machine's config.toml, reconciles mm- collections, and runs an
+    initial refresh. `mm memory-index off` disables the index and removes only
+    mm- collections from qmd. The choice is per-machine and never syncs.
+    qmd 2.8.3+ must already be installed (setup automation is separate).
+
+    Exits 0 on success, 1 when turning on, refreshing, or removing fails, and
+    2 on usage error.
+    """
+    memoryindex.memory_index(action)
 
 
 @app.command(name="migrate-config")
@@ -4749,6 +4790,7 @@ def autopull() -> None:
     stderr + traceback to `~/.config/mind-meld/autopull.log`) on: corrupt
     config, crypto init failure, unexpected bug inside `_pull_core`.
     """
+    detached_config: dict | None = None
     with (
         token_usage.diagnostic_scope(lambda message, degraded=False: None),
         pullhistory.command_scope(attended=False),
@@ -4851,6 +4893,7 @@ def autopull() -> None:
             _write_autorun_breadcrumb(
                 "pull", outcome, detail, removal_wait_only=mesh_res.removal_wait_only(degradations)
             )
+            detached_config = setup.config
 
             # Seam 2 — self-update or nudge at the TAIL. Runs AFTER the main work
             # + breadcrumb so the cold-cache HTTP fetch latency (~500ms 1x/24h)
@@ -4858,6 +4901,12 @@ def autopull() -> None:
             # detached and says nothing; the nudge prints only when no update can
             # run AND the 24h re-nudge gate permits.
             upgrade.update_or_nudge(setup.config, attended=False)
+
+        if detached_config is not None:
+            try:
+                memoryindex.start_detached_refresh(detached_config)
+            except Exception:
+                pass
 
 
 @app.command()
@@ -4876,6 +4925,7 @@ def autopush() -> None:
         if degraded:
             diagnostics.append(message.removeprefix("mm: notice: ").strip())
 
+    detached_config: dict | None = None
     with (
         token_usage.diagnostic_scope(notice),
         pullhistory.command_scope(attended=False),
@@ -4978,9 +5028,16 @@ def autopush() -> None:
                 crumb_detail,
                 removal_wait_only=mesh_res.removal_wait_only(details),
             )
+            detached_config = setup.config
 
             # Seam 2 — self-update or nudge at the TAIL (mirrors autopull).
             upgrade.update_or_nudge(setup.config, attended=False)
+
+        if detached_config is not None:
+            try:
+                memoryindex.start_detached_refresh(detached_config)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
