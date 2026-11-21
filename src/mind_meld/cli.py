@@ -17,7 +17,7 @@ import time
 import traceback
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -667,7 +667,7 @@ def init(
     if sys.stdin is None or getattr(sys.stdin, "closed", False):
         _init_needs_terminal()
 
-    def pull_join(passphrase: str, finish_memory_setup: Callable[[], None]) -> None:
+    def pull_join(passphrase: str, finish_memory_setup: Callable[[bool], None]) -> None:
         _attended_pull(
             from_device=None,
             source=None,
@@ -2903,7 +2903,7 @@ def _attended_pull(
     conflict_mode: pullflow.ConflictMode,
     passphrase: str | None = None,
     join: bool = False,
-    finish_memory_setup: Callable[[], None] | None = None,
+    finish_memory_setup: Callable[[bool], None] | None = None,
 ) -> None:
     """The body of `mm pull`, shared with `mm init`'s join (``join=True``).
 
@@ -2911,7 +2911,13 @@ def _attended_pull(
     it (or holds a stale entry) must not fail the join's own pull. It is passed
     as an argument, never through the environment.
     """
-    with _sync_outcome("pull", verbose=verbose, dry_run=dry_run):
+    with _sync_outcome("pull", verbose=verbose, dry_run=dry_run), ExitStack() as join_setup:
+        # Init has registered before this call. Finish independent local setup
+        # even if pull stops early, but defer the synced instruction file until
+        # delivery is confirmed. The callback runs before the pull outcome.
+        if finish_memory_setup is not None:
+            incomplete_delivery = True
+            join_setup.callback(lambda: finish_memory_setup(incomplete_delivery))
         with (
             _attended_sync_run(
                 "pull",
@@ -2975,6 +2981,14 @@ def _attended_pull(
                     syncthing_delivery=delivery_mode,
                 )
                 run["result"] = pulled
+                if finish_memory_setup is not None:
+                    incomplete_delivery = bool(
+                        pulled.no_peers
+                        or pulled.total_failed
+                        or pulled.total_waiting
+                        or pulled.waiting
+                        or pulled.corrupt_peer_count
+                    )
                 if not dry_run:
                     mesh_res = meshflow.run(
                         config,
@@ -3024,11 +3038,9 @@ def _attended_pull(
                                 mesh_res.superseded_registrations if mesh_res is not None else ()
                             ),
                         )
-                if not pulled.total_failed:
-                    if finish_memory_setup is None:
-                        _sync_memory_index(config)
-                    else:
-                        finish_memory_setup()
+                join_setup.close()
+                if finish_memory_setup is None and not pulled.total_failed:
+                    _sync_memory_index(config)
                 _sync_update(config, verbose=verbose)
 
 

@@ -49,6 +49,7 @@ from mind_meld import (
     core,
     events_tail,
     fsutil,
+    manifest,
     memoryindex,
     outputstyle,
     skill_link,
@@ -672,9 +673,10 @@ def _pointer_target_paths() -> tuple[Path, Path | None]:
     codex_home_raw = os.environ.get("CODEX_HOME")
     try:
         codex_base = Path(codex_home_raw).expanduser() if codex_home_raw else home / ".codex"
-    except RuntimeError:
+        codex_target = codex_base.absolute() / "AGENTS.md"
+    except (OSError, RuntimeError):
         return (claude_target, None)
-    return (claude_target, codex_base.absolute() / "AGENTS.md")
+    return (claude_target, codex_target)
 
 
 def _show_pointer_targets() -> None:
@@ -736,13 +738,14 @@ def _ask_memory_setup(
     return (mem_index, embeddings, pointer_line)
 
 
-def _print_pointer_line_manual(target: Path) -> None:
+def _print_pointer_line_manual(target: Path, *, after_delivery: bool = False) -> None:
     try:
         resolved = target.resolve()
     except (OSError, RuntimeError):
         resolved = target
+    when = "After the fleet files arrive, add" if after_delivery else "Add"
     console.print(
-        f"  Add this line by hand to {safe_str(safe_terminal_str(resolved))}:",
+        f"  {when} this line by hand to {safe_str(safe_terminal_str(resolved))}:",
         soft_wrap=True,
     )
     console.print(
@@ -763,15 +766,17 @@ def _write_pointer_line(target: Path) -> str:
     home = Path.home().absolute()
     home_resolved = home.resolve()
     absolute = target.absolute()
-    unlinked = (
-        home_resolved / absolute.relative_to(home) if absolute.is_relative_to(home) else absolute
-    )
+    root = home if absolute.is_relative_to(home) else home_resolved
     try:
         resolved = target.resolve()
     except RuntimeError:  # A symlink loop on Python 3.11 or 3.12.
         _print_pointer_line_manual(target)
         return "printed"
-    if resolved != unlinked or not resolved.is_relative_to(home_resolved):
+    if (
+        not resolved.is_relative_to(home_resolved)
+        or not absolute.is_relative_to(root)
+        or manifest.path_has_descendant_symlink(absolute, root)
+    ):
         _print_pointer_line_manual(target)
         return "printed"
 
@@ -802,13 +807,17 @@ def _write_pointer_line(target: Path) -> str:
     return "appended"
 
 
-def _apply_pointer_line() -> None:
+def _apply_pointer_line(*, defer_codex: bool = False) -> None:
     """Apply the recommended pointer line to each target instruction file."""
-    for target in _pointer_target_paths():
+    claude_target, codex_target = _pointer_target_paths()
+    for target in (claude_target, codex_target):
         if target is None:
             core._warning("could not expand CODEX_HOME. Add the memory search line by hand.")
             continue
         try:
+            if defer_codex and target == codex_target:
+                _print_pointer_line_manual(target, after_delivery=True)
+                continue
             outcome = _write_pointer_line(target)
         except (OSError, StorageError) as e:
             cause = e.__cause__ if isinstance(e.__cause__, OSError) else e
@@ -1282,7 +1291,7 @@ def _wait_for_header(backend: LocalBackend, full_path: Path) -> CryptoInitFetch:
 def init(
     new_fleet: bool = False,
     *,
-    pull_join: Callable[[str, Callable[[], None]], None] | None = None,
+    pull_join: Callable[[str, Callable[[bool], None]], None] | None = None,
 ) -> str | None:
     """Run init; return the verified passphrase after a join, otherwise None."""
     # Capture prior device metadata BEFORE any prompt so the orphan-case
@@ -1542,11 +1551,13 @@ def init(
     )
     _forget_join_record()
 
-    def finish_memory_setup() -> None:
+    def finish_memory_setup(incomplete_delivery: bool = False) -> None:
         if memory_index_answer is True:
             _refresh_memory_index_best_effort(config)
         if pointer_line_answer is True:
-            _apply_pointer_line()
+            _apply_pointer_line(
+                defer_codex=incomplete_delivery and any(src["name"] == "codex" for src in sources)
+            )
 
     if new_fleet or pull_join is None:
         finish_memory_setup()

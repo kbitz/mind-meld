@@ -2938,8 +2938,9 @@ class TestInitMemorySetup160A:
         assert claude_md.read_text(encoding="utf-8") == "# Claude\n"
         assert memoryindex.POINTER_LINE in codex_md.read_text(encoding="utf-8")
 
+    @pytest.mark.parametrize("delivery", ["ready", "waiting", "failed"])
     def test_join_pulls_codex_instructions_before_appending_and_refreshes_once(
-        self, env, real_memory_setup_gate, tmp_path, monkeypatch
+        self, env, real_memory_setup_gate, tmp_path, monkeypatch, delivery
     ):
         from mind_meld import cli, memoryindex
 
@@ -2972,8 +2973,24 @@ class TestInitMemorySetup160A:
         assert pushed.exit_code == 0, pushed.output
         assert config.CONFIG_PATH == join_config
 
+        delayed = {}
+        if delivery == "waiting":
+            delayed = {key: backend.get(key) for key in backend.list_keys("data/")}
+            assert len(delayed) == 1
+            for key in delayed:
+                backend.delete(key)
+        elif delivery == "failed":
+            from mind_meld.errors import MindMeldError
+
+            def fail_pull(*args, **kwargs):
+                raise MindMeldError("storage unavailable")
+
+            monkeypatch.setattr(cli.pullflow, "_pull_core", fail_pull)
+
         target = home / ".codex" / "AGENTS.md"
         target.parent.mkdir()
+        claude = home / ".claude" / "CLAUDE.md"
+        claude.parent.mkdir()
         monkeypatch.setattr(
             initflow,
             "_prompt_sources",
@@ -2991,11 +3008,26 @@ class TestInitMemorySetup160A:
         joined = runner.invoke(
             cli.app, ["init"], input=f"join\n{storage}\nMac B\ny\ny\ny\n{PASSPHRASE}\n"
         )
-        assert joined.exit_code == 0, joined.output
-        assert target.read_text(encoding="utf-8") == (
-            peer_instructions + memoryindex.POINTER_LINE + "\n"
-        )
-        assert refreshed == [({"enabled": True, "embeddings": True}, peer_instructions)]
+        assert joined.exit_code == (1 if delivery == "failed" else 0), joined.output
+        assert claude.read_text(encoding="utf-8") == memoryindex.POINTER_LINE + "\n"
+        if delivery == "ready":
+            assert target.read_text(encoding="utf-8") == (
+                peer_instructions + memoryindex.POINTER_LINE + "\n"
+            )
+            assert refreshed == [({"enabled": True, "embeddings": True}, peer_instructions)]
+        else:
+            assert not target.exists()
+            assert "After the fleet files arrive, add this line by hand" in joined.stdout
+            assert refreshed == [({"enabled": True, "embeddings": True}, None)]
+            if delivery == "failed":
+                assert joined.stderr.strip().splitlines()[-1] == "Run: mm diag"
+            else:
+                for key, data in delayed.items():
+                    backend.put(key, data)
+                monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+                pulled = runner.invoke(cli.app, ["pull"])
+                assert pulled.exit_code == 0, pulled.output
+                assert target.read_text(encoding="utf-8") == peer_instructions
 
     def test_pointer_line_writer_regular_idempotent_create_symlink_outside_and_missing_parent(
         self, tmp_path, monkeypatch
