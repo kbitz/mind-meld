@@ -5761,3 +5761,137 @@ class TestResolveOutputFailureAfterMutation:
 
         assert (resolved, failed) == (1, 0)
         assert rename_calls == 1
+
+
+# ── Track 155A: re-check the conflict pair before mm resolve writes ──────
+
+
+class TestResolveRecheckBeforeWrite155A:
+    @staticmethod
+    def _setup_pair(
+        tmp_path: Path, *, is_pre_inversion: bool
+    ) -> tuple[Path, Path, bytes, bytes, list[dict[str, str]], dict[str, dict]]:
+        canonical = tmp_path / "note.md"
+        if is_pre_inversion:
+            sidecar = tmp_path / "note.sync-conflict-v0-20260101-100000-devA1234.md"
+            canonical_orig = b"a\nb\nc\n"
+            sidecar_orig = b"a\nb\n"
+        else:
+            sidecar = tmp_path / "note.sync-conflict-20260421-143055-v1-devA1234.md"
+            canonical_orig = b"a\nb\n"
+            sidecar_orig = b"a\nb\nc\n"
+        canonical.write_bytes(canonical_orig)
+        sidecar.write_bytes(sidecar_orig)
+        devices = [{"device_id": "devA1234", "device_name": "Peer"}]
+        sources_by_name = {"s1": {"name": "s1", "path": str(tmp_path), "type": "generic"}}
+        return canonical, sidecar, canonical_orig, sidecar_orig, devices, sources_by_name
+
+    @pytest.mark.parametrize(
+        "is_pre_inversion",
+        [pytest.param(True, id="pre"), pytest.param(False, id="post")],
+    )
+    @pytest.mark.parametrize("choice", ["l", "r", "m"])
+    @pytest.mark.parametrize("edited_side", ["canonical", "copy"])
+    @pytest.mark.parametrize("edit_kind", ["write_different_len", "replace_same_len"])
+    def test_edit_while_prompt_waits_stops_without_mutating_or_settling(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        is_pre_inversion: bool,
+        choice: str,
+        edited_side: str,
+        edit_kind: str,
+    ) -> None:
+        canonical, sidecar, canonical_orig, sidecar_orig, devices, sources_by_name = (
+            self._setup_pair(tmp_path, is_pre_inversion=is_pre_inversion)
+        )
+        target_path = canonical if edited_side == "canonical" else sidecar
+        other_path = sidecar if edited_side == "canonical" else canonical
+        target_orig = canonical_orig if edited_side == "canonical" else sidecar_orig
+        other_orig = sidecar_orig if edited_side == "canonical" else canonical_orig
+
+        if edit_kind == "write_different_len":
+            edited_bytes = target_orig + b"edited while prompt waited\n"
+        else:
+            # Same byte length as target_orig, written via os.replace for a new inode.
+            edited_bytes = b"X" + target_orig[1:]
+            assert len(edited_bytes) == len(target_orig)
+
+        def _prompt_after_edit(*_args: object, **_kwargs: object) -> str:
+            if edit_kind == "write_different_len":
+                target_path.write_bytes(edited_bytes)
+            else:
+                replacement = tmp_path / "replacement.tmp"
+                replacement.write_bytes(edited_bytes)
+                os.replace(replacement, target_path)
+            return choice
+
+        monkeypatch.setattr(typer, "prompt", _prompt_after_edit)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", sidecar, canonical)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (0, 1)
+        assert canonical.exists()
+        assert sidecar.exists()
+        assert target_path.read_bytes() == edited_bytes
+        assert other_path.read_bytes() == other_orig
+
+        err = capsys.readouterr().err
+        assert target_path.name in err
+        assert "changed while the prompt waited; both files left; run mm resolve again" in err
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        assert ledger.base("devA1234", "s1", "note.md") is None
+
+    @pytest.mark.parametrize(
+        "is_pre_inversion",
+        [pytest.param(True, id="pre"), pytest.param(False, id="post")],
+    )
+    @pytest.mark.parametrize("choice", ["l", "r", "m"])
+    @pytest.mark.parametrize("removed_side", ["canonical", "copy"])
+    def test_removal_while_prompt_waits_counts_as_changed_and_failed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        is_pre_inversion: bool,
+        choice: str,
+        removed_side: str,
+    ) -> None:
+        canonical, sidecar, canonical_orig, sidecar_orig, devices, sources_by_name = (
+            self._setup_pair(tmp_path, is_pre_inversion=is_pre_inversion)
+        )
+        removed_path = canonical if removed_side == "canonical" else sidecar
+        surviving_path = sidecar if removed_side == "canonical" else canonical
+        surviving_orig = sidecar_orig if removed_side == "canonical" else canonical_orig
+
+        def _prompt_after_unlink(*_args: object, **_kwargs: object) -> str:
+            removed_path.unlink()
+            return choice
+
+        monkeypatch.setattr(typer, "prompt", _prompt_after_unlink)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [("s1", sidecar, canonical)],
+            devices=devices,
+            sources_by_name=sources_by_name,
+        )
+
+        assert (resolved, failed) == (0, 1)
+        assert not removed_path.exists()
+        assert surviving_path.exists()
+        assert surviving_path.read_bytes() == surviving_orig
+
+        err = capsys.readouterr().err
+        assert removed_path.name in err
+        assert "changed while the prompt waited; both files left; run mm resolve again" in err
+
+        ledger, ledger_err = core.load_ledger(["devA1234"])
+        assert ledger_err is None
+        assert ledger.base("devA1234", "s1", "note.md") is None

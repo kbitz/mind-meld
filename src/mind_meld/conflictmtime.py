@@ -1,29 +1,34 @@
-"""Mtime primitives shared by the pull/apply path and the conflict resolver.
+"""Mtime and lstat-identity primitives shared by pull/apply and conflict resolve.
 
-Extracted from ``cli.py`` in Track 16A. Leaf module: imports only ``manifest``
+Extracted from ``cli.py`` in Track 16A (with ``_unchanged_since`` moved here
+from ``pullflow.py`` in Track 155A). Leaf module: imports only ``manifest``
 (itself a leaf), never ``cli`` or ``resolveflow``.
 
-**Why a leaf and not part of ``resolveflow`` (load-bearing).** These three have
+**Why a leaf and not part of ``resolveflow`` (load-bearing).** These four have
 callers on BOTH sides of the Track 16A cut:
 
-  * ``_restore_mtime_best_effort`` — ``cli._apply_write`` / ``_apply_merge`` /
-    ``_apply_conflict`` (the pull/apply path, stays in ``cli``)
-  * ``_stat_mtime_btime`` — ``cli._prompt_conflict_choice`` (inline pull prompt)
+  * ``_restore_mtime_best_effort`` — ``pullflow._apply_write`` / ``_apply_merge`` /
+    ``_apply_conflict`` / ``_apply_fast_forward`` (the pull/apply path)
+  * ``_stat_mtime_btime`` — ``pullflow._prompt_conflict_choice`` (inline pull prompt)
     AND ``resolveflow._resolve_interactive_loop`` (the ``mm resolve`` prompt)
-  * ``_bump_canonical_mtime_post_resolve`` — ``cli._drain_inline_bumps``
+  * ``_bump_canonical_mtime_post_resolve`` — ``pullflow._drain_inline_bumps``
     (Track 12A's deferred bump) AND ``resolveflow``'s (l)ocal / (p)romote
     branches
+  * ``_unchanged_since`` — ``pullflow._apply_fast_forward`` / ``_apply_incoming_file``
+    AND ``resolveflow._resolve_interactive_loop`` (Track 155A pre-write re-check)
 
-Putting them in ``resolveflow`` would be acyclic but inverted: the early
-pull/apply infrastructure would import a ~900-line interactive-resolution
+Putting them in ``resolveflow`` would be acyclic for ``cli`` but inverted (and
+cyclic for ``pullflow``, which already imports ``resolveflow``): the early
+pull/apply infrastructure would import a ~1,200-line interactive-resolution
 module just to stat a file. A leaf keeps the dependency arrow pointing the way
 the call graph actually runs.
 
-All three share ``_MTIME_RESTORE_MAX_SKEW_SECONDS``, which is why the constant
-moves with them rather than staying behind.
+The three mtime helpers share ``_MTIME_RESTORE_MAX_SKEW_SECONDS``, which is why
+the constant moves with them rather than staying behind.
 
-See ``docs/invariants/conflicts.md`` (the (l)ocal-must-bump rule) and
-``docs/invariants/sync.md`` (mtime restore + future-clamp) before editing.
+See ``docs/invariants/conflicts.md`` (the (l)ocal-must-bump rule and the
+pre-write identity re-check) and ``docs/invariants/sync.md`` (mtime restore +
+future-clamp) before editing.
 """
 
 from __future__ import annotations
@@ -123,9 +128,21 @@ def _bump_canonical_mtime_post_resolve(canonical: Path, peer_mtime: float) -> No
         return
 
 
+def _unchanged_since(path: Path, before: os.stat_result) -> bool:
+    """True when ``path`` still has the size, mtime, ctime and inode of ``before``."""
+    now = path.lstat()
+    return (now.st_size, now.st_mtime_ns, now.st_ctime_ns, now.st_ino) == (
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+        before.st_ino,
+    )
+
+
 __all__ = [
     "_MTIME_RESTORE_MAX_SKEW_SECONDS",
     "_bump_canonical_mtime_post_resolve",
     "_restore_mtime_best_effort",
     "_stat_mtime_btime",
+    "_unchanged_since",
 ]

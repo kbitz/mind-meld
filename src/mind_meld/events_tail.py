@@ -1936,6 +1936,11 @@ def _run_events_tail(
         # advance the next-push cursor. The optional host row sits between the
         # session rows and it — it is capture data like the others, and must
         # not displace the terminal row.
+        if capture.git_rows:
+            events.record_uncommitted_push_roots(
+                capture.git_rows,
+                push_ts=mm_event["ts"],
+            )
         append_result = events.write_push_event(
             events_dir,
             device_id,
@@ -2263,7 +2268,7 @@ def _commit_recorded_git_rows(
     if not git_rows:
         return
     scan = events.latest_event_rows(events_dir, device_id, {"git-snapshot"})
-    if scan.rows.get("git-snapshot") != git_rows[-1]:
+    if scan.rows.get("git-snapshot") != events.wire_row(git_rows[-1]):
         return
     events.commit_repo_cursors(
         git_rows,

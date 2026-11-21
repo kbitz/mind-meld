@@ -14,10 +14,10 @@ The ``@app.command()`` shells (``conflicts``, ``resolve``, ``recover``) stay in
 ``cli.py``; this module owns no typer registration.
 
 Imports nothing from ``cli`` — pinned by ``tests/test_module_boundaries.py``.
-The two mtime primitives it needs (``_stat_mtime_btime`` and
-``_bump_canonical_mtime_post_resolve``) live in the ``conflictmtime`` leaf
-precisely because ``cli``'s pull/apply path calls them too; the Rich consoles
-come from the ``consoles`` leaf for the same reason.
+The mtime and lstat-identity primitives it needs (``_stat_mtime_btime``,
+``_bump_canonical_mtime_post_resolve``, and ``_unchanged_since``) live in the
+``conflictmtime`` leaf precisely because ``pullflow``'s apply path calls them
+too; the Rich consoles come from the ``consoles`` leaf for the same reason.
 
 **Read ``docs/invariants/conflicts.md`` BEFORE editing.** The dual-mode dispatch
 by filename prefix (``v0-`` = pre-inversion semantics, no prefix =
@@ -40,7 +40,7 @@ from typing import Any, Literal
 
 import typer
 
-from mind_meld import core, fsutil, manifest, outputstyle, pullplan, sidecar
+from mind_meld import conflictmtime, core, fsutil, manifest, outputstyle, pullplan, sidecar
 from mind_meld.config import get_sources
 from mind_meld.conflictdiff import (
     count_divergent_lines,
@@ -619,6 +619,24 @@ def _links_through(path: Path, target: Path) -> bool | None:
     return None if want is None else False
 
 
+def _changed_conflict_pair_names(
+    canonical: Path,
+    canonical_before: os.stat_result,
+    cpath: Path,
+    cpath_before: os.stat_result,
+) -> list[str]:
+    """Return sanitized filenames in ``(canonical, cpath)`` whose lstat identity changed."""
+    changed: list[str] = []
+    for path, before in ((canonical, canonical_before), (cpath, cpath_before)):
+        try:
+            unchanged = conflictmtime._unchanged_since(path, before)
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            changed.append(safe_terminal_str(path.name))
+    return changed
+
+
 def _resolve_interactive_loop(
     hits: list[tuple[str, Path, Path | None]],
     devices: list[dict[str, Any]] | None = None,
@@ -799,6 +817,8 @@ def _resolve_interactive_loop(
         )
 
         try:
+            canonical_before = canonical.lstat()
+            cpath_before = cpath.lstat()
             canonical_bytes = canonical.read_bytes()
             cpath_bytes = cpath.read_bytes()
         except OSError as e:
@@ -1024,6 +1044,19 @@ def _resolve_interactive_loop(
         # not silently keep local; "retry" / "remove" must not silently
         # delete the conflict file. (codex /review v0.9.0 — caught a real
         # silent-data-loss footgun the eng review missed.)
+        if choice in ("l", "local", "r", "remote") or (
+            choice in ("m", "merge") and merge_available
+        ):
+            changed_names = _changed_conflict_pair_names(
+                canonical, canonical_before, cpath, cpath_before
+            )
+            if changed_names:
+                core._print_error(
+                    f"resolve stopped: {' and '.join(changed_names)} changed while the "
+                    "prompt waited; both files left; run mm resolve again"
+                )
+                failed += 1
+                continue
         resolved_before = resolved
         outcome: str | None = None
         promoted_target: Path | None = None

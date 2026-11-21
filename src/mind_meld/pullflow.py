@@ -41,6 +41,7 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, T
 
 from mind_meld import config as _config_module
 from mind_meld import (
+    conflictmtime,
     core,
     fsutil,
     manifest,
@@ -1367,17 +1368,6 @@ def _ledger_verdict(
     return verdict
 
 
-def _unchanged_since(path: Path, before: os.stat_result) -> bool:
-    """True when ``path`` still has the size, mtime, ctime and inode of ``before``."""
-    now = path.lstat()
-    return (now.st_size, now.st_mtime_ns, now.st_ctime_ns, now.st_ino) == (
-        before.st_size,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-        before.st_ino,
-    )
-
-
 def _apply_fast_forward(
     local_path: Path,
     rel_path: str,
@@ -1396,7 +1386,7 @@ def _apply_fast_forward(
     re-check and the replace are the same exposure as ``_apply_merge``.
     """
     try:
-        if not _unchanged_since(local_path, before):
+        if not conflictmtime._unchanged_since(local_path, before):
             return None
         fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
     except (OSError, StorageError) as e:
@@ -1628,7 +1618,7 @@ def _apply_incoming_file(
             # _prompt_conflict_choice.
             assert merged_bytes is not None  # invariant: choice=="merge" -> bytes
             try:
-                unchanged = _unchanged_since(local_path, before)
+                unchanged = conflictmtime._unchanged_since(local_path, before)
                 if unchanged:
                     fsutil.atomic_write_bytes(local_path, merged_bytes, fsync=False)
             except (OSError, StorageError) as e:

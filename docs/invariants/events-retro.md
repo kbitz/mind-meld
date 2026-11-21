@@ -11,7 +11,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
-- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `configured_author_emails` / `identity_inputs_digest` / `_configured_author_spellings` / `resolve_walk_author_emails` / `is_checkpoint_commit` / `CHECKPOINT_AUTHOR_EMAIL` / `CHECKPOINT_SUBJECT_PREFIX` / `_parse_git_log_numstat` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `resolve_push_cursor` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
+- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `wire_row` / `record_uncommitted_push_roots` / `configured_author_emails` / `identity_inputs_digest` / `_configured_author_spellings` / `resolve_walk_author_emails` / `is_checkpoint_commit` / `CHECKPOINT_AUTHOR_EMAIL` / `CHECKPOINT_SUBJECT_PREFIX` / `_parse_git_log_numstat` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `resolve_push_cursor` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_validated_settled_days` / `_validated_settled_memo` / `_validated_settled_entry` / `_slim_entry` / `_unclosed_settled_records` / `_record_memo` / `_reduce_with_settled_memos` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
 - `src/mind_meld/hosts/grok.py` — `read_grok_usage` / `grok_usage_diag` / `GROK_SESSIONS_PATH` / `CACHE_PATH` / `_scan_grok_root` / `_parse_usage`
 - `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
@@ -144,7 +144,8 @@ Track 7B wires `events.py` (Track 7A foundation, v0.10.2) into the push hot path
 
 **Resumable Git discovery and capture (Track 82A).** The private local
 `GIT_CAPTURE_CACHE_PATH` JSON cache contains `projects`, `discovery_resume_after`,
-`pending_refresh_since`, `repo_cursors`, and `incomplete_streak`. Discovery reads
+`pending_refresh_since`, `repo_cursors`, `repo_cursor_stores`,
+`uncommitted_push_roots`, and `incomplete_streak`. Discovery reads
 it by default; only real push, init backfill, recapture and explicit identity
 refresh persist progress. Inspection and previews never create the cache or its
 lock. Cache locking uses `lockedjson`; an unavailable cache remains best effort.
@@ -362,10 +363,26 @@ aborts and errors keep the old lower bound; successful roots and benign
 `write_push_event` keeps its existing non-strict return contract: a `None` return
 alone never proves persistence. Push confirms its terminal `mm-push` row before
 committing cursor state and stamps completion no earlier than that row's timestamp.
-Init and explicit recapture confirm their exact Git snapshot; recapture uses the
-requested full window rather than incremental cursors. Before the next push walk,
-reconciliation restores skipped roots from a persisted batch whose cache commit
-was interrupted. A failed or size-skipped append never advances cursors.
+Init and explicit recapture confirm their exact Git snapshot (compared in wire
+form via `events.wire_row`); recapture uses the
+requested full window rather than incremental cursors. `write_push_event`
+serializes `git-snapshot` rows through `events.wire_row`, stripping
+`projects[].local_path` and `skipped[].path` so repository paths stay off the
+synced log (Track 155A); in-memory capture rows keep both fields for
+`_apply_repo_cursors_to_cache`, `preview_pending_repositories`, and recapture
+dry-run listing. Before `write_push_event` appends a push batch with git rows,
+`events_tail._run_events_tail` records the batch's completed and failed root
+paths in `GIT_CAPTURE_CACHE_PATH`'s `uncommitted_push_roots` journal under the
+terminal `mm-push` row's `ts` (`events.record_uncommitted_push_roots`, capped at
+`MAX_UNCOMMITTED_PUSH_ROOTS = 8` newest entries within `CURSOR_SCAN_DAYS` and
+after `last_committed_push_ts`; cleared when `_apply_repo_cursors_to_cache`
+commits at or past that `recorded` timestamp). Before the next push walk,
+`reconcile_uncommitted_push_cursors` restores completed and skipped roots from a
+persisted batch whose cache commit was interrupted, reading paths from that
+local journal entry (or falling back to `_repo_outcomes(git_rows)` for older
+rows that still carried paths on disk, and moving no repository cursor while
+still advancing `last_committed_push_ts` when neither source has paths). A
+failed or size-skipped append never advances cursors.
 
 Attended push may cross the substantive-change gate when Git catch-up is pending,
 including a usage-only refresh or no-content push. Dry runs and autopush retain
@@ -524,7 +541,7 @@ Git-walk cost is *monotone in cursor age*. Discovery cost and a zero-root walk a
 
 **Git-walk repository loss is visible.** `walk_git_projects` drops repositories into `skipped` with typed reasons (`budget_abort` / `timeout` / `no_commits` / `git_error` / `raised`). Never interpolate a skip reason into a degradation phrase: git stderr carries branch names and absolute paths onto a synced row. `no_commits` (`rc=128` + "does not have any commits yet") is benign — an empty `git init` directory returns it on every push forever. The session-walk budget flag is named `session_walk_exceeded_budget` so it cannot be mistaken for git-walk loss.
 
-The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositories this push. Run mm recapture --dry-run to check current repository failures, then mm recapture 30d to recover the omitted commits`. It contains no `; ` separator. On an attended push whose git walk stopped on budget aborts with `walk_errors == 0` and `pending_left > 0` from `events.count_pending_repositories`, `_git_walk_degradation` returns `git capture catching up ({pending_left} left) — the next attended mm push continues it`; any walk error (`walk_errors > 0`), unknown/zero `pending_left`, or quiet `autopush` caller keeps `_GIT_WALK_DEGRADATION`. Status repeats the current-failures check before its `mm diag` link, and the aggregator's `git_budget` health note remedy in `skills/retro_fleet/aggregator.py` names the same `mm recapture --dry-run` and `mm recapture 30d` commands. Dry-run lists each skipped path via `safe_str` and its typed reason, labels `no_commits` benign, and links `GIT_WALK_FAILURES_URL` for non-benign skips. These paths already ride the synced git-snapshot row. The dry-run is a fresh scan on recapture's own walk budget, not evidence about an earlier push: a clean result cannot establish that the earlier capture was complete. Partial recapture gives a same-window retry for Git failures and narrower-window advice for budget aborts; mixed failures show both with separate counts.
+The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositories this push. Run mm recapture --dry-run to check current repository failures, then mm recapture 30d to recover the omitted commits`. It contains no `; ` separator. On an attended push whose git walk stopped on budget aborts with `walk_errors == 0` and `pending_left > 0` from `events.count_pending_repositories`, `_git_walk_degradation` returns `git capture catching up ({pending_left} left) — the next attended mm push continues it`; any walk error (`walk_errors > 0`), unknown/zero `pending_left`, or quiet `autopush` caller keeps `_GIT_WALK_DEGRADATION`. Status repeats the current-failures check before its `mm diag` link, and the aggregator's `git_budget` health note remedy in `skills/retro_fleet/aggregator.py` names the same `mm recapture --dry-run` and `mm recapture 30d` commands. Dry-run lists each skipped path via `safe_str` and its typed reason from the in-memory `walk_git_projects` result, labels `no_commits` benign, and links `GIT_WALK_FAILURES_URL` for non-benign skips (`write_push_event` strips `projects[].local_path` and `skipped[].path` via `events.wire_row` before writing to the synced log, and `recapture` estimates `row_bytes` from `wire_row`). The dry-run is a fresh scan on recapture's own walk budget, not evidence about an earlier push: a clean result cannot establish that the earlier capture was complete. Partial recapture gives a same-window retry for Git failures and narrower-window advice for budget aborts; mixed failures show both with separate counts.
 
 Track 124A's two-repository fixture reproduces the loop as budget aborts despite
 recapture advancing both cursors: each push still pays for `git log` per repository.
