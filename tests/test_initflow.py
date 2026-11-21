@@ -2690,3 +2690,392 @@ def test_new_fleet_saves_relative_storage_path_as_absolute(env, tmp_path, monkey
     monkeypatch.chdir(elsewhere)
     assert config.load_config()["storage"]["path"] == str(storage)
     assert not (elsewhere / storage.name).exists()
+
+
+class TestInitMemorySetup160A:
+    """Track 160A: qmd memory index, embeddings, and pointer line in mm init."""
+
+    def _iso_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir(exist_ok=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        return home
+
+    def test_enter_defaults_index_yes_embeddings_no_pointer_no(
+        self, env, real_memory_setup_gate, tmp_path, monkeypatch
+    ):
+        from mind_meld import memoryindex
+
+        storage, backend = env
+        _populate(backend)
+        home = self._iso_home(tmp_path, monkeypatch)
+        (home / ".claude").mkdir()
+        (home / ".claude" / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
+
+        monkeypatch.setattr(memoryindex, "probe_qmd", lambda: ("ok", "2.8.3"))
+        refreshed: list[dict] = []
+        monkeypatch.setattr(
+            memoryindex,
+            "refresh",
+            lambda cfg: (
+                refreshed.append(cfg),
+                memoryindex.RefreshResult("ok", collections=("mm-claude",)),
+            )[1],
+        )
+
+        # Bare newlines for: memory_index (Enter=y), embeddings (Enter=n), pointer_line (Enter=n)
+        result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}\n\n\n{PASSPHRASE}\n")
+        assert result.exit_code == 0, text
+        assert "Index agent memories for search with qmd? [y/n] (Enter = y)" in text
+        assert (
+            "Also download qmd's embedding model (334 MB) for semantic search? [y/n] (Enter = n)"
+            in text
+        )
+        assert "Add this line? [y/n] (Enter = n)" in text
+
+        cfg = config.load_config()
+        assert cfg["memory_index"] == {"enabled": True, "embeddings": False}
+        assert len(refreshed) == 1
+        assert (home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8") == "# Claude\n"
+
+    def test_new_fleet_yes_yes_records_config_and_refreshes_once(
+        self, env, real_memory_setup_gate, tmp_path, monkeypatch
+    ):
+        from mind_meld import memoryindex
+
+        storage, _ = env
+        home = self._iso_home(tmp_path, monkeypatch)
+        (home / ".claude").mkdir()
+        (home / ".codex").mkdir()
+
+        monkeypatch.setattr(memoryindex, "probe_qmd", lambda: ("ok", "2.8.3"))
+        refreshed: list[dict] = []
+        monkeypatch.setattr(
+            memoryindex,
+            "refresh",
+            lambda cfg: (
+                refreshed.append(cfg),
+                memoryindex.RefreshResult("ok", collections=("mm-claude",)),
+            )[1],
+        )
+
+        result, text = _new_fleet(
+            f"{storage}\nMac A\n{PASSPHRASE}\n{PASSPHRASE}\n{SOURCES_CLAUDE_ONLY}y\ny\ny\n"
+        )
+        assert result.exit_code == 0, text
+        cfg = config.load_config()
+        assert cfg["memory_index"] == {"enabled": True, "embeddings": True}
+        assert len(refreshed) == 1
+        assert refreshed[0]["memory_index"] == {"enabled": True, "embeddings": True}
+        assert memoryindex.POINTER_LINE in (home / ".claude" / "CLAUDE.md").read_text(
+            encoding="utf-8"
+        )
+        assert memoryindex.POINTER_LINE in (home / ".codex" / "AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+
+    @pytest.mark.parametrize(
+        "probe_res,expected_fragment",
+        [
+            (("qmd-missing", None), "qmd is not available"),
+            (("version-too-old", "2.8.2"), "2.8.2"),
+        ],
+    )
+    def test_qmd_missing_or_too_old_prints_hint_skips_index_questions_and_saves_none(
+        self, env, real_memory_setup_gate, tmp_path, monkeypatch, probe_res, expected_fragment
+    ):
+        from mind_meld import memoryindex
+
+        storage, _ = env
+        self._iso_home(tmp_path, monkeypatch)
+        monkeypatch.setattr(memoryindex, "probe_qmd", lambda: probe_res)
+        monkeypatch.setattr(memoryindex, "install_hint", lambda: "bun install -g @tobilu/qmd")
+
+        # No key header in storage so join stops after saving join.toml
+        result, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}n\n")
+        assert result.exit_code == 1
+        assert expected_fragment in text
+        assert "bun install -g @tobilu/qmd" in text
+        assert "Index agent memories for search with qmd?" not in text
+        assert "embedding model" not in text
+        assert "Add this line?" in text
+
+        saved = config.load_join_record()
+        assert saved is not None
+        assert saved.memory_index is None
+        assert saved.embeddings is None
+        assert saved.pointer_line is False
+
+    def test_managed_join_wait_saves_memory_answers_and_resume_reuses_without_rewriting(
+        self, env, fake_syncthing, real_memory_setup_gate, tmp_path, monkeypatch
+    ):
+        from mind_meld import memoryindex
+
+        _storage, _ = env
+        stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+        target = stock_root / "mind-meld"
+        home = self._iso_home(tmp_path, monkeypatch)
+        (home / ".claude").mkdir()
+        monkeypatch.setattr(initflow, "APPROVAL_WAIT_SECONDS", 2)
+        monkeypatch.setattr(initflow, "APPROVAL_POLL_SECONDS", 2)
+        monkeypatch.setattr(initflow, "_pause", lambda _s: None)
+        monkeypatch.setattr(memoryindex, "probe_qmd", lambda: ("ok", "2.8.3"))
+        refreshed: list[dict] = []
+        monkeypatch.setattr(
+            memoryindex,
+            "refresh",
+            lambda cfg: (refreshed.append(cfg), memoryindex.RefreshResult("ok"))[1],
+        )
+
+        # First run stops in approval wait; saves all three answers (never passphrase).
+        res1, text1 = _run(f"join\n{target}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}y\ny\nn\n")
+        assert res1.exit_code == 1, text1
+        assert "waiting for a fleet machine to approve" in text1
+        raw_join = config.join_record_path().read_text(encoding="utf-8")
+        assert PASSPHRASE not in raw_join
+        saved = config.load_join_record()
+        assert saved is not None
+        assert saved.memory_index is True
+        assert saved.embeddings is True
+        assert saved.pointer_line is False
+        assert refreshed == []
+
+        # Approve offer; deliver key header once the share is accepted (during header wait).
+        fake_syncthing.responses[f"/rest/cluster/pending/folders?device={peer_id}"] = {
+            "mind-meld": {
+                "offeredBy": {
+                    peer_id: {
+                        "time": "2026-11-21T00:00:00Z",
+                        "label": "Mind Meld",
+                        "receiveEncrypted": False,
+                    }
+                }
+            }
+        }
+        monkeypatch.setattr(initflow, "HEADER_WAIT_SECONDS", 2)
+        monkeypatch.setattr(initflow, "HEADER_POLL_SECONDS", 1)
+        monkeypatch.setattr(initflow, "_pause", lambda _s: _populate(LocalBackend(target)))
+        save_calls: list[config.JoinRecord] = []
+        orig_save = config.save_join_record
+        monkeypatch.setattr(
+            config, "save_join_record", lambda rec: (save_calls.append(rec), orig_save(rec))[1]
+        )
+
+        # Resume asks only Continue joining? and passphrase — no memory questions!
+        res2, text2 = _run(f"y\n{PASSPHRASE}\n")
+        assert res2.exit_code == 0, text2
+        assert "memory index yes, embeddings yes, pointer line no" in text2
+        assert "Index agent memories for search with qmd?" not in text2
+        assert "Add this line?" not in text2
+        assert save_calls == []
+        assert len(refreshed) == 1
+        assert config.load_config()["memory_index"] == {"enabled": True, "embeddings": True}
+
+    def test_resumed_pre_change_join_record_asks_and_resaves_memory_answers(
+        self, env, real_memory_setup_gate, tmp_path, monkeypatch
+    ):
+        from mind_meld import memoryindex
+
+        storage, _ = env
+        self._iso_home(tmp_path, monkeypatch)
+        # Write a pre-change join.toml with no memory keys.
+        rec_path = config.join_record_path()
+        rec_path.parent.mkdir(parents=True, exist_ok=True)
+        rec_path.write_text(
+            f'[join]\nstorage_path = "{storage}"\ndevice_name = "Mac B"\nsources = ["claude"]\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(memoryindex, "probe_qmd", lambda: ("ok", "2.8.3"))
+
+        # Resume stops at missing header, after asking and saving the new answers.
+        res, text = _run("y\ny\nn\ny\n")
+        assert res.exit_code == 1
+        assert "Index agent memories for search with qmd?" in text
+        assert "Add this line?" in text
+        updated = config.load_join_record()
+        assert updated is not None
+        assert updated.memory_index is True
+        assert updated.embeddings is False
+        assert updated.pointer_line is True
+
+    def test_failed_refresh_and_pointer_append_failure_degrade_without_failing_init(
+        self, env, real_memory_setup_gate, tmp_path, monkeypatch
+    ):
+        from mind_meld import memoryindex
+
+        storage, backend = env
+        _populate(backend)
+        home = self._iso_home(tmp_path, monkeypatch)
+        (home / ".claude").mkdir()
+        (home / ".codex").mkdir()
+        claude_md = home / ".claude" / "CLAUDE.md"
+        codex_md = home / ".codex" / "AGENTS.md"
+        claude_md.write_text("# Claude\n", encoding="utf-8")
+        codex_md.write_text("# Codex\n", encoding="utf-8")
+
+        monkeypatch.setattr(memoryindex, "probe_qmd", lambda: ("ok", "2.8.3"))
+        monkeypatch.setattr(
+            memoryindex,
+            "refresh",
+            lambda _cfg: memoryindex.RefreshResult("failed"),
+        )
+        orig_atomic = fsutil.atomic_write_bytes
+
+        def fail_claude(path, data: bytes, **kw):
+            if path == claude_md:
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return orig_atomic(path, data, **kw)
+
+        monkeypatch.setattr(fsutil, "atomic_write_bytes", fail_claude)
+
+        res, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}y\nn\ny\n{PASSPHRASE}\n")
+        assert res.exit_code == 0, text
+        assert "mm: notice: memory index enabled, but last refresh failed." in text
+        assert "mm: warning: could not update" in text
+        assert memoryindex.POINTER_LINE in codex_md.read_text(encoding="utf-8")
+
+    def test_pointer_line_writer_regular_idempotent_create_symlink_outside_and_missing_parent(
+        self, tmp_path, monkeypatch
+    ):
+        import stat as stat_mod
+
+        from mind_meld import memoryindex
+
+        home = self._iso_home(tmp_path, monkeypatch)
+        (home / ".claude").mkdir()
+        regular = home / ".claude" / "CLAUDE.md"
+        regular.write_text("# Existing", encoding="utf-8")
+        regular.chmod(0o640)
+
+        # 1. Append once, preserving existing bytes and mode; rerun is byte-identical.
+        assert initflow._write_pointer_line(regular) == "appended"
+        first_bytes = regular.read_bytes()
+        assert first_bytes == f"# Existing\n{memoryindex.POINTER_LINE}\n".encode("utf-8")
+        assert stat_mod.S_IMODE(regular.stat().st_mode) == 0o640
+        assert initflow._write_pointer_line(regular) == "unchanged"
+        assert regular.read_bytes() == first_bytes
+
+        # 2. Missing file with existing parent inside home is created.
+        (home / ".codex").mkdir()
+        codex_new = home / ".codex" / "AGENTS.md"
+        assert initflow._write_pointer_line(codex_new) == "created"
+        assert codex_new.read_text(encoding="utf-8") == f"{memoryindex.POINTER_LINE}\n"
+
+        # 3. Symlink is print-only and target is untouched.
+        repo_target = home / "dotfiles" / "CLAUDE.md"
+        repo_target.parent.mkdir()
+        repo_target.write_text("# Linked\n", encoding="utf-8")
+        link_path = home / ".claude" / "LINK.md"
+        link_path.symlink_to(repo_target)
+        assert initflow._write_pointer_line(link_path) == "printed"
+        assert repo_target.read_text(encoding="utf-8") == "# Linked\n"
+
+        # 4. CODEX_HOME outside home is print-only and untouched.
+        outside_dir = tmp_path / "outside-codex"
+        outside_dir.mkdir()
+        outside_agents = outside_dir / "AGENTS.md"
+        outside_agents.write_text("# Outside\n", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(outside_dir))
+        _, codex_resolved = initflow._pointer_target_paths()
+        assert codex_resolved == outside_agents
+        assert initflow._write_pointer_line(codex_resolved) == "printed"
+        assert outside_agents.read_text(encoding="utf-8") == "# Outside\n"
+
+        # 5. Missing parent folder is print-only and parent is not created.
+        missing_parent_target = home / ".nonexistent-agent" / "AGENTS.md"
+        assert initflow._write_pointer_line(missing_parent_target) == "printed"
+        assert not missing_parent_target.parent.exists()
+
+    def test_real_refresh_wiring_runs_qmd_collections_update_and_embed(
+        self, env, real_memory_setup_gate, tmp_path, monkeypatch
+    ):
+        import stat as stat_mod
+
+        storage, backend = env
+        _populate(backend)
+        home = self._iso_home(tmp_path, monkeypatch)
+        # Create a Claude projects dir so desired_collections produces mm-claude.
+        claude_projects = home / ".claude" / "projects" / "demo" / "memory"
+        claude_projects.mkdir(parents=True)
+        (claude_projects / "note.md").write_text("# Fact\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "fake-qmd-bin"
+        fake_bin.mkdir()
+        qmd_log = tmp_path / "qmd-calls.log"
+        qmd_script = fake_bin / "qmd"
+        qmd_script.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> "{qmd_log}"
+if [ "$1" = "--version" ]; then
+  printf 'qmd 2.8.3\\n'
+  exit 0
+fi
+if [ "$1" = "--index" ]; then
+  shift 2
+fi
+case "$1 $2" in
+  "collection list")
+    printf 'No collections found.\\n'
+    exit 0
+    ;;
+  "collection add")
+    exit 0
+    ;;
+  "update ")
+    exit 0
+    ;;
+  "embed ")
+    exit 0
+    ;;
+esac
+exit 0
+""",
+            encoding="utf-8",
+        )
+        qmd_script.chmod(qmd_script.stat().st_mode | stat_mod.S_IXUSR)
+        monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+        res, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}y\ny\nn\n{PASSPHRASE}\n")
+        assert res.exit_code == 0, text
+        logged = qmd_log.read_text(encoding="utf-8").splitlines()
+        assert "--version" in logged
+        assert any("collection add" in line and "mm-claude" in line for line in logged), logged
+        assert any(line.endswith("update") for line in logged), logged
+        import time
+
+        # Wait briefly for detached embed stub to log if scheduled.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            logged = qmd_log.read_text(encoding="utf-8").splitlines()
+            if any(line.endswith("embed") for line in logged):
+                break
+            time.sleep(0.05)
+        assert any(line.endswith("embed") for line in logged), logged
+
+
+def test_pointer_line_write_refuses_protected_root(
+    synthetic_account_home, monkeypatch, forbid_fs_mutations
+):
+    claude_dir = synthetic_account_home / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    target = claude_dir / "CLAUDE.md"
+    monkeypatch.setenv("HOME", str(synthetic_account_home))
+    with pytest.raises(fsutil.PytestRealStateWriteError):
+        fsutil.refuse_real_state_write_under_pytest(target)
+    calls = forbid_fs_mutations()
+    with pytest.raises(fsutil.PytestRealStateWriteError):
+        initflow._write_pointer_line(target)
+    assert calls == [], f"denied mutation attempts: {calls!r}"
+
+
+def test_pointer_line_write_tmp_control(tmp_path, monkeypatch):
+    from mind_meld import memoryindex
+
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True)
+    target = claude_dir / "CLAUDE.md"
+    monkeypatch.setenv("HOME", str(home))
+    assert initflow._write_pointer_line(target) == "created"
+    assert target.read_text(encoding="utf-8") == f"{memoryindex.POINTER_LINE}\n"

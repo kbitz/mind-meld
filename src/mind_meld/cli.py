@@ -646,8 +646,10 @@ def init(
     each other machine.
 
     Joining asks for the storage path, a fleet machine's Syncthing device ID (on
-    a default Syncthing configuration), the device name and the sources first,
-    and saves those answers locally (never the passphrase). On a default
+    a default Syncthing configuration), the device name, the sources, and the
+    optional qmd memory index, semantic-search embeddings, and agent
+    instruction pointer line first, and saves those answers locally (never the
+    passphrase). On a default
     Syncthing configuration it adds the fleet device as introducer, prints this
     machine's device ID and short ID with both 'mm devices approve' commands
     to run on the fleet machine, waits up to 10 minutes for approval, accepts the 'mind-meld'
@@ -656,7 +658,8 @@ def init(
     stopped with Ctrl-C, it prints a waiting outcome ending 'Run: mm init',
     stops and writes nothing to the Mind Meld store; it never creates a key
     header). Once the header arrives and your passphrase verifies, it writes
-    .stignore, registers this device, saves config and pulls.
+    .stignore, registers this device, saves config, runs the first memory-index
+    refresh and pointer-line update if chosen, and pulls.
 
     Running init again on a configured machine asks before it replaces this
     device's entry.

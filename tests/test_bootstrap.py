@@ -73,6 +73,88 @@ class BootstrapHarness:
     def install_sudo(self) -> None:
         _make_fake_script(self.sysbin / "sudo", "sudo", 'exec "$@"\n')
 
+    def install_id(self, uid: int) -> None:
+        _make_fake_script(
+            self.sysbin / "id",
+            "id",
+            f'if [ "${{1:-}}" = "-u" ]; then printf "%s\\n" "{uid}"; exit 0; fi\nexit 2\n',
+        )
+
+    def install_qmd(self, directory: Path, version: str = "2.8.3", *, exit_code: int = 0) -> None:
+        _make_fake_script(
+            directory / "qmd",
+            "qmd",
+            f"""\
+if [ "${{#}}" -eq 1 ] && [ "$1" = "--version" ]; then
+  if [ "{exit_code}" != "0" ]; then
+    exit {exit_code}
+  fi
+  printf 'qmd %s\\n' "{version}"
+  exit 0
+fi
+exit 2
+""",
+        )
+
+    def install_bun(self, directory: Path, *, target_dir: Path | None = None) -> None:
+        dest = target_dir or self.sysbin
+        stage = self.tmp_path / "qmd-stage"
+        self.install_qmd(stage, "2.8.3")
+        _make_fake_script(
+            directory / "bun",
+            "bun",
+            f"""\
+if [ "${{1:-}}" = "install" ] && [ "${{2:-}}" = "-g" ] && [ "${{3:-}}" = "@tobilu/qmd" ]; then
+  if [ "${{MM_TEST_BUN_FAIL:-0}}" = "1" ]; then
+    exit 1
+  fi
+  if [ "${{MM_TEST_QMD_MISSING_AFTER_INSTALL:-0}}" != "1" ]; then
+    cp "{stage}/qmd" "{dest}/qmd"
+    chmod +x "{dest}/qmd"
+  fi
+  exit 0
+fi
+exit 2
+""",
+        )
+
+    def install_node(self, directory: Path, version: str = "22.14.0") -> None:
+        _make_fake_script(
+            directory / "node",
+            "node",
+            f"""\
+if [ "${{#}}" -eq 1 ] && [ "$1" = "--version" ]; then
+  printf 'v%s\\n' "{version}"
+  exit 0
+fi
+exit 2
+""",
+        )
+
+    def install_npm(self, directory: Path) -> None:
+        stage = self.tmp_path / "qmd-stage"
+        self.install_qmd(stage, "2.8.3")
+        _make_fake_script(
+            directory / "npm",
+            "npm",
+            f"""\
+if [ "${{1:-}}" = "install" ] && [ "${{2:-}}" = "-g" ] \\
+   && [ "${{3:-}}" = "--prefix" ] && [ -n "${{4:-}}" ] \\
+   && [ "${{5:-}}" = "@tobilu/qmd" ]; then
+  if [ "${{MM_TEST_NPM_FAIL:-0}}" = "1" ]; then
+    exit 1
+  fi
+  if [ "${{MM_TEST_QMD_MISSING_AFTER_INSTALL:-0}}" != "1" ]; then
+    mkdir -p "$4/bin"
+    cp "{stage}/qmd" "$4/bin/qmd"
+    chmod +x "$4/bin/qmd"
+  fi
+  exit 0
+fi
+exit 2
+""",
+        )
+
     def install_python(self, directory: Path, version: str = "3.13.2") -> None:
         _make_fake_script(
             directory / "python3",
@@ -262,6 +344,8 @@ esac
         self.install_python(stage, "3.13.2")
         self.install_pipx(stage)
         self.install_syncthing(stage, "2.1.7")
+        self.install_node(stage, "22.14.0")
+        self.install_npm(stage)
         keg = self.tmp_path / "syncthing-keg"
         keg.mkdir(parents=True, exist_ok=True)
         (keg / "homebrew.mxcl.syncthing.plist").write_text(
@@ -289,6 +373,9 @@ if [ "${{1:-}}" = "services" ] && [ "${{2:-}}" = "start" ] && [ "${{3:-}}" = "sy
   exit "${{MM_TEST_START_FAIL:-0}}"
 fi
 if [ "${{1:-}}" = "install" ]; then
+  if [ "${{2:-}}" = "node" ] && [ "${{MM_TEST_NODE_PKG_FAIL:-0}}" = "1" ]; then
+    exit 1
+  fi
   if [ "${{MM_TEST_PKG_FAIL:-0}}" = "1" ]; then
     exit 1
   fi
@@ -306,6 +393,10 @@ if [ "${{1:-}}" = "install" ]; then
       syncthing)
         copy_exec "{stage}/syncthing" "{self.brewbin}/syncthing"
         ;;
+      node)
+        copy_exec "{stage}/node" "{self.brewbin}/node"
+        copy_exec "{stage}/npm" "{self.brewbin}/npm"
+        ;;
     esac
   done
   exit 0
@@ -320,6 +411,8 @@ exit 2
         self.install_pipx(stage)
         self.install_syncthing(stage, "2.1.7")
         self.install_git(stage)
+        self.install_node(stage, "22.14.0")
+        self.install_npm(stage)
         _make_fake_script(
             self.sysbin / "pacman",
             "pacman",
@@ -349,6 +442,18 @@ if [ "${{1:-}}" = "-S" ]; then
         ;;
       git)
         copy_exec "{stage}/git" "{self.sysbin}/git"
+        ;;
+      nodejs)
+        if [ "${{MM_TEST_NODE_PKG_FAIL:-0}}" = "1" ]; then
+          exit 1
+        fi
+        copy_exec "{stage}/node" "{self.sysbin}/node"
+        ;;
+      npm)
+        if [ "${{MM_TEST_NODE_PKG_FAIL:-0}}" = "1" ]; then
+          exit 1
+        fi
+        copy_exec "{stage}/npm" "{self.sysbin}/npm"
         ;;
     esac
   done
@@ -431,6 +536,8 @@ exit 2
         st_calls = [row[1:] for row in self.calls() if row[0] == "syncthing"]
         assert st_calls, "successful run must check syncthing --version"
         assert all(args == ["--version"] for args in st_calls), st_calls
+        qmd_calls = [row[1:] for row in self.calls() if row[0] == "qmd"]
+        assert all(args == ["--version"] for args in qmd_calls), qmd_calls
         for rel in SYNCTHING_CONFIG_PATHS:
             assert not (self.home / rel).exists(), f"unexpected Syncthing path: {rel}"
         lines = [line for line in output.splitlines() if line.strip()]
@@ -475,6 +582,7 @@ def harness(tmp_path: Path) -> BootstrapHarness:
     )
     h.install_sudo()
     h.install_systemctl()
+    h.install_qmd(h.sysbin)
     return h
 
 
@@ -666,6 +774,86 @@ class TestBootstrapArch:
         assert proc.returncode == 1
         assert "pacman -Syu" in _last_line(proc.stdout)
         assert not [row for row in harness.calls() if row[0] == "pipx"]
+
+    def test_arch_non_root_wraps_pacman_in_sudo(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_id(1000)
+        harness.install_pacman()
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+
+        calls = harness.calls()
+        sudo_calls = [row for row in calls if row[0] == "sudo"]
+        assert sudo_calls == [
+            ["sudo", "pacman", "-S", "--needed", "python", "python-pipx", "syncthing", "git"]
+        ]
+
+    def test_arch_root_runs_pacman_without_sudo(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_id(0)
+        harness.install_pacman()
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+
+        calls = harness.calls()
+        assert not [row for row in calls if row[0] == "sudo"]
+        pacman_calls = [row for row in calls if row[0] == "pacman"]
+        assert pacman_calls == [
+            ["pacman", "-S", "--needed", "python", "python-pipx", "syncthing", "git"]
+        ]
+
+    @pytest.mark.parametrize("uid,expected_prefix", [(1000, "sudo "), (0, "")])
+    def test_arch_failed_pacman_stops_with_fix(
+        self, harness: BootstrapHarness, uid: int, expected_prefix: str
+    ) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_id(uid)
+        harness.install_pacman()
+
+        proc = harness.run(extra_env={"MM_TEST_PKG_FAIL": "1"})
+        assert proc.returncode == 1
+        assert (
+            f"Run: {expected_prefix}pacman -S --needed python python-pipx syncthing git"
+            in _last_line(proc.stdout)
+        )
+        assert not [row for row in harness.calls() if row[0] == "pipx"]
+
+    def test_arch_missing_pacman_stops_with_fix(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_id(1000)
+
+        proc = harness.run()
+        assert proc.returncode == 1
+        last = _last_line(proc.stdout)
+        assert "pacman was not found on PATH" in last
+        assert "Run: sudo pacman -S --needed python python-pipx syncthing git" in last
+
+    def test_arch_rerun_changes_nothing(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_pacman()
+
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+
+        harness.clear_calls()
+        second = harness.run()
+        assert second.returncode == 0, second.stdout
+
+        calls = harness.calls()
+        assert not [row for row in calls if row[0] in {"pacman", "sudo"}]
+        assert not [row for row in calls if row[0] == "pipx" and row[1] in {"install", "upgrade"}]
+        assert (
+            "bootstrap: nothing to change: Python 3.13, pipx, "
+            "Syncthing 2.1.7 and mm are already installed." in second.stdout
+        )
+        assert "mm init" in _last_line(second.stdout)
 
 
 class TestBootstrapUnsupportedAndErrors:
@@ -1560,3 +1748,200 @@ class TestBootstrapUpgrade123A:
             f"bootstrap: installed syncthing, upgraded mm 1.12.24 to {RELEASE}; "
             "Python 3.13, Syncthing 2.1.7 and mm are ready." in second.stdout
         )
+
+
+class TestBootstrapQmd:
+    def _ready_arch(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_id(1000)
+        harness.install_pacman()
+        harness.install_python(harness.sysbin, "3.13.2")
+        harness.install_pipx(harness.sysbin)
+        harness.install_syncthing(harness.sysbin, "2.1.7")
+        harness.install_git(harness.sysbin)
+        (harness.sysbin / "qmd").unlink()
+
+    def _ready_macos(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.1.7")
+        (harness.sysbin / "qmd").unlink()
+
+    def test_existing_qmd_left_alone(self, harness: BootstrapHarness) -> None:
+        self._ready_arch(harness)
+        harness.install_qmd(harness.sysbin, "2.5.0")
+        harness.install_bun(harness.sysbin)
+        harness.install_node(harness.sysbin, "22.14.0")
+        harness.install_npm(harness.sysbin)
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+        assert "bootstrap: qmd is already installed." in proc.stdout
+        calls = harness.calls()
+        assert not [row for row in calls if row[0] in {"bun", "npm", "pacman", "sudo", "brew"}]
+        assert "mm init" in _last_line(proc.stdout)
+
+    def test_bun_branch_installs_qmd_without_sudo_or_npm(self, harness: BootstrapHarness) -> None:
+        self._ready_arch(harness)
+        harness.install_bun(harness.sysbin)
+        harness.install_node(harness.sysbin, "22.14.0")
+        harness.install_npm(harness.sysbin)
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+        calls = harness.calls()
+        assert ["bun", "install", "-g", "@tobilu/qmd"] in calls
+        assert not [row for row in calls if row[0] in {"npm", "pacman", "sudo", "brew"}]
+        assert "bootstrap: installed qmd." in proc.stdout
+        assert "mm init" in _last_line(proc.stdout)
+
+    def test_node_22_npm_branch_uses_per_user_prefix_without_sudo(
+        self, harness: BootstrapHarness
+    ) -> None:
+        self._ready_arch(harness)
+        harness.install_node(harness.sysbin, "22.14.0")
+        harness.install_npm(harness.sysbin)
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+        calls = harness.calls()
+        assert [
+            "npm",
+            "install",
+            "-g",
+            "--prefix",
+            str(harness.home / ".local"),
+            "@tobilu/qmd",
+        ] in calls
+        assert not [row for row in calls if row[0] in {"sudo", "pacman", "brew", "bun"}]
+        assert "bootstrap: installed qmd." in proc.stdout
+
+    def test_old_node_without_bun_installs_node_on_arch(self, harness: BootstrapHarness) -> None:
+        self._ready_arch(harness)
+        harness.install_node(harness.sysbin, "20.11.0")
+        harness.install_npm(harness.sysbin)
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+        calls = harness.calls()
+        assert ["sudo", "pacman", "-S", "--needed", "nodejs", "npm"] in calls
+        assert [
+            "npm",
+            "install",
+            "-g",
+            "--prefix",
+            str(harness.home / ".local"),
+            "@tobilu/qmd",
+        ] in calls
+        assert "bootstrap: installed qmd." in proc.stdout
+
+    def test_old_node_without_bun_installs_node_on_macos(self, harness: BootstrapHarness) -> None:
+        self._ready_macos(harness)
+        harness.install_node(harness.brewbin, "20.11.0")
+        harness.install_npm(harness.brewbin)
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+        calls = harness.calls()
+        assert ["brew", "install", "node"] in calls
+        assert [
+            "npm",
+            "install",
+            "-g",
+            "--prefix",
+            str(harness.home / ".local"),
+            "@tobilu/qmd",
+        ] in calls
+        assert not [row for row in calls if row[0] == "sudo"]
+        assert "bootstrap: installed qmd." in proc.stdout
+
+    @pytest.mark.parametrize("platform", ["arch", "macos"])
+    def test_no_runtime_installs_node_then_npm(
+        self, harness: BootstrapHarness, platform: str
+    ) -> None:
+        if platform == "arch":
+            self._ready_arch(harness)
+        else:
+            self._ready_macos(harness)
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+        calls = harness.calls()
+        if platform == "arch":
+            assert ["pacman", "-S", "--needed", "nodejs", "npm"] in calls
+        else:
+            assert ["brew", "install", "node"] in calls
+        assert [
+            "npm",
+            "install",
+            "-g",
+            "--prefix",
+            str(harness.home / ".local"),
+            "@tobilu/qmd",
+        ] in calls
+        assert "bootstrap: installed qmd." in proc.stdout
+
+    def test_bun_failure_prints_manual_command_and_exits_0(self, harness: BootstrapHarness) -> None:
+        self._ready_arch(harness)
+        harness.install_bun(harness.sysbin)
+
+        proc = harness.run(extra_env={"MM_TEST_BUN_FAIL": "1"})
+        assert proc.returncode == 0, proc.stdout
+        assert "bun install -g @tobilu/qmd" in proc.stdout
+        assert "mm init" in _last_line(proc.stdout)
+
+    def test_npm_failure_prints_manual_command_and_exits_0(self, harness: BootstrapHarness) -> None:
+        self._ready_arch(harness)
+        harness.install_node(harness.sysbin, "22.14.0")
+        harness.install_npm(harness.sysbin)
+
+        proc = harness.run(extra_env={"MM_TEST_NPM_FAIL": "1"})
+        assert proc.returncode == 0, proc.stdout
+        assert f"npm install -g --prefix {harness.home / '.local'} @tobilu/qmd" in proc.stdout
+        assert "mm init" in _last_line(proc.stdout)
+
+    @pytest.mark.parametrize("platform", ["arch", "macos"])
+    def test_node_package_failure_prints_manual_command_and_exits_0(
+        self, harness: BootstrapHarness, platform: str
+    ) -> None:
+        if platform == "arch":
+            self._ready_arch(harness)
+        else:
+            self._ready_macos(harness)
+
+        proc = harness.run(extra_env={"MM_TEST_NODE_PKG_FAIL": "1"})
+        assert proc.returncode == 0, proc.stdout
+        assert f"npm install -g --prefix {harness.home / '.local'} @tobilu/qmd" in proc.stdout
+        assert not [row for row in harness.calls() if row[0] == "npm"]
+        assert "mm init" in _last_line(proc.stdout)
+
+    def test_broken_qmd_is_reinstalled(self, harness: BootstrapHarness) -> None:
+        self._ready_arch(harness)
+        harness.install_qmd(harness.sysbin, "2.8.3", exit_code=1)
+        harness.install_bun(harness.sysbin)
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+        assert ["bun", "install", "-g", "@tobilu/qmd"] in harness.calls()
+        assert "bootstrap: installed qmd." in proc.stdout
+
+    def test_npm_install_off_path_names_local_bin(
+        self, harness: BootstrapHarness, tmp_path: Path
+    ) -> None:
+        self._ready_arch(harness)
+        harness.install_node(harness.sysbin, "22.14.0")
+        harness.install_npm(harness.sysbin)
+        other_home = tmp_path / "other-home"
+        other_home.mkdir()
+
+        proc = harness.run(extra_env={"HOME": str(other_home)})
+        assert proc.returncode == 0, proc.stdout
+        local_bin = other_home / ".local" / "bin"
+        assert (local_bin / "qmd").is_file()
+        assert str(local_bin) in proc.stdout
+        assert "not on PATH" in proc.stdout
+        assert "bootstrap: installed qmd." not in proc.stdout
+        assert "mm init" in _last_line(proc.stdout)

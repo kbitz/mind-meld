@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -47,6 +48,7 @@ from mind_meld import (
     core,
     events_tail,
     fsutil,
+    memoryindex,
     outputstyle,
     skill_link,
     syncthing,
@@ -656,6 +658,172 @@ def _write_stignore(path: Path) -> None:
     fsutil.atomic_write_bytes(path, existing + separator + STIGNORE_LINE.encode() + b"\n")
 
 
+def _format_saved_bool(value: bool | None) -> str:
+    if value is None:
+        return "not yet asked"
+    return "yes" if value else "no"
+
+
+def _pointer_target_paths() -> tuple[Path, Path]:
+    """Resolve the two global agent instruction files at call time."""
+    home = Path.home()
+    claude_target = home / ".claude" / "CLAUDE.md"
+    codex_home_raw = os.environ.get("CODEX_HOME", "").strip()
+    codex_base = Path(codex_home_raw).expanduser() if codex_home_raw else home / ".codex"
+    codex_target = codex_base / "AGENTS.md"
+    return (claude_target, codex_target)
+
+
+def _ask_memory_setup(
+    saved: _config_module.JoinRecord | None = None,
+) -> tuple[bool | None, bool | None, bool | None]:
+    """Ask the optional qmd index, embeddings, and pointer-line questions."""
+    mem_index = saved.memory_index if saved is not None else None
+    embeddings = saved.embeddings if saved is not None else None
+    pointer_line = saved.pointer_line if saved is not None else None
+
+    if mem_index is None:
+        status, version = memoryindex.probe_qmd()
+        if status == "ok":
+            mem_index = core.ask_yes_no("Index agent memories for search with qmd?", default=True)
+            if mem_index:
+                embeddings = core.ask_yes_no(
+                    "Also download qmd's embedding model (334 MB) for semantic search?",
+                    default=False,
+                )
+        else:
+            hint = memoryindex.install_hint()
+            if status == "version-too-old" and version is not None:
+                console.print(
+                    f"  qmd {safe_str(version)} is older than {memoryindex.MIN_QMD_VERSION}; "
+                    f"skipping memory index setup. Install qmd with: {safe_str(hint)}",
+                    soft_wrap=True,
+                )
+            else:
+                console.print(
+                    "  qmd is not available; skipping memory index setup. "
+                    f"Install qmd with: {safe_str(hint)}",
+                    soft_wrap=True,
+                )
+    elif mem_index is True and embeddings is None:
+        embeddings = core.ask_yes_no(
+            "Also download qmd's embedding model (334 MB) for semantic search?",
+            default=False,
+        )
+
+    if pointer_line is None:
+        claude_target, codex_target = _pointer_target_paths()
+        console.print("  Recommended line for your agent instruction files:")
+        console.print(
+            f"    {memoryindex.POINTER_LINE}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+        console.print(
+            f"  Target files: {safe_str(safe_terminal_str(claude_target))} and "
+            f"{safe_str(safe_terminal_str(codex_target))}",
+            soft_wrap=True,
+        )
+        pointer_line = core.ask_yes_no("Add this line?", default=False)
+
+    return (mem_index, embeddings, pointer_line)
+
+
+def _print_pointer_line_manual(target: Path) -> None:
+    try:
+        resolved = target.resolve()
+    except OSError:
+        resolved = target
+    console.print(
+        f"  Add this line by hand to {safe_str(safe_terminal_str(resolved))}:",
+        soft_wrap=True,
+    )
+    console.print(
+        f"    {memoryindex.POINTER_LINE}",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+
+
+def _write_pointer_line(target: Path) -> str:
+    """Append ``POINTER_LINE`` once to a regular instruction file inside home.
+
+    Returns ``"created"``, ``"appended"``, ``"unchanged"``, or ``"printed"``.
+    Symlinks, non-regular files, paths resolving outside ``Path.home()``, and
+    missing files whose parent folder does not exist are print-only no-ops.
+    """
+    home_resolved = Path.home().resolve()
+    try:
+        st = target.lstat()
+    except FileNotFoundError:
+        if not target.parent.is_dir():
+            _print_pointer_line_manual(target)
+            return "printed"
+        parent_resolved = target.parent.resolve()
+        if not parent_resolved.is_relative_to(home_resolved):
+            _print_pointer_line_manual(target)
+            return "printed"
+        fsutil.refuse_real_state_write_under_pytest(target)
+        fsutil.atomic_write_bytes(target, memoryindex.POINTER_LINE.encode("utf-8") + b"\n")
+        return "created"
+
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        _print_pointer_line_manual(target)
+        return "printed"
+    resolved = target.resolve()
+    if not resolved.is_relative_to(home_resolved):
+        _print_pointer_line_manual(target)
+        return "printed"
+
+    fsutil.refuse_real_state_write_under_pytest(target)
+    existing = target.read_bytes()
+    line_bytes = memoryindex.POINTER_LINE.encode("utf-8")
+    if line_bytes in (line.strip() for line in existing.splitlines()):
+        return "unchanged"
+    separator = b"" if not existing or existing.endswith(b"\n") else b"\n"
+    fsutil.atomic_write_bytes(
+        target,
+        existing + separator + line_bytes + b"\n",
+        mode=stat.S_IMODE(st.st_mode),
+    )
+    return "appended"
+
+
+def _apply_pointer_line() -> None:
+    """Apply the recommended pointer line to each target instruction file."""
+    for target in _pointer_target_paths():
+        try:
+            outcome = _write_pointer_line(target)
+        except OSError as e:
+            core._warning(
+                f"could not update {safe_terminal_str(target)} ({os_error_cause(e)}); "
+                "add the memory search line by hand."
+            )
+            continue
+        if outcome in ("created", "appended"):
+            console.print(
+                f"  Added memory search line to {safe_str(safe_terminal_str(target))}.",
+                soft_wrap=True,
+            )
+
+
+def _refresh_memory_index_best_effort(cfg: dict[str, Any]) -> None:
+    """Run the initial memory-index refresh after init; never change init's exit code."""
+    try:
+        res = memoryindex.refresh(cfg)
+    except Exception as e:
+        core._notice(
+            f"initial memory index refresh failed ({type(e).__name__}: {safe_terminal_str(e)}).",
+            fix="mm memory-index on",
+        )
+        return
+    if res.status != "ok":
+        problem, fix = memoryindex.problem_text(res.status)
+        core._notice(f"memory index enabled, but {problem}.", fix=fix)
+
+
 @dataclass
 class _StorageOccupancy:
     """Authoritative occupancy signals for the init guard.
@@ -1120,10 +1288,21 @@ def init(new_fleet: bool = False) -> str | None:
                 else ""
             )
             sources_s = ", ".join(safe_str(name) for name in saved.sources)
+            memory_part = ""
+            if (
+                saved.memory_index is not None
+                or saved.embeddings is not None
+                or saved.pointer_line is not None
+            ):
+                memory_part = (
+                    f", memory index {safe_str(_format_saved_bool(saved.memory_index))}, "
+                    f"embeddings {safe_str(_format_saved_bool(saved.embeddings))}, "
+                    f"pointer line {safe_str(_format_saved_bool(saved.pointer_line))}"
+                )
             console.print(
                 f"  Saved join answers: storage {safe_str(saved.storage_path)}, "
                 f"{fleet_part}device name {safe_str(saved.device_name)}, "
-                f"sources {sources_s}.",
+                f"sources {sources_s}{memory_part}.",
                 soft_wrap=True,
             )
             if not core.ask_yes_no("Continue joining?", default=True):
@@ -1156,6 +1335,9 @@ def init(new_fleet: bool = False) -> str | None:
     accepted_share = None
     device_name = ""
     sources: list[dict[str, Any]] = []
+    memory_index_answer: bool | None = None
+    embeddings_answer: bool | None = None
+    pointer_line_answer: bool | None = None
     if not new_fleet:
         if _config_module.join_record_path().parent.resolve().is_relative_to(full_path.resolve()):
             core._error(
@@ -1195,6 +1377,13 @@ def init(new_fleet: bool = False) -> str | None:
             core._error(
                 "init: no sync sources enabled. Re-run 'mm init' and accept at least one source."
             )
+        memory_index_answer, embeddings_answer, pointer_line_answer = _ask_memory_setup(saved)
+        if saved is not None and (
+            (saved.memory_index is None and memory_index_answer is not None)
+            or (saved.embeddings is None and embeddings_answer is not None)
+            or (saved.pointer_line is None and pointer_line_answer is not None)
+        ):
+            save_answers = True
         if needs_pairing:
             _require_shareable_folder(full_path, join_saved=saved is not None)
         if save_answers:
@@ -1204,6 +1393,9 @@ def init(new_fleet: bool = False) -> str | None:
                     fleet_device_id=fleet_id,
                     device_name=device_name,
                     sources=tuple(s["name"] for s in user_facing_sources),
+                    memory_index=memory_index_answer,
+                    embeddings=embeddings_answer,
+                    pointer_line=pointer_line_answer,
                 )
             )
         if needs_pairing:
@@ -1288,6 +1480,7 @@ def init(new_fleet: bool = False) -> str | None:
             core._error(
                 "init: no sync sources enabled. Re-run 'mm init' and accept at least one source."
             )
+        memory_index_answer, embeddings_answer, pointer_line_answer = _ask_memory_setup(None)
     else:
         root_salt, argon2_memory_kb, _keycheck_blob = _verify_join(backend, passphrase, fetch)
         if setup.record is not None:
@@ -1312,6 +1505,11 @@ def init(new_fleet: bool = False) -> str | None:
             "root_salt_fp": root_salt_fingerprint(root_salt),
         },
     }
+    if memory_index_answer is not None:
+        config["memory_index"] = {
+            "enabled": memory_index_answer,
+            "embeddings": bool(embeddings_answer) if memory_index_answer else False,
+        }
 
     _register_and_save(config, backend, device_id, device_name, passphrase)
     _publish_syncthing_record_best_effort(
@@ -1322,6 +1520,11 @@ def init(new_fleet: bool = False) -> str | None:
         argon2_memory_kb,
     )
     _forget_join_record()
+
+    if memory_index_answer is True:
+        _refresh_memory_index_best_effort(config)
+    if pointer_line_answer is True:
+        _apply_pointer_line()
 
     # Seam 1 — transition detection (init path). Seeds the
     # last_seen_self_version cache so any subsequent upgrade transition is

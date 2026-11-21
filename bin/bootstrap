@@ -43,6 +43,21 @@ python_version_ok() {
   [ "$py_major" -gt 3 ] || { [ "$py_major" -eq 3 ] && [ "$py_minor" -ge 11 ]; }
 }
 
+read_node_major() {
+  node_ver=""
+  if ! command -v node >/dev/null 2>&1; then
+    return 1
+  fi
+  node_out=$(node --version 2>&1 || true)
+  node_ver=$(printf '%s\n' "$node_out" | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p' | sed -n '1p')
+  [ -n "$node_ver" ]
+}
+
+node_version_ok() {
+  read_node_major || return 1
+  [ "$node_ver" -ge 22 ]
+}
+
 read_syncthing_version() {
   st_ver=""
   if ! command -v syncthing >/dev/null 2>&1; then
@@ -213,6 +228,76 @@ ensure_syncthing_at_login() {
     fi
     say "started Syncthing and set it to start at login ($start_syncthing_cmd)."
   fi
+}
+
+ensure_qmd() {
+  if command -v qmd >/dev/null 2>&1 && qmd --version >/dev/null 2>&1; then
+    say "qmd is already installed."
+    return 0
+  fi
+
+  qmd_prefix="$HOME/.local"
+  qmd_branch="npm"
+  qmd_manual_cmd="npm install -g --prefix $qmd_prefix @tobilu/qmd"
+
+  if command -v bun >/dev/null 2>&1; then
+    qmd_branch="bun"
+    qmd_manual_cmd="bun install -g @tobilu/qmd"
+    say "installing qmd with bun"
+    if ! bun install -g @tobilu/qmd; then
+      say "could not install qmd; to install it yourself, run: $qmd_manual_cmd"
+      return 0
+    fi
+  elif node_version_ok && command -v npm >/dev/null 2>&1; then
+    say "installing qmd with npm"
+    if ! npm install -g --prefix "$qmd_prefix" @tobilu/qmd; then
+      say "could not install qmd; to install it yourself, run: $qmd_manual_cmd"
+      return 0
+    fi
+  else
+    if [ "$platform" = "macos" ]; then
+      say "installing Node with Homebrew for qmd"
+      if ! brew install node; then
+        say "could not install Node for qmd; to install qmd yourself, run: brew install node && $qmd_manual_cmd"
+        return 0
+      fi
+    else
+      say "installing Node with pacman for qmd"
+      if [ -n "$SUDO" ]; then
+        if ! "$SUDO" pacman -S --needed nodejs npm; then
+          say "could not install Node for qmd; to install qmd yourself, run: ${sudo_prefix}pacman -S --needed nodejs npm && $qmd_manual_cmd"
+          return 0
+        fi
+      else
+        if ! pacman -S --needed nodejs npm; then
+          say "could not install Node for qmd; to install qmd yourself, run: pacman -S --needed nodejs npm && $qmd_manual_cmd"
+          return 0
+        fi
+      fi
+    fi
+    hash -r 2>/dev/null || true
+    if ! node_version_ok || ! command -v npm >/dev/null 2>&1; then
+      say "Node 22+ and npm are still not ready for qmd; to install qmd yourself, run: $qmd_manual_cmd"
+      return 0
+    fi
+    say "installing qmd with npm"
+    if ! npm install -g --prefix "$qmd_prefix" @tobilu/qmd; then
+      say "could not install qmd; to install it yourself, run: $qmd_manual_cmd"
+      return 0
+    fi
+  fi
+
+  hash -r 2>/dev/null || true
+  if command -v qmd >/dev/null 2>&1 && qmd --version >/dev/null 2>&1; then
+    say "installed qmd."
+    return 0
+  fi
+  if [ "$qmd_branch" = "npm" ] && [ -x "$qmd_prefix/bin/qmd" ] && "$qmd_prefix/bin/qmd" --version >/dev/null 2>&1; then
+    say "installed qmd in $qmd_prefix/bin, which is not on PATH; add $qmd_prefix/bin to PATH and open a new terminal."
+    return 0
+  fi
+  say "qmd could not be verified after install; to install it yourself, run: $qmd_manual_cmd"
+  return 0
 }
 
 main() {
@@ -446,6 +531,7 @@ main() {
     say "nothing to change: Python $py_ver, pipx, Syncthing $st_ver and mm are already installed."
   fi
   ensure_syncthing_at_login
+  ensure_qmd
   say "Next: run mm init --new-fleet on your fleet's first machine, or mm init to join this machine to the fleet. README Quick Start has the details."
 }
 

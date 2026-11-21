@@ -44,6 +44,14 @@ REFRESH_DEADLINE_S = 30.0
 MM_COLLECTION_PREFIX = "mm-"
 _GLOBAL_INDEX = ("--index", "index")
 
+POINTER_LINE = (
+    "Before assuming a fact about this project or the owner's preferences, "
+    'search agent memory with `qmd search "<key words>" -n 10` (every agent, '
+    "every machine; `qmd get <docid>` reads a hit). If memories disagree, show "
+    "the owner each one with its path and ask which is right; never pick one "
+    "silently."
+)
+
 CLAUDE_MASK = "*/memory/**/*.md"
 GROK_MASK = "**/topics/**/*.md"
 MUSE_MASK = "**/*.md"
@@ -604,10 +612,32 @@ def refresh(cfg: dict[str, Any]) -> RefreshResult:
         return RefreshResult("failed")
 
 
-def _find_qmd() -> str | None:
+def _find_on_abs_path(name: str) -> str | None:
     # A hook's working directory is a project, so use absolute PATH entries.
     entries = [entry for entry in os.get_exec_path() if os.path.isabs(entry)]
-    return shutil.which("qmd", path=os.pathsep.join(entries)) if entries else None
+    return shutil.which(name, path=os.pathsep.join(entries)) if entries else None
+
+
+def _find_qmd() -> str | None:
+    return _find_on_abs_path("qmd")
+
+
+def probe_qmd() -> tuple[
+    Literal["ok", "qmd-missing", "failed", "timed-out", "version-too-old"], str | None
+]:
+    """Probe qmd on absolute PATH entries using only ``qmd --version``."""
+    qmd = _find_qmd()
+    if qmd is None:
+        return ("qmd-missing", None)
+    return _qmd_version(qmd, time.monotonic() + REFRESH_DEADLINE_S)
+
+
+def install_hint() -> str:
+    """Return the copyable qmd install command matching this machine's runtime."""
+    if _find_on_abs_path("bun") is not None:
+        return "bun install -g @tobilu/qmd"
+    prefix = Path.home() / ".local"
+    return f"npm install -g --prefix {prefix} @tobilu/qmd"
 
 
 def remove_mm_collections() -> RemoveResult:

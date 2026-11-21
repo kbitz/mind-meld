@@ -1377,7 +1377,9 @@ MEMORYINDEX_DEFINITIONS = frozenset(
     RemoveResult
     desired_collections
     diag_state
+    install_hint
     memory_index
+    probe_qmd
     problem_text
     read_state
     refresh
@@ -1682,7 +1684,7 @@ def test_memoryindex_single_ownership_and_qualified_calls():
             f"{module}: expected owner inventory {expected}"
         )
         assert _unqualified_owner_calls(source, module) == []
-    assert len(MEMORYINDEX_DEFINITIONS) == 11
+    assert len(MEMORYINDEX_DEFINITIONS) == 13
 
 
 def test_recaptureflow_single_ownership_and_qualified_calls():

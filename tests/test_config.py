@@ -3286,6 +3286,81 @@ class TestJoinRecord151A:
         )
         assert config_module.load_join_record() == owner_managed
 
+    def test_memory_answers_round_trip_absent_as_none_and_reject_non_bool(
+        self, tmp_path, monkeypatch
+    ):
+        import stat
+        import tomllib
+
+        from mind_meld import config as config_module
+
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "cfg" / "config.toml")
+        rec_path = config_module.join_record_path()
+
+        # Pre-change record without memory keys loads with all three as None.
+        rec_path.parent.mkdir(parents=True, exist_ok=True)
+        rec_path.write_text(
+            '[join]\nstorage_path = "~/Sync/mind-meld"\n'
+            'device_name = "Mac B"\nsources = ["claude"]\n',
+            encoding="utf-8",
+        )
+        loaded_old = config_module.load_join_record()
+        assert loaded_old == config_module.JoinRecord(
+            storage_path="~/Sync/mind-meld",
+            fleet_device_id=None,
+            device_name="Mac B",
+            sources=("claude",),
+            memory_index=None,
+            embeddings=None,
+            pointer_line=None,
+        )
+
+        # Round-trip with all three answers set keeps mode 0600.
+        full = config_module.JoinRecord(
+            storage_path="~/Sync/mind-meld",
+            fleet_device_id=self.VALID_ID,
+            device_name="Mac B",
+            sources=("claude", "gstack"),
+            memory_index=True,
+            embeddings=False,
+            pointer_line=True,
+        )
+        config_module.save_join_record(full)
+        assert stat.S_IMODE(rec_path.stat().st_mode) == 0o600
+        on_disk = tomllib.loads(rec_path.read_text(encoding="utf-8"))
+        assert on_disk["join"]["memory_index"] is True
+        assert on_disk["join"]["embeddings"] is False
+        assert on_disk["join"]["pointer_line"] is True
+        assert config_module.load_join_record() == full
+
+        # Non-bool value on disk raises ConfigError naming the key.
+        for key, bad_toml in (
+            ("memory_index", '"yes"'),
+            ("embeddings", "1"),
+            ("pointer_line", '"no"'),
+        ):
+            rec_path.write_text(
+                '[join]\nstorage_path = "~/Sync/mind-meld"\ndevice_name = "Mac B"\n'
+                f'sources = ["claude"]\n{key} = {bad_toml}\n',
+                encoding="utf-8",
+            )
+            with pytest.raises(ConfigError) as exc_info:
+                config_module.load_join_record()
+            assert f"join.{key}" in str(exc_info.value)
+
+        # Non-bool value passed to save_join_record raises ConfigError naming the key.
+        for key in ("memory_index", "embeddings", "pointer_line"):
+            kwargs: dict[str, object] = {
+                "storage_path": "~/Sync/mind-meld",
+                "fleet_device_id": None,
+                "device_name": "Mac B",
+                "sources": ("claude",),
+                key: "yes",
+            }
+            with pytest.raises(ConfigError) as exc_info:
+                config_module.save_join_record(config_module.JoinRecord(**kwargs))  # type: ignore[arg-type]
+            assert f"join.{key}" in str(exc_info.value)
+
     @pytest.mark.parametrize(
         "raw",
         [
