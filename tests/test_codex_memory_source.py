@@ -748,6 +748,16 @@ class TestCodexMemoryPullAndConfinement:
             assert env.pull(DEV_B).retired_copies_removed == 0
             assert (dev_b.copies_dir / DEV_C / "MEMORY.md").exists()
 
+        def fail_recovery_move(*args):
+            raise OSError("synthetic recovery move failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(pullflow, "_move_into_copy", fail_recovery_move)
+            failed = env.pull(DEV_B)
+            assert failed.retired_copies_removed == 0
+            assert failed.maintenance_failures == 1
+            assert (dev_b.copies_dir / DEV_C / "MEMORY.md").exists()
+
         (dev_a.codex / "memories_v2" / "MEMORY.md").write_text("A memory v2\n")
         env.push(DEV_A)
 

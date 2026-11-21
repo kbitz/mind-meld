@@ -3402,20 +3402,20 @@ def _remove_retired_codex_memory_copies(
     touched_parents: set[Path],
     fsync_warnings: list[_FsyncWarning],
     folder: Path | None = None,
-) -> tuple[int, list[str], str | None]:
-    """Move retired peers' Codex memory copies into the 30-day recovery folder (Track 157A)."""
+) -> tuple[int, list[str], str | None, int]:
+    """Recover retired copies and return removed count, peer names, folder, and failures."""
     try:
         if _config_module.codex_memory_copy_dirs_missing(copies_root):
-            return 0, [], None
+            return 0, [], None, 0
         peer_dirs = {p.name: p for p in copies_root.iterdir()}
     except OSError:
-        return 0, [], None
+        return 0, [], None, 0
     try:
         retired = read_retirement_records(backend, passphrase, memory_kb)
     except (OSError, MindMeldError):
-        return 0, [], None
+        return 0, [], None, 0
     if not retired.records:
-        return 0, [], None
+        return 0, [], None, 0
 
     plan: list[tuple[str, list[Path], list[Path]]] = []
     for rec in retired.records.values():
@@ -3436,7 +3436,7 @@ def _remove_retired_codex_memory_copies(
         plan.append((rec.device_name or rid, reg_files, subdirs))
 
     if not plan:
-        return 0, [], None
+        return 0, [], None, 0
 
     has_files = any(files for _, files, _ in plan)
     recovery_folder: Path | None = None
@@ -3459,16 +3459,17 @@ def _remove_retired_codex_memory_copies(
                 "mm: warning: could not prepare recovery folder for retired Codex memory copies: "
                 f"{safety.safe_terminal_str(exc)}. Restore folder access, then run mm pull."
             )
-            return 0, [], None
+            return 0, [], None, 1
         warnings = _fsync_touched_parents(
             set(created) | ({created[0].parent} if created else set())
         )
         if warnings:
             fsync_warnings.extend(warnings)
             _remove_copy_dirs(created)
-            return 0, [], None
+            return 0, [], None, 0
 
     removed_count = 0
+    failures = 0
     retired_names: list[str] = []
     for dname, reg_files, subdirs in plan:
         peer_removed = 0
@@ -3504,12 +3505,15 @@ def _remove_retired_codex_memory_copies(
                     f"{safety.safe_terminal_str(exc)}. Check {safety.safe_terminal_str(copy_path)}."
                 )
             except (OSError, StorageError) as exc:
+                failures += 1
                 core._print_apply_warning(
                     "mm: warning: failed to move retired Codex memory copy "
                     f"{safety.safe_terminal_str(local_path)}: {safety.safe_terminal_str(exc)}. "
                     "Restore folder access, then run mm pull."
                 )
                 continue
+            if outcome != "deleted":
+                failures += 1
             if outcome in ("deleted", "kept-copy"):
                 peer_removed += 1
                 removed_count += 1
@@ -3527,7 +3531,7 @@ def _remove_retired_codex_memory_copies(
     if recovery_dirs:
         fsync_warnings.extend(_fsync_touched_parents(recovery_dirs))
     folder_out = str(recovery_folder) if removed_count and recovery_folder else None
-    return removed_count, retired_names, folder_out
+    return removed_count, retired_names, folder_out, failures
 
 
 def retired_copies_clause(result: PullResult) -> str:
@@ -4181,6 +4185,7 @@ def _pull_core(
             retired_folder: str | None = None
             retired_fsync_warnings: list[_FsyncWarning] = []
             recovery_cleanup_failures = 0
+            retirement_failures = 0
             if (
                 not dry_run
                 and "codex-memory" in local_sources_map
@@ -4190,7 +4195,7 @@ def _pull_core(
                 # recovery folders still expire on later Codex memory pulls.
                 recovery_cleanup_failures = _gc_pull_recovery_copies()
                 retired_touched: set[Path] = set()
-                retired_removed, retired_names, retired_folder = (
+                retired_removed, retired_names, retired_folder, retirement_failures = (
                     _remove_retired_codex_memory_copies(
                         backend,
                         passphrase,
@@ -4224,7 +4229,7 @@ def _pull_core(
                 no_sources=not pull_resolution.selected,
                 elapsed=time.time() - start,
                 durability_fsync_failures=len(retired_fsync_warnings),
-                maintenance_failures=recovery_cleanup_failures,
+                maintenance_failures=recovery_cleanup_failures + retirement_failures,
                 waiting=_waiting_peers([], [], vanished_entries),
                 retired_copies_removed=retired_removed,
                 retired_copies_names=retired_names,
@@ -4724,6 +4729,7 @@ def _pull_core(
                         retired_copies_removed,
                         retired_copies_names,
                         retired_copies_folder,
+                        retirement_failures,
                     ) = _remove_retired_codex_memory_copies(
                         backend,
                         passphrase,
@@ -4734,6 +4740,7 @@ def _pull_core(
                         fsync_warnings=fsync_warnings,
                         folder=Path(deleted_folder) if deleted_folder else None,
                     )
+                    maintenance_failures += retirement_failures
                 _tidy_line_indexes(
                     line_indexes,
                     pending=pending_files,
