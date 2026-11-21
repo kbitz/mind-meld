@@ -771,7 +771,12 @@ mm status
 ```
 
 <a id="syncthing-mesh-causes"></a>
-Syncthing mesh diagnostics appear in `mm status` and `mm diag` under the latest run evidence. An attended run prints a line when it shares the folder and a notice when you need to act. Hooks record those details silently.
+Syncthing mesh diagnostics appear in `mm status` and `mm diag`. `mm status`
+shows removal waits from the latest push, pull, or hook that evaluated removals.
+A later evaluation with no waits clears those lines. `mm diag --json` reports
+that evaluation under `syncthing.last_mesh`. An attended run prints a line
+when it shares the folder and a notice when you need to act. Hooks record
+their outcomes silently.
 
 - **`unreachable`** — local Syncthing did not answer. The next push or pull retries.
 - **`timeout`** — local Syncthing exceeded the per-request or pass deadline. The next push or pull retries.
@@ -1246,12 +1251,14 @@ their own per-verb record; overwritten failures are not retained. Discovery
 finding no repositories is advisory detail, not lost work. No additional history or consecutive-hold
 escalation is inferred.
 
-`mm diag --json` retains raw `last_autorun`, distinct `last_attended_runs`
-(`state`, `runs`), and `sync_run_projection`. Each projected verb has `kind`,
+`mm diag --json` reports `last_autorun`, `last_attended_runs` (`state`, `runs`),
+and `sync_run_projection`. Each projected verb has `kind`,
 `selected`, `superseded`, `unknown_reason`, `unresolved`, and `limited_coverage`.
-Plain diag prints these too. Raw autorun age still describes when hooks ran;
-an attended run's age is not “no autorun.” Supersession hides obsolete status
-rows without deleting the underlying latest records. Capture/publication
+Plain diag prints these too. When a valid mesh record exists, both forms
+filter older removal-wait clauses from `last_autorun`. The on-disk hook
+breadcrumb and the raw attended records retain their original detail. Autorun
+age describes when hooks ran. Supersession hides obsolete status rows without
+deleting the underlying latest records. Capture/publication
 evidence stays separate; only its existing `latest_attempt_superseded` proof hides an obsolete capture
 attempt from status, and diag retains it.
 
@@ -1288,7 +1295,7 @@ be recorded.
 | <a id="run-evidence-write-unavailable"></a>`run-evidence-write-unavailable` | Sync's primary result is unchanged. The stderr notice names push/pull, known content side effects and a bounded errno/code. Do not repeat sync solely to record history; restore local access/storage if needed, then run `mm diag`. |
 | <a id="run-evidence-contended"></a>`run-evidence-contended` | Read was busy and changed nothing. Retry read-only `mm status` once; if still busy, use `mm diag` and inspect local access. Never delete a live lock. |
 | <a id="run-evidence-corrupt"></a><a id="run-evidence-oversized"></a><a id="run-evidence-unreadable"></a>`run-evidence-corrupt`, `run-evidence-oversized`, `run-evidence-unreadable` | History is unknown. Use `mm diag`; no deletion or blind sync retry is prescribed. Missing history needs no repair. |
-| <a id="run-evidence-ambiguous"></a><a id="run-evidence-limited-coverage"></a>`run-evidence-ambiguous`, `run-evidence-limited-coverage` | Ordering or scope cannot prove recovery. Inspect raw evidence and the selected scope with `mm diag`. |
+| <a id="run-evidence-ambiguous"></a><a id="run-evidence-limited-coverage"></a>`run-evidence-ambiguous`, `run-evidence-limited-coverage` | Ordering or scope cannot prove recovery. Inspect run evidence and the selected scope with `mm diag`. |
 | `ok`, `no-changes` | Completed content execution; capture and publication remain independent. |
 | `setup-error`, `authentication-error`, `crypto-error`, `storage-error`, `snapshot-refused`, `command-refused`, `unexpected-error` | The callback stopped; use current diagnostics and the original fixing instruction. A bare command refusal has unknown side effects. |
 | `lock-held`, `interrupted`, `result-degraded` | No execution, interruption, or typed partial/degraded result. Inspect `mm diag` and its counts before choosing a sync retry. |

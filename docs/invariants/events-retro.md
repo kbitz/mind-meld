@@ -4024,9 +4024,11 @@ mode 0600; status/diag do not write it or create an evidence lock. Normal
 missing upgrade history requires no seeding runs. Contention/damage is unknown,
 not success; recovery never recommends deleting a live lock or blind sync retry.
 
-Projection retains all available raw evidence in diag (last_autorun,
-last_attended_runs, sync_run_projection in JSON and text). Each auto/attended
-store retains only its latest record per verb; later writes overwrite it, so
+Diag includes `last_autorun`, `last_attended_runs`, and `sync_run_projection`
+in JSON and text. With valid `last-mesh.json` evidence, both formats filter
+old removal-wait clauses from `last_autorun`, as `mm status` does. The on-disk
+hook breadcrumb and the raw `last_attended_runs` retain historical detail.
+Each auto/attended store retains only its latest record per verb. Later writes overwrite it, so
 this projection cannot recover overwritten failures. Strict later completed
 success can resolve an available earlier same-verb failure in either direction;
 a skip cannot. Routine lock-skip alone need not block a healthy local
