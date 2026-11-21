@@ -739,3 +739,311 @@ def project_runs(auto: dict, attended: dict, *, now: datetime | None = None) -> 
             "limited_coverage": bool(selected and selected[2]["scope"]),
         }
     return projection
+
+
+def mesh_waits_path() -> Path:
+    return sidecar.SIDECAR_DIR / "last-mesh.json"
+
+
+def mesh_wait_details(details: list[str]) -> tuple[list[str], int]:
+    """Retain only bounded, path-free ``Syncthing device removals wait for `` lines."""
+    if not details:
+        return [], 0
+    retained: list[str] = []
+    omitted = 0
+    for detail in details:
+        if not isinstance(detail, str) or not detail.startswith(
+            "Syncthing device removals wait for "
+        ):
+            omitted += 1
+            continue
+        kept, dropped = run_details([detail])
+        if kept and not dropped and len(retained) < _MAX_DETAILS:
+            retained.append(kept[0])
+        else:
+            omitted += 1
+    return retained, min(omitted, _MAX_COUNT)
+
+
+def _valid_mesh_waits(data: object) -> bool:
+    if not isinstance(data, dict) or set(data) != {
+        "version",
+        "completed_at",
+        "waits",
+        "omitted_details",
+    }:
+        return False
+    waits = data["waits"]
+    return (
+        type(data["version"]) is int
+        and data["version"] == 1
+        and _timestamp(data["completed_at"]) is not None
+        and _count(data["omitted_details"])
+        and isinstance(waits, list)
+        and len(waits) <= _MAX_DETAILS
+        and all(
+            isinstance(s, str)
+            and len(s) <= _MAX_DETAIL_CHARS
+            and s == safety.safe_terminal_str(s)
+            and "/" not in s
+            and "~" not in s
+            and s.startswith("Syncthing device removals wait for ")
+            and bool(_MESH_DETAIL_RE.fullmatch(s))
+            for s in waits
+        )
+    )
+
+
+def write_mesh_waits(waits: list[str], *, completed_at: str | None = None) -> None:
+    """Persist the latest evaluated Syncthing removal-wait lines.
+
+    Only readers: ``mm status`` and the ``mm diag`` state dict.
+    """
+    details, omitted = mesh_wait_details(list(waits))
+    record = {
+        "version": 1,
+        "completed_at": completed_at or datetime.now(timezone.utc).isoformat(),
+        "waits": details,
+        "omitted_details": omitted,
+    }
+    if not _valid_mesh_waits(record):
+        raise ValueError("invalid mesh waits")
+    path = mesh_waits_path()
+    fsutil.refuse_real_state_write_under_pytest(path)
+    sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+    with lockedjson.locked_json_rmw(
+        path, retry_intervals=(), on_contention="raise", mode=0o600, compact=True
+    ) as locked:
+        if not locked.is_locked:
+            raise OSError("mesh evidence lock unavailable")
+        if _valid_mesh_waits(locked.data) and _timestamp(locked.data["completed_at"]) > _timestamp(
+            record["completed_at"]
+        ):
+            locked.write_on_exit = False
+        else:
+            while len(json.dumps(record, sort_keys=True).encode()) > _MAX_RECORD_BYTES:
+                if not record["waits"]:
+                    raise ValueError("oversized mesh evidence")
+                record["waits"].pop()
+                record["omitted_details"] = min(_MAX_COUNT, record["omitted_details"] + 1)
+            locked.data = record
+    if locked.write_error is not None:
+        raise locked.write_error
+
+
+def read_mesh_waits() -> dict:
+    """Write-free read of the latest evaluated Syncthing removal-wait lines.
+
+    Only readers: ``mm status`` and the ``mm diag`` state dict.
+    """
+    path = mesh_waits_path()
+    empty = {"completed_at": None, "waits": [], "omitted_details": 0}
+    try:
+        if path.stat().st_size > _MAX_RECORD_BYTES:
+            return {"state": "oversized", **empty}
+        with lockedjson.locked_json_snapshot(path, blocking=False) as snapshot:
+            state = {
+                "lock_failed": "contended",
+                "empty": "corrupt",
+                "malformed": "corrupt",
+                "non_dict": "corrupt",
+            }.get(snapshot.state, snapshot.state)
+            if state != "valid":
+                return {"state": state, **empty}
+            data = snapshot.data
+            if not _valid_mesh_waits(data):
+                return {"state": "corrupt", **empty}
+            return {
+                "state": "valid",
+                "completed_at": data["completed_at"],
+                "waits": list(data["waits"]),
+                "omitted_details": data["omitted_details"],
+            }
+    except FileNotFoundError:
+        return {"state": "missing", **empty}
+    except OSError:
+        return {"state": "unreadable", **empty}
+    except (ValueError, RecursionError):
+        return {"state": "corrupt", **empty}
+
+
+def init_notices_path() -> Path:
+    return sidecar.SIDECAR_DIR / "last-init-notices.json"
+
+
+def init_notice_details(details: list[str]) -> tuple[list[str], int]:
+    """Retain only known path-free init-backfill notice phrases."""
+    if not details:
+        return [], 0
+    from mind_meld import events_tail
+
+    literals = {
+        events_tail._INIT_BACKFILL_BUDGET_NOTICE,
+        events_tail._INIT_ROOT_DISCOVERY_NOTICE,
+    }
+    host_phrases = {
+        events_tail._host_skip_phrase(
+            reader,
+            reason,
+            verb=verb,
+            readiness="ready",
+            no_release_reads=no_release_reads,
+            attended=attended,
+        )
+        for reader in (*events.HOST_USAGE_TOKEN_SOURCES, None)
+        for reason in (*get_args(host_usage.Reason), "unavailable", None)
+        for verb in ("push", "init")
+        for attended in (False, True)
+        for no_release_reads in ((), (reader,) if reader is not None else ())
+    }
+    host_names = "|".join(re.escape(name) for name in events.HOST_USAGE_TOKEN_SOURCES)
+    retained: list[str] = []
+    omitted = 0
+    for detail in details:
+        if not isinstance(detail, str):
+            omitted += 1
+            continue
+        raw_known = (
+            detail in literals
+            or detail in host_phrases
+            or bool(
+                re.fullmatch(
+                    rf"(?:{host_names}) usage catching up \([1-9][0-9]* left\) — "
+                    r"content sync and git/session capture unaffected\. "
+                    r"The next attended mm push continues it; see "
+                    rf"{re.escape(events_tail.HOST_USAGE_CAPTURE_URL)}\.",
+                    detail,
+                )
+            )
+        )
+        detail = detail.replace(events_tail.HOST_USAGE_CAPTURE_URL, "mm diag")
+        detail = detail.replace("git/session", "git and session")
+        safe = safety.safe_terminal_str(detail)
+        if (
+            not raw_known
+            or safe != detail
+            or "/" in safe
+            or "~" in safe
+            or len(safe) > _MAX_DETAIL_CHARS
+            or len(retained) >= _MAX_DETAILS
+        ):
+            omitted += 1
+        else:
+            retained.append(safe)
+    return retained, min(omitted, _MAX_COUNT)
+
+
+def _valid_init_notices(data: object) -> bool:
+    if not isinstance(data, dict) or set(data) != {
+        "version",
+        "completed_at",
+        "notices",
+        "omitted_details",
+    }:
+        return False
+    notices = data["notices"]
+    if not (
+        type(data["version"]) is int
+        and data["version"] == 1
+        and _timestamp(data["completed_at"]) is not None
+        and _count(data["omitted_details"])
+        and isinstance(notices, list)
+        and len(notices) <= _MAX_DETAILS
+        and all(
+            isinstance(s, str)
+            and len(s) <= _MAX_DETAIL_CHARS
+            and s == safety.safe_terminal_str(s)
+            and "/" not in s
+            and "~" not in s
+            for s in notices
+        )
+    ):
+        return False
+    if not notices:
+        return True
+    from mind_meld import events_tail
+
+    host_names = "|".join(re.escape(name) for name in events.HOST_USAGE_TOKEN_SOURCES)
+    allowed_re = re.compile(
+        rf"{re.escape(events_tail._INIT_BACKFILL_BUDGET_NOTICE)}|"
+        rf"{re.escape(events_tail._INIT_ROOT_DISCOVERY_NOTICE)}|"
+        r"host-usage snapshot skipped \([^/~]{1,64}\) — "
+        r"content sync and git and session capture unaffected\. [^/~]{1,280}|"
+        rf"(?:{host_names}) usage catching up \([1-9][0-9]* left\) — "
+        r"content sync and git and session capture unaffected\. "
+        r"The next attended mm push continues it; see mm diag\."
+    )
+    return all(bool(allowed_re.fullmatch(s)) for s in notices)
+
+
+def write_init_notices(notices: list[str], *, completed_at: str | None = None) -> None:
+    """Persist no-action capture notices from ``mm init``'s events backfill.
+
+    Only readers: ``mm status`` and ``mm diag`` (state dict and plain text).
+    """
+    details, omitted = init_notice_details(list(notices))
+    record = {
+        "version": 1,
+        "completed_at": completed_at or datetime.now(timezone.utc).isoformat(),
+        "notices": details,
+        "omitted_details": omitted,
+    }
+    if not _valid_init_notices(record):
+        raise ValueError("invalid init notices")
+    path = init_notices_path()
+    fsutil.refuse_real_state_write_under_pytest(path)
+    sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+    with lockedjson.locked_json_rmw(
+        path, retry_intervals=(), on_contention="raise", mode=0o600, compact=True
+    ) as locked:
+        if not locked.is_locked:
+            raise OSError("init notices lock unavailable")
+        if _valid_init_notices(locked.data) and _timestamp(
+            locked.data["completed_at"]
+        ) > _timestamp(record["completed_at"]):
+            locked.write_on_exit = False
+        else:
+            while len(json.dumps(record, sort_keys=True).encode()) > _MAX_RECORD_BYTES:
+                if not record["notices"]:
+                    raise ValueError("oversized init notices")
+                record["notices"].pop()
+                record["omitted_details"] = min(_MAX_COUNT, record["omitted_details"] + 1)
+            locked.data = record
+    if locked.write_error is not None:
+        raise locked.write_error
+
+
+def read_init_notices() -> dict:
+    """Write-free read of no-action capture notices from ``mm init``.
+
+    Only readers: ``mm status`` and ``mm diag`` (state dict and plain text).
+    """
+    path = init_notices_path()
+    empty = {"completed_at": None, "notices": [], "omitted_details": 0}
+    try:
+        if path.stat().st_size > _MAX_RECORD_BYTES:
+            return {"state": "oversized", **empty}
+        with lockedjson.locked_json_snapshot(path, blocking=False) as snapshot:
+            state = {
+                "lock_failed": "contended",
+                "empty": "corrupt",
+                "malformed": "corrupt",
+                "non_dict": "corrupt",
+            }.get(snapshot.state, snapshot.state)
+            if state != "valid":
+                return {"state": state, **empty}
+            data = snapshot.data
+            if not _valid_init_notices(data):
+                return {"state": "corrupt", **empty}
+            return {
+                "state": "valid",
+                "completed_at": data["completed_at"],
+                "notices": list(data["notices"]),
+                "omitted_details": data["omitted_details"],
+            }
+    except FileNotFoundError:
+        return {"state": "missing", **empty}
+    except OSError:
+        return {"state": "unreadable", **empty}
+    except (ValueError, RecursionError):
+        return {"state": "corrupt", **empty}

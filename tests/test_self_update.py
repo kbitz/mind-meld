@@ -238,9 +238,12 @@ class TestUpdateArgv:
         )
         monkeypatch.setattr(upgrade, "_install_prefix", lambda: venv)
         monkeypatch.setenv("PIPX_HOME", str(tmp_path / "other-pipx"))
-        argv = shlex.split(upgrade.reinstall_cmd(upgrade.detect_install()))
-        assert argv[0] == f"PIPX_HOME={venv.parent.parent}"
-        assert argv[1:] == [
+        cmd = upgrade.reinstall_cmd(upgrade.detect_install())
+        assert "\n" not in cmd
+        argv = shlex.split(cmd)
+        assert argv[0] == "UV_VENV_CLEAR=1"
+        assert argv[1] == f"PIPX_HOME={venv.parent.parent}"
+        assert argv[2:] == [
             "pipx",
             "install",
             "--force",
@@ -257,7 +260,56 @@ class TestUpdateArgv:
         argv = upgrade.update_argv(PIPX, info)
         assert argv == [PIPX, "install", "--force", upgrade.INSTALL_SPEC]
         # The nudge and README quote INSTALL_CMD; the two must stay one command.
-        assert " ".join(["pipx", *argv[1:]]) == upgrade.INSTALL_CMD
+        assert f"UV_VENV_CLEAR=1 {' '.join(['pipx', *argv[1:]])}" == upgrade.INSTALL_CMD
+
+    @pytest.mark.parametrize("backend_field", ["pip", "uv", None])
+    def test_reinstall_commands_and_environment_work_across_pipx_backends(
+        self, pipx_install, monkeypatch, tmp_path, backend_field
+    ):
+        monkeypatch.delenv("UV_VENV_CLEAR", raising=False)
+        venv = pipx_install(spec=f"{upgrade.REPO_SPEC}@v1.2.0", version="1.2.0")
+        meta_path = venv / "pipx_metadata.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if backend_field is not None:
+            meta["backend"] = backend_field
+        else:
+            meta.pop("backend", None)
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+        own_app = venv / "bin" / "mm"
+        own_app.parent.mkdir(exist_ok=True)
+        own_app.write_text("our installed executable")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / "mm").symlink_to(own_app)
+        monkeypatch.setenv("PIPX_BIN_DIR", str(bin_dir))
+
+        assert (
+            upgrade.INSTALL_CMD
+            == "UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest"
+        )
+        assert "\n" not in upgrade.INSTALL_CMD
+        install = upgrade.detect_install()
+        assert install.kind == "pinned"
+        reinstall = upgrade.reinstall_cmd(install)
+        assert "\n" not in reinstall
+        assert reinstall == (
+            f"UV_VENV_CLEAR=1 PIPX_HOME={shlex.quote(str(venv.parent.parent))} "
+            f"pipx install --force {upgrade.INSTALL_SPEC}"
+        )
+
+        pinned_argv = upgrade.update_argv(PIPX, install)
+        assert pinned_argv == [PIPX, "install", "--force", upgrade.INSTALL_SPEC]
+        pinned_env = upgrade._pipx_environment(pinned_argv)
+        assert pinned_env["UV_VENV_CLEAR"] == "1"
+        assert pinned_env["PIPX_HOME"] == str(venv.parent.parent)
+        assert pinned_env["PIPX_BIN_DIR"] == str(bin_dir.resolve())
+
+        tracking_info = upgrade.InstallInfo("tracking", "mind-meld", upgrade.INSTALL_SPEC, "1.2.0")
+        tracking_argv = upgrade.update_argv(PIPX, tracking_info)
+        assert tracking_argv == [PIPX, "upgrade", "mind-meld"]
+        tracking_env = upgrade._pipx_environment(tracking_argv)
+        assert "UV_VENV_CLEAR" not in tracking_env
 
 
 # ── the pipx seams ────────────────────────────────────────────────────────
@@ -2135,7 +2187,7 @@ class TestAttendedAutoUpdate:
         assert _cache()["install_attempt_outcome"] == "failed"
         error = capsys.readouterr().err
         assert "cancelled" in error
-        assert upgrade.INSTALL_CMD in error
+        assert upgrade.reinstall_cmd(upgrade.detect_install()) in error
         assert "cancelled" in upgrade.update_log_path().read_text().lower()
         lockfile.acquire_lock()
         lockfile.release_lock()
@@ -2172,7 +2224,8 @@ class TestAttendedAutoUpdate:
         upgrade.update_or_nudge({}, attended=True)
         err = capsys.readouterr().err
         assert "automatic update to 1.3.0 did not complete (fatal: no route to host)" in err
-        assert "Run: mm update" in err and upgrade.INSTALL_CMD in err and "`mm update`" not in err
+        reinstall = upgrade.reinstall_cmd(upgrade.detect_install())
+        assert "Run: mm update" in err and reinstall in err and "`mm update`" not in err
         assert _cache()["install_attempt_outcome"] == "failed"
         # The same run does not also print the plain nudge, and the next run
         # neither retries pipx nor repeats itself inside the gates.
@@ -3252,7 +3305,7 @@ class TestUpdateCommand:
         text = _flat(result.stdout)
         assert f"made from {spec}" in text
         assert "mm will not update it automatically" in text
-        assert upgrade.INSTALL_CMD in text
+        assert upgrade.reinstall_cmd(upgrade.detect_install()) in text
 
     @pytest.mark.parametrize("width", [60, 80])
     def test_pinned_current_reinstall_command_is_one_line(self, monkeypatch, width):
@@ -3818,7 +3871,8 @@ class TestSyncUpdateDisplay:
         )
         failed_notice = (
             "mm: notice: automatic update to 1.3.0 did not complete (fatal: no route); "
-            "if mm is now missing, reinstall with: PIPX_HOME=/tmp/pipx pipx install --force "
+            "if mm is now missing, reinstall with: "
+            "UV_VENV_CLEAR=1 PIPX_HOME=/tmp/pipx pipx install --force "
             "git+https://github.com/kbitz/mind-meld.git@latest "
             "Run: mm update\n"
         )

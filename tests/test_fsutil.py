@@ -1489,6 +1489,8 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
         "events_bootstrap": "events-root",
         "sidecar_write": "last-push.json",
         "attemptlog_write": "last-attended-capture.json",
+        "mesh_waits_write": "last-mesh.json",
+        "init_notices_write": "last-init-notices.json",
         "inversion_marker": "inversion-installed-at",
         # Track 91A: the scan-root anchor and the recovery-copy writers.
         "anchor_write": "scan/.mind-meld-anchor",
@@ -1580,6 +1582,10 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
             return sidecar.write({"device_id": "fixture", "sources": {}, "tombstones": {}})
         if writer == "attemptlog_write":
             return attemptlog.write(attemptlog.CaptureOutcome(kind="no-row"))
+        if writer == "mesh_waits_write":
+            return attemptlog.write_mesh_waits([])
+        if writer == "init_notices_write":
+            return attemptlog.write_init_notices([])
         if writer == "inversion_marker":
             return resolveflow._ensure_inversion_marker()
         if writer == "anchor_write":
@@ -1733,7 +1739,13 @@ def raw_writer_control(tmp_path, monkeypatch):
                     assert stat.S_IMODE(path.stat().st_mode) == 0o600
                 elif writer == "migration_write":
                     assert json.loads(path.read_bytes())["missing_sources"] == ["custom"]
-                elif writer in ("sidecar_write", "attemptlog_write", "save_config"):
+                elif writer in (
+                    "sidecar_write",
+                    "attemptlog_write",
+                    "mesh_waits_write",
+                    "init_notices_write",
+                    "save_config",
+                ):
                     assert stat.S_IMODE(path.stat().st_mode) == 0o600
                 elif writer == "stignore_write":
                     expected = b"keep\n" if exists else b""
@@ -1920,6 +1932,22 @@ def test_attemptlog_write_refuses_protected_root(raw_writer_refusal, raw_writer_
 
 def test_attemptlog_write_tmp_control(raw_writer_control, raw_writer_exists):
     raw_writer_control("attemptlog_write", raw_writer_exists)
+
+
+def test_mesh_waits_write_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("mesh_waits_write", raw_writer_exists)
+
+
+def test_mesh_waits_write_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("mesh_waits_write", raw_writer_exists)
+
+
+def test_init_notices_write_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("init_notices_write", raw_writer_exists)
+
+
+def test_init_notices_write_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("init_notices_write", raw_writer_exists)
 
 
 def test_inversion_marker_refuses_protected_root(raw_writer_refusal):

@@ -962,3 +962,114 @@ def test_src_mac_phrases_appear_only_in_comments_or_internal_docstrings():
                     f"{py_path}:{lineno} matches four-phrase Mac regex outside "
                     f"comment/internal docstring: {line!r}"
                 )
+
+
+def test_status_legacy_attended_removal_wait_renders_until_mesh_record_supersedes(
+    inspection, monkeypatch
+):
+    """Track 156A AC3 & AC7: pre-change attended run records with a wait line still
+    render when last-mesh.json is missing, and stop resurrecting the wait once a
+    valid last-mesh.json exists."""
+    from mind_meld import attemptlog, sidecar
+
+    _, root = inspection
+    monkeypatch.setattr(sidecar, "SIDECAR_DIR", root.parent)
+    wait_line = (
+        "Syncthing device removals wait for cachyos (dev-c) to publish "
+        "its Syncthing ID; run 'mm update' and 'mm push' on cachyos"
+    )
+    legacy_run = attemptlog.make_run(
+        outcome="degraded",
+        cause="result-degraded",
+        degradations=[
+            wait_line,
+            "the Syncthing record of device peer1 is from a newer mm. Run: mm update",
+        ],
+        completed_at="2026-11-20T10:00:00+00:00",
+    )
+    attemptlog.write_run("push", legacy_run)
+
+    # 1. No last-mesh.json yet (right after upgrade): legacy attended wait still renders
+    assert attemptlog.read_mesh_waits()["state"] == "missing"
+    res_legacy = runner.invoke(app, ["status"])
+    assert res_legacy.exit_code == 0, res_legacy.output
+    flat_legacy = " ".join(res_legacy.stdout.split())
+    assert wait_line in flat_legacy
+    assert "the Syncthing record of device peer1 is from a newer mm. Run: mm update" in flat_legacy
+
+    # 2. Valid last-mesh.json with empty waits suppresses the legacy attended wait line
+    attemptlog.write_mesh_waits([], completed_at="2026-11-20T10:05:00+00:00")
+    res_cleared = runner.invoke(app, ["status"])
+    assert res_cleared.exit_code == 0, res_cleared.output
+    flat_cleared = " ".join(res_cleared.stdout.split())
+    assert "Syncthing device removals wait for" not in flat_cleared
+    assert "the Syncthing record of device peer1 is from a newer mm. Run: mm update" in flat_cleared
+
+    # 3. diag --json exposes last_mesh under syncthing
+    res_diag = runner.invoke(app, ["diag", "--json"])
+    assert res_diag.exit_code == 0, res_diag.output
+    assert json.loads(res_diag.stdout)["syncthing"]["last_mesh"] == {
+        "state": "valid",
+        "completed_at": "2026-11-20T10:05:00+00:00",
+        "waits": [],
+        "omitted_details": 0,
+    }
+
+
+def test_status_and_diag_display_init_notices_until_attended_capture_replaces_them(
+    inspection, monkeypatch
+):
+    """Track 156A AC4 & AC7: no-action init notices display in mm status and mm diag
+    when no attended capture exists (or when the attended capture is older than init),
+    and stop rendering once an attended capture is recorded at or after init's
+    completed_at."""
+    from mind_meld import attemptlog, events_tail, sidecar
+
+    _, root = inspection
+    monkeypatch.setattr(sidecar, "SIDECAR_DIR", root.parent)
+
+    init_t = "2026-11-20T10:00:00+00:00"
+    deadline_phrase = events_tail._host_skip_phrase(
+        "codex", "deadline", verb="init", readiness="ready", attended=True
+    )
+    attemptlog.write_init_notices(
+        [
+            events_tail._INIT_BACKFILL_BUDGET_NOTICE,
+            events_tail._INIT_ROOT_DISCOVERY_NOTICE,
+            deadline_phrase,
+        ],
+        completed_at=init_t,
+    )
+
+    # 1. With no attended capture record yet, both status and plain-text diag render the 3 notices
+    for cmd in (["status"], ["diag"]):
+        res = runner.invoke(app, cmd)
+        assert res.exit_code == 0, res.output
+        flat = " ".join(res.stdout.split())
+        assert events_tail._INIT_BACKFILL_BUDGET_NOTICE in flat
+        assert events_tail._INIT_ROOT_DISCOVERY_NOTICE in flat
+        assert "host-usage snapshot skipped (codex deadline)" in flat
+
+    diag_json = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+    assert diag_json["host_publication"]["init_notices"]["state"] == "valid"
+    assert len(diag_json["host_publication"]["init_notices"]["notices"]) == 3
+
+    # 2. Pre-existing older attended capture record (< init_t): init notices still render
+    attemptlog.write(
+        attemptlog.CaptureOutcome(attempted_at="2026-11-20T09:55:00+00:00").finish("no-row")
+    )
+    res_older = runner.invoke(app, ["status"])
+    assert res_older.exit_code == 0, res_older.output
+    assert events_tail._INIT_BACKFILL_BUDGET_NOTICE in " ".join(res_older.stdout.split())
+
+    # 3. Attended capture at or after init_t replaces the init notices on both status and diag
+    attemptlog.write(
+        attemptlog.CaptureOutcome(attempted_at="2026-11-20T10:01:00+00:00").finish("published")
+    )
+    for cmd in (["status"], ["diag"]):
+        res_replaced = runner.invoke(app, cmd)
+        assert res_replaced.exit_code == 0, res_replaced.output
+        flat_replaced = " ".join(res_replaced.stdout.split())
+        assert events_tail._INIT_BACKFILL_BUDGET_NOTICE not in flat_replaced
+        assert events_tail._INIT_ROOT_DISCOVERY_NOTICE not in flat_replaced
+        assert "host-usage snapshot skipped (codex deadline)" not in flat_replaced

@@ -190,6 +190,25 @@ REVIEWED = {
             "detail.replace('git/session', 'git and session')",
         ],
     ),
+    "attemptlog.py:init_notice_details": (
+        *_READ_ONLY,
+        [
+            "detail.replace(events_tail.HOST_USAGE_CAPTURE_URL, 'mm diag')",
+            "detail.replace('git/session', 'git and session')",
+        ],
+    ),
+    "attemptlog.py:write_mesh_waits": (
+        *_GUARDED,
+        [
+            "sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)",
+        ],
+    ),
+    "attemptlog.py:write_init_notices": (
+        *_GUARDED,
+        [
+            "sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)",
+        ],
+    ),
     "attemptlog.py:project_runs": (
         *_READ_ONLY,
         [

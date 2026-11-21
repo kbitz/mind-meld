@@ -2020,14 +2020,20 @@ Grok Build, Muse and Antigravity)" for remedies and the three existing deferred-
 `_accept_host_usage_snapshot` does no key-set check and `_tie_break_key`
 excludes unknown top-level fields. The field carries reader names only.
 
-**Tail appends a degradation; init prints only.** Same rule as every other
+**Tail appends a degradation; init records no-action notices and prints only actionable ones (Track 156A).** Same rule as every other
 tail degradation: `_run_events_tail` writes the `mm: notice:` AND appends the
 phrase to its returned list, because an unattended hook's stderr reaches
 nobody and `mm status` is the only surface the user reads. It is NOT
 rate-limited — it describes the CURRENT state, and no-op pushes never reach
 the tail at all, so a stale `success` would be the misleading outcome.
-`_run_events_backfill` has no `mm-push` row and no autorun breadcrumb, so it
-emits the notice alone.
+`_run_events_backfill` has no `mm-push` row and no autorun breadcrumb; during
+`mm init`, it prints only notices carrying a fix the owner must run (such as
+non-deadline host skips and unexpected exceptions) and returns no-action
+budget/deadline capture notices (`_INIT_BACKFILL_BUDGET_NOTICE`,
+`_INIT_ROOT_DISCOVERY_NOTICE`, and `deadline` host-skip phrases) for
+`initflow.init` to persist via `attemptlog.write_init_notices`
+(`last-init-notices.json`, read by `mm status` and `mm diag` until an
+attended push records a capture attempt at or after that timestamp).
 
 **Row order.** Tail: git rows, sessions row, optional host row, `mm-push`
 LAST (CT-4 unchanged). Backfill: git, sessions, optional host, never `mm-push`.
@@ -2693,9 +2699,9 @@ with `~/.grok/sessions` would see the healthy-tail control pin in
 
 **`mm-events`-resolved gate, mirrored from `_run_events_tail`.** A user who disabled mm-events per-machine (`disabled_sources: ["mm-events"]`) gets a silent no-op — no events dir created, no rows written. Same gate covers fresh installs (mm-events auto-included via `MM_INTERNAL_SOURCE_NAMES`), un-migrated upgraders (no mm-events source in config → no-op), and explicit opt-outs uniformly.
 
-**Forensic-only on failure.** Same `try / except Exception` wrapper as `_run_events_tail`; failures emit `mm: notice: events backfill failed: <type>: <safe_str(msg)>` to stderr. Init proceeds. A budget overrun emits `mm: notice: events backfill budget exceeded` and the partial events written so far stay on disk.
+**Forensic-only on failure.** Same `try / except Exception` wrapper as `_run_events_tail`; failures emit `mm: notice: events backfill failed: <type>: <safe_str(msg)>` to stderr. Init proceeds. A budget overrun (`_INIT_BACKFILL_BUDGET_NOTICE`), root-discovery budget hit (`_INIT_ROOT_DISCOVERY_NOTICE`), or `deadline` host-usage skip is returned from `_run_events_backfill` and persisted to `last-init-notices.json` (never printed during `mm init`), while partial events written so far stay on disk; `mm status` and `mm diag` display those recorded notices until an attended push records a capture attempt at or after the init record's `completed_at`.
 
-**No init-time subcommand, no marker.** Init backfill stays automatic. `mm recapture [WINDOW]` (Track 30A) is the explicit recovery verb for already-orphaned intervals; it is a git-only primitive, not a wrapper around this backfill (backfill also force-refreshes identity and warms the host cache, and returns `None`).
+**No init-time subcommand, no marker.** Init backfill stays automatic. `mm recapture [WINDOW]` (Track 30A) is the explicit recovery verb for already-orphaned intervals; it is a git-only primitive, not a wrapper around this backfill (backfill also force-refreshes identity and warms the host cache, and returns the list of no-action notices).
 
 ## Sessions snapshot v=2 full-inventory (load-bearing, v0.11.0)
 

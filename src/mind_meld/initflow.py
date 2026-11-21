@@ -1349,7 +1349,12 @@ def init(new_fleet: bool = False) -> str | None:
     # after init, without waiting for the first push to populate events.
     # Sources were explicitly bootstrapped above; the backfill creates events/
     # when appending rows. Forensic-only on failure; init proceeds.
-    events_tail._run_events_backfill(config, resolved_sources, device_id)
+    init_notices = events_tail._run_events_backfill(config, resolved_sources, device_id)
+    if isinstance(init_notices, list):
+        try:
+            attemptlog.write_init_notices(init_notices)
+        except (Exception, SystemExit):
+            pass
 
     if new_fleet:
         if setup.record is not None:

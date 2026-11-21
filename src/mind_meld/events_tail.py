@@ -328,6 +328,11 @@ _CURSOR_COVERAGE_DEGRADATION = (
     "retro cursor floored: no complete capture found in the retained event log. "
     "Run mm diag, then mm recapture 30d to recover older commits"
 )
+_INIT_BACKFILL_BUDGET_NOTICE = "events backfill budget exceeded"
+_INIT_ROOT_DISCOVERY_NOTICE = (
+    "git repository discovery hit its time budget: "
+    "initial retro capture may omit repositories. Run mm diag"
+)
 
 _HOST_READ_REASONS = frozenset(get_args(host_usage.Reason))
 """Reason classes a reader may report, taken from ``host_usage`` so the two
@@ -2087,7 +2092,7 @@ def _run_events_backfill(
     config: dict,
     sources: list[dict],
     device_id: str,
-) -> None:
+) -> list[str]:
     """Init-time backfill of git+sessions events for the past 30 days, plus
     the optional host-usage row.
 
@@ -2109,11 +2114,13 @@ def _run_events_backfill(
 
     Idempotent at the aggregator layer (commits dedup; sessions latest-
     per-tuple wins). Forensic-only on failure: stderr breadcrumb, init
-    proceeds.
+    proceeds. No-action budget/deadline capture notices are returned for
+    ``mm status`` and ``mm diag`` instead of printing during ``mm init``.
     """
+    notices: list[str] = Degradations()
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
-        return
+        return notices
     try:
         budget_ms = events.WALK_TIME_BUDGET_INTERACTIVE_MS
         events_dir = Path(mm_events_src["path"]).expanduser() / "events"
@@ -2205,15 +2212,12 @@ def _run_events_backfill(
             )
 
         if capture.session_walk_exceeded_budget:
-            token_usage._diagnostic("mm: notice: events backfill budget exceeded\n")
+            notices.append(_INIT_BACKFILL_BUDGET_NOTICE)
         if capture.root_discovery.exceeded:
-            token_usage._diagnostic(
-                "mm: notice: git repository discovery hit its time budget: "
-                "initial retro capture may omit repositories. Run mm diag\n"
-            )
+            notices.append(_INIT_ROOT_DISCOVERY_NOTICE)
 
-        # Init has no `mm-push` row and no autorun breadcrumb, so the notice is
-        # the only surface available — and init IS attended, so it lands.
+        # Actionable reader notices print live during init; deadline skips
+        # need no owner action and are returned for mm status and mm diag.
         def _init_no_release_reads(reader: str | None, reason: str | None) -> tuple[str, ...]:
             if reader is not None and reason in _HOST_PERMANENT_REASONS:
                 try:
@@ -2225,35 +2229,36 @@ def _run_events_backfill(
 
         if capture.host_capture.dropped:
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
-                token_usage._diagnostic(
-                    "mm: notice: "
-                    + _host_skip_phrase(
-                        dropped_reader,
-                        dropped_reason,
-                        verb="init",
-                        readiness="ready",
-                        no_release_reads=_init_no_release_reads(dropped_reader, dropped_reason),
-                        attended=True,
-                    )
-                    + "\n"
-                )
-        elif not capture.host_capture.complete:
-            token_usage._diagnostic(
-                "mm: notice: "
-                + _host_skip_phrase(
-                    capture.host_capture.reader,
-                    capture.host_capture.reason,
+                phrase = _host_skip_phrase(
+                    dropped_reader,
+                    dropped_reason,
                     verb="init",
                     readiness="ready",
-                    no_release_reads=_init_no_release_reads(
-                        capture.host_capture.reader, capture.host_capture.reason
-                    ),
+                    no_release_reads=_init_no_release_reads(dropped_reader, dropped_reason),
                     attended=True,
                 )
-                + "\n"
+                if dropped_reason == "deadline":
+                    notices.append(phrase)
+                else:
+                    token_usage._diagnostic(f"mm: notice: {phrase}\n")
+        elif not capture.host_capture.complete:
+            phrase = _host_skip_phrase(
+                capture.host_capture.reader,
+                capture.host_capture.reason,
+                verb="init",
+                readiness="ready",
+                no_release_reads=_init_no_release_reads(
+                    capture.host_capture.reader, capture.host_capture.reason
+                ),
+                attended=True,
             )
+            if capture.host_capture.reason == "deadline":
+                notices.append(phrase)
+            else:
+                token_usage._diagnostic(f"mm: notice: {phrase}\n")
     except Exception as e:
         token_usage._diagnostic(f"mm: notice: events backfill failed: {_exception_detail(e)}\n")
+    return notices
 
 
 def _commit_recorded_git_rows(

@@ -403,6 +403,128 @@ class TestBackfillHostSnapshot:
         assert "mm update" not in err
         assert "events backfill failed" not in err
 
+    def test_incomplete_scan_keeps_mm_update_advice_when_cached_upgrade_view_raises(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mind_meld import upgrade
+
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root, claude_dir=None, hosts=("muse",))
+        self._stub(
+            monkeypatch,
+            muse=_mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
+        )
+
+        def boom(_cfg):
+            raise RuntimeError("cache broken")
+
+        monkeypatch.setattr(upgrade, "cached_upgrade_view", boom)
+
+        notices = events_tail._run_events_backfill(
+            {"sync": {"sources": sources}},
+            sources,
+            "dev-a",
+        )
+
+        assert notices == []
+        rows = _read_event_rows(sorted((events_root / "events").glob("*.jsonl"))[0])
+        assert [r["type"] for r in rows] == ["git-snapshot"]
+        err = capsys.readouterr().err
+        assert err.count("host-usage snapshot skipped") == 1
+        assert (
+            "mm: notice: host-usage snapshot skipped (muse unsupported) — "
+            "content sync and git/session capture unaffected. "
+            "muse wrote a record this version cannot read. A newer mm may read it: "
+            "run `mm update`, or run "
+            "`mm disable-source muse` to stop retrying.\n" in err
+        )
+        assert "no newer mm can yet" not in err
+        assert "events backfill failed" not in err
+
+    def test_no_action_notices_returned_without_printing_while_actionable_prints(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        events_root = tmp_path / "events_root"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        sources = _make_sources(events_root, claude_dir, hosts=("codex", "muse"))
+        self._stub(
+            monkeypatch,
+            codex=_mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
+            muse=_mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
+        )
+        monkeypatch.setattr(
+            events_tail.host_registry,
+            "warm_host_cache_inline",
+            lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
+        )
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda _c, **_kw: _mm_events.GitRootDiscovery(
+                (), (_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR,), True
+            ),
+        )
+        monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_INTERACTIVE_MS", 10)
+
+        @contextmanager
+        def fake_lock(mode):
+            yield {}
+
+        monkeypatch.setattr(_mm_token_usage, "lock_and_get_files", fake_lock)
+
+        def slow_walk(_dir, **kwargs):
+            import time
+
+            time.sleep(0.05)
+            return []
+
+        monkeypatch.setattr(_mm_events, "walk_session_metadata", slow_walk)
+
+        notices = events_tail._run_events_backfill(
+            {"sync": {"sources": sources}},
+            sources,
+            "dev-a",
+        )
+
+        err = capsys.readouterr().err
+        # Actionable muse unsupported notice still prints during init
+        assert "host-usage snapshot skipped (muse unsupported)" in err
+        assert "run `mm update`" in err
+        # None of the 3 no-action notices print during init
+        assert "events backfill budget exceeded" not in err
+        assert "git repository discovery hit its time budget" not in err
+        assert "host-usage snapshot skipped (codex deadline)" not in err
+        # All 3 no-action notices are returned for persistence
+        assert events_tail._INIT_BACKFILL_BUDGET_NOTICE in notices
+        assert events_tail._INIT_ROOT_DISCOVERY_NOTICE in notices
+        assert any("host-usage snapshot skipped (codex deadline)" in n for n in notices)
+
+    def test_sweep_level_deadline_is_returned_not_printed(self, tmp_path, monkeypatch, capsys):
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root, claude_dir=None, hosts=("codex",))
+        self._stub(
+            monkeypatch,
+            codex=_mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
+        )
+        monkeypatch.setattr(
+            events_tail,
+            "_capture_host_snapshot",
+            lambda *_a, **_kw: (
+                events_tail.HostUsageCapture(None, "codex", "deadline", dropped=(), invoked=False),
+                [],
+            ),
+        )
+        notices = events_tail._run_events_backfill(
+            {"sync": {"sources": sources}},
+            sources,
+            "dev-a",
+        )
+        err = capsys.readouterr().err
+        assert "host-usage snapshot skipped" not in err
+        assert len(notices) == 1
+        assert "host-usage snapshot skipped (codex deadline)" in notices[0]
+
     def test_absent_mm_events_source_touches_no_host_reader(self, tmp_path, monkeypatch):
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()

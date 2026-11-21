@@ -999,6 +999,8 @@ def status(
 
         # Surface the last autopull/autopush breadcrumb so a wedged sync
         # (silent lock contention, missing passphrase, bad config) is visible.
+        mesh_evidence = attemptlog.read_mesh_waits()
+        mesh_valid = mesh_evidence["state"] == "valid"
         crumbs = auto_evidence["runs"]
         for verb, state in projection.items():
             if state["kind"] == "attended" and state["selected"]:
@@ -1029,6 +1031,8 @@ def status(
                 if summary:
                     console.print("    " + "; ".join(summary) + ". Details: mm diag")
                 for detail in run["degradations"]:
+                    if mesh_valid and detail.startswith("Syncthing device removals wait for "):
+                        continue
                     console.print(safe_str(f"    {detail}"))
                 if run["omitted_details"]:
                     console.print(
@@ -1091,6 +1095,13 @@ def status(
                 and "git repository discovery" in detail
             ):
                 discovery_nag = True
+        if mesh_valid:
+            for wait in mesh_evidence["waits"]:
+                console.print(safe_str(f"    {wait}"))
+            if mesh_evidence["omitted_details"]:
+                console.print(
+                    f"    {mesh_evidence['omitted_details']} diagnostic detail(s) not retained."
+                )
         retro_nag = _print_retro_capture_status(sources_configs, device_id, scan=capture_rows)
         if discovery_nag and not retro_nag:
             console.print(
@@ -1669,6 +1680,7 @@ def _host_publication(
         manifest = None
     projected = events.project_host_publication(scan, readers, manifest)
     projected.update(attemptlog.project(readers, projected.get("ts")))
+    projected["init_notices"] = attemptlog.read_init_notices()
     projected["readiness"] = _config_module.usage_capture_readiness(
         selected, sources, reader_consented=bool(readers)
     )
@@ -1717,6 +1729,19 @@ def _print_host_publication(
         )
     ):
         console.print(f"    {safe_str(line)}")
+    init_evidence = state.get("init_notices")
+    if init_evidence is None:
+        init_evidence = attemptlog.read_init_notices()
+    if isinstance(init_evidence, dict) and init_evidence.get("state") == "valid":
+        init_ts = attemptlog._timestamp(init_evidence.get("completed_at"))
+        attempt_ts = attemptlog._timestamp(state.get("latest_attempt_at"))
+        if init_ts is not None and (attempt_ts is None or attempt_ts < init_ts):
+            for notice in init_evidence.get("notices", ()):
+                console.print(f"    {safe_str(notice)}")
+            if init_evidence.get("omitted_details"):
+                console.print(
+                    f"    {init_evidence['omitted_details']} diagnostic detail(s) not retained."
+                )
     if state.get("coverage_invalid"):
         console.print("    Coverage metadata is inconsistent; reader completeness is unknown.")
     if state["readiness"] != "ready" or (
@@ -2174,9 +2199,14 @@ def _syncthing_diag(storage_path: Path) -> dict[str, Any]:
             "options": dict(st.options),
             "problems": list(st.problems),
             "stignore": st.stignore,
+            "last_mesh": attemptlog.read_mesh_waits(),
         }
     except Exception as exc:
-        return {"state": "error", "cause": type(exc).__name__}
+        return {
+            "state": "error",
+            "cause": type(exc).__name__,
+            "last_mesh": attemptlog.read_mesh_waits(),
+        }
 
 
 def _print_syncthing_diag(st: dict[str, Any]) -> None:

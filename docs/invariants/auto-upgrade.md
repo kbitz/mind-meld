@@ -137,7 +137,12 @@ updating a rollback environment cannot overwrite its unsuffixed sibling.
 Before a forced reinstall, the subprocess seam also refuses an existing
 executable destination that belongs to another install, including an ambient
 `PIPX_BIN_DIR` selecting a sibling home's command. It binds `PIPX_BIN_DIR` to
-the checked directory so self-managed pipx cannot infer a different destination.
+the checked directory so self-managed pipx cannot infer a different destination,
+and sets `UV_VENV_CLEAR=1` in `_pipx_environment` for `install --force`
+(`reinstall_cmd` and `INSTALL_CMD` prefix `UV_VENV_CLEAR=1` as well) so
+recreating an existing venv in place succeeds on pipx's uv backend while
+remaining inert on pipx's default venv backend, without branching on the
+recorded backend.
 
 **Completion is verified from metadata.** A successful pipx exit must leave
 readable metadata for a release-tracking install. When the check found a newer
@@ -461,7 +466,7 @@ setting is off, the install does not track the release branch, pipx is not
 found) or when its attempt failed. `recapture` stays nudge-only.
 
 **Upgrade command tracks the `latest` BRANCH, never a `@vX.Y.Z` TAG (load-bearing).**
-`INSTALL_CMD = "pipx install --force git+https://github.com/kbitz/mind-meld.git@latest"`
+`INSTALL_CMD = "UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest"`
 — a single version-independent constant (NOT a per-version template). The target
 version appears only in the nudge *message* text (`format_upgrade_message`, which
 formats `mm: notice: <old> → <new> available. Run: <install_cmd>` and

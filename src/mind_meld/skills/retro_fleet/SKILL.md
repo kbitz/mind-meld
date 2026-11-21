@@ -150,7 +150,7 @@ target this floor; local pricing upgrades and diagnostics have their own remedie
 interactive `mm push`, whose tail may print something about upgrading. If it
 did, repeat it verbatim, then add: this retro may omit blocks added after your
 installed version; absent means unmeasured, not zero. The upgrade command is
-`pipx install --force git+https://github.com/kbitz/mind-meld.git@latest` — do
+`UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest` — do
 not invent a different one. After they run it they still need
 `mm install-skills`, then an agent restart.
 
