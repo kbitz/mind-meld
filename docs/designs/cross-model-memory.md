@@ -3,8 +3,10 @@
 Status: designed on 2026-11-21 from the developer's decisions of 2026-11-20
 and 2026-11-21. This is [docs/SPEC.md](../SPEC.md) O9, planned now and a
 condition of 2.0.0, with its own MINOR checkpoint for a 1.x release that
-lands it first. Implementation waits for the
-[qualification](#qualification) below. This design replaces the 2026-10-29
+lands it first. Qualified on 2026-11-21 on `linux-a`
+([qualification](#qualification)): Q1 and Q2 passed on the first run and Q3
+kept the default Codex copy set; Tracks 157A, 159A and 160A may start. This
+design replaces the 2026-10-29
 design ([archived](../archive/cross-model-memory-2026-10-29.md)), which
 carried only Codex memory and pointed agents at grep. The developer rejected
 it: "o9 - why just codex? current design seems like we should throw out and
@@ -93,8 +95,9 @@ source works like this:
   `CODEX_HOME/memories/` without changing them, and publishes them as this
   machine's files. The default file set is `memory_summary.md`, `MEMORY.md`
   and `rollout_summaries/*.md`. Codex's `.git`, its SQLite files and anything
-  else outside that set never sync. The qualification settles the set
-  (Q3).
+  else outside that set never sync. Q3 kept this default set on 2026-11-21
+  ([qualification](#qualification)); codex-cli 0.171.0 also initializes
+  `CODEX_HOME/memories_v2/` with the same layout.
 - At pull, mm places each peer's files under
   `~/.local/share/mind-meld/codex-memory/<device id>/`. That folder is mm's,
   outside every native store.
@@ -120,7 +123,7 @@ When the memory index is on, mm keeps qmd collections in qmd's default index:
 | `mm-claude` | `~/.claude/projects` | `*/memory/**/*.md` |
 | `mm-grok` | `~/.grok/memory-v2` | `**/topics/**/*.md` |
 | `mm-muse` | `<Muse root>/memory` | `**/*.md` |
-| `mm-codex-<this machine's name>` | `CODEX_HOME/memories` | the Q3 file set |
+| `mm-codex-<this machine's name>` | `CODEX_HOME/memories` | the Q3 file set (default set kept: `memory_summary.md`, `MEMORY.md`, `rollout_summaries/*.md`) |
 | `mm-codex-<peer name>` | `~/.local/share/mind-meld/codex-memory/<peer id>` | `**/*.md` |
 
 - A collection exists only for an enabled source whose folder exists.
@@ -152,7 +155,7 @@ machine.
 
 ### 5. Agents search, guided by one recommended line
 
-The proposed pointer line, settled by Q1:
+The final pointer line, settled by Q1 and Q2 on 2026-11-21 without revision:
 
 > Before assuming a fact about this project or the owner's preferences,
 > search agent memory with `qmd search "<key words>" -n 10` (every agent,
@@ -257,3 +260,179 @@ Record in this document the results, the observed codex-cli, Claude Code
 and qmd versions, the commands the agents ran and the final pointer line.
 A failed Q1 or Q2 returns the design to the owner before any implementation
 Track starts.
+
+### Results, 2026-11-21
+
+Observed inside the isolated environment on `linux-a`: `codex-cli 0.171.0`,
+`2.1.330 (Claude Code)`, `qmd 2.8.3`, and `node v26.12.0`.
+
+#### Isolation and authentication
+
+- Temporary root `$ROOT` created with `mktemp -d /var/tmp/mm-156b.XXXXXX`
+  (mode `0700`). Layout: `$ROOT/home` (`HOME`), `$ROOT/home/.codex`
+  (`CODEX_HOME` for Q1 and Q2), `$ROOT/home/.config` (`XDG_CONFIG_HOME`),
+  `$ROOT/home/.cache` (`XDG_CACHE_HOME`, placing the qmd index at
+  `$ROOT/home/.cache/qmd/index.sqlite`), `$ROOT/home/.local/share`
+  (`XDG_DATA_HOME`, placing Codex copies at
+  `$ROOT/home/.local/share/mind-meld/codex-memory/mac-a-00000000/`),
+  `$ROOT/home/.local/state` (`XDG_STATE_HOME`), `$ROOT/bin` (symlinks to the
+  resolved `codex`, `claude`, and `qmd` binaries, bypassing `mise` shims),
+  `$ROOT/work` (empty non-git working directory for Q1 and Q2),
+  `$ROOT/q3-codex` (`CODEX_HOME` for Q3, with no `AGENTS.md`), and
+  `$ROOT/q3-work` (Q3 working directory holding one 3-line `project.txt`).
+- Every `qmd` command and agent session ran through `env -i` with an explicit
+  allowlist: `HOME`, `CODEX_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`,
+  `XDG_DATA_HOME`, `XDG_STATE_HOME`, `PATH=$ROOT/bin:/usr/bin:/bin`,
+  `SHELL=/bin/bash`, `LANG`, and `TERM`.
+- Ancestor check: `/var/tmp`, `/var`, and `/` held no `CLAUDE.md`,
+  `AGENTS.md`, `.claude`, or `.git`.
+- Empty-index check before adding collections: `qmd collection list` printed
+  `No collections found. Run 'qmd collection add .' to create one.` and
+  `qmd status` reported `$ROOT/home/.cache/qmd/index.sqlite` with
+  `Total: 0 files indexed` and `Vectors: 0 embedded`.
+- Owner qmd `stat` before the first `qmd` command and after `$ROOT` deletion
+  matched identically: `/home/user/.cache/qmd/index.sqlite` (`size=122880`,
+  `mtime=1793057842`) and `/home/user/.config/qmd/index.yml` (`size=270`,
+  `mtime=1793057842`).
+- Authentication route: fresh subscription logins inside each temporary home
+  (`claude auth login --claudeai` in `$ROOT/home`; `codex login --device-auth`
+  in `$ROOT/home/.codex` and `$ROOT/q3-codex`). No API keys were read or
+  exported, and no credential files were copied from `/home/user`.
+
+#### Seeds and collections
+
+`$ROOT/home/.claude/projects/-home-user-ledger/memory/export.md`:
+
+```markdown
+---
+name: ledger nightly export
+description: Schedule and output path for the ledger nightly export
+type: project
+---
+
+The ledger's nightly export runs at 03:40 UTC and writes `exports/ledger-<date>.parquet`.
+```
+
+`$ROOT/home/.claude/projects/-home-user-ledger/memory/db.md`:
+
+```markdown
+---
+name: ledger database
+description: Database engine for the ledger project
+type: project
+---
+
+Use PostgreSQL 16 for the ledger.
+```
+
+`$ROOT/home/.local/share/mind-meld/codex-memory/mac-a-00000000/MEMORY.md`:
+
+```markdown
+# Task Group: ledger fixtures
+
+Ledger fixtures are regenerated with `make ledger-fixtures SEED=8812`.
+
+# Task Group: ledger database
+
+The ledger uses SQLite, not Postgres.
+```
+
+Collections built (`mm-grok` and `mm-muse` were not seeded):
+
+```bash
+qmd collection add "$ROOT/home/.claude/projects" --name mm-claude --mask '*/memory/**/*.md'
+qmd collection add "$ROOT/home/.local/share/mind-meld/codex-memory/mac-a-00000000" --name mm-codex-mac-a --mask '**/*.md'
+qmd update
+```
+
+Control searches from the harness returned
+`qmd://mm-claude/-home-user-ledger/memory/export.md:2 #be9616` for
+`"ledger nightly export"`,
+`qmd://mm-codex-mac-a/MEMORY.md:1 #8aa6a7` for `"ledger fixtures"`, and both
+`qmd://mm-claude/-home-user-ledger/memory/db.md:2 #627ce9` and
+`qmd://mm-codex-mac-a/MEMORY.md:5 #cea051` for `"ledger database"` and
+`"ledger"`.
+
+#### Q1 and Q2 sessions
+
+Codex sessions ran via
+`codex exec --skip-git-repo-check -C "$ROOT/work" --json -o <file> -s workspace-write --add-dir "$ROOT/home/.cache/qmd"`
+(note for Track 160A: `qmd search` and `qmd get` succeeded inside
+`workspace-write` with `--add-dir` for the qmd cache folder). Claude Code
+sessions ran in `$ROOT/work` via
+`claude -p --output-format stream-json --verbose --no-session-persistence --allowedTools "Bash(qmd *)" "Bash(qmd:*)" -- <prompt>`
+(an initial CLI invocation without `--` before the prompt exited immediately
+with a flag-parsing error before starting a session, because `--allowedTools`
+is variadic). Neither agent ran `qmd query`, `qmd vsearch`, or `qmd embed`,
+and transcript scans showed no file access outside `$ROOT` other than
+`/usr/bin/bash` and `/dev/null`.
+
+| Session | Prompt | Commands run (from transcript) | Answer excerpt | Verdict |
+|---|---|---|---|---|
+| Codex, Q1 | `In the ledger project, when does the nightly export run and where does it write its file? Answer in two sentences.` | `rg --files --hidden -g "!**/.git/**"`; `qmd search "ledger nightly export schedule file destination" -n 10`; `qmd search "export" -n 10`; `qmd search "nightly export" -n 10`; `qmd search "ledger" -n 10`; `qmd get '#be9616'` | "The ledger's nightly export runs at 03:40 UTC. It writes to `exports/ledger-<date>.parquet`." | **PASS** |
+| Claude Code, Q1 | `How do I regenerate the ledger fixtures? Answer in one sentence.` | `qmd search "regenerate ledger fixtures" -n 10; ls -la $ROOT/work; cat $ROOT/home/.claude/projects/-var-tmp-mm-156b-XXXXXX-work/memory/MEMORY.md 2>/dev/null`; `qmd search "ledger fixtures" -n 10; qmd search "ledger-fixtures SEED" -n 10; qmd get "#cea051"` | "Run `make ledger-fixtures SEED=8812`. This comes from a saved agent memory note (`qmd://mm-codex-mac-a/MEMORY.md`), and I couldn't check it against the Makefile because the working directory is empty." | **PASS** |
+| Codex, Q2 | `Which database does the ledger use? Answer briefly.` | `qmd search "ledger database" -n 10`; `qmd get '#cea051'`; `qmd get '#627ce9'` | "Agent memories disagree. - **PostgreSQL 16** — `qmd://mm-claude/-home-user-ledger/memory/db.md` - **SQLite** — `qmd://mm-codex-mac-a/MEMORY.md` Which is correct?" | **PASS** |
+| Claude Code, Q2 | `Which database does the ledger use? Answer briefly.` | `qmd search "ledger database" -n 10`; `qmd get "#627ce9"; echo ----; qmd get "#cea051"` | "Two saved memories give different answers, so I can't tell you which one is right: - `qmd://mm-claude/-home-user-ledger/memory/db.md` says: 'Use PostgreSQL 16 for the ledger.' - `qmd://mm-codex-mac-a/MEMORY.md` says: 'The ledger uses SQLite, not Postgres.' Which is correct?" | **PASS** |
+
+#### Q3: Codex memory files and copy set
+
+Four sessions (~186 s of session runtime, ~13 minutes wall clock) ran with
+`CODEX_HOME=$ROOT/q3-codex` and `--enable memories -c memories.min_rollout_idle_hours=0`
+(accepted without error; `logs_2.sqlite` recorded `feature.memories="true"`,
+`memories.generate_memories="true"`, `memories.use_memories="true"`,
+`memories.max_rollouts_per_startup="2"`, and
+`memories.max_raw_memories_for_consolidation="256"`). S1 and S2 ran via
+`codex exec`; after inspecting `state_5.sqlite` showed that Codex's interactive
+thread index filters on
+`source IN ('cli', 'vscode', '{"custom":"atlas"}', '{"custom":"chatgpt"}')`
+whereas `codex exec` records `source = 'exec'`, S3 and S4 ran via the
+interactive `codex` CLI (`--no-alt-screen --no-daemon`, recording
+`source = 'cli'`).
+
+In S1, `codex-cli 0.171.0` initialized `CODEX_HOME/memories_v2/` (with `.git`
+at commit `d04dc37 Initialize Codex git baseline`), `memories_1.sqlite`,
+`memories_v2_1.sqlite` (with one completed `memory_consolidate_global` job and
+`0` rows in `stage1_outputs`), and `memories_v2.lock`; no `CODEX_HOME/memories/`
+directory was created. `git -C memories_v2 log --oneline` remained at
+`d04dc37 Initialize Codex git baseline` after S1 through S4:
+
+| Path under `CODEX_HOME` | S0 → S1 | S1 → S2 | S2 → S3 | S3 → S4 |
+|---|---|---|---|---|
+| `auth.json` | unchanged (name only) | unchanged (name only) | unchanged (name only) | unchanged (name only) |
+| `memories_1.sqlite` | new (45056 B, `62a1452a`) | unchanged | unchanged | unchanged |
+| `memories_v2_1.sqlite` | new (45056 B, `23024163`) | unchanged | unchanged | unchanged |
+| `memories_v2.lock` | new (0 B, `e3b0c442`) | unchanged | unchanged | unchanged |
+| `memories_v2/memory_summary.md` | new (79 B, `a57aae3d`) | unchanged | unchanged | unchanged |
+| `memories_v2/extensions/ad_hoc/instructions.md` | new (733 B, `d36a3608`) | unchanged | unchanged | unchanged |
+| `memories_v2/.codex-baseline/.git/codex-baseline.lock` | new (0 B, `e3b0c442`) | unchanged | unchanged | unchanged |
+| `memories_v2/.git/HEAD`, `config`, `index`, `refs/heads/main`, `logs/*`, `objects/*` | new (baseline commit `d04dc37`) | unchanged | unchanged | unchanged |
+| `config.toml` | — | — | new (42 B, `0772345e`) | unchanged |
+| `history.jsonl` | — | — | new (366 B, `d1b0dbfa`) | appended (536 B, `4588a2e4`) |
+| `session_index.jsonl` | — | — | new (135 B, `c28e0f97`) | appended (277 B, `58f81059`) |
+| `sessions/2026/11/21/rollout-*.jsonl` (1 per session) | S1 new (154456 B, `f4f9e8bc`) | S2 new (141393 B, `98567fd6`) | S3 new (149766 B, `39dd9395`) | S4 new (140260 B, `82889027`) |
+| `models_cache.json` | new (604152 B, `307bffc5`) | regenerated wholesale (`399d9d98`) | regenerated wholesale (`5ad5d9e2`) | regenerated wholesale (`765e0957`) |
+| `state_5.sqlite` | new (307200 B, `2ee7bb81`) | regenerated wholesale (`006ef6b5`) | unchanged (WAL active) | regenerated wholesale (315392 B, `03d52580`) |
+| `thread_history_1.sqlite` | new (118784 B, `86f93e8e`) | regenerated wholesale (122880 B, `80da121f`) | regenerated wholesale (126976 B, `fffd3fc7`) | regenerated wholesale (131072 B, `f4a3db8e`) |
+| `logs_2.sqlite` | new (49152 B, `b5dcf171`) | unchanged | unchanged (WAL active) | regenerated wholesale (503808 B, `6923e2e4`) |
+
+Because Codex extracted no rollout into `stage1_outputs` and wrote no new
+memory markdown within the four-session budget, the default copy set
+(`memory_summary.md`, `MEMORY.md`, `rollout_summaries/*.md`) is kept, excluding
+`.git`, `.codex-baseline`, SQLite databases, lockfiles, `raw_memories.md`, and
+static `extensions/ad_hoc/instructions.md` boilerplate. Track 157A should
+note that `codex-cli 0.171.0` initialized `CODEX_HOME/memories_v2/` on disk.
+
+#### Final pointer line and outcome
+
+Final pointer line (settled without revision):
+
+> Before assuming a fact about this project or the owner's preferences,
+> search agent memory with `qmd search "<key words>" -n 10` (every agent,
+> every machine; `qmd get <docid>` reads a hit). If memories disagree, show
+> the owner each one with its path and ask which is right; never pick one
+> silently.
+
+All credential files inside `$ROOT` and `$ROOT` itself were deleted after the
+runs; raw transcripts and snapshots are kept off the repository on `linux-a`.
+**Outcome:** Q1 and Q2 passed and Q3 kept the default copy set. Tracks 157A,
+159A and 160A may start.
