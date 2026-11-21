@@ -1006,6 +1006,25 @@ def _optional_host_present(path: Path) -> bool:
         return False
 
 
+def codex_memory_copy_dirs_missing(copies_root: Path) -> list[Path]:
+    """Inspect the copies path from the home directory down, without following links."""
+    dirs = [copies_root]
+    home = Path.home().absolute()
+    for parent in copies_root.parents:
+        if parent == home or parent == parent.parent:
+            break
+        dirs.append(parent)
+    dirs.reverse()
+    for index, directory in enumerate(dirs):
+        try:
+            st = directory.lstat()
+        except FileNotFoundError:
+            return dirs[index:]
+        if not stat.S_ISDIR(st.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "expected a real directory", str(directory))
+    return []
+
+
 def _source_path_available(path_str: str, *, strict: bool, source_name: str) -> bool:
     """Probe a selected source root. Strict mode refuses permission/I/O errors."""
     path = Path(path_str)

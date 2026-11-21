@@ -1067,6 +1067,38 @@ def _prove_omitted_paths_absent(
         base = Path(src_cfg["path"]).expanduser()
         _require_published_source_root(src_name, base)
         local_files = local_sources.get(src_name, {}).get("files", {})
+        if (
+            src_name == manifest.CODEX_MEMORY_SOURCE_NAME
+            and remote_src["files"].keys() - local_files.keys()
+        ):
+            # A missing memory folder is not proof that Codex deleted each
+            # published memory. The folder is never anchored or recreated by mm.
+            memdir = manifest.codex_memory_dir_name(base, strict=True, source_name=src_name)
+            try:
+                real_dir = stat.S_ISDIR((base / memdir).lstat().st_mode)
+            except FileNotFoundError:
+                real_dir = False
+            except OSError as e:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=src_name,
+                        rel_path=memdir,
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            if not real_dir:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=src_name,
+                        rel_path=memdir,
+                        problem="is missing after this source was previously published",
+                        next_action=(
+                            "Restore the memory folder, or run mm disable-source codex-memory."
+                        ),
+                    )
+                )
         for rel_path in remote_src.get("files", {}):
             if rel_path in local_files:
                 continue
@@ -2413,6 +2445,8 @@ def _recover_prior_manifest(
         # freeze) gains the last accepted push's records; blob diffs still
         # compare against fetch.manifest alone.
         sidecar_manifest = sidecar.read(device_id)
+        if sidecar_manifest is not None:
+            manifest.codex_memory_from_wire(sidecar_manifest, recovered_local=True)
         rewrite = "mm push would rewrite it" if dry_run else "rewriting it"
         if sidecar_manifest is None:
             msg = (
@@ -2448,7 +2482,9 @@ def _recover_prior_manifest(
         # in autopush leaves the user with no signal that storage is
         # degrading. Always surface to stderr.
         _warning(msg)
-        return reconcile_recovered_prior(sidecar_manifest)
+        return reconcile_recovered_prior(
+            manifest.codex_memory_from_wire(sidecar_manifest, recovered_local=True)
+        )
 
     # No sidecar — try peer fallback
     peer_tombstones = _collect_peer_tombstones(backend, device_id, passphrase, memory_kb)
@@ -2517,10 +2553,18 @@ def _collect_peer_tombstones(
     if not peer_manifests:
         return {}
 
-    return collect_tombstones(
+    tombstones = collect_tombstones(
         list(peer_manifests.keys()),
         lambda did: peer_manifests.get(did),
     )
+    # Even legitimate Codex memory records from peers have other publishers'
+    # prefixes. The own codec would drop all of them, so they cannot establish
+    # that this device has a usable prior for corrupt-manifest recovery.
+    return {
+        key: info
+        for key, info in tombstones.items()
+        if not key.startswith(f"{manifest.CODEX_MEMORY_SOURCE_NAME}:")
+    }
 
 
 def load_ledger(peer_ids: Iterable[str] | None) -> tuple[pullplan.Ledger, BaseException | None]:

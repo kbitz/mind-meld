@@ -256,8 +256,6 @@ REVIEWED = {
     "pullflow.py:_remove_retired_codex_memory_copies": (
         *_GUARDED,
         [
-            "directory.mkdir(mode=448)",
-            "os.chmod(directory, 448)",
             "directory.rmdir()",
         ],
     ),

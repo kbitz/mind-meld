@@ -27,7 +27,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `walk_muse_source` / `walk_codex_memory_source` / `CODEX_MEMORY_SOURCE_NAME` / `CODEX_MEMORY_DIRS` / `codex_memory_dir_name` / `codex_memory_path_allowed` / `configure_codex_memory` / `codex_memory_to_wire` / `codex_memory_from_wire` / `confine_codex_memory` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `BROWSER_PROFILE_MARKER`
 - `src/mind_meld/core.py` — `_configure_codex_memory` / `encode_manifest` / `compute_mint_guard`
 - `src/mind_meld/pullflow.py` — `_ensure_codex_memory_copies_dir` / `_remove_retired_codex_memory_copies` / `retired_copies_clause` / `retired_copies_detail`
-- `src/mind_meld/config.py` — `CODEX_MEMORY_COPIES_DIR`
+- `src/mind_meld/config.py` — `CODEX_MEMORY_COPIES_DIR` / `codex_memory_copy_dirs_missing`
 - `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths`
 - `src/mind_meld/core.py` — `_prove_omitted_paths_absent`
 - `src/mind_meld/cli.py` — `_warn_push_growth`
@@ -1296,7 +1296,7 @@ reader, which joins the historical `analytics/stage-runs.jsonl` and the sorted
 
 ## Nested git checkouts are frozen, never published
 
-Every source walker prunes a directory with a regular `.git` file (worktree or
+Source walkers that traverse directory trees prune a directory with a regular `.git` file (worktree or
 submodule) or a `.git` directory in which `lstat` finds `HEAD` as a file or
 symlink strictly below its source root, before enumerating or hashing checkout
 contents. An empty or HEAD-less `.git` directory (a placeholder some sandboxed
@@ -1311,6 +1311,8 @@ found and nothing is probed through a link; callers check it before the
 descendant-symlink omission. Strict publishing and status refuse an unreadable component
 or `.git`/`.git/HEAD` probe; permissive scans treat an unreadable `.git` as no
 checkout and a `.git` directory whose `HEAD` cannot be probed as a checkout.
+The `codex-memory` walker reads an explicit file set from Codex's own
+Git-tracked memory folder. It never enters the Git metadata.
 
 **One observation per command.** `build_manifest_v2(nested_roots=...)` returns the
 roots its own walk skipped. Push, status and diff never re-walk for them, and
@@ -2072,11 +2074,12 @@ Defense-in-depth: `_download_and_apply` ALSO checks `local_path.resolve(strict=F
 
 ## Symlink policy at the manifest and apply boundaries (load-bearing, v0.12.17)
 
-Symlinks **below** a source root are local routing, not synced content. Strict publishing scans omit descendant symlinks for Claude, generic, Grok, and Muse; a symlinked source root remains allowed. Prior-state filtering suppresses those omissions for all four types before deletion proof so a converted link is not tombstoned. The source root itself may be a symlink: users can locate an entire source through a link, and resolving that root remains valid. Do not weaken the rel-path traversal defense to admit child links. An unavailable symlink/privacy probe refuses rather than becoming an intentional omission.
+Symlinks **below** a source root are local routing, not synced content. Strict publishing scans omit descendant symlinks for Claude, generic, Grok, Muse, and Codex memory. Prior-state filtering suppresses those omissions before deletion proof so a converted link is not tombstoned. The publishing root itself may be a symlink so users can locate an entire source through a link. Do not weaken the rel-path traversal defense to admit child links. An unavailable symlink/privacy probe refuses rather than becoming an intentional omission.
 
-The Grok and Muse walkers are stricter still: each rejects a candidate whose
+The Grok, Muse, and Codex memory walkers also reject a candidate whose
 inode has more than one link. A hard link to `auth.json` or a session transcript
-inside an allowlisted `skills/` or Muse `memory/` path has no symlink component, but would otherwise evade
+inside an allowlisted `skills/`, Muse memory, or Codex memory path has no symlink
+component but would otherwise evade
 the scoped-source privacy boundary. Do not replace this conservative refusal
 with an inode-path search that can race the filesystem walk.
 
@@ -2297,22 +2300,26 @@ places peers' copies under `config.CODEX_MEMORY_COPIES_DIR`
   `base / rel` unchanged. `core.encode_manifest` applies
   `manifest.codex_memory_to_wire` on a copy in both `wire_names` and old-form
   branches, mapping `<memdir>/<sub>` to `<device id>/<sub>` so published
-  manifests never carry the local folder name. A file key whose first segment
-  is not in `CODEX_MEMORY_DIRS`, or a tombstone colliding with a mapped file,
-  raises `ManifestError` before anything is encrypted or published. Tombstones
+  manifests never carry the local folder name. A file key outside the local
+  form and allowlist, or a tombstone colliding with a mapped file, raises
+  `ManifestError`. The push also runs this check on the assembled snapshot
+  before it uploads any source blobs. Tombstones
   under any other device's prefix (e.g. from peer-fallback recovery) are
   dropped. `manifest.codex_memory_from_wire` runs at the end of `load_manifest`
   (after `manifest_from_wire`) and maps only this device's own manifest back to
   local form via `manifest.configure_codex_memory` (called by
   `core._configure_codex_memory` in `_init_crypto_session`, `_push_core`, and
-  `_pull_core`). Peer manifests stay in wire form.
+  `_pull_core`). Recovery respells a sidecar's paths to the active local folder
+  before comparison. Peer manifests stay in wire form.
 - **Anchorless deletions.** `manifest.scan_roots` returns `[]` for
   `codex-memory` so `publish_anchors` / `observe_anchors` never write
   `.mind-meld-anchor` into Codex's git-tracked memory folder. In
   `core.compute_mint_guard`, a `codex-memory` source with empty `scan_roots`
   mints absent paths as if their root were unchanged while retaining every
   other guard (`still_present`, `prior_accepted`, readable ledger,
-  `newest_stamp`, and held-digest resolution).
+  `newest_stamp`, and held-digest resolution). If an already-published memory
+  folder disappears, the omission proof refuses the push. An empty real
+  memory folder still proves that individual files are absent.
 - **One-writer confinement of files and deletion records.** On pull (when
   building `filtered_cache`, before downloads, `all_tombstones`, and
   `deletion_manifests`) and in peer-fallback collection
@@ -2327,21 +2334,30 @@ places peers' copies under `config.CODEX_MEMORY_COPIES_DIR`
   `local_sources_map["codex-memory"]["path"]` pointing at
   `CODEX_MEMORY_COPIES_DIR`. Before applying files,
   `pullflow._ensure_codex_memory_copies_dir` creates `~/.local/share/mind-meld`
-  and `codex-memory` at mode `0700` without following symlinks; a symlinked or
-  unwritable root fails that source's files with one warning. No source walks
+  and `codex-memory` at mode `0700`. Apply, deletion, retirement and conflict
+  discovery refuse linked directories below the home directory. An absent or
+  refused copies root does not pause deletion propagation in other sources.
+  An unusable root fails this source's incoming files with a warning. No source walks
   `codex-memory/` on push (`mm-events` lists only `events/`).
   `resolveflow._synced_scan_dirs` returns the copies root (never `~/.codex`) so
   `mm conflicts` and `mm resolve` find conflict sidecars created if a copy is
-  edited locally.
+  edited locally. The chosen version settles the ledger relative to the same
+  copies root. A clean copy fast-forwards to its publisher's successor even
+  when the publisher's timestamp is older. Two edits use the conflict flow
+  without automatic `MEMORY.md` line union.
 - **Retirement removal.** On real pulls when `codex-memory` is selected (and
   `source_filter` is `None` or `"codex-memory"`),
   `pullflow._remove_retired_codex_memory_copies` reads authenticated
   `retired/*.enc` records (`devices.read_retirement_records`), validates each
-  retired ID via `storage.keys._validate_component`, moves regular files under
+  retired ID via `storage.keys._validate_component`, skips IDs still registered
+  or waiting on a registration, and moves regular files under
   `<copies root>/<id>/` into the 30-day recovery folder without following
-  symlinks, removes emptied directories, and reports one pull-summary clause
+  symlinks, flushes recovery directories before any move, removes emptied directories,
+  and reports one pull-summary clause
   (`retired_copies_clause` / `retired_copies_detail`). Unreadable or vanished
   records remove nothing, and previews write nothing.
 - **Disable deletes nothing.** Disabling `codex-memory` on one machine drops
   its prior entries through `_filter_unselected_sources` without minting
   deletion records, so peers keep existing copies.
+
+Tests: `tests/test_codex_memory_source.py`.

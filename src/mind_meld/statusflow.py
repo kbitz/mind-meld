@@ -716,8 +716,16 @@ def status(
         source_resolution = core._retain_prior_default_sources(
             resolve_sources(config, strict=True, bootstrap=False), remote_manifest, config
         )
-        sources_configs = source_resolution.available
         selected = source_resolution.selected
+        sources_configs = list(source_resolution.available)
+        remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
+        sources_configs.extend(
+            src
+            for src in selected
+            if src["name"] == manifest.CODEX_MEMORY_SOURCE_NAME
+            and not remote_sources.get(src["name"], {}).get("files")
+            and src not in sources_configs
+        )
         selected_names = {s["name"] for s in selected}
         available_names = {s["name"] for s in sources_configs}
         blocking = None
@@ -796,7 +804,6 @@ def status(
             )
             console.print(safe_str(safety.safe_terminal_str(str(exc))))
             local_manifest = {"sources": {}}
-        remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
         # Selection retirement is metadata too; disabled sources are deliberate.
         source_diffs = list(
             core.iter_content_diffs(local_manifest, remote_sources, source_filter=source)

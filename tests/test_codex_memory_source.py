@@ -6,10 +6,13 @@ import hashlib
 import os
 import stat
 import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from mind_meld import (
@@ -19,15 +22,20 @@ from mind_meld import (
     crypto,
     devices,
     devicesflow,
+    events,
+    events_tail,
+    fsutil,
+    initflow,
     manifest,
     pullflow,
     resolveflow,
     sidecar,
+    skill_link,
     sourceflow,
     statedb,
     statusflow,
 )
-from mind_meld.errors import ConfigError, ManifestError
+from mind_meld.errors import ConfigError, ManifestError, SnapshotError, StorageError
 from mind_meld.storage import keys as storage_keys
 from mind_meld.storage.local import LocalBackend
 
@@ -230,6 +238,28 @@ class TestCodexMemoryConfig:
 
 
 class TestCodexMemoryWalker:
+    def test_holds_a_rollout_removed_after_listing(self, tmp_path, monkeypatch):
+        codex = tmp_path / ".codex"
+        rollouts = codex / "memories_v2" / "rollout_summaries"
+        rollouts.mkdir(parents=True)
+        rollout = rollouts / "old.md"
+        rollout.write_text("old summary\n")
+        original_scandir = os.scandir
+
+        @contextmanager
+        def scan_then_remove(path):
+            with original_scandir(path) as entries:
+                if path == rollouts:
+                    entries = list(entries)
+                    rollout.unlink()
+                yield entries
+
+        monkeypatch.setattr(manifest.os, "scandir", scan_then_remove)
+        holds = manifest.SourceHolds(reasons={}, candidates=set())
+        source = {"name": "codex-memory", "type": "codex-memory", "path": str(codex)}
+        assert manifest.walk_source(source, strict=True, holds=holds)[1] == {}
+        assert holds.candidates == {"memories_v2/rollout_summaries/old.md"}
+
     def test_exact_file_set_and_untouched_tree(self, tmp_path):
         codex = tmp_path / ".codex"
         mem = codex / "memories_v2"
@@ -298,6 +328,73 @@ class TestCodexMemoryWalker:
 
 
 class TestCodexMemoryPublication:
+    def test_invalid_local_form_refuses_before_blob_uploads(self, tmp_path, monkeypatch):
+        env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch)
+        dev = env.devices[DEV_A]
+        (dev.codex / "memories_v2").mkdir()
+        (dev.codex / "memories_v2" / "MEMORY.md").write_text("own copy\n")
+        (dev.home / "notes.md").write_text("other source\n")
+        dev.cfg["sync"]["sources"].insert(
+            0,
+            {
+                "name": "notes",
+                "type": "generic",
+                "path": str(dev.home),
+                "include_files": ["notes.md"],
+            },
+        )
+        build_manifest = cli.build_manifest_v2
+
+        def invalid_local_form(*args, **kwargs):
+            snapshot = build_manifest(*args, **kwargs)
+            files = snapshot["sources"]["codex-memory"]["files"]
+            files[f"{DEV_A}/MEMORY.md"] = files.pop("memories_v2/MEMORY.md")
+            return snapshot
+
+        monkeypatch.setattr(cli, "build_manifest_v2", invalid_local_form)
+        with pytest.raises(ManifestError, match="not in local form"):
+            env.push(DEV_A)
+        assert not env.backend.list_keys("data/")
+        assert not env.backend.exists(storage_keys.manifest_key(DEV_A))
+        assert not (dev.home / manifest.ANCHOR_NAME).exists()
+
+    def test_missing_published_memory_folder_does_not_mint_deletions(self, tmp_path, monkeypatch):
+        env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch)
+        codex = env.devices[DEV_A].codex
+        memories = codex / "memories_v2"
+        memories.mkdir()
+        (memories / "MEMORY.md").write_text("keep this copy\n")
+        env.push(DEV_A)
+        manifest_path = storage_keys.manifest_key(DEV_A)
+        before = env.backend.get(manifest_path)
+
+        memories.rename(codex / "saved-memories")
+        with pytest.raises(SnapshotError, match="previously published"):
+            env.push(DEV_A)
+        assert env.backend.get(manifest_path) == before
+
+    def test_recover_sidecar_after_codex_memory_folder_switches(self, tmp_path, monkeypatch):
+        env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch)
+        codex = env.devices[DEV_A].codex
+        memories = codex / "memories"
+        memories.mkdir()
+        summary = memories / "MEMORY.md"
+        summary.write_text("old\n")
+        env.push(DEV_A)
+        summary.unlink()
+        env.push(DEV_A)
+        old_sidecar = sidecar.read(DEV_A)
+        assert "codex-memory:memories/MEMORY.md" in old_sidecar["tombstones"]
+
+        migrated = codex / "memories_v2"
+        memories.rename(migrated)
+        (migrated / "MEMORY.md").write_text("back after migration\n")
+        env.backend.put(storage_keys.manifest_key(DEV_A), b"unreadable")
+        env.push(DEV_A)
+        raw = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert f"{DEV_A}/MEMORY.md" in raw["sources"]["codex-memory"]["files"]
+        assert f"codex-memory:{DEV_A}/MEMORY.md" not in raw["tombstones"]
+
     def test_push_wire_form_sidecar_noop_and_anchorless_deletion(self, tmp_path, monkeypatch):
         env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch, ((DEV_A, "Mac A"),))
         dev_a = env.devices[DEV_A]
@@ -414,6 +511,8 @@ class TestCodexMemoryPullAndConfinement:
 
         mem_a = dev_a.codex / "memories_v2"
         (mem_a / "rollout_summaries").mkdir(parents=True)
+        (mem_a / ".git").mkdir()
+        (mem_a / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
         (mem_a / "MEMORY.md").write_text("A v1\n")
         (mem_a / "rollout_summaries" / "r1.md").write_text("rollout 1\n")
         env.push(DEV_A)
@@ -435,8 +534,8 @@ class TestCodexMemoryPullAndConfinement:
         (mem_a / "rollout_summaries" / "r1.md").unlink()
         mem_file = mem_a / "MEMORY.md"
         mem_file.write_text("A v2\n")
-        future = time.time() + 15
-        os.utime(mem_file, (future, future))
+        older = time.time() - 60
+        os.utime(mem_file, (older, older))
         env.push(DEV_A)
 
         pull_res = env.pull(DEV_B)
@@ -465,6 +564,36 @@ class TestCodexMemoryPullAndConfinement:
         env.pull(DEV_B)
         assert (dev_b.copies_dir / DEV_A / "memory_summary.md").read_text() == "summary A\n"
         assert not dev_b.codex.exists()
+        monkeypatch.setattr(statusflow, "_syncthing_status_lines", lambda *a, **k: [])
+        status = runner.invoke(cli.app, ["status", "--source", "codex-memory"])
+        assert status.exit_code == 0, status.output
+        assert "Source 'codex-memory'" in status.output
+
+    def test_missing_copies_root_does_not_block_other_source_deletions(self, tmp_path, monkeypatch):
+        env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch)
+        for dev in env.devices.values():
+            dev.cfg["sync"]["sources"].append(
+                {
+                    "name": "notes",
+                    "type": "generic",
+                    "path": str(dev.home),
+                    "include_files": ["notes.md"],
+                }
+            )
+        origin = env.devices[DEV_A].home / "notes.md"
+        receiver = env.devices[DEV_B]
+        copy = receiver.home / "notes.md"
+        origin.write_text("notes to sync\n")
+        env.push(DEV_A)
+        env.pull(DEV_B)
+        assert copy.read_text() == "notes to sync\n"
+        assert not receiver.copies_dir.exists()
+
+        origin.unlink()
+        env.push(DEV_A)
+        assert env.pull(DEV_B).total_deleted == 1
+        assert not copy.exists()
+        assert not receiver.copies_dir.exists()
 
     def test_forged_peer_paths_and_tombstones_refused(self, tmp_path, monkeypatch, capsys):
         env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch)
@@ -510,7 +639,7 @@ class TestCodexMemoryPullAndConfinement:
             },
             "tombstones": {
                 f"codex-memory:{DEV_C}/MEMORY.md": {
-                    "deleted_at": "2026-11-21T01:00:00Z",
+                    "deleted_at": datetime.now(timezone.utc).isoformat(),
                     "device_id": DEV_A,
                     "sha256": c_sha,
                 }
@@ -538,6 +667,7 @@ class TestCodexMemoryPullAndConfinement:
         assert not (dev_b.copies_dir / DEV_A).exists()
         assert "upgrade mm on that machine" in err
         assert "refused 6 paths" in err
+        assert err.count("refused 6 paths") == 1
 
     def test_retired_machine_copies_removed_on_pull_and_autopull(self, tmp_path, monkeypatch):
         env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch)
@@ -565,13 +695,36 @@ class TestCodexMemoryPullAndConfinement:
         env.pull(DEV_B, dry_run=True)
         assert (dev_b.copies_dir / DEV_C / "MEMORY.md").exists()
 
+        # An unavailable recovery directory must leave retired files in place.
+        real_fsync = fsutil.fsync_dir
+
+        def fail_recovery_fsync(path):
+            if path.is_relative_to(dev_b.deleted_copies):
+                raise StorageError("recovery directory could not be flushed")
+            return real_fsync(path)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(fsutil, "fsync_dir", fail_recovery_fsync)
+            assert env.pull(DEV_B).retired_copies_removed == 0
+            assert (dev_b.copies_dir / DEV_C / "MEMORY.md").exists()
+
+        (dev_a.codex / "memories_v2" / "MEMORY.md").write_text("A memory v2\n")
+        env.push(DEV_A)
+
         # Real pull removes C's copies into recovery and keeps A's copies.
         res = env.pull(DEV_B)
         assert res.retired_copies_removed == 1
         assert res.retired_copies_names == ["Linux C"]
         assert res.retired_copies_folder is not None
         assert not (dev_b.copies_dir / DEV_C).exists()
-        assert (dev_b.copies_dir / DEV_A / "MEMORY.md").read_text() == "A memory\n"
+        active_copy = dev_b.copies_dir / DEV_A / "MEMORY.md"
+        assert active_copy.read_text() == "A memory v2\n"
+        assert res.durability_fsync_failures == 0
+        ledger, error = core.load_ledger([DEV_A])
+        assert error is None
+        assert ledger.base(DEV_A, "codex-memory", f"{DEV_A}/MEMORY.md") == manifest.hash_file(
+            active_copy
+        )
         assert (
             Path(res.retired_copies_folder) / "codex-memory" / DEV_C / "MEMORY.md"
         ).read_text() == "C memory\n"
@@ -590,6 +743,13 @@ class TestCodexMemoryPullAndConfinement:
         assert not (dev_b.copies_dir / DEV_C).exists()
         assert (dev_b.copies_dir / DEV_A / "MEMORY.md").exists()
 
+        # The documented ordinary push re-registers a retired ID. The older
+        # authenticated retirement record must not remove its new copies.
+        (dev_c.codex / "memories_v2" / "MEMORY.md").write_text("C after rejoining\n")
+        env.push(DEV_C)
+        assert env.pull(DEV_B).retired_copies_removed == 0
+        assert (dev_b.copies_dir / DEV_C / "MEMORY.md").read_text() == "C after rejoining\n"
+
     def test_edited_copy_conflict_found_by_resolveflow_and_mm_events_ignores_copies(
         self, tmp_path, monkeypatch
     ):
@@ -600,13 +760,14 @@ class TestCodexMemoryPullAndConfinement:
         dev_b = env.devices[DEV_B]
 
         (dev_a.codex / "memories_v2").mkdir(parents=True)
-        (dev_a.codex / "memories_v2" / "memory_summary.md").write_text("v1\n")
+        (dev_a.codex / "memories_v2" / "MEMORY.md").write_text("v1\n")
+        dev_b.codex.rmdir()
         env.push(DEV_A)
         env.pull(DEV_B)
 
         # Edit B's copy locally, then rewrite on A -> conflict sidecar in copies_dir.
-        (dev_b.copies_dir / DEV_A / "memory_summary.md").write_text("local edit on B\n")
-        a_file = dev_a.codex / "memories_v2" / "memory_summary.md"
+        (dev_b.copies_dir / DEV_A / "MEMORY.md").write_text("local edit on B\n")
+        a_file = dev_a.codex / "memories_v2" / "MEMORY.md"
         a_file.write_text("v2 from A\n")
         future = time.time() + 15
         os.utime(a_file, (future, future))
@@ -617,19 +778,66 @@ class TestCodexMemoryPullAndConfinement:
         env.activate(DEV_B)
         hits = resolveflow._find_conflict_files(dev_b.cfg, migrate_pre_inversion=False)
         assert any(src == "codex-memory" and DEV_A in str(cpath) for src, cpath, _ in hits)
+        listed = runner.invoke(cli.app, ["conflicts"])
+        assert listed.exit_code == 0, listed.output
+        assert "Conflict files (1)" in listed.output
+        monkeypatch.setattr(typer, "prompt", lambda *args, **kwargs: "l")
+        resolved = runner.invoke(cli.app, ["resolve"])
+        assert resolved.exit_code == 0, resolved.output
+        assert env.pull(DEV_B).total_conflicted == 0
+        ledger, error = core.load_ledger([DEV_A])
+        assert error is None
+        assert ledger.base(DEV_A, "codex-memory", f"{DEV_A}/MEMORY.md") == manifest.hash_file(
+            a_file
+        )
 
         # mm-events push on B never lists codex-memory/ paths.
         mm_events_src = config.get_default_source("mm-events")
         assert mm_events_src is not None
         mm_events_src["path"] = str(dev_b.copies_dir.parent)
-        _, walked = manifest.walk_source(mm_events_src, strict=True)
-        assert not any("codex-memory" in rel for rel in walked)
+        dev_b.cfg["sync"]["sources"].append(mm_events_src)
+        events_dir = dev_b.copies_dir.parent / "events"
+        events_dir.mkdir()
+        event_path = events.write_push_event(
+            events_dir,
+            DEV_B,
+            [{"type": "mm-push", "device": DEV_B, "ts": datetime.now(timezone.utc).isoformat()}],
+            strict=True,
+        )
+        monkeypatch.setattr(events_tail, "_run_events_tail", lambda *args, **kwargs: [])
+        env.push(DEV_B)
+        published = _decrypt_raw_manifest(env.backend, DEV_B)
+        assert set(published["sources"]["mm-events"]["files"]) == {f"events/{event_path.name}"}
+        assert "codex-memory" not in published["sources"]
 
 
 # ── T5: Init detection, enable/disable, sources, status ──────────────
 
 
 class TestCodexMemoryInitAndSourceCommands:
+    @pytest.mark.parametrize("detected", [False, True])
+    def test_init_enter_persists_the_detected_default(self, tmp_path, monkeypatch, detected):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(config, "CONFIG_PATH", home / "config.toml")
+        monkeypatch.setattr(initflow, "DEFAULT_ARGON2_MEMORY_KB", MEMORY_KB)
+        monkeypatch.setattr(initflow, "_default_device_name", lambda: "Mac A")
+        monkeypatch.setattr(events_tail, "_run_events_backfill", lambda *args, **kwargs: None)
+        monkeypatch.setattr(skill_link, "_ensure_retro_skill_links", lambda **kwargs: ())
+        if detected:
+            active = home / ".codex" / "memories_v2"
+            active.mkdir(parents=True)
+            (active / "memory_summary.md").write_text("init summary\n")
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        inputs = f"{storage}\nMac A\npw\npw\ny\n" + "\n" * 7
+        initialized = runner.invoke(cli.app, ["init", "--new-fleet"], input=inputs)
+        assert initialized.exit_code == 0, initialized.output
+        saved = config.load_config(config.CONFIG_PATH)
+        assert any(src["name"] == "codex-memory" for src in saved["sync"]["sources"]) is detected
+
     def test_detection_for_memories_v2_and_absent(self, tmp_path, monkeypatch):
         from mind_meld import initflow
 

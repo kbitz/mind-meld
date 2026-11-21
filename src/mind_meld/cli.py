@@ -2275,6 +2275,9 @@ def _push_core(
         deleted_hashes=guard.deleted_hashes,
     )
     local_manifest["tombstones"] = tombstones
+    # Validate the assembled Codex snapshot before any source uploads blobs.
+    # The final encoder repeats this check on the published revision.
+    manifest.codex_memory_to_wire(local_manifest)
 
     # Only the REAL remote manifest drives the diff (avoid re-uploading every
     # file just because we're recovering from corruption via the sidecar).
@@ -4356,7 +4359,7 @@ def resolve(
         # storage N times to attribute the REMOTE side, and iCloud cold-cache
         # reads can spike to multi-second per call.
         devices = list_devices(backend)
-        sources_by_name = {s["name"]: s for s in get_sources(config)}
+        sources_by_name = {s["name"]: s for s in resolveflow._conflict_sources(config)}
         _, failed = resolveflow._resolve_interactive_loop(hits, devices, sources_by_name)
     finally:
         release_lock()

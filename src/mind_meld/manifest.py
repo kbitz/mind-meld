@@ -110,7 +110,9 @@ def configure_codex_memory(own_id: str | None, codex_home: Path | str | None) ->
     _CODEX_MEMORY_HOME = Path(codex_home).expanduser() if codex_home is not None else None
 
 
-def codex_memory_dir_name(base: Path | str) -> str:
+def codex_memory_dir_name(
+    base: Path | str, *, strict: bool = False, source_name: str | None = None
+) -> str:
     """Return the active Codex memory directory name under ``base``.
 
     Prefers ``memories_v2`` when it is a real directory, else ``memories`` when
@@ -119,11 +121,8 @@ def codex_memory_dir_name(base: Path | str) -> str:
     root = Path(base).expanduser()
     for name in CODEX_MEMORY_DIRS:
         candidate = root / name
-        try:
-            st = candidate.lstat()
-        except OSError:
-            continue
-        if stat.S_ISDIR(st.st_mode):
+        st = _lstat_or_none(candidate, strict=strict, source_name=source_name, rel_path=name)
+        if st is not None and stat.S_ISDIR(st.st_mode):
             return name
     return CODEX_MEMORY_DIRS[0]
 
@@ -1496,7 +1495,7 @@ def _assert_revision_privacy(
                     next_action=("Remove the descendant symlink or hard link, then run mm push."),
                 )
             )
-    if source_type in ("grok", "muse") and st.st_nlink > 1:
+    if source_type in ("grok", "muse", CODEX_MEMORY_SOURCE_NAME) and st.st_nlink > 1:
         raise SnapshotError(
             snapshot_refusal(
                 source=source_name,
@@ -2785,7 +2784,7 @@ def walk_codex_memory_source(
         return {}
 
     exclude_patterns = list(source_config.get("exclude_patterns") or [])
-    mem_dir = codex_memory_dir_name(base)
+    mem_dir = codex_memory_dir_name(base, strict=strict, source_name=source_name)
     mem_root = base / mem_dir
     mem_st = _lstat_or_none(mem_root, strict=strict, source_name=source_name, rel_path=mem_dir)
     if mem_st is None:
@@ -2849,8 +2848,8 @@ def walk_codex_memory_source(
                     est = entry.stat(follow_symlinks=False)
                 except FileNotFoundError as e:
                     if strict:
-                        if holds is not None:
-                            holds.candidates[rel] = "vanished"
+                        if holds is not None and holds.candidates is not None:
+                            holds.candidates.add(rel)
                             continue
                         raise SnapshotError(
                             snapshot_refusal(
@@ -3771,7 +3770,7 @@ def codex_memory_to_wire(manifest: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(rel, str):
                 raise ManifestError(f"manifest: invalid codex-memory file key {rel!r}")
             first, sep, sub = rel.partition("/")
-            if not sep or first not in CODEX_MEMORY_DIRS or not sub:
+            if not sep or first not in CODEX_MEMORY_DIRS or not codex_memory_path_allowed(sub):
                 raise ManifestError(f"manifest: codex-memory file key {rel!r} is not in local form")
             wire_rel = f"{device_id}/{sub}"
             if wire_rel in new_files:
@@ -3785,7 +3784,7 @@ def codex_memory_to_wire(manifest: dict[str, Any]) -> dict[str, Any]:
             continue
         rel = key[len(tprefix) :]
         first, sep, sub = rel.partition("/")
-        if not sep or not sub:
+        if not sep or not codex_memory_path_allowed(sub):
             continue
         if first in CODEX_MEMORY_DIRS:
             wire_rel = f"{device_id}/{sub}"
@@ -3812,12 +3811,15 @@ def codex_memory_to_wire(manifest: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def codex_memory_from_wire(manifest: dict[str, Any]) -> dict[str, Any]:
+def codex_memory_from_wire(
+    manifest: dict[str, Any], *, recovered_local: bool = False
+) -> dict[str, Any]:
     """Decode this device's own ``codex-memory`` wire keys back to local form.
 
     Mutates ``manifest`` in place and returns it. Runs at the end of
     ``load_manifest`` after ``manifest_from_wire``. Leaves peer manifests
-    unchanged (in wire form ``<peer_id>/<sub>``).
+    unchanged (in wire form ``<peer_id>/<sub>``). When reading a recovered
+    sidecar, also normalize an older local memory folder to the current one.
     """
     if _CODEX_MEMORY_OWN_ID is None or manifest.get("device_id") != _CODEX_MEMORY_OWN_ID:
         return manifest
@@ -3826,7 +3828,15 @@ def codex_memory_from_wire(manifest: dict[str, Any]) -> dict[str, Any]:
         if _CODEX_MEMORY_HOME is not None
         else CODEX_MEMORY_DIRS[0]
     )
-    own_prefix = f"{_CODEX_MEMORY_OWN_ID}/"
+    prefixes = {_CODEX_MEMORY_OWN_ID}
+    if recovered_local:
+        prefixes.update(CODEX_MEMORY_DIRS)
+
+    def local_path(rel: str) -> str:
+        first, sep, sub = rel.partition("/")
+        if sep and sub and first in prefixes:
+            return f"{memdir}/{sub}"
+        return rel
 
     sources = manifest.get("sources")
     entry = (
@@ -3835,15 +3845,10 @@ def codex_memory_from_wire(manifest: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     if entry is not None and isinstance(entry.get("files"), dict):
-        mapped_files: dict[str, Any] = {}
-        for rel, info in entry["files"].items():
-            if isinstance(rel, str) and rel.startswith(own_prefix):
-                sub = rel[len(own_prefix) :]
-                if sub:
-                    mapped_files[f"{memdir}/{sub}"] = info
-                    continue
-            mapped_files[rel] = info
-        entry["files"] = mapped_files
+        entry["files"] = {
+            local_path(rel) if isinstance(rel, str) else rel: info
+            for rel, info in entry["files"].items()
+        }
 
     tombstones = manifest.get("tombstones")
     if isinstance(tombstones, dict):
@@ -3851,12 +3856,7 @@ def codex_memory_from_wire(manifest: dict[str, Any]) -> dict[str, Any]:
         mapped_tombs: dict[str, Any] = {}
         for key, info in tombstones.items():
             if isinstance(key, str) and key.startswith(tprefix):
-                rel = key[len(tprefix) :]
-                if rel.startswith(own_prefix):
-                    sub = rel[len(own_prefix) :]
-                    if sub:
-                        mapped_tombs[f"{tprefix}{memdir}/{sub}"] = info
-                        continue
+                key = tprefix + local_path(key[len(tprefix) :])
             mapped_tombs[key] = info
         manifest["tombstones"] = mapped_tombs
     return manifest

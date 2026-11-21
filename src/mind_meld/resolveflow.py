@@ -122,14 +122,13 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
                 dirs.append(candidate)
         return dirs
     if src_type == "codex-memory":
-        copies_root = Path(_config_module.CODEX_MEMORY_COPIES_DIR).expanduser()
+        copies_root = Path(_config_module.CODEX_MEMORY_COPIES_DIR).expanduser().absolute()
         try:
-            st = copies_root.lstat()
+            return (
+                [] if _config_module.codex_memory_copy_dirs_missing(copies_root) else [copies_root]
+            )
         except OSError:
             return []
-        if stat.S_ISDIR(st.st_mode):
-            return [copies_root]
-        return []
     # generic: include_dirs (resolved) + base for single-file includes
     dirs = []
     for d in src_cfg.get("include_dirs", []):
@@ -267,6 +266,19 @@ def _migrate_pre_inversion_conflict(path: Path) -> Path:
     return new_path
 
 
+def _conflict_sources(config: dict) -> list[dict]:
+    """Resolve the enabled sources against their local conflict destinations."""
+    sources = list(get_sources(config))
+    codex = next(
+        (s for s in resolve_sources(config).selected if s.get("type") == "codex-memory"),
+        None,
+    )
+    if codex is not None:
+        sources = [s for s in sources if s["name"] != "codex-memory"]
+        sources.append({**codex, "path": _config_module.CODEX_MEMORY_COPIES_DIR})
+    return sources
+
+
 def _find_conflict_files(
     config: dict,
     *,
@@ -341,17 +353,12 @@ def _find_conflict_files(
         seen.add(key)
         hits.append((src_name, conflict_path, canonical))
 
-    sources_to_scan = list(get_sources(config))
-    seen_src_names = {s["name"] for s in sources_to_scan}
-    for src_cfg in resolve_sources(config).selected:
-        if src_cfg.get("type") == "codex-memory" and src_cfg["name"] not in seen_src_names:
-            sources_to_scan.append(src_cfg)
-            seen_src_names.add(src_cfg["name"])
-
-    for src_cfg in sources_to_scan:
-        base_path = Path(src_cfg["path"]).expanduser().resolve()
-        if src_cfg.get("type") != "codex-memory" and not base_path.exists():
-            continue
+    for src_cfg in _conflict_sources(config):
+        base_path = Path(src_cfg["path"]).expanduser()
+        if src_cfg.get("type") != "codex-memory":
+            base_path = base_path.resolve()
+            if not base_path.exists():
+                continue
 
         # (1) Recursive scan in include_dirs / SYNCED_SUBDIRS.
         for scan_dir in _synced_scan_dirs(src_cfg, base_path):
@@ -360,6 +367,13 @@ def _find_conflict_files(
             for conflict_path in scan_dir.rglob(f"*{CONFLICT_INFIX}*"):
                 if not is_conflict_filename(conflict_path.name):
                     continue
+                if src_cfg.get("type") == "codex-memory":
+                    canonical_pre = manifest._canonical_for_conflict(conflict_path)
+                    if manifest.path_has_descendant_symlink(conflict_path, scan_dir) or (
+                        canonical_pre is not None
+                        and manifest.path_has_descendant_symlink(canonical_pre, scan_dir)
+                    ):
+                        continue
                 try:
                     is_regular = conflict_path.is_file()
                 except OSError as e:
@@ -496,6 +510,8 @@ def _promote_target_will_sync(src_cfg: dict, target: Path) -> bool:
     either, so promote produces a file that will not sync until the user adds
     it to config.
     """
+    if src_cfg.get("type") == "codex-memory":
+        return False
     base_path = Path(src_cfg["path"]).expanduser().resolve()
     try:
         resolved_target = target.resolve()
@@ -1098,7 +1114,8 @@ def _resolve_interactive_loop(
                     )
                     failed += 1
                 else:
-                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
+                    if src_name != manifest.CODEX_MEMORY_SOURCE_NAME:
+                        _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
                     resolved += 1
                     outcome = (
                         f"kept local; promoted {safe_terminal_str(cpath.name)} -> "
@@ -1115,7 +1132,8 @@ def _resolve_interactive_loop(
                     )
                     failed += 1
                 else:
-                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
+                    if src_name != manifest.CODEX_MEMORY_SOURCE_NAME:
+                        _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
                     resolved += 1
                     outcome = f"kept local; discarded remote {safe_terminal_str(cpath.name)}"
         elif choice in ("r", "remote"):
@@ -1219,7 +1237,11 @@ def _resolve_interactive_loop(
                 )
                 failed += 1
             else:
-                if not is_pre_inversion and peer_mtime > 0.0:
+                if (
+                    not is_pre_inversion
+                    and peer_mtime > 0.0
+                    and src_name != manifest.CODEX_MEMORY_SOURCE_NAME
+                ):
                     _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
                 resolved += 1
                 outcome = (
