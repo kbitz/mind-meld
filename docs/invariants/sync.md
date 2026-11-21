@@ -27,7 +27,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `walk_muse_source` / `walk_codex_memory_source` / `CODEX_MEMORY_SOURCE_NAME` / `CODEX_MEMORY_DIRS` / `codex_memory_dir_name` / `codex_memory_path_allowed` / `configure_codex_memory` / `codex_memory_to_wire` / `codex_memory_from_wire` / `confine_codex_memory` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `BROWSER_PROFILE_MARKER`
 - `src/mind_meld/core.py` — `_configure_codex_memory` / `encode_manifest` / `compute_mint_guard`
 - `src/mind_meld/pullflow.py` — `_ensure_codex_memory_copies_dir` / `_remove_retired_codex_memory_copies` / `retired_copies_clause` / `retired_copies_detail`
-- `src/mind_meld/config.py` — `CODEX_MEMORY_COPIES_DIR` / `codex_memory_copy_dirs_missing`
+- `src/mind_meld/config.py` — `CODEX_MEMORY_COPIES_DIR` / `codex_memory_copy_dirs_missing` / `memory_index_enabled` / `memory_index_embeddings`
+- `src/mind_meld/memoryindex.py` — `desired_collections` / `refresh` / `remove_mm_collections` / `start_detached_refresh` / `read_state` / `diag_state` / `memory_index` / (see "Memory index refresh (Track 159A)")
 - `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths`
 - `src/mind_meld/core.py` — `_prove_omitted_paths_absent`
 - `src/mind_meld/cli.py` — `_warn_push_growth`
@@ -50,7 +51,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/syncdiag.py` — local historical pull and anchor observations
 - `src/mind_meld/syncthing.py` / `src/mind_meld/statusflow.py` — `_peer_states` / `_overdue_peers_line` / `_format_peer_state` / `_syncthing_status_lines` / `_syncthing_diag` / `_print_syncthing_diag` / `src/mind_meld/pullflow.py` — `_record_peer_cursors` / `src/mind_meld/statedb.py` — `read_cursors` / `commit_cursors` / `src/mind_meld/core.py` — `_manifest_cursor_hash` / `_manifest_content_hash` / `ManifestFetch.canonical_hash` / `_prefetch_manifests` (`canonical_hashes_out`) (see "Syncthing state and each peer's push (Track 92A)")
 
-Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_push_anchors.py` (anchors, mint guard, `left_out`, and ancestry), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables), and for Track 92A Syncthing inspection and peer push state `tests/test_syncthing.py`, `tests/test_diag.py`, `tests/test_pullflow.py`, `tests/test_projectid.py` and `tests/test_statedb.py`, and for Track 157A Codex memory copies `tests/test_codex_memory_source.py`.
+Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_push_anchors.py` (anchors, mint guard, `left_out`, and ancestry), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables), and for Track 92A Syncthing inspection and peer push state `tests/test_syncthing.py`, `tests/test_diag.py`, `tests/test_pullflow.py`, `tests/test_projectid.py` and `tests/test_statedb.py`, and for Track 157A Codex memory copies `tests/test_codex_memory_source.py`, and for Track 159A memory index refresh `tests/test_memory_index.py`.
 
 ---
 
@@ -2405,3 +2406,53 @@ places peers' copies under `config.CODEX_MEMORY_COPIES_DIR`
   deletion records, so peers keep existing copies.
 
 Tests: `tests/test_codex_memory_source.py`.
+
+## Memory index refresh (Track 159A)
+
+Each machine where `[memory_index] enabled = true` is set in local `config.toml`
+maintains one local qmd index over enabled providers' memory folders and
+per-machine Codex memory copies. The index is derived and never synced; the
+markdown files remain the source of truth.
+
+- **Collection boundary.** `memoryindex.py` adds or removes only
+  `mm-`-prefixed collections (`mm-claude`, `mm-grok`, `mm-muse`,
+  `mm-codex-<slug>`) through qmd's own CLI (argv-only, never a shell) and never
+  reads or edits qmd's files directly. It selects the machine-wide qmd index
+  explicitly, even when a sync starts inside a project with its own qmd index.
+  `qmd update` refreshes all collections in that machine index.
+  Own Codex uses `manifest.codex_memory_dir_name`
+  with the brace mask `{MEMORY.md,memory_summary.md,rollout_summaries/*.md}`;
+  peer Codex collections are driven by real subdirectories on disk under
+  `CODEX_MEMORY_COPIES_DIR`, named from the plaintext device registry with
+  device-id fallback and deterministic collision suffixes.
+- **Post-lock sync tails.** Attended `mm push` and `mm pull` call
+  `cli._sync_memory_index(config)` (module-qualified `memoryindex.refresh`)
+  after `core._release_sync_lock()`, only on a completed non-preview sync, and
+  print nothing on success or failure; with `embeddings = true`, a successful
+  `qmd update` spawns `qmd embed` detached with all streams set to `DEVNULL`.
+  `mm autopush` and `mm autopull` spawn `memoryindex.start_detached_refresh`
+  (`sys.executable -P -m mind_meld.memoryindex`, all streams `DEVNULL`,
+  `start_new_session=True`) after `_auto_command_scope` exits and releases the
+  lock, never wait, and print nothing. The child starts outside the caller's
+  project directory.
+- **Failure isolation and single-flight state.** A missing qmd, old version
+  (< 2.8.3), or failed/timed-out refresh never changes a sync's outcome or exit
+  code. `refresh` holds a single-flight `lockedjson.locked_json_rmw` flock on
+  `memory-index.json` bounded by one 30-second deadline (contended runs skip
+  silently without writing) and persists a closed-vocabulary record
+  (`version`, `result`, `at`, `qmd_version`, `collections`).
+  The on/off commands take the same flock. Off waits up to the refresh budget
+  for an active refresh to finish. A busy lock at the deadline produces a
+  retry message.
+  Refresh rechecks the saved toggle under that lock so a completed off command
+  also stops refreshes launched with older sync config.
+- **Write-free previews and inspection.** Previews (`--dry-run`) never refresh,
+  `mm status` never runs qmd (reads `memory-index.json` via non-blocking
+  `locked_json_snapshot` only when enabled), and `mm diag` probes qmd only when
+  enabled. The bare command and enabled diag verify recorded collection names
+  with `qmd collection show`. The list command initializes the qmd index, so
+  it runs only on refresh and cleanup. Config toggles use
+  `config.patch_config_on_disk` and state writes use `lockedjson`. Both have
+  the pytest write guard. Detached refresh and embed send output to `DEVNULL`.
+
+Tests: `tests/test_memory_index.py`.

@@ -39,6 +39,7 @@ DIAG_KEYS = {
     "host_publication",
     "discovery",
     "git_capture",
+    "memory_index",
 }
 
 

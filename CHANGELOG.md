@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.78] - 2026-11-21
+
+An opt-in local qmd index lets one search cover memories from every synced agent and machine, and a successful sync refreshes it.
+
+### Added
+
+- With the memory index on, `qmd search` finds memories from every synced agent and machine, refreshed after each `mm push` and `mm pull`.
+- Use `mm memory-index on` to search enabled agents' memories in one local qmd index.
+
+### Changed
+
+- Successful syncs refresh the opt-in index automatically, and `mm status` reports refresh failures.
+
+### Upgrade notes
+
+- Each machine keeps the index off until `mm memory-index on` is run there, and that command needs qmd 2.8.3 or newer on the path.
+
 ## [1.12.77] - 2026-11-21
 
 `mm pull` waits briefly for Syncthing to finish delivering a peer's push and says when files are still on their way, while `mm status` separates live delivery from the last hook observation.

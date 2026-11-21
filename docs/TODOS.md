@@ -44,6 +44,28 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/memoryindex.py] Avoid overlapping qmd embedding processes if they interfere with sync
+
+- **Description:** With embeddings enabled, a completed refresh can start an embed while an earlier embed is still running. Track 159A leaves background embedding to qmd and keeps keyword search as the default.
+- **Evidence:** Greptile found the overlap possible on Track 159A. The review did not observe a failed refresh or search.
+- **Revisit:** If concurrent embeddings slow an owner's machine, repeat model downloads, or cause a refresh to fail. Measure the overlap before adding an embedding-specific guard.
+
+### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Reject changed qmd collection output
+
+- **Test gap:** No demonstrated defect.
+- **Description:** The qmd stub exercises nonzero list and show exits. It does not cover a successful exit with an invalid collection header or missing collection details.
+- **Hypothesis (untested):** Return malformed output with exit zero and verify that refresh records a failure before issuing collection mutations or an update.
+- **Evidence:** Track 159A coverage audit, path 09.
+- **Revisit:** When a qmd release changes either collection output format or the parsing code next changes.
+
+### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Finish disabling the index after an active refresh
+
+- **Test gap:** No demonstrated defect.
+- **Description:** Tests cover disabling with a free lock and with a lock that stays busy. They do not cover the lock becoming available during the retry budget.
+- **Hypothesis (untested):** Release a held refresh flock during the retry and verify that `mm memory-index off` saves the disabled setting and removes the managed collections.
+- **Evidence:** Track 159A adversarial delta review and coverage audit, path 27.
+- **Revisit:** When the refresh locking code next changes or an owner reports a disable retry after a refresh completes.
+
 ### [review:files=src/mind_meld/pullflow.py|tests/test_codex_memory_source.py] Test gap: Refuse an unusable Codex copies destination
 
 - **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.

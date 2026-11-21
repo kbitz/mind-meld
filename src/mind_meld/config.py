@@ -701,6 +701,18 @@ def _apply_defaults(config: dict[str, Any]) -> None:
     elif not isinstance(upgrade["auto_install"], bool):
         upgrade["auto_install"] = False
 
+    # Local qmd memory index (Track 159A): off by default, per-machine. Same
+    # no-crash leniency as [upgrade].auto_install — this table lets mm run an
+    # external process, so a non-dict table or non-bool value reads as off.
+    raw_memory_index = config.get("memory_index")
+    memory_index: dict[str, Any] = raw_memory_index if isinstance(raw_memory_index, dict) else {}
+    if not isinstance(raw_memory_index, dict):
+        config["memory_index"] = memory_index
+    if not isinstance(memory_index.get("enabled"), bool):
+        memory_index["enabled"] = False
+    if not isinstance(memory_index.get("embeddings"), bool):
+        memory_index["embeddings"] = False
+
     # Canonicalize paths: expanduser + resolve matches the walker / storage pattern.
     # claude_dir is only present in legacy configs; guard the expansion accordingly.
     config["storage"]["path"] = str(Path(config["storage"]["path"]).expanduser().resolve())
@@ -970,6 +982,22 @@ def grok_usage_consented(config: dict[str, Any]) -> bool:
             return True
     retro = config.get("retro")
     return isinstance(retro, dict) and retro.get("grok_host_usage") is True
+
+
+def memory_index_enabled(config: dict[str, Any] | None) -> bool:
+    """Return True when the local qmd memory index is enabled on this device."""
+    if not isinstance(config, dict):
+        return False
+    table = config.get("memory_index")
+    return isinstance(table, dict) and table.get("enabled") is True
+
+
+def memory_index_embeddings(config: dict[str, Any] | None) -> bool:
+    """Return True when background qmd embeddings are enabled on this device."""
+    if not isinstance(config, dict):
+        return False
+    table = config.get("memory_index")
+    return isinstance(table, dict) and table.get("embeddings") is True
 
 
 def _resolve_source_path(value: str, *, label: str) -> str:
