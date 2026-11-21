@@ -1945,7 +1945,9 @@ ledger and `pullhistory` follow the actual peer and file outcomes. Pending
 delivery alone keeps the pull successful. `delivering_clause` (`Syncthing is still
 delivering N files. Run: mm pull`, or countless form) is appended by
 `cli._sync_success` and `_print_pull_summary` so `Pull: no changes.` /
-`nothing to apply` never stands alone while delivery is pending. An initial
+`nothing to apply` never stands alone while delivery is pending.
+`cli._sync_failure` includes the pending observation in its error details
+and keeps the repair command last. An initial
 probe with an unreachable, unauthorized or unconfigured API or `no-folder`
 (for example, iCloud Drive) adds no delivery output. `mm autopull` prints
 nothing for pending delivery and adds `delivering_detail` to the breadcrumb

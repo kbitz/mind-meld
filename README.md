@@ -408,7 +408,8 @@ waiting up to `[sync] pull_syncthing_wait_ms` (default 15,000 ms) after the prob
 A non-terminal pull or a pull with the setting at `0` proceeds after one probe.
 If delivery still appears pending, pull applies what has arrived and adds
 `Pull: Syncthing is still delivering N files. Run: mm pull.` Pending delivery
-alone keeps exit 0.
+alone keeps exit 0. If a file fails to apply, the error also includes the
+pending delivery observation and ends with the repair command.
 
 `mm autopull` makes one probe with a 500 ms REST budget and records pending
 delivery in a successful run without printing anything for it. `mm status`

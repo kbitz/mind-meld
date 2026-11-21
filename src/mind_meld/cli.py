@@ -1132,6 +1132,8 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> list[s
             effects += f"; {clause}"
         if clause := pullflow.waiting_clause(result):
             effects += f"; {clause}"
+        if clause := pullflow.delivering_clause(result, with_retry=False):
+            effects += f"; {clause}"
     elif isinstance(result, PushResult) and result.content_accepted:
         accepted = result.published_content_files
         if accepted is None:

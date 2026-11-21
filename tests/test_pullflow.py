@@ -5017,6 +5017,24 @@ def test_cli_autopull_records_pending_syncthing_delivery_in_success_breadcrumb_s
     assert "Syncthing is still delivering 2 files. Run: mm pull" in crumb["detail"]
 
 
+def test_sync_failure_reports_pending_delivery_and_keeps_the_repair_command_last():
+    from mind_meld import cli
+
+    result = pullflow.PullResult(
+        total_written=1,
+        total_failed=1,
+        syncthing_still_delivering=True,
+        syncthing_pending_files=2,
+    )
+    lines = cli._sync_failure("pull", {"run": {"result": result}}, None)
+
+    assert len(lines) == 2
+    assert "1 file applied, 1 failed" in lines[0]
+    assert "Syncthing is still delivering 2 files." in lines[0]
+    assert "Run: mm pull" not in lines[0]
+    assert lines[1] == "Run: mm diag"
+
+
 # ── T3: summary counts across peers and deletion-only pulls ───────────
 
 

@@ -3258,12 +3258,12 @@ def waiting_detail(result: PullResult) -> str:
     return "; ".join(_waiting_items(result, detail=True))
 
 
-def delivering_clause(result: PullResult) -> str:
+def delivering_clause(result: PullResult, *, with_retry: bool = True) -> str:
     """The outcome-line clause when Syncthing is still delivering folder files,
     or "" when delivery is not pending."""
     if not result.syncthing_still_delivering:
         return ""
-    return syncthing.delivery_notice(result.syncthing_pending_files)
+    return syncthing.delivery_notice(result.syncthing_pending_files, with_retry=with_retry)
 
 
 def delivering_detail(result: PullResult) -> str:

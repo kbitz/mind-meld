@@ -105,8 +105,9 @@ def delivery_files(count: int | None) -> str:
     return f"{count} {'file' if count == 1 else 'files'}"
 
 
-def delivery_notice(count: int | None) -> str:
-    return f"{_DELIVERY_NOTICE_PREFIX}{delivery_files(count)}{_DELIVERY_NOTICE_FIX}"
+def delivery_notice(count: int | None, *, with_retry: bool = True) -> str:
+    notice = f"{_DELIVERY_NOTICE_PREFIX}{delivery_files(count)}"
+    return f"{notice}{_DELIVERY_NOTICE_FIX}" if with_retry else notice
 
 
 def historical_delivery_detail(detail: str) -> str:
