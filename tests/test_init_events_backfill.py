@@ -499,6 +499,12 @@ class TestBackfillHostSnapshot:
         assert events_tail._INIT_BACKFILL_BUDGET_NOTICE in notices
         assert events_tail._INIT_ROOT_DISCOVERY_NOTICE in notices
         assert any("host-usage snapshot skipped (codex deadline)" in n for n in notices)
+        rows = [
+            row
+            for path in (events_root / "events").glob("*.jsonl")
+            for row in _read_event_rows(path)
+        ]
+        assert {row["type"] for row in rows} == {"git-snapshot", "sessions-snapshot"}
 
     def test_sweep_level_deadline_is_returned_not_printed(self, tmp_path, monkeypatch, capsys):
         events_root = tmp_path / "events_root"
@@ -544,11 +550,16 @@ class TestInitWiring:
     need to confirm the wiring is present so a refactor that drops the
     call site fails loudly."""
 
-    def test_init_calls_run_events_backfill(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("with_notice", [False, True])
+    def test_init_calls_run_events_backfill(self, tmp_path, monkeypatch, with_notice):
         """Stub the backfill helper, drive ``mm init`` via the runner,
-        assert the helper was called once with the right device_id."""
+        and exercise the notice handoff through the next attended push."""
+        # Protects the CLI's persistence and expiry wiring. Fails when init
+        # drops the returned notice or push fails to replace it. The direct
+        # backfill and seeded inspection cases bypass those handoffs. Seam: none.
         from typer.testing import CliRunner
 
+        from mind_meld import attemptlog, config
         from mind_meld.cli import app
 
         runner = CliRunner()
@@ -556,11 +567,19 @@ class TestInitWiring:
         cfg_path = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
+        claude = tmp_path / ".claude"
+        (claude / "projects").mkdir(parents=True)
+        default_claude = next(
+            source for source in config.DEFAULT_SOURCES if source["name"] == "claude"
+        )
+        monkeypatch.setitem(default_claude, "path", str(claude))
 
         calls: list[tuple] = []
+        notice = events_tail._INIT_BACKFILL_BUDGET_NOTICE
 
         def stub_backfill(config, sources, device_id):
             calls.append((config["device"]["id"], device_id, len(sources)))
+            return [notice] if with_notice else None
 
         monkeypatch.setattr("mind_meld.events_tail._run_events_backfill", stub_backfill)
         # Stub the skill link installer too — irrelevant to this test and
@@ -580,6 +599,20 @@ class TestInitWiring:
         cfg_dev_id, called_dev_id, n_sources = calls[0]
         assert cfg_dev_id == called_dev_id, "device_id must match config"
         assert n_sources >= 1, "sources list must not be empty"
+        if not with_notice:
+            assert attemptlog.read_init_notices()["state"] == "missing"
+            return
+
+        assert attemptlog.read_init_notices()["notices"] == [notice]
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "pw123")
+        status = runner.invoke(app, ["status"])
+        assert status.exit_code == 0, status.output
+        assert notice in status.stdout
+        pushed = runner.invoke(app, ["push"])
+        assert pushed.exit_code == 0, pushed.output
+        diag = runner.invoke(app, ["diag", "--json"])
+        assert diag.exit_code == 0, diag.output
+        assert json.loads(diag.stdout)["host_publication"]["init_notices"]["state"] == "superseded"
 
     def test_init_passes_derived_skill_consent_to_installer(self, tmp_path, monkeypatch):
         """The init hook receives the same source-derived consent as push."""

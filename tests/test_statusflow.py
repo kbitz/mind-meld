@@ -1056,6 +1056,36 @@ def test_newer_mesh_record_hides_only_removal_waits_from_a_legacy_hook(inspectio
     assert old_detail in core._autorun_breadcrumb_path().read_text()
 
 
+@pytest.mark.parametrize("unexplained", [0, 1])
+def test_cleared_legacy_attended_wait_does_not_mask_other_degradation_counts(
+    inspection, monkeypatch, unexplained
+):
+    # Protects a clear across verbs with historical, production-shaped counts.
+    # Fails when the old wait alone keeps status actionable or when clearing
+    # a wait also discards an unrelated degradation. The older fixture carries
+    # mixed text rather than the aggregate diagnostic count. Seam: none.
+    from mind_meld import attemptlog, sidecar
+
+    _, root = inspection
+    monkeypatch.setattr(sidecar, "SIDECAR_DIR", root.parent)
+    wait = "Syncthing device removals wait for a complete fleet registry read. Run: mm diag"
+    legacy = attemptlog.make_run(
+        outcome="degraded",
+        cause="result-degraded",
+        counts={"events_degradations": 1 + unexplained},
+        degradations=[wait],
+        completed_at="2026-11-20T10:00:00+00:00",
+    )
+    attemptlog.write_run("pull", legacy)
+    attemptlog.write_mesh_waits([], completed_at="2026-11-20T10:05:00+00:00")
+
+    status = runner.invoke(app, ["status"])
+    assert status.exit_code == 0, status.output
+    assert wait not in status.stdout
+    assert ("Latest pull needs attention" in status.stdout.splitlines()[0]) == bool(unexplained)
+    assert attemptlog.read_runs()["runs"]["pull"] == legacy
+
+
 def test_status_and_diag_display_init_notices_until_attended_capture_replaces_them(
     inspection, monkeypatch
 ):

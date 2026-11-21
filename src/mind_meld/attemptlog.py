@@ -622,10 +622,7 @@ def _run_needs_action(run: dict) -> bool:
     return not (
         (
             run.get("degradations") == [events_tail._ROOT_DISCOVERY_EMPTY_DEGRADATION]
-            or (
-                run.get("removal_wait_only") is True
-                and not run.get("counts", {}).get("events_degradations")
-            )
+            or run.get("removal_wait_only") is True
         )
         and not run.get("omitted_details")
         and not any(
@@ -673,7 +670,11 @@ def project_runs(
                         for line in raw["degradations"]
                         if not line.startswith(MESH_WAIT_PREFIX)
                     ]
-                    if not run["degradations"]:
+                    # Older attended runs counted each wait in this total.
+                    # An excess count can still represent a different degradation.
+                    if not run["degradations"] and run["counts"].get(
+                        "events_degradations", 0
+                    ) <= len(raw["degradations"]):
                         run["removal_wait_only"] = True
             else:
                 outcome = raw.get("outcome") if isinstance(raw, dict) else None
