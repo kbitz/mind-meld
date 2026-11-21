@@ -910,3 +910,21 @@ def test_init_notices_roundtrip_newest_wins_and_normalizes_closed_vocabulary():
     # Older completion never overwrites newer completion
     attemptlog.write_init_notices([], completed_at=t_old)
     assert attemptlog.read_init_notices() == read_new
+
+
+def test_init_notices_reader_requires_a_closed_host_phrase():
+    attemptlog.init_notices_path().write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "completed_at": "2026-11-20T10:00:00+00:00",
+                "notices": [
+                    "host-usage snapshot skipped (codex deadline) — "
+                    "content sync and git and session capture unaffected. Unrecognized advice."
+                ],
+                "omitted_details": 0,
+            }
+        )
+    )
+
+    assert attemptlog.read_init_notices()["state"] == "corrupt"

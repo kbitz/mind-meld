@@ -1448,6 +1448,10 @@ def test_mesh_still_renames_when_pairing_loses_fleet_folder(fake_syncthing, tmp_
     fake_syncthing.set_folder(root, peers=[(peer_id, "old-peer-name", True)])
     fake_syncthing.responses["/rest/config/devices"][0]["name"] = "old-own-name"
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {joining_id: {}}
+    attemptlog.write_mesh_waits(
+        ["Syncthing device removals wait for a complete fleet registry read. Run: mm diag"]
+    )
+    previous_waits = attemptlog.read_mesh_waits()
 
     def move_folder_after_add(method, path, body):
         if method == "POST" and path == "/rest/config/devices":
@@ -1456,6 +1460,7 @@ def test_mesh_still_renames_when_pairing_loses_fleet_folder(fake_syncthing, tmp_
     fake_syncthing.on_write = move_folder_after_add
     res = runner.invoke(app, ["pull"])
     assert res.exit_code == 0 and "not-mm-folder" in res.output
+    assert attemptlog.read_mesh_waits() == previous_waits
     assert not any(path.startswith("/rest/config/folders/") for _, path, _ in fake_syncthing.bodies)
     assert ("PATCH", f"/rest/config/devices/{own_id}", {"name": "mac-a"}) in fake_syncthing.bodies
     assert (
@@ -1492,25 +1497,35 @@ def test_mesh_removal_wait_refreshes_and_clears_across_all_sync_commands(
     register_device(backend, "dev-b", "mac-b")
     devices.publish_record(backend, "dev-b", peer_b_st_id, PASSPHRASE, TEST_MEMORY_KB)
     # Unpublished live peer holds removal
-    register_device(backend, "dev-unpub", "cachyos")
+    register_device(backend, "dev-unpub", "linux-c")
 
-    res_push = runner.invoke(app, ["push"])
-    assert res_push.exit_code == 0, res_push.output
+    res_attended = runner.invoke(app, ["pull"])
+    assert res_attended.exit_code == 0, res_attended.output
     wait_line = (
-        "Syncthing device removals wait for cachyos (dev-unpub) to publish "
-        "its Syncthing ID; run 'mm update' and 'mm push' on cachyos"
+        "Syncthing device removals wait for linux-c (dev-unpub) to publish "
+        "its Syncthing ID; run 'mm update' and 'mm push' on linux-c"
     )
-    assert f"mm: notice: {wait_line}" in res_push.output
+    assert f"mm: notice: {wait_line}" in res_attended.output
     # New attended run record does not carry wait-prefixed degradations
     assert all(
         not d.startswith("Syncthing device removals wait for ")
-        for d in attemptlog.read_runs()["runs"]["push"]["degradations"]
+        for d in attemptlog.read_runs()["runs"]["pull"]["degradations"]
     )
     assert attemptlog.read_mesh_waits()["waits"] == [wait_line]
 
     status_waiting = runner.invoke(app, ["status"])
     assert status_waiting.exit_code == 0, status_waiting.output
     assert wait_line in " ".join(status_waiting.output.split())
+
+    hook_wait = runner.invoke(app, ["autopull"])
+    assert hook_wait.exit_code == 0 and hook_wait.output == ""
+    crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["pull"]
+    assert crumb["outcome"] == "degraded"
+    assert not crumb.get("detail")
+    status_hook_waiting = runner.invoke(app, ["status"])
+    assert status_hook_waiting.exit_code == 0, status_hook_waiting.output
+    assert "Latest pull needs attention" not in status_hook_waiting.stdout.splitlines()[0]
+    assert wait_line in " ".join(status_hook_waiting.stdout.split())
 
     # An unevaluated stopped pass (e.g. unauthorized) must NOT clear the standing wait
     fake_syncthing.responses["/rest/system/status"] = 403
@@ -1521,7 +1536,16 @@ def test_mesh_removal_wait_refreshes_and_clears_across_all_sync_commands(
     assert wait_line in " ".join(status_after_stop.output.split())
     fake_syncthing.responses["/rest/system/status"] = {"myID": fake_syncthing.my_id}
 
-    # Resolve the hold by publishing cachyos's Syncthing ID; run clear_cmd
+    def fail_retirement_listing(*args, **kwargs):
+        raise OSError(errno.EIO, "retirement records unavailable")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(devices, "read_retirement_records", fail_retirement_listing)
+        unavailable = runner.invoke(app, ["autopull"])
+        assert unavailable.exit_code == 0 and unavailable.output == ""
+        assert attemptlog.read_mesh_waits()["waits"] == [wait_line]
+
+    # Resolve the hold by publishing the peer's Syncthing ID; run clear_cmd
     unpub_st_id = _valid_syncthing_id("C")
     devices.publish_record(backend, "dev-unpub", unpub_st_id, PASSPHRASE, TEST_MEMORY_KB)
     if clear_cmd in ("push", "autopush"):
@@ -1549,13 +1573,13 @@ def test_compose_hook_breadcrumb_several_omitted_details_keeps_priority_and_stat
     degradations before share/removal/rename summaries, +N more within 300 chars,
     wait lines excluded from detail text while still marking outcome degraded) and
     display cleanly in mm status."""
-    _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    _, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
 
     # 1. Pure wait degradation marks outcome degraded without putting wait text in crumb
     wait_only = meshflow.MeshResult(
         degradations=[
-            "Syncthing device removals wait for cachyos (dev-c) to publish "
-            "its Syncthing ID; run 'mm update' and 'mm push' on cachyos"
+            "Syncthing device removals wait for linux-c (dev-c) to publish "
+            "its Syncthing ID; run 'mm update' and 'mm push' on linux-c"
         ]
     )
     wait_outcome, wait_detail = meshflow.compose_hook_breadcrumb([], wait_only)
@@ -1567,22 +1591,18 @@ def test_compose_hook_breadcrumb_several_omitted_details_keeps_priority_and_stat
     id_b = _valid_syncthing_id("C")
     id_c = _valid_syncthing_id("D")
     id_d = _valid_syncthing_id("E")
-    long_a = "workstation-alpha-long-hostname-01"
-    long_b = "workstation-bravo-long-hostname-02"
-    long_c = "workstation-charlie-long-hostname-03"
-    long_d = "workstation-delta-long-hostname-04"
+    long_a, long_b, long_c, long_d = (letter * 128 for letter in "abcd")
+    diagnostics = [
+        f"Syncthing did not confirm marking as introducer for {long_a} ({id_a[:7]}); "
+        "it may have applied; the next push or pull reconciles it",
+        f"Syncthing mesh step did not finish for {long_b} ({id_b[:7]}); "
+        "the next push or pull reconciles it",
+        "the Syncthing record of device dev-newer-peer is from a newer mm. Run: mm update",
+        "the Syncthing record of device dev-corrupt-peer is unreadable. Run: mm diag",
+    ]
 
     rich_mesh = meshflow.MeshResult(
-        degradations=[
-            "Syncthing device removals wait for cachyos (dev-c) to publish "
-            "its Syncthing ID; run 'mm update' and 'mm push' on cachyos",
-            f"Syncthing did not confirm marking as introducer for {long_a} ({id_a[:7]}); "
-            "it may have applied; the next push or pull reconciles it",
-            f"Syncthing mesh step did not finish for {long_b} ({id_b[:7]}); "
-            "the next push or pull reconciles it",
-            "the Syncthing record of device dev-newer-peer is from a newer mm. Run: mm update",
-            "the Syncthing record of device dev-corrupt-peer is unreadable. Run: mm diag",
-        ],
+        degradations=[*wait_only.degradations, *diagnostics],
         shared=[(long_a, id_a), (long_b, id_b), (long_c, id_c)],
         removed=[(long_d, id_d)],
         renamed=[(long_c, id_c, False)],
@@ -1591,16 +1611,50 @@ def test_compose_hook_breadcrumb_several_omitted_details_keeps_priority_and_stat
     outcome, detail = meshflow.compose_hook_breadcrumb(existing, rich_mesh)
     assert outcome == "degraded"
     assert len(detail) <= meshflow.BREADCRUMB_BUDGET_CHARS
-    assert detail.startswith("events walk exceeded its 250ms budget; ")
-    assert "Syncthing device removals wait for" not in detail
-    assert f"Syncthing did not confirm marking as introducer for {long_a} ({id_a[:7]})" in detail
-    assert "+3 more" in detail or "+2 more" in detail
+    assert detail == "; ".join([*existing, diagnostics[0], "+3 more"])
 
-    # Write to autorun breadcrumb and verify mm status renders the omitted marker
-    cli._write_autorun_breadcrumb("pull", outcome, detail)
+    prefix = "; ".join([*existing, *diagnostics])
+    share_lead = "Syncthing now shares the fleet folder with 3 fleet machines"
+    for summary in (
+        f"{share_lead}: {long_a} ({id_a[:7]}), +2 more",
+        f"{share_lead} (+3 more)",
+        "3 Syncthing shares",
+        "",
+    ):
+        limited = meshflow.compose_hook_breadcrumb(
+            existing, rich_mesh, budget=len(prefix) + 2 + len(summary)
+        )
+        assert limited == ("degraded", f"{prefix}; {summary}" if summary else prefix)
+
+    shared = f"{share_lead}: {long_a} ({id_a[:7]}), {long_b} ({id_b[:7]}), {long_c} ({id_c[:7]})"
+    removed = f"Syncthing removed retired device {long_d} ({id_d[:7]})"
+    renamed = f"Syncthing renamed {long_c} ({id_c[:7]})"
+    up_to_remove = f"{prefix}; {shared}; {removed}"
+    assert meshflow.compose_hook_breadcrumb(
+        existing, rich_mesh, budget=len(f"{up_to_remove}; +1 more")
+    ) == ("degraded", f"{up_to_remove}; +1 more")
+    assert meshflow.compose_hook_breadcrumb(
+        existing, rich_mesh, budget=len(f"{up_to_remove}; {renamed}")
+    ) == ("degraded", f"{up_to_remove}; {renamed}")
+
+    # Exercise the actual hook writer and the status renderer with an overflowing mesh result.
+    for suffix in "abcdef":
+        device_id = f"dev-corrupt-{suffix}"
+        register_device(backend, device_id, f"mac-{suffix}")
+        backend.put(syncthing_record_key(device_id), b"corrupt record")
+    hook = runner.invoke(app, ["autopull"])
+    assert hook.exit_code == 0 and hook.output == ""
+    crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["pull"]
+    assert crumb["outcome"] == "degraded"
+    assert crumb["detail"] == "; ".join(
+        [
+            f"the Syncthing record of device dev-corrupt-{suffix} is unreadable. Run: mm diag"
+            for suffix in "abc"
+        ]
+        + ["+3 more"]
+    )
     res_status = runner.invoke(app, ["status"])
     assert res_status.exit_code == 0, res_status.output
     flat = " ".join(res_status.output.split())
     assert "Last auto-pull:" in flat
-    assert "events walk exceeded its 250ms budget" in flat
-    assert "more)" in flat
+    assert f"(degraded: {crumb['detail']})" in flat

@@ -102,9 +102,7 @@ def compose_hook_breadcrumb(
     ]
     remaining = budget - sum(len(part) + 2 for part in parts)
     non_wait_degradations = [
-        d
-        for d in mesh_result.degradations
-        if not d.startswith("Syncthing device removals wait for ")
+        d for d in mesh_result.degradations if not d.startswith(attemptlog.MESH_WAIT_PREFIX)
     ]
     mesh_detail = _join_within_budget(non_wait_degradations, remaining)
     if mesh_detail:
@@ -196,6 +194,14 @@ class MeshResult:
             budget=budget,
         )
 
+    def removal_wait_only(self, existing_degradations: Sequence[str]) -> bool:
+        """Identify hook degradations fully explained by the separate mesh record."""
+        return (
+            bool(self.degradations)
+            and not any(existing_degradations)
+            and all(detail.startswith(attemptlog.MESH_WAIT_PREFIX) for detail in self.degradations)
+        )
+
 
 def _record_degradation(
     result: MeshResult,
@@ -207,7 +213,7 @@ def _record_degradation(
     safe_detail = safety.safe_terminal_str(detail)
     result.degradations.append(safe_detail)
     if attended:
-        if not safe_detail.startswith("Syncthing device removals wait for "):
+        if not safe_detail.startswith(attemptlog.MESH_WAIT_PREFIX):
             state = core._SYNC_OUTPUT.get()
             if state is not None and "diagnostics" in state:
                 state["diagnostics"].append(safe_detail)
@@ -344,11 +350,7 @@ def run(
     if result.removals_evaluated:
         try:
             attemptlog.write_mesh_waits(
-                [
-                    d
-                    for d in result.degradations
-                    if d.startswith("Syncthing device removals wait for ")
-                ]
+                [d for d in result.degradations if d.startswith(attemptlog.MESH_WAIT_PREFIX)]
             )
         except (Exception, SystemExit):
             pass
@@ -401,6 +403,7 @@ def _retired_share_still_listed(
 
 
 def _stop_folder_steps(result: MeshResult, cause: str, *, attended: bool) -> None:
+    result.removals_evaluated = False
     result.stop_cause = cause
     result.stops.append(cause)
     _record_degradation(

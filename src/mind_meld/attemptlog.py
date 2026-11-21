@@ -283,6 +283,7 @@ RUN_COUNTS = frozenset(
 _MAX_COUNT = 2**53
 _MAX_DETAILS = 8
 _MAX_DETAIL_CHARS = 384
+MESH_WAIT_PREFIX = "Syncthing device removals wait for "
 _MESH_DETAIL_RE = re.compile(
     r"Syncthing mesh step stopped \([a-z0-9_-]+\) after [0-9]+ of [1-9][0-9]* steps; "
     r"(?:nothing else changed|a write may have applied); retries on the next push or pull|"
@@ -308,7 +309,7 @@ _MESH_DETAIL_RE = re.compile(
     r"the next push or pull retries"
     r"|could not list retirement records \([A-Za-z0-9._ -]{1,64}\); "
     r"the next push or pull retries"
-    r"|Syncthing device removals wait for [^/~]{1,340}"
+    rf"|{MESH_WAIT_PREFIX}[^/~]{{1,340}}"
     r"|[^/~]{1,128} \([A-Z2-7]{7}\) is retired but still connected; "
     r"shut it down or stop Syncthing there, or remove it in Syncthing's web UI"
     r"|[^/~]{1,128} \([A-Z2-7]{7}\) is retired from Mind Meld but also shares another "
@@ -616,9 +617,16 @@ def _run_needs_action(run: dict) -> bool:
         return False
     from mind_meld import events_tail
 
-    # Finding no repositories is a fact, not lost work. Keep it in detail.
+    # An empty discovery and a separately reported removal wait do not imply
+    # incomplete content sync. Keep any other degradation actionable.
     return not (
-        run.get("degradations") == [events_tail._ROOT_DISCOVERY_EMPTY_DEGRADATION]
+        (
+            run.get("degradations") == [events_tail._ROOT_DISCOVERY_EMPTY_DEGRADATION]
+            or (
+                run.get("removal_wait_only") is True
+                and not run.get("counts", {}).get("events_degradations")
+            )
+        )
         and not run.get("omitted_details")
         and not any(
             run.get("counts", {}).get(k)
@@ -634,7 +642,9 @@ def _run_needs_action(run: dict) -> bool:
     )
 
 
-def project_runs(auto: dict, attended: dict, *, now: datetime | None = None) -> dict:
+def project_runs(
+    auto: dict, attended: dict, *, now: datetime | None = None, mesh_waits_current: bool = False
+) -> dict:
     """Select one run per verb, retaining unknown ordering and coverage facts.
 
     Strict later success resolves an available earlier failure symmetrically.
@@ -657,6 +667,14 @@ def project_runs(auto: dict, attended: dict, *, now: datetime | None = None) -> 
                 run = dict(raw)
                 if run.get("ordering_unknown"):
                     unknown = "ambiguous"
+                if mesh_waits_current and run["degradations"]:
+                    run["degradations"] = [
+                        line
+                        for line in raw["degradations"]
+                        if not line.startswith(MESH_WAIT_PREFIX)
+                    ]
+                    if not run["degradations"]:
+                        run["removal_wait_only"] = True
             else:
                 outcome = raw.get("outcome") if isinstance(raw, dict) else None
                 if not isinstance(outcome, str) or outcome not in {
@@ -708,6 +726,8 @@ def project_runs(auto: dict, attended: dict, *, now: datetime | None = None) -> 
                     "omitted_details": 0,
                     "errno": None,
                 }
+                if outcome == "degraded" and raw.get("removal_wait_only") is True:
+                    run["removal_wait_only"] = True
             timestamp = _timestamp(run["completed_at"])
             if timestamp is None or timestamp > now:
                 unknown = "ambiguous"
@@ -752,9 +772,7 @@ def mesh_wait_details(details: list[str]) -> tuple[list[str], int]:
     retained: list[str] = []
     omitted = 0
     for detail in details:
-        if not isinstance(detail, str) or not detail.startswith(
-            "Syncthing device removals wait for "
-        ):
+        if not isinstance(detail, str) or not detail.startswith(MESH_WAIT_PREFIX):
             omitted += 1
             continue
         kept, dropped = run_details([detail])
@@ -787,7 +805,7 @@ def _valid_mesh_waits(data: object) -> bool:
             and s == safety.safe_terminal_str(s)
             and "/" not in s
             and "~" not in s
-            and s.startswith("Syncthing device removals wait for ")
+            and s.startswith(MESH_WAIT_PREFIX)
             and bool(_MESH_DETAIL_RE.fullmatch(s))
             for s in waits
         )
@@ -871,24 +889,34 @@ def init_notices_path() -> Path:
     return sidecar.SIDECAR_DIR / "last-init-notices.json"
 
 
-def init_notice_details(details: list[str]) -> tuple[list[str], int]:
-    """Retain only known path-free init-backfill notice phrases."""
-    if not details:
-        return [], 0
+_INIT_PROGRESS_RE = re.compile(
+    rf"(?:{'|'.join(map(re.escape, events.HOST_USAGE_TOKEN_SOURCES))}) "
+    r"usage catching up \([1-9][0-9]* left\) — content sync and git and session capture "
+    r"unaffected\. The next attended mm push continues it; see mm diag\."
+)
+
+
+def _normalize_init_notice(detail: str, capture_url: str) -> str:
+    return detail.replace(capture_url, "mm diag").replace("git/session", "git and session")
+
+
+def _init_notice_vocabulary() -> set[str]:
     from mind_meld import events_tail
 
-    literals = {
+    return {
         events_tail._INIT_BACKFILL_BUDGET_NOTICE,
         events_tail._INIT_ROOT_DISCOVERY_NOTICE,
-    }
-    host_phrases = {
-        events_tail._host_skip_phrase(
-            reader,
-            reason,
-            verb=verb,
-            readiness="ready",
-            no_release_reads=no_release_reads,
-            attended=attended,
+    } | {
+        _normalize_init_notice(
+            events_tail._host_skip_phrase(
+                reader,
+                reason,
+                verb=verb,
+                readiness="ready",
+                no_release_reads=no_release_reads,
+                attended=attended,
+            ),
+            events_tail.HOST_USAGE_CAPTURE_URL,
         )
         for reader in (*events.HOST_USAGE_TOKEN_SOURCES, None)
         for reason in (*get_args(host_usage.Reason), "unavailable", None)
@@ -896,40 +924,37 @@ def init_notice_details(details: list[str]) -> tuple[list[str], int]:
         for attended in (False, True)
         for no_release_reads in ((), (reader,) if reader is not None else ())
     }
-    host_names = "|".join(re.escape(name) for name in events.HOST_USAGE_TOKEN_SOURCES)
+
+
+def _valid_init_notice(detail: object, known: set[str]) -> bool:
+    return (
+        isinstance(detail, str)
+        and len(detail) <= _MAX_DETAIL_CHARS
+        and detail == safety.safe_terminal_str(detail)
+        and "/" not in detail
+        and "~" not in detail
+        and (detail in known or _INIT_PROGRESS_RE.fullmatch(detail) is not None)
+    )
+
+
+def init_notice_details(details: list[str]) -> tuple[list[str], int]:
+    """Retain only known path-free init-backfill notice phrases."""
+    if not details:
+        return [], 0
+    from mind_meld import events_tail
+
+    known = _init_notice_vocabulary()
     retained: list[str] = []
     omitted = 0
     for detail in details:
         if not isinstance(detail, str):
             omitted += 1
             continue
-        raw_known = (
-            detail in literals
-            or detail in host_phrases
-            or bool(
-                re.fullmatch(
-                    rf"(?:{host_names}) usage catching up \([1-9][0-9]* left\) — "
-                    r"content sync and git/session capture unaffected\. "
-                    r"The next attended mm push continues it; see "
-                    rf"{re.escape(events_tail.HOST_USAGE_CAPTURE_URL)}\.",
-                    detail,
-                )
-            )
-        )
-        detail = detail.replace(events_tail.HOST_USAGE_CAPTURE_URL, "mm diag")
-        detail = detail.replace("git/session", "git and session")
-        safe = safety.safe_terminal_str(detail)
-        if (
-            not raw_known
-            or safe != detail
-            or "/" in safe
-            or "~" in safe
-            or len(safe) > _MAX_DETAIL_CHARS
-            or len(retained) >= _MAX_DETAILS
-        ):
+        detail = _normalize_init_notice(detail, events_tail.HOST_USAGE_CAPTURE_URL)
+        if len(retained) >= _MAX_DETAILS or not _valid_init_notice(detail, known):
             omitted += 1
         else:
-            retained.append(safe)
+            retained.append(detail)
     return retained, min(omitted, _MAX_COUNT)
 
 
@@ -949,31 +974,12 @@ def _valid_init_notices(data: object) -> bool:
         and _count(data["omitted_details"])
         and isinstance(notices, list)
         and len(notices) <= _MAX_DETAILS
-        and all(
-            isinstance(s, str)
-            and len(s) <= _MAX_DETAIL_CHARS
-            and s == safety.safe_terminal_str(s)
-            and "/" not in s
-            and "~" not in s
-            for s in notices
-        )
     ):
         return False
     if not notices:
         return True
-    from mind_meld import events_tail
-
-    host_names = "|".join(re.escape(name) for name in events.HOST_USAGE_TOKEN_SOURCES)
-    allowed_re = re.compile(
-        rf"{re.escape(events_tail._INIT_BACKFILL_BUDGET_NOTICE)}|"
-        rf"{re.escape(events_tail._INIT_ROOT_DISCOVERY_NOTICE)}|"
-        r"host-usage snapshot skipped \([^/~]{1,64}\) — "
-        r"content sync and git and session capture unaffected\. [^/~]{1,280}|"
-        rf"(?:{host_names}) usage catching up \([1-9][0-9]* left\) — "
-        r"content sync and git and session capture unaffected\. "
-        r"The next attended mm push continues it; see mm diag\."
-    )
-    return all(bool(allowed_re.fullmatch(s)) for s in notices)
+    known = _init_notice_vocabulary()
+    return all(_valid_init_notice(detail, known) for detail in notices)
 
 
 def write_init_notices(notices: list[str], *, completed_at: str | None = None) -> None:

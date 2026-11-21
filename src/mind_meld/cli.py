@@ -4402,7 +4402,9 @@ def _write_migration_breadcrumb(missing: list[str]) -> None:
         pass
 
 
-def _write_autorun_breadcrumb(verb: str, outcome: str, detail: str = "") -> None:
+def _write_autorun_breadcrumb(
+    verb: str, outcome: str, detail: str = "", *, removal_wait_only: bool = False
+) -> None:
     """Record the last autopull/autopush attempt for forensic observability.
 
     Written on EVERY invocation -- success, lock-skip, config-missing,
@@ -4417,12 +4419,14 @@ def _write_autorun_breadcrumb(verb: str, outcome: str, detail: str = "") -> None
     Silent contract preserved: nothing is printed. Any failure here is
     swallowed -- a broken breadcrumb must never crash the hook.
     """
-    entry: dict[str, str] = {
+    entry: dict[str, str | bool] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "outcome": outcome,
     }
     if detail:
         entry["detail"] = detail
+    if removal_wait_only:
+        entry["removal_wait_only"] = True
     try:
         with locked_json_rmw(core._autorun_breadcrumb_path()) as ljson:
             if not ljson.is_locked:
@@ -4819,7 +4823,9 @@ def autopull() -> None:
                     pullflow.old_form_detail(result),
                 ),
             )
-            _write_autorun_breadcrumb("pull", outcome, detail)
+            _write_autorun_breadcrumb(
+                "pull", outcome, detail, removal_wait_only=mesh_res.removal_wait_only(degradations)
+            )
 
             # Seam 2 — self-update or nudge at the TAIL. Runs AFTER the main work
             # + breadcrumb so the cold-cache HTTP fetch latency (~500ms 1x/24h)
@@ -4941,7 +4947,12 @@ def autopush() -> None:
                 details,
                 extra_success=("published under shared names",) if switched else (),
             )
-            _write_autorun_breadcrumb("push", outcome, crumb_detail)
+            _write_autorun_breadcrumb(
+                "push",
+                outcome,
+                crumb_detail,
+                removal_wait_only=mesh_res.removal_wait_only(details),
+            )
 
             # Seam 2 — self-update or nudge at the TAIL (mirrors autopull).
             upgrade.update_or_nudge(setup.config, attended=False)

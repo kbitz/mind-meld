@@ -190,11 +190,11 @@ REVIEWED = {
             "detail.replace('git/session', 'git and session')",
         ],
     ),
-    "attemptlog.py:init_notice_details": (
+    "attemptlog.py:_normalize_init_notice": (
         *_READ_ONLY,
         [
-            "detail.replace(events_tail.HOST_USAGE_CAPTURE_URL, 'mm diag')",
-            "detail.replace('git/session', 'git and session')",
+            "detail.replace(capture_url, 'mm diag')",
+            "detail.replace(capture_url, 'mm diag').replace('git/session', 'git and session')",
         ],
     ),
     "attemptlog.py:write_mesh_waits": (

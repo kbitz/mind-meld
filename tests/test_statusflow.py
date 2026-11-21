@@ -975,8 +975,8 @@ def test_status_legacy_attended_removal_wait_renders_until_mesh_record_supersede
     _, root = inspection
     monkeypatch.setattr(sidecar, "SIDECAR_DIR", root.parent)
     wait_line = (
-        "Syncthing device removals wait for cachyos (dev-c) to publish "
-        "its Syncthing ID; run 'mm update' and 'mm push' on cachyos"
+        "Syncthing device removals wait for linux-c (dev-c) to publish "
+        "its Syncthing ID; run 'mm update' and 'mm push' on linux-c"
     )
     legacy_run = attemptlog.make_run(
         outcome="degraded",
@@ -1014,6 +1014,46 @@ def test_status_legacy_attended_removal_wait_renders_until_mesh_record_supersede
         "waits": [],
         "omitted_details": 0,
     }
+
+
+def test_newer_mesh_record_hides_only_removal_waits_from_a_legacy_hook(inspection, monkeypatch):
+    from mind_meld import attemptlog, sidecar
+
+    _, root = inspection
+    monkeypatch.setattr(sidecar, "SIDECAR_DIR", root.parent)
+    wait = (
+        "Syncthing device removals wait for linux; peer (dev-c) to publish "
+        "its Syncthing ID; run 'mm update' and 'mm push' on linux; peer"
+    )
+    before = "2 file(s) failed"
+    after = "Syncthing mesh step stopped (timeout). Run: mm diag"
+    old_detail = f"{before}; {wait}; {after}"
+    core._autorun_breadcrumb_path().write_text(
+        json.dumps(
+            {
+                "pull": {
+                    "timestamp": "2026-11-20T10:00:00+00:00",
+                    "outcome": "degraded",
+                    "detail": old_detail,
+                }
+            }
+        )
+    )
+
+    initial = runner.invoke(app, ["status"])
+    assert initial.exit_code == 0, initial.output
+    assert wait in " ".join(initial.stdout.split())
+
+    attemptlog.write_mesh_waits([], completed_at="2026-11-20T10:05:00+00:00")
+    for command in (["status"], ["diag"]):
+        cleared = runner.invoke(app, command)
+        assert cleared.exit_code == 0, cleared.output
+        assert f"{before}; {after}" in " ".join(cleared.stdout.split())
+        assert "Syncthing device removals wait for" not in cleared.stdout
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["last_autorun"]["pull"]["detail"] == f"{before}; {after}"
+    assert old_detail in core._autorun_breadcrumb_path().read_text()
 
 
 def test_status_and_diag_display_init_notices_until_attended_capture_replaces_them(
@@ -1073,3 +1113,11 @@ def test_status_and_diag_display_init_notices_until_attended_capture_replaces_th
         assert events_tail._INIT_BACKFILL_BUDGET_NOTICE not in flat_replaced
         assert events_tail._INIT_ROOT_DISCOVERY_NOTICE not in flat_replaced
         assert "host-usage snapshot skipped (codex deadline)" not in flat_replaced
+    replaced_json = runner.invoke(app, ["diag", "--json"])
+    assert replaced_json.exit_code == 0, replaced_json.output
+    assert json.loads(replaced_json.stdout)["host_publication"]["init_notices"] == {
+        "state": "superseded",
+        "completed_at": init_t,
+        "notices": [],
+        "omitted_details": 0,
+    }

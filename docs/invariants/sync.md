@@ -2226,10 +2226,13 @@ writes nothing so a stopped run never clears a standing wait). Its only readers
 are `mm status` and the `mm diag` state dict (`syncthing.last_mesh`). Wait
 lines (`Syncthing device removals wait for ...`) are rendered from
 `last-mesh.json` after the attended/auto run block (and omitted from new
-attended-run `degradations` and autorun breadcrumb text, while still counting
-toward a degraded breadcrumb outcome); when `last-mesh.json` is valid,
-`mm status` filters wait-prefixed strings out of older attended-run records so
-a pre-change record cannot resurrect a cleared wait.
+attended-run `degradations` and autorun breadcrumb text). A hook with only
+removal waits still records a `degraded` breadcrumb. Its `removal_wait_only`
+flag lets `attemptlog.project_runs` keep the wait out of the status verdict
+while retaining the recorded outcome. When `last-mesh.json` is valid, the
+inspection projection also hides earlier wait clauses in hook breadcrumbs
+and attended status lines. It keeps any other diagnostics and leaves the
+underlying records intact.
 
 Use `locked_json_rmw(retry_intervals=(), on_contention="raise", mode=0o600)`;
 check is_locked and write_error. Capture completion once before locking. A delayed
