@@ -11,12 +11,14 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +42,7 @@ from mind_meld.storage.local import LocalBackend
 MIN_QMD_VERSION = Version("2.8.3")
 REFRESH_DEADLINE_S = 30.0
 MM_COLLECTION_PREFIX = "mm-"
+_GLOBAL_INDEX = ("--index", "index")
 
 CLAUDE_MASK = "*/memory/**/*.md"
 GROK_MASK = "**/topics/**/*.md"
@@ -51,8 +54,10 @@ VALID_RESULTS: frozenset[str] = frozenset({"ok", "qmd-missing", "failed", "timed
 
 _MAX_SLUG_LEN = 64
 _MAX_COLLECTION_NAME_LEN = 256
-_VERSION_RE = re.compile(r"\b(\d+\.\d+\.\d+)\b")
-_COLLECTION_LIST_RE = re.compile(r"^(\S+)\s+\(qmd://")
+_VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+_QMD_VERSION_RE = re.compile(r"\bv?(" + _VERSION_RE.pattern + r")([^\s]*)")
+_COLLECTION_COUNT_RE = re.compile(r"Collections \(([0-9]+)\):")
+_COLLECTION_LIST_RE = re.compile(r"^(.+?) \(qmd://")
 _SHOW_PATH_RE = re.compile(r"^\s*Path:\s*(.+?)\s*$")
 _SHOW_PATTERN_RE = re.compile(r"^\s*Pattern:\s*(.+?)\s*$")
 
@@ -244,6 +249,8 @@ def _run_qmd(
     qmd: str,
     args: Sequence[str],
     deadline: float,
+    *,
+    inspect: bool = False,
 ) -> tuple[
     Literal["ok", "qmd-missing", "failed", "timed-out"],
     subprocess.CompletedProcess[str] | None,
@@ -251,22 +258,43 @@ def _run_qmd(
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return ("timed-out", None)
+    # An explicit index bypasses QMD's project-local index discovery. Its
+    # --version path opens no index, even without the flag.
+    command = [qmd, *args] if args == ["--version"] else [qmd, *_GLOBAL_INDEX, *args]
+    env = {**os.environ, "NO_COLOR": "1"}
+    if inspect:
+        # collection show only reads the YAML config. Avoid even creating the
+        # default SQLite cache directory during --index argument parsing.
+        env["INDEX_PATH"] = ":memory:"
     try:
-        proc = subprocess.run(
-            [qmd, *args],
+        with subprocess.Popen(
+            command,
+            cwd="/",
+            env=env,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=remaining,
-            check=False,
-        )
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
+        ) as proc:
+            try:
+                stdout, _ = proc.communicate(timeout=remaining)
+            except BaseException:
+                # QMD can start child processes while updating collections.
+                # Stop the owned process group before releasing the refresh lock.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                raise
     except FileNotFoundError:
         return ("qmd-missing", None)
     except subprocess.TimeoutExpired:
         return ("timed-out", None)
     except OSError:
         return ("failed", None)
-    return ("ok", proc)
+    return ("ok", subprocess.CompletedProcess(command, proc.returncode, stdout))
 
 
 def _qmd_version(
@@ -278,13 +306,12 @@ def _qmd_version(
         return (status, None)
     if proc.returncode != 0:
         return ("failed", None)
-    combined = f"{proc.stdout or ''}\n{proc.stderr or ''}"
-    match = _VERSION_RE.search(combined)
+    match = _QMD_VERSION_RE.search(proc.stdout)
     if match is None:
         return ("failed", None)
     ver_str = match.group(1)
     try:
-        parsed = Version(ver_str)
+        parsed = Version(ver_str + match.group(2))
     except InvalidVersion:
         return ("failed", None)
     if parsed < MIN_QMD_VERSION:
@@ -301,14 +328,14 @@ def _list_mm_collection_names(
         return (status, [])
     if proc.returncode != 0:
         return ("failed", [])
-    names: list[str] = []
-    for line in (proc.stdout or "").splitlines():
-        match = _COLLECTION_LIST_RE.match(line.strip())
-        if match:
-            name = match.group(1)
-            if name.startswith(MM_COLLECTION_PREFIX):
-                names.append(name)
-    return ("ok", sorted(set(names)))
+    lines = proc.stdout.strip().splitlines()
+    if lines and lines[0].startswith("No collections found."):
+        return ("ok", [])
+    count = _COLLECTION_COUNT_RE.fullmatch(lines[0]) if lines else None
+    names = [match.group(1) for line in lines[1:] if (match := _COLLECTION_LIST_RE.match(line))]
+    if count is None or count.group(1) != str(len(names)):
+        return ("failed", [])
+    return ("ok", sorted({name for name in names if name.startswith(MM_COLLECTION_PREFIX)}))
 
 
 def _current_mm_collections(
@@ -320,7 +347,7 @@ def _current_mm_collections(
         return (status, {})
     details: dict[str, tuple[str, str]] = {}
     for name in names:
-        show_status, proc = _run_qmd(qmd, ["collection", "show", name], deadline)
+        show_status, proc = _run_qmd(qmd, ["collection", "show", name], deadline, inspect=True)
         if show_status != "ok" or proc is None:
             return (show_status, {})
         if proc.returncode != 0:
@@ -445,6 +472,8 @@ def read_state() -> dict[str, Any]:
     with lockedjson.locked_json_snapshot(path, blocking=False) as snapshot:
         if snapshot.state != "valid":
             return {"state": snapshot.state, **empty}
+        if snapshot.data == {}:
+            return {"state": "missing", **empty}
         validated = _validate_state_record(snapshot.data or {})
         if validated is None:
             return {"state": "malformed", **empty}
@@ -484,82 +513,93 @@ def problem_text(result: str | None) -> tuple[str, str]:
     )
 
 
+def _refresh_locked(
+    cfg: dict[str, Any], deadline: float, cache: lockedjson.LockedJson
+) -> RefreshResult:
+    status: Literal["ok", "qmd-missing", "failed", "timed-out"] = "failed"
+    qmd_version = None
+    previous = _validate_state_record(cache.data)
+    collections = list(previous["collections"]) if previous else []
+    try:
+        qmd = _find_qmd()
+        if qmd is None:
+            status = "qmd-missing"
+        else:
+            version_status, qmd_version = _qmd_version(qmd, deadline)
+            status = "failed" if version_status == "version-too-old" else version_status
+            if status == "ok":
+                status, collections = _reconcile(qmd, desired_collections(cfg), deadline)
+            if status == "ok":
+                status, proc = _run_qmd(qmd, ["update"], deadline)
+                if proc is not None and proc.returncode != 0:
+                    status = "failed"
+            if status == "ok" and config.memory_index_embeddings(cfg):
+                subprocess.Popen(
+                    [qmd, *_GLOBAL_INDEX, "embed"],
+                    cwd="/",
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+    except Exception:
+        status = "failed"
+
+    at = _now_utc()
+    cache.data = {
+        "version": 1,
+        "result": status,
+        "at": at,
+        "qmd_version": qmd_version,
+        "collections": collections,
+    }
+    cache.write_on_exit = True
+    return RefreshResult(status, at, qmd_version, tuple(collections))
+
+
+@contextmanager
+def _index_lock() -> Iterator[lockedjson.LockedJson]:
+    path = state_path()
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise OSError("memory-index state is not a regular file")
+    except FileNotFoundError:
+        pass
+    with lockedjson.locked_json_rmw(path, on_contention="raise", retry_intervals=()) as cache:
+        cache.write_on_exit = False
+        yield cache
+
+
 def refresh(cfg: dict[str, Any]) -> RefreshResult:
-    """Reconcile ``mm-`` collections and run ``qmd update`` (plus background ``qmd embed``)."""
+    """Reconcile the machine index after sync with one deadline and one writer."""
     if not config.memory_index_enabled(cfg):
-        return RefreshResult(status="skipped-off")
+        return RefreshResult("skipped-off")
 
     deadline = time.monotonic() + REFRESH_DEADLINE_S
     try:
-        with lockedjson.locked_json_rmw(
-            state_path(), on_contention="raise", retry_intervals=()
-        ) as cache:
-            record_result: Literal["ok", "qmd-missing", "failed", "timed-out"] = "failed"
-            qmd_version: str | None = None
-            collections: list[str] = []
-
-            qmd = shutil.which("qmd")
-            if qmd is None:
-                record_result = "qmd-missing"
-            else:
-                ver_status, qmd_version = _qmd_version(qmd, deadline)
-                if ver_status == "qmd-missing":
-                    record_result = "qmd-missing"
-                elif ver_status == "timed-out":
-                    record_result = "timed-out"
-                elif ver_status != "ok":
-                    record_result = "failed"
-                else:
-                    desired = desired_collections(cfg)
-                    rec_status, collections = _reconcile(qmd, desired, deadline)
-                    if rec_status != "ok":
-                        record_result = rec_status
-                    else:
-                        upd_status, upd_proc = _run_qmd(qmd, ["update"], deadline)
-                        if upd_status != "ok":
-                            record_result = upd_status
-                        elif upd_proc is None or upd_proc.returncode != 0:
-                            record_result = "failed"
-                        else:
-                            record_result = "ok"
-                            if config.memory_index_embeddings(cfg):
-                                try:
-                                    subprocess.Popen(
-                                        [qmd, "embed"],
-                                        stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL,
-                                        start_new_session=True,
-                                    )
-                                except Exception:
-                                    record_result = "failed"
-
-            at = _now_utc()
-            sorted_cols = sorted(collections)
-            cache.data = {
-                "version": 1,
-                "result": record_result,
-                "at": at,
-                "qmd_version": qmd_version,
-                "collections": sorted_cols,
-            }
-            return RefreshResult(
-                status=record_result,
-                at=at,
-                qmd_version=qmd_version,
-                collections=tuple(sorted_cols),
-            )
+        with _index_lock() as cache:
+            # A sync can finish with a config snapshot captured before an off toggle.
+            current = config.load_config()
+            if not config.memory_index_enabled(current):
+                return RefreshResult("skipped-off")
+            result = _refresh_locked(current, deadline, cache)
+        return RefreshResult("failed") if cache.write_error else result
     except lockedjson.LockContended:
-        return RefreshResult(status="skipped-running")
+        return RefreshResult("skipped-running")
     except Exception:
-        return RefreshResult(status="failed")
+        return RefreshResult("failed")
 
 
-def remove_mm_collections(cfg: dict[str, Any] | None = None) -> RemoveResult:
+def _find_qmd() -> str | None:
+    # A hook's working directory is a project, so use absolute PATH entries.
+    entries = [entry for entry in os.get_exec_path() if os.path.isabs(entry)]
+    return shutil.which("qmd", path=os.pathsep.join(entries)) if entries else None
+
+
+def remove_mm_collections() -> RemoveResult:
     """Remove every ``mm-`` collection from qmd, leaving user collections untouched."""
-    del cfg
     deadline = time.monotonic() + REFRESH_DEADLINE_S
-    qmd = shutil.which("qmd")
+    qmd = _find_qmd()
     if qmd is None:
         return RemoveResult(status="qmd-missing")
 
@@ -586,7 +626,8 @@ def start_detached_refresh(cfg: dict[str, Any] | None) -> bool:
         return False
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "mind_meld.memoryindex"],
+            [sys.executable, "-P", "-m", "mind_meld.memoryindex"],
+            cwd="/",
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -597,60 +638,42 @@ def start_detached_refresh(cfg: dict[str, Any] | None) -> bool:
         return False
 
 
+def _inspect_qmd(known: Sequence[str]) -> tuple[str, str | None, list[str]]:
+    qmd = _find_qmd()
+    if qmd is None:
+        return ("qmd-missing", None, [])
+
+    deadline = time.monotonic() + REFRESH_DEADLINE_S
+    status, version = _qmd_version(qmd, deadline)
+    if status != "ok":
+        return (status, version, [])
+
+    # QMD's collection list initializes the database and can rewrite index.yml.
+    # Verify known mm-owned names via the read-only show path instead.
+    collections: list[str] = []
+    for name in known:
+        probe, proc = _run_qmd(qmd, ["collection", "show", name], deadline, inspect=True)
+        if probe != "ok":
+            return (probe, version, [])
+        if proc is not None and proc.returncode == 0:
+            collections.append(name)
+    return ("ok", version, collections)
+
+
 def diag_state(cfg: dict[str, Any] | None) -> dict[str, Any]:
-    """Build the non-secret ``memory_index`` section for ``mm diag``.
-
-    When ``cfg`` is ``None`` or the index is disabled, runs no subprocess and
-    reports version/collections from state alone (null/empty when absent).
-    """
+    """Build the non-secret memory-index view with read-only probes when enabled."""
     enabled = config.memory_index_enabled(cfg)
-    embeddings = config.memory_index_embeddings(cfg)
     recorded = read_state()
-    last_refresh = {
-        "state": recorded["state"],
-        "result": recorded["result"],
-        "at": recorded["at"],
-    }
-
-    if not enabled:
-        return {
-            "enabled": False,
-            "embeddings": embeddings,
-            "qmd_version": None,
-            "collections": [],
-            "last_refresh": last_refresh,
-        }
-
-    qmd_version: str | None = recorded["qmd_version"]
-    collections: list[str] = list(recorded["collections"])
-
-    try:
-        deadline = time.monotonic() + REFRESH_DEADLINE_S
-        qmd = shutil.which("qmd")
-        if qmd is None:
-            qmd_version = None
-            collections = []
-        else:
-            ver_status, probed_ver = _qmd_version(qmd, deadline)
-            if ver_status in ("ok", "version-too-old"):
-                qmd_version = probed_ver
-            else:
-                qmd_version = None
-            col_status, probed_cols = _list_mm_collection_names(qmd, deadline)
-            if col_status == "ok":
-                collections = probed_cols
-            else:
-                collections = []
-    except Exception:
-        qmd_version = None
-        collections = []
-
+    qmd_version = None
+    collections: list[str] = []
+    if enabled:
+        _, qmd_version, collections = _inspect_qmd(recorded["collections"])
     return {
-        "enabled": True,
-        "embeddings": embeddings,
+        "enabled": enabled,
+        "embeddings": config.memory_index_embeddings(cfg),
         "qmd_version": qmd_version,
         "collections": collections,
-        "last_refresh": last_refresh,
+        "last_refresh": {key: recorded[key] for key in ("state", "result", "at")},
     }
 
 
@@ -658,27 +681,16 @@ def _print_state(cfg: dict[str, Any]) -> None:
     enabled = config.memory_index_enabled(cfg)
     embeddings = config.memory_index_embeddings(cfg)
     recorded = read_state()
-
-    qmd_display = "not found"
-    collections_display: list[str] = []
-    deadline = time.monotonic() + REFRESH_DEADLINE_S
-    qmd = shutil.which("qmd")
-    if qmd is not None:
-        ver_status, ver = _qmd_version(qmd, deadline)
-        if ver_status == "ok" and ver:
-            qmd_display = ver
-        elif ver_status == "version-too-old" and ver:
-            qmd_display = f"{ver} (requires {MIN_QMD_VERSION}+)"
-        elif ver_status == "timed-out":
-            qmd_display = "timed out"
-        elif ver_status == "qmd-missing":
-            qmd_display = "not found"
-        else:
-            qmd_display = "error"
-
-        col_status, probed_cols = _list_mm_collection_names(qmd, deadline)
-        if col_status == "ok":
-            collections_display = probed_cols
+    version_status, version, collections_display = _inspect_qmd(recorded["collections"])
+    if version_status == "version-too-old":
+        qmd_display = f"{version} (requires {MIN_QMD_VERSION}+)"
+    elif version is not None:
+        qmd_display = version
+    else:
+        qmd_display = {
+            "timed-out": "timed out",
+            "qmd-missing": "not found",
+        }.get(version_status, "error")
 
     consoles.console.print("[bold]Memory index[/bold]")
     consoles.console.print(f"  enabled:       {'on' if enabled else 'off'}")
@@ -708,81 +720,87 @@ def _print_state(cfg: dict[str, Any]) -> None:
 def memory_index(action: str | None = None) -> None:
     """Body of ``mm memory-index [on|off]``."""
     if action not in (None, "on", "off"):
-        core._error(
+        core._print_error(
             f"unknown memory-index action '{safety.safe_terminal_str(action)}' "
             "(expected 'on' or 'off').",
             fix="mm memory-index --help",
         )
+        raise typer.Exit(2)
 
     if action is None:
-        cfg = core._get_config(read_only=True)
-        _print_state(cfg)
+        _print_state(core._get_config(read_only=True))
         return
 
-    cfg = core._get_config(read_only=False)
-
+    core._get_config(read_only=False)
     if action == "on":
-        deadline = time.monotonic() + REFRESH_DEADLINE_S
-        qmd = shutil.which("qmd")
-        if qmd is None:
-            core._error(
-                f"qmd {MIN_QMD_VERSION}+ is not installed or not on PATH.",
-                fix="install qmd (2.8.3+) and re-run mm memory-index on",
-            )
-        ver_status, ver = _qmd_version(qmd, deadline)
-        if ver_status == "version-too-old":
-            core._error(
-                f"qmd {ver} is too old; Mind Meld requires qmd {MIN_QMD_VERSION}+.",
-                fix="upgrade qmd to 2.8.3+ and re-run mm memory-index on",
-            )
-        if ver_status != "ok":
-            core._error(
-                f"could not verify qmd {MIN_QMD_VERSION}+ ({ver_status}).",
-                fix="install qmd (2.8.3+) and re-run mm memory-index on",
-            )
+        _enable_index()
+    else:
+        _disable_index()
 
-        config.patch_config_on_disk({"memory_index": {"enabled": True}})
-        cfg.setdefault("memory_index", {})["enabled"] = True
 
-        res = refresh(cfg)
-        if res.status == "ok":
-            count = len(res.collections)
-            noun = "collection" if count == 1 else "collections"
-            core._print_outcome(
-                outputstyle._outcome_line(
-                    "memory-index", f"enabled on this device ({count} {noun} indexed)"
-                )
-            )
-            consoles.console.print(
-                outputstyle._fix_line("mm memory-index off"),
-                markup=False,
-                highlight=False,
-                soft_wrap=True,
-            )
-            return
-        if res.status == "skipped-running":
-            core._print_outcome(
-                outputstyle._outcome_line(
-                    "memory-index", "enabled on this device (refresh already running)"
-                )
-            )
-            consoles.console.print(
-                outputstyle._fix_line("mm memory-index off"),
-                markup=False,
-                highlight=False,
-                soft_wrap=True,
-            )
-            return
+def _set_enabled(enabled: bool) -> None:
+    config.patch_config_on_disk({"memory_index": {"enabled": enabled}})
 
-        problem, fix = problem_text(res.status)
+
+def _enable_index() -> None:
+    deadline = time.monotonic() + REFRESH_DEADLINE_S
+    qmd = _find_qmd()
+    ver_status, ver = _qmd_version(qmd, deadline) if qmd else ("qmd-missing", None)
+    if ver_status != "ok":
+        detail = f"found {ver}" if ver is not None else ver_status
+        core._error(
+            f"could not verify qmd {MIN_QMD_VERSION}+ ({detail}).",
+            fix="install qmd (2.8.3+) and re-run mm memory-index on",
+        )
+
+    try:
+        with _index_lock() as cache:
+            _set_enabled(True)
+            res = _refresh_locked(config.load_config(), deadline, cache)
+    except lockedjson.LockContended:
+        core._error("memory index is busy.", fix="mm memory-index on")
+        raise
+    except Exception:
+        core._error("could not enable the memory index.", fix="mm memory-index on")
+        raise
+
+    if res.status != "ok" or cache.write_error:
+        problem, fix = problem_text(res.status if not cache.write_error else "unreadable")
         core._error(f"memory index enabled, but {problem}.", fix=fix)
 
-    # action == "off"
-    was_enabled = config.memory_index_enabled(cfg)
-    config.patch_config_on_disk({"memory_index": {"enabled": False}})
-    cfg.setdefault("memory_index", {})["enabled"] = False
+    count = len(res.collections)
+    noun = "collection" if count == 1 else "collections"
+    core._print_outcome(
+        outputstyle._outcome_line(
+            "memory-index", f"enabled on this device ({count} {noun} indexed)"
+        )
+    )
+    consoles.console.print(
+        outputstyle._fix_line("mm memory-index off"),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
 
-    rm = remove_mm_collections(cfg)
+
+def _disable_index() -> None:
+    try:
+        with _index_lock() as cache:
+            was_enabled = config.memory_index_enabled(config.load_config())
+            if was_enabled:
+                _set_enabled(False)
+            rm = remove_mm_collections()
+            if rm.status == "ok":
+                # Keep the inode used as a lock and invalidate the former success.
+                cache.data = {}
+                cache.write_on_exit = True
+    except lockedjson.LockContended:
+        core._error("memory index is busy.", fix="mm memory-index off")
+        raise
+    except Exception:
+        core._error("could not disable the memory index.", fix="mm memory-index off")
+        raise
+
     if rm.status == "qmd-missing":
         if not was_enabled:
             core._print_outcome(

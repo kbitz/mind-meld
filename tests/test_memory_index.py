@@ -21,6 +21,7 @@ from mind_meld import (
     crypto,
     devices,
     memoryindex,
+    pullflow,
     sidecar,
     statedb,
     statusflow,
@@ -118,6 +119,8 @@ _QMD_STUB_SOURCE = textwrap.dedent(
 
     def main():
         argv = sys.argv[1:]
+        if argv[:2] == ["--index", "index"]:
+            argv = argv[2:]
         log_call(argv)
         if SLEEP_S > 0:
             time.sleep(SLEEP_S)
@@ -144,6 +147,7 @@ _QMD_STUB_SOURCE = textwrap.dedent(
                 if not cols:
                     print("No collections found.")
                     return
+                print(f"Collections ({len(cols)}):")
                 for name in sorted(cols):
                     print(f"{name} (qmd://{name}/)")
                 return
@@ -546,6 +550,16 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
     assert rec["result"] == "ok"
     assert rec["collections"] == ["mm-claude"]
 
+    # A provider scan failure replaces the last success in the record.
+    with monkeypatch.context() as mp:
+
+        def unreadable_source(_cfg):
+            raise PermissionError("fixture directory is unreadable")
+
+        mp.setattr(memoryindex, "desired_collections", unreadable_source)
+        assert memoryindex.refresh(env.cfg).status == "failed"
+        assert memoryindex.read_state()["result"] == "failed"
+
     # Embeddings=True spawns qmd embed detached.
     popen_calls: list[tuple[list[str], dict]] = []
     real_popen = subprocess.Popen
@@ -555,10 +569,10 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
         return real_popen(cmd, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", spy_popen)
-    env.cfg["memory_index"]["embeddings"] = True
+    config.patch_config_on_disk({"memory_index": {"embeddings": True}})
     res_emb = memoryindex.refresh(env.cfg)
     assert res_emb.status == "ok"
-    embed_calls = [c for c in popen_calls if c[0][1:] == ["embed"]]
+    embed_calls = [c for c in popen_calls if c[0][1:] == ["--index", "index", "embed"]]
     assert len(embed_calls) == 1
     assert embed_calls[0][1]["start_new_session"] is True
     assert embed_calls[0][1]["stdin"] is subprocess.DEVNULL
@@ -573,6 +587,10 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         res_busy = memoryindex.refresh(env.cfg)
         assert res_busy.status == "skipped-running"
+        off_busy = runner.invoke(cli.app, ["memory-index", "off"])
+        assert off_busy.exit_code == 1
+        assert "Run: mm memory-index off" in off_busy.output
+        assert config.memory_index_enabled(config.load_config(env.cfg_path))
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
@@ -665,23 +683,27 @@ def test_memory_index_command_bare_on_off(tmp_path: Path, monkeypatch: pytest.Mo
     assert "enabled:       on" in r_bare.output
     assert "mm-claude" in r_bare.output
     assert "keep-me" not in r_bare.output
+    assert stub.calls()[-2:] == [["--version"], ["collection", "show", "mm-claude"]]
 
     # `off` disables config, removes only mm- collections, preserves embeddings=True.
+    stale_config = config.load_config(env.cfg_path)
     r_off = runner.invoke(cli.app, ["memory-index", "off"])
     assert r_off.exit_code == 0, r_off.output
     reloaded2 = config.load_config(env.cfg_path)
     assert reloaded2["memory_index"] == {"enabled": False, "embeddings": True}
     assert "mm-claude" not in stub.state()["collections"]
     assert "keep-me" in stub.state()["collections"]
+    assert memoryindex.refresh(stale_config).status == "skipped-off"
+    assert "mm-claude" not in stub.state()["collections"]
 
     # Already-off no-op.
     r_off2 = runner.invoke(cli.app, ["memory-index", "off"])
     assert r_off2.exit_code == 0, r_off2.output
     assert "already off" in r_off2.output
 
-    # Invalid action exits 1.
+    # Invalid action exits with the documented usage error.
     r_bad = runner.invoke(cli.app, ["memory-index", "bogus"])
-    assert r_bad.exit_code == 1
+    assert r_bad.exit_code == 2
 
 
 # ── T2: Attended push/pull tails, two-machine Codex search, hooks ────────────
@@ -750,7 +772,7 @@ def _init_two_machine_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
     return SimpleNamespace(storage_dir=storage_dir, backend=backend, devs=devs, activate=activate)
 
 
-def test_two_machine_attended_push_pull_refreshes_qmd_and_reflects_deletions(
+def test_two_machine_attended_push_pull_refreshes_qmd_after_add_edit_and_delete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fleet = _init_two_machine_env(tmp_path, monkeypatch)
@@ -787,6 +809,24 @@ def test_two_machine_attended_push_pull_refreshes_qmd_and_reflects_deletions(
     assert r_pull.exit_code == 0, r_pull.output
     assert "qmd://mm-codex-mac-a/MEMORY.md" in stub_b.search("alpha-memory-token-159a")
 
+    # A change in the same file must replace the indexed text on B.
+    fleet.activate("aaaaaaaa")
+    monkeypatch.setenv("PATH", f"{stub_a.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("QMD_STUB_STATE", str(stub_a.state_path))
+    monkeypatch.setenv("QMD_STUB_LOG", str(stub_a.log_path))
+    (mem_a / "MEMORY.md").write_text("updated-memory-token-159a\n", encoding="utf-8")
+    updated_push = runner.invoke(cli.app, ["push"])
+    assert updated_push.exit_code == 0, updated_push.output
+
+    fleet.activate("bbbbbbbb")
+    monkeypatch.setenv("PATH", f"{stub_b.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("QMD_STUB_STATE", str(stub_b.state_path))
+    monkeypatch.setenv("QMD_STUB_LOG", str(stub_b.log_path))
+    updated_pull = runner.invoke(cli.app, ["pull"])
+    assert updated_pull.exit_code == 0, updated_pull.output
+    assert "qmd://mm-codex-mac-a/MEMORY.md" in stub_b.search("updated-memory-token-159a")
+    assert "No results found." in stub_b.search("alpha-memory-token-159a")
+
     # Machine A deletes MEMORY.md and pushes; Machine B pulls; search reflects deletion.
     dev_a = fleet.activate("aaaaaaaa")
     monkeypatch.setenv("PATH", f"{stub_a.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
@@ -802,7 +842,7 @@ def test_two_machine_attended_push_pull_refreshes_qmd_and_reflects_deletions(
     monkeypatch.setenv("QMD_STUB_LOG", str(stub_b.log_path))
     r_pull2 = runner.invoke(cli.app, ["pull"])
     assert r_pull2.exit_code == 0, r_pull2.output
-    assert "No results found." in stub_b.search("alpha-memory-token-159a")
+    assert "No results found." in stub_b.search("updated-memory-token-159a")
 
     # Removing B's peer copies folder and refreshing removes A's peer collection.
     peer_dir = dev_b.copies_dir / "aaaaaaaa"
@@ -859,6 +899,12 @@ def test_attended_lock_order_dry_run_failure_and_missing_qmd_isolation(
         events.clear()
         r_pull_dry = runner.invoke(cli.app, ["pull", "--dry-run"])
         assert r_pull_dry.exit_code == 0, r_pull_dry.output
+        assert events == ["release"]
+
+        events.clear()
+        mp.setattr(pullflow, "_pull_core", lambda *a, **kw: pullflow.PullResult(total_failed=1))
+        r_pull_failed = runner.invoke(cli.app, ["pull"])
+        assert r_pull_failed.exit_code == 1, r_pull_failed.output
         assert events == ["release"]
 
     # Missing qmd never changes push/pull exit code or adds output lines.
@@ -926,6 +972,12 @@ def test_hooks_spawn_detached_after_lock_release_and_child_records_state(
         assert r_apull.output == ""
         assert events == ["release", "spawn"]
 
+        events.clear()
+        mp.setattr(pullflow, "_pull_core", lambda *a, **kw: pullflow.PullResult(total_failed=1))
+        r_apull_failed = runner.invoke(cli.app, ["autopull"])
+        assert "1 file(s) failed to apply" in r_apull_failed.output
+        assert events == ["release"]
+
     # Unit-test start_detached_refresh Popen arguments.
     popen_args: list[tuple[list[str], dict]] = []
 
@@ -943,7 +995,8 @@ def test_hooks_spawn_detached_after_lock_release_and_child_records_state(
             lambda cmd, **kw: (popen_args.append((list(cmd), kw)), _FakeProc())[1],
         )
         assert memoryindex.start_detached_refresh(config.load_config(dev_a.cfg_path)) is True
-    assert popen_args[0][0] == [sys.executable, "-m", "mind_meld.memoryindex"]
+    assert popen_args[0][0] == [sys.executable, "-P", "-m", "mind_meld.memoryindex"]
+    assert popen_args[0][1]["cwd"] == "/"
     assert popen_args[0][1]["start_new_session"] is True
     assert popen_args[0][1]["stdin"] is subprocess.DEVNULL
     assert popen_args[0][1]["stdout"] is subprocess.DEVNULL

@@ -899,34 +899,13 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery keeps a private local project index, and per-repository cursors resume unfinished Git walks on later attended `mm push` runs, including pushes with no user-file edits. Unchanged projects avoid rescanning their session logs. Autopush keeps its own small budgets. An attended push uses one `[retro] capture_budget_ms` (default 5,000 ms) for host capture and activity capture together, and can spend up to `[retro] attended_capture_cap_ms` (default 30,000 ms, range `capture_budget_ms`–60,000) to finish remaining host warm retries, repository discovery, Git walks and session scans before stopping. On a terminal, an attended push that runs longer than 3 seconds shows a transient progress line with the step and count that clears before the single outcome line. A host reader or Git walk stopped by its deadline or budget with items left reports `catching up (N left)` on the attended push and in `mm status`, with `N` matching `mm diag`'s `host_usage.codex.pending` (or `files_on_disk - files_cached`) and `git_capture.fresh.pending_repos`. Persistent failures (three incomplete captures), empty discovery, Git errors, or gaps beyond the 90-day retained event window advise explicit `mm recapture`. Historical degradation breadcrumbs retain their original diagnostic text. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does not mean fleet retro received a new activity event.
 - **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available. Run: UV_VENV_CLEAR=1 pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
 
+
 ## Codex Integration
 
 Mind Meld treats Codex as a first-class peer of Claude Code. Grok Build, Muse and Antigravity are also usage-reader hosts (see [Grok Build](#grok-build), [Muse](#muse) and [Antigravity](#antigravity-agy)).
 
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`, except Codex's own installed plugin versions (`plugins/cache/*` and `plugins/.remote-plugin-install-staging/*`): Codex installs and removes those itself, and a removal there would otherwise delete the same files on your other Macs.
 - Enable `codex-memory` with `mm enable-source codex-memory` or select it during `mm init`. On `mm push` it publishes `memory_summary.md`, `MEMORY.md`, and direct `rollout_summaries/*.md` files from `~/.codex/memories_v2/`, with `~/.codex/memories/` as the fallback. This source leaves the Codex home untouched. Git metadata, SQLite stores, and files outside the copy set stay local. Each publisher's copies land in `~/.local/share/mind-meld/codex-memory/<peer device id>/` on machines that enable the source, including machines without their own Codex memory folder. Treat the copies as read-only. To correct a memory, fix it on the machine that wrote it, then push from that machine and pull on its peers.
-
-### Searching agent memory (qmd)
-
-Mind Meld can maintain one local [qmd](https://github.com/tobi/qmd) search index on this machine over every enabled provider's memory so any agent can search what any other agent learned on any machine:
-
-- **What is indexed:** only enabled sources whose memory folder exists — `mm-claude` (`<claude>/projects`, `*/memory/**/*.md`), `mm-grok` (`<grok>/memory-v2`, `**/topics/**/*.md`), `mm-muse` (`<muse>/memory`, `**/*.md`), `mm-codex-<this-machine>` (`<codex>/memories_v2` or `memories`, `{MEMORY.md,memory_summary.md,rollout_summaries/*.md}`), and one `mm-codex-<peer>` per peer copies folder under `~/.local/share/mind-meld/codex-memory/`.
-- **Local and derived:** the index and its `[memory_index]` config live on this machine only and never sync. The markdown files stay the source of truth.
-- **Requires qmd 2.8.3+:** install qmd 2.8.3 or newer on your `PATH` first (automatic bootstrap/init setup arrives separately).
-- **Commands:**
-  - `mm memory-index` — show whether the index and embeddings are enabled, the qmd version, current `mm-` collections, and the last refresh result (read-only).
-  - `mm memory-index on` — verify qmd 2.8.3+, enable `[memory_index]` in `~/.config/mind-meld/config.toml`, reconcile collections, and run an initial refresh.
-  - `mm memory-index off` — disable the index and remove only `mm-` collections from qmd.
-- **Automatic refresh:** attended `mm push` and `mm pull` reconcile `mm-` collections and run `qmd update` after releasing the sync lock (printing nothing on success). `mm autopush` and `mm autopull` run the same refresh detached in the background and never wait or print. Previews (`--dry-run`) never refresh.
-- **Other qmd collections:** Mind Meld adds or removes only `mm-`-prefixed collections and never edits qmd's files directly. Because `qmd update` reindexes all configured qmd collections, any non-`mm-` collections you keep in qmd are reindexed too, but never added or removed by Mind Meld.
-- **Embeddings (optional):** keyword search (`qmd search`) is the baseline and downloads no models. To also run `qmd embed` in the background after each refresh (downloads qmd's ~334 MB embedding model on first run), set `embeddings = true` under `[memory_index]` in `~/.config/mind-meld/config.toml`.
-- **Failures and diagnostics:** a missing qmd or a failed/timed-out refresh never changes a sync's outcome or exit code. `mm status` shows one line with its fix when the index is enabled and unhealthy; `mm diag` shows the qmd version, `mm-` collections, and last refresh result.
-- **Optional MCP setup (manual):** Mind Meld never edits agent MCP configs. If you want Claude Code or Codex to query qmd over MCP, run these yourself:
-
-```bash
-claude mcp add qmd -- qmd mcp
-codex mcp add qmd -- qmd mcp
-```
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
 - Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source agy` is the corresponding verb: it adds a scoped Antigravity source (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`) and opts this Mac into reading step token totals from local conversation databases. Session databases, settings, and chat history stay on the Mac.
 - The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`.
@@ -960,6 +939,29 @@ To verify Codex usage capture on an initialized Mac with Codex logs and the
 read blocker. Neither proves a snapshot was published. The device-wide capture
 and publication lines in `mm status` provide that evidence. For a blocker, see
 [Host usage capture](#host-usage-capture).
+
+### Searching agent memory (qmd)
+
+Mind Meld can maintain one local [qmd](https://github.com/tobi/qmd) search index on this machine over every enabled provider's memory so any agent can search what any other agent learned on any machine:
+
+- **What is indexed:** only enabled sources whose memory folder exists — `mm-claude` (`<claude>/projects`, `*/memory/**/*.md`), `mm-grok` (`<grok>/memory-v2`, `**/topics/**/*.md`), `mm-muse` (`<muse>/memory`, `**/*.md`), `mm-codex-<this-machine>` (`<codex>/memories_v2` or `memories`, `{MEMORY.md,memory_summary.md,rollout_summaries/*.md}`), and one `mm-codex-<peer>` per peer copies folder under `~/.local/share/mind-meld/codex-memory/`.
+- **Local and derived:** the index and its `[memory_index]` config live on this machine only and never sync. The markdown files stay the source of truth.
+- **Requires qmd 2.8.3+:** install qmd 2.8.3 or newer on your `PATH` first (automatic bootstrap/init setup arrives separately).
+- **Commands:**
+  - `mm memory-index` — show whether the index and embeddings are enabled, the qmd version, the `mm-` collections verified from the last refresh record, and the last refresh result (read-only).
+  - `mm memory-index on` — verify qmd 2.8.3+, enable `[memory_index]` in `~/.config/mind-meld/config.toml`, reconcile collections, and run an initial refresh.
+  - `mm memory-index off` — disable the index and remove only `mm-` collections from qmd.
+- **Automatic refresh:** attended `mm push` and `mm pull` reconcile `mm-` collections and run `qmd update` after releasing the sync lock (printing nothing on success). `mm autopush` and `mm autopull` run the same refresh detached in the background and never wait or print. Previews (`--dry-run`) never refresh.
+- **Machine index:** Mind Meld uses qmd’s machine-wide index. If your current directory uses a project index, run `qmd --index index search` to search the machine index.
+- **Other qmd collections:** Mind Meld adds or removes only `mm-`-prefixed collections and never edits qmd's files directly. Because `qmd update` reindexes all configured qmd collections, any non-`mm-` collections you keep in qmd are reindexed too, but never added or removed by Mind Meld.
+- **Embeddings (optional):** keyword search (`qmd search`) is the baseline and downloads no models. To also run `qmd embed` in the background after each refresh (downloads qmd's ~334 MB embedding model on first run), set `embeddings = true` under `[memory_index]` in `~/.config/mind-meld/config.toml`.
+- **Failures and diagnostics:** a missing qmd or a failed/timed-out refresh never changes a sync's outcome or exit code. `mm status` shows one line with its fix when the index is enabled and unhealthy; `mm diag` shows the qmd version, `mm-` collections, and last refresh result.
+- **Optional MCP setup (manual):** Mind Meld never edits agent MCP configs. If you want Claude Code or Codex to query qmd over MCP, run these yourself:
+
+```bash
+claude mcp add qmd -- qmd mcp
+codex mcp add qmd -- qmd mcp
+```
 
 ### Grok Build
 

@@ -2387,8 +2387,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         address, folder id/label/state, fetch counts, peer counts, option
         values, problems and .stignore state; Track 92A)
       * memory_index values other than enabled/embeddings bools, the parsed qmd
-        version, mm- collection names (locally visible in qmd; no paths, no
-        peer device ids), and the last refresh's state/result/at (Track 159A)
+        version, mm- collection names (which may include a device ID slug),
+        and the last refresh's state/result/at (Track 159A)
 
     Uses existing tri-state helpers (`fetch_crypto_init`, `sidecar.read`)
     rather than re-sampling raw blob bytes — the tri-state branches are

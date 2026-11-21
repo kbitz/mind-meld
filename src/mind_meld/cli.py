@@ -1637,11 +1637,7 @@ def push(
                             )
                 finally:
                     core._release_sync_lock()
-                if (
-                    not dry_run
-                    and core_finished
-                    and not isinstance(sys.exception(), (KeyboardInterrupt, typer.Abort))
-                ):
+                if not dry_run and core_finished and sys.exception() is None:
                     _sync_memory_index(config)
                 # Failed attended attempts need the update or nudge too; previews never
                 # fetch, install or write it.
@@ -3022,7 +3018,8 @@ def _attended_pull(
                                 mesh_res.superseded_registrations if mesh_res is not None else ()
                             ),
                         )
-                _sync_memory_index(config)
+                if not pulled.total_failed:
+                    _sync_memory_index(config)
                 _sync_update(config, verbose=verbose)
 
 
@@ -4893,7 +4890,8 @@ def autopull() -> None:
             _write_autorun_breadcrumb(
                 "pull", outcome, detail, removal_wait_only=mesh_res.removal_wait_only(degradations)
             )
-            detached_config = setup.config
+            if not result.total_failed:
+                detached_config = setup.config
 
             # Seam 2 — self-update or nudge at the TAIL. Runs AFTER the main work
             # + breadcrumb so the cold-cache HTTP fetch latency (~500ms 1x/24h)
