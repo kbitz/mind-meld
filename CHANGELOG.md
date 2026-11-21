@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.77] - 2026-11-21
+
+`mm pull` waits briefly for Syncthing to finish delivering a peer's push and says when files are still on their way, while `mm status` separates live delivery from the last hook observation.
+
+### Added
+
+- The `sync.pull_syncthing_wait_ms` setting controls the terminal pull wait, and zero keeps the probe while skipping the wait.
+
+### Changed
+
+- `mm pull` now waits briefly for Syncthing to finish delivering a peer's push and says when files are still on their way instead of reporting nothing to pull.
+- When Syncthing is still delivering files, `mm pull` reports the pending delivery and waits up to 15 seconds by default on a terminal.
+- `mm autopull` records pending delivery quietly, and `mm status` distinguishes live delivery from the last hook observation.
+
+### Upgrade notes
+
+- An attended `mm pull` can now take up to 15 seconds longer while Syncthing delivers; set `sync.pull_syncthing_wait_ms` to `0` in `config.toml` to turn the wait off.
+
 ## [1.12.76] - 2026-11-21
 
 Opt-in Codex memory sharing publishes this machine's summaries, stores every other machine's copies outside Codex, and keeps a retired machine's copies in local recovery for 30 days.
