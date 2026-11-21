@@ -117,13 +117,17 @@ over"; "reaching for the search tool -- we would want to recommend a line in
 agents.md as part of setup"; "we would want to facilitate installed qmd just
 like we do syncthing on setup"; "memories contradicting each other is
 valuable as it gives us the opportunity to correct the conflict"; and, on
-three questions, "1 c / 2 a / 3 a". O9 now covers every provider's memory
-through one local qmd index per machine, with Codex memory roaming as
-per-machine copies; keyword search is the baseline and embeddings are opt-in.
-It is planned now rather than after 2.0.0, keeps its own MINOR checkpoint and
-does not gate 2.0.0. The O9 non-goal, the supported conditions, the accepted
-manual steps and the checkpoint's criteria list follow. Target, audience,
-O1 to O8 and the other release rules are unchanged.
+three questions, "1 c / 2 a / 3 a", then "3 yes, gate" when asked whether
+"1 c" made O9 a condition of 2.0.0 (confirmed directly by the owner). O9 now
+covers every provider's memory through one local qmd index per machine, with
+Codex memory roaming as per-machine copies; keyword search is the baseline
+and embeddings are opt-in. It is planned now rather than after 2.0.0, joins
+the selected target's acceptance and is a condition of 2.0.0; its MINOR
+checkpoint stays for a 1.x release that lands O9 before 2.0.0's other
+conditions. The selected target line, the MVP-1 row, the 2.0.0 stage
+version, the O9 non-goal, the supported conditions, the accepted manual
+steps and the checkpoint's criteria list follow. Audience, O1 to O8 and the
+other release rules are unchanged.
 Earlier text lives in
 `git log -- docs/SPEC.md`.
 
@@ -184,8 +188,8 @@ Grok row counts Grok Build's own runs only.
   repository is public and stays public (owner's decision, 2026-11-14); it
   installs with no GitHub login.
 - Selected target: MVP-1, the owner's fleet of macOS and Arch-based Linux
-  machines syncing over Syncthing, with complete usage reporting and quiet,
-  honest output.
+  machines syncing over Syncthing, with complete usage reporting, quiet,
+  honest output and cross-model memory (O9, added 2026-11-21).
 - Supported conditions: macOS and Arch-based Linux (Omarchy); Syncthing 2.1 or
   newer on every machine; Python 3.11+ and pipx, installed by the bootstrap
   script if missing; a desktop keyring (Keychain, or an unlocked Secret
@@ -201,16 +205,16 @@ Grok row counts Grok Build's own runs only.
 ## Stage outcomes
 | Stage | Intended users and usable outcome | Planned? |
 |---|---|---|
-| MVP-1 | The owner syncs agent context across their own macOS and Linux machines over Syncthing, end-to-end encrypted, and sees the whole fleet's agent usage | yes (selected) |
+| MVP-1 | The owner syncs agent context across their own macOS and Linux machines over Syncthing, end-to-end encrypted, sees the whole fleet's agent usage, and every agent can search what any agent learned | yes (selected) |
 | MVP-2 | A small supported alpha group runs their own fleets | no |
 | public-beta | Public users install from PyPI or GitHub with support | no |
 | public-release | Public users receive stable compatibility commitments | no |
 
 MVP-1 on the 1.x iCloud store, macOS only, was achieved with v1.0.0 on
 2026-09-22; the outcomes below redefine MVP-1 for Syncthing and Linux.
-Cross-model memory (O9) is planned now, before 2.0.0, for the same owner
-fleet (developer, 2026-11-21: "1 c"). It is a capability with its own
-checkpoint, not an audience stage, and does not gate 2.0.0.
+Cross-model memory (O9) is planned now for the same owner fleet and is a
+condition of 2.0.0 (developer, 2026-11-21: "1 c", then "3 yes, gate"). It is
+a capability with its own checkpoint, not an audience stage.
 
 ## Selected target acceptance
 ### O1: Sync converges across macOS and Linux over Syncthing
@@ -410,8 +414,6 @@ manual step.
    prefix and fix-command form), so they all read as one tool. The agent
    hooks stay silent (O8.3).
 
-## Planned capability: cross-model memory
-
 ### O9: Cross-model memory
 Anything one agent learned on any of the owner's machines can be found by
 every agent on every machine (Claude Code, Codex, Grok Build, Muse and any
@@ -594,13 +596,15 @@ index. mm never copies a memory into another agent's store. Design:
   documentation-only changes take no bump.
 - Capability checkpoints, each a MINOR when accepted: **quiet output** (O8),
   **complete usage** (O7 criteria 1 to 3 on the owner's machines) and
-  **cross-model memory** (O9 criteria 1 to 6; owner, 2026-10-29; planned
-  before 2.0 since 2026-11-21).
+  **cross-model memory** (O9 criteria 1 to 6; owner, 2026-10-29). O9 is
+  also a condition of 2.0.0 (developer, 2026-11-21: "3 yes, gate"); its
+  MINOR applies only to a 1.x release that lands O9's acceptance before
+  2.0.0's other conditions are met, and 2.0.0 never awards it again.
 - Stage versions: MVP-1 on iCloud (macOS) = 1.0.0, achieved. MVP-1 on
   Syncthing (macOS and Linux) = **2.0.0**: O1 to O4 accepted on the
   owner's own observation on one Mac and both Linux machines in the
-  Syncthing fleet, with O6 to O8 holding, the bootstrap script and O2's
-  Syncthing setup and approval shipped. MAJOR
+  Syncthing fleet, O9 accepted (its criterion 6), with O6 to O8 holding,
+  the bootstrap script and O2's Syncthing setup and approval shipped. MAJOR
   because the transport changes. A Mac not yet moved keeps running on iCloud
   Drive and does not hold 2.0.0 or any other machine up; a machine may move
   before 2.0.0 on any release that has the Syncthing support it needs.

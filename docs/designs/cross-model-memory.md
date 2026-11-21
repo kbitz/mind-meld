@@ -1,8 +1,9 @@
 # Cross-model memory
 
 Status: designed on 2026-11-21 from the developer's decisions of 2026-11-20
-and 2026-11-21. This is [docs/SPEC.md](../SPEC.md) O9, planned now, before
-2.0.0, with its own MINOR checkpoint. Implementation waits for the
+and 2026-11-21. This is [docs/SPEC.md](../SPEC.md) O9, planned now and a
+condition of 2.0.0, with its own MINOR checkpoint for a 1.x release that
+lands it first. Implementation waits for the
 [qualification](#qualification) below. This design replaces the 2026-10-29
 design ([archived](../archive/cross-model-memory-2026-10-29.md)), which
 carried only Codex memory and pointed agents at grep. The developer rejected
@@ -35,6 +36,7 @@ Verbatim, 2026-11-20 and 2026-11-21:
 - On three open questions: "1 c / 2 a / 3 a". O9 moves before 2.0, with its
   qualification and implementation on the Current Plan. Keyword search is the
   baseline, and embeddings are opt-in.
+- Asked whether "1 c" made O9 a condition of 2.0.0: "3 yes, gate".
 
 ## What exists today
 
