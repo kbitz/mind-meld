@@ -169,6 +169,7 @@ class MeshResult:
     ran: bool = False
     snapshot_taken: bool = False
     removals_evaluated: bool = False
+    removal_waits_recorded: bool = False
     published: bool = False
     stop_cause: str | None = None
 
@@ -197,7 +198,8 @@ class MeshResult:
     def removal_wait_only(self, existing_degradations: Sequence[str]) -> bool:
         """Identify hook degradations fully explained by the separate mesh record."""
         return (
-            bool(self.degradations)
+            self.removal_waits_recorded
+            and bool(self.degradations)
             and not any(existing_degradations)
             and all(detail.startswith(attemptlog.MESH_WAIT_PREFIX) for detail in self.degradations)
         )
@@ -354,6 +356,8 @@ def run(
             )
         except (Exception, SystemExit):
             pass
+        else:
+            result.removal_waits_recorded = True
     if attended:
         clauses = result.outcome_clauses
         if clauses:

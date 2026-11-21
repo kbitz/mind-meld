@@ -1524,7 +1524,9 @@ def test_mesh_removal_wait_refreshes_and_clears_across_all_sync_commands(
     assert not crumb.get("detail")
     status_hook_waiting = runner.invoke(app, ["status"])
     assert status_hook_waiting.exit_code == 0, status_hook_waiting.output
-    assert "Latest pull needs attention" not in status_hook_waiting.stdout.splitlines()[0]
+    verdict = status_hook_waiting.stdout.splitlines()[0]
+    assert "Latest pull needs attention" not in verdict
+    assert "Sync run evidence unknown" not in verdict
     assert wait_line in " ".join(status_hook_waiting.stdout.split())
 
     # An unevaluated stopped pass (e.g. unauthorized) must NOT clear the standing wait
@@ -1563,6 +1565,37 @@ def test_mesh_removal_wait_refreshes_and_clears_across_all_sync_commands(
     status_cleared = runner.invoke(app, ["status"])
     assert status_cleared.exit_code == 0, status_cleared.output
     assert "Syncthing device removals wait for" not in " ".join(status_cleared.output.split())
+
+
+@pytest.mark.parametrize("failure", ["write", "read"])
+def test_hook_wait_with_unavailable_mesh_record_keeps_degraded_verdict(
+    fake_syncthing, tmp_path, monkeypatch, failure
+):
+    _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+
+    def wait_for_peer(result, **_kwargs):
+        result.removals_evaluated = True
+        result.degradations.append(
+            "Syncthing device removals wait for a complete fleet registry read. Run: mm diag"
+        )
+        return result
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError(errno.EIO, "mesh record unavailable")
+
+    monkeypatch.setattr(meshflow, "_run_inner", wait_for_peer)
+    if failure == "write":
+        attemptlog.write_mesh_waits([])
+        monkeypatch.setattr(attemptlog, "write_mesh_waits", fail_write)
+    hook = runner.invoke(app, ["autopull"])
+    assert hook.exit_code == 0 and hook.output == ""
+    if failure == "read":
+        assert attemptlog.read_mesh_waits()["state"] == "valid"
+        monkeypatch.setattr(attemptlog, "read_mesh_waits", lambda: {"state": "contended"})
+
+    status = runner.invoke(app, ["status"])
+    assert status.exit_code == 0, status.output
+    assert "Latest pull needs attention" in status.stdout.splitlines()[0]
 
 
 def test_compose_hook_breadcrumb_several_omitted_details_keeps_priority_and_status_display(

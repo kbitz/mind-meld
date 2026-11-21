@@ -726,7 +726,11 @@ def project_runs(
                     "omitted_details": 0,
                     "errno": None,
                 }
-                if outcome == "degraded" and raw.get("removal_wait_only") is True:
+                if (
+                    mesh_waits_current
+                    and outcome == "degraded"
+                    and raw.get("removal_wait_only") is True
+                ):
                     run["removal_wait_only"] = True
             timestamp = _timestamp(run["completed_at"])
             if timestamp is None or timestamp > now:

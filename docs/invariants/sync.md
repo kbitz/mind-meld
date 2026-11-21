@@ -2227,10 +2227,11 @@ are `mm status` and the `mm diag` state dict (`syncthing.last_mesh`). Wait
 lines (`Syncthing device removals wait for ...`) are rendered from
 `last-mesh.json` after the attended/auto run block (and omitted from new
 attended-run `degradations` and autorun breadcrumb text). A hook with only
-removal waits still records a `degraded` breadcrumb. Its `removal_wait_only`
-flag lets `attemptlog.project_runs` keep the wait out of the status verdict
-while retaining the recorded outcome. When `last-mesh.json` is valid, the
-inspection projection also hides earlier wait clauses in hook breadcrumbs
+removal waits still records a `degraded` breadcrumb. It sets `removal_wait_only`
+after a successful record write. When the record is valid,
+`attemptlog.project_runs` keeps the wait out of the status verdict while
+retaining the recorded outcome. The inspection projection also uses the valid
+record to hide earlier wait clauses in hook breadcrumbs
 and attended status lines. It keeps any other diagnostics and leaves the
 underlying records intact.
 
