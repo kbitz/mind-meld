@@ -100,7 +100,9 @@ source works like this:
   including when both `memories/` and `memories_v2/` exist. Q3 observed only
   `memories_v2/` on a fresh 0.171.0 home. It did not exercise an upgrade
   with both directories. Source detection, publishing and the local qmd
-  collection use the same resolved directory.
+  collection use the same resolved directory. The 157A and 159A roadmap
+  cards still name the legacy root. Their planning must reconcile those
+  references with Q3 so 159A uses the directory 157A resolves.
 - At pull, mm places each peer's files under
   `~/.local/share/mind-meld/codex-memory/<device id>/`. That folder is mm's,
   outside every native store.
