@@ -1070,12 +1070,8 @@ def status(
             # `mm status` is the command the v0.12.16 degradation signal is
             # designed to reach, and it runs far more often than `mm diag`.
             detail = crumb.get("detail")
-            if verb == "pull" and not syncthing_pending and isinstance(detail, str):
-                detail = "; ".join(
-                    part
-                    for part in detail.split("; ")
-                    if not part.startswith(syncthing.DELIVERY_NOTICE_PREFIX)
-                )
+            if verb == "pull" and isinstance(detail, str):
+                detail = syncthing.historical_delivery_detail(detail)
             outcome_str = (
                 f"{safe_str(safety.safe_terminal_str(outcome))}: "
                 f"{safe_str(safety.safe_terminal_str(detail))}"

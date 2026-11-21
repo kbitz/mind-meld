@@ -4840,11 +4840,13 @@ def test_syncthing_delivery_probe_and_zero_wait_never_sleep(fleet, monkeypatch):
     assert res_zero.syncthing_pending_files == 1
 
 
+@pytest.mark.parametrize("previously_pending", (False, True), ids=("initial", "recheck"))
 @pytest.mark.parametrize(
     "st_kwargs",
     (
         {"state": "not-found"},
-        {"state": "unreachable", "cause": "connection-refused"},
+        {"state": "unreachable", "cause": "refused"},
+        {"state": "unreachable", "cause": "timeout"},
         {"state": "unauthorized"},
         {"state": "ok", "folder_id": None, "problems": ("no-folder",)},
         {
@@ -4855,17 +4857,29 @@ def test_syncthing_delivery_probe_and_zero_wait_never_sleep(fleet, monkeypatch):
             "files_to_fetch": 4,
         },
     ),
-    ids=("not-found", "unreachable", "unauthorized", "no-folder-icloud", "paused"),
+    ids=("not-found", "unreachable", "timeout", "unauthorized", "no-folder-icloud", "paused"),
 )
-def test_syncthing_delivery_non_pending_states_leave_pull_unchanged(fleet, monkeypatch, st_kwargs):
+def test_syncthing_delivery_non_pending_states_leave_pull_unchanged(
+    fleet, monkeypatch, st_kwargs, previously_pending
+):
     from mind_meld import syncthing
 
     st = syncthing.SyncthingState(**st_kwargs)
     assert syncthing.delivery_pending(st) is False
-    monkeypatch.setattr(pullflow.syncthing, "read_state", lambda *a, **kw: st)
+    pending = syncthing.SyncthingState(state="ok", folder_id="mind-meld", files_to_fetch=2)
+    samples = iter((pending, st) if previously_pending else (st,))
+    clock = [0.0]
+
+    def advance_clock(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(pullflow.syncthing, "read_state", lambda *a, **kw: next(samples))
+    monkeypatch.setattr(pullflow, "_delivery_now", lambda: clock[0])
+    monkeypatch.setattr(pullflow, "_delivery_sleep", advance_clock)
 
     result, summaries, (out, err) = _run(fleet, monkeypatch, "direct", syncthing_delivery="wait")
 
+    assert clock[0] == (1.0 if previously_pending else 0.0)
     assert result.syncthing_still_delivering is False
     assert result.syncthing_pending_files is None
     assert "Syncthing is still delivering" not in out

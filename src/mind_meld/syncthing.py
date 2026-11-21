@@ -94,7 +94,8 @@ class SyncthingState:
     pending_device_names: dict[str, str] = field(default_factory=dict, repr=False)
 
 
-DELIVERY_NOTICE_PREFIX = "Syncthing is still delivering "
+_DELIVERY_NOTICE_PREFIX = "Syncthing is still delivering "
+_DELIVERY_NOTICE_FIX = ". Run: mm pull"
 
 
 def delivery_files(count: int | None) -> str:
@@ -105,7 +106,18 @@ def delivery_files(count: int | None) -> str:
 
 
 def delivery_notice(count: int | None) -> str:
-    return f"{DELIVERY_NOTICE_PREFIX}{delivery_files(count)}. Run: mm pull"
+    return f"{_DELIVERY_NOTICE_PREFIX}{delivery_files(count)}{_DELIVERY_NOTICE_FIX}"
+
+
+def historical_delivery_detail(detail: str) -> str:
+    """Render a past hook observation without repeating the live retry advice."""
+    parts = []
+    for part in detail.split("; "):
+        if part.startswith(_DELIVERY_NOTICE_PREFIX) and part.endswith(_DELIVERY_NOTICE_FIX):
+            files = part.removeprefix(_DELIVERY_NOTICE_PREFIX).removesuffix(_DELIVERY_NOTICE_FIX)
+            part = f"Syncthing reported {files} pending"
+        parts.append(part)
+    return "; ".join(parts)
 
 
 def delivery_pending(state: SyncthingState) -> bool:

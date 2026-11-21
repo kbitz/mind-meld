@@ -1229,12 +1229,14 @@ def test_status_shows_pending_syncthing_delivery_and_clears_on_catchup(inspectio
         "Syncthing is still delivering 3 files."
         in statusflow._read_autorun_evidence()["runs"]["pull"]["detail"]
     )
+    fake_syncthing.set_folder(backend.root, state="syncing", need_files=2, need_bytes=80)
     fake_syncthing.requests.clear()
 
     res_pending = runner.invoke(app, ["status"])
     assert res_pending.exit_code == 0, res_pending.output
-    assert "Syncthing is still delivering 3 files. Run: mm pull" in res_pending.stdout
-    assert "3 files to fetch" in res_pending.stdout
+    assert "Syncthing is still delivering 2 files. Run: mm pull" in res_pending.stdout
+    assert "Syncthing reported 3 files pending" in " ".join(res_pending.stdout.split())
+    assert "2 files to fetch" in res_pending.stdout
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []
 
@@ -1247,6 +1249,7 @@ def test_status_shows_pending_syncthing_delivery_and_clears_on_catchup(inspectio
     assert "Syncthing is still delivering" not in res_idle.stdout
     assert "files to fetch" not in res_idle.stdout
     assert "Last auto-pull" in res_idle.stdout
+    assert "Syncthing reported 3 files pending" in " ".join(res_idle.stdout.split())
     assert "up to date" in res_idle.stdout
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []

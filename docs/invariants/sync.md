@@ -1933,11 +1933,11 @@ the transient phase `Waiting for Syncthing to deliver N files` (or `... files`
 without a count). It polls at 1 s intervals between reads through injectable
 `_delivery_sleep` / `_delivery_now` seams. The budget for every retry fits
 within the remaining `sync.pull_syncthing_wait_ms` (default 15,000 ms, range
-0–60,000 ms). A timed-out retry keeps the last observed pending count. Setting
-the wait to zero keeps just the initial probe. The wait holds the mm lock, so
-another hook that reaches that lock records `lock-held` and exits silently.
-If delivery is still pending after the probe or bound,
-pull still applies what has arrived, records `PullResult.syncthing_still_delivering`
+0–60,000 ms). A retry that times out on a shortened budget keeps the last
+observed pending count. Setting the wait to zero keeps just the initial probe.
+The wait holds the mm lock, so another hook that reaches that lock records
+`lock-held` and exits silently. If delivery is still pending after the probe
+or bound, pull applies what has arrived, records `PullResult.syncthing_still_delivering`
 and `syncthing_pending_files` (without touching `waiting`/`WaitingPeer`,
 `_record_peer_cursors`, the ledger or `pullhistory`, and never failing or
 degrading the pull), and exits 0. `delivering_clause` (`Syncthing is still
@@ -1948,9 +1948,9 @@ or `no-folder` (iCloud Drive) states leave pull output unchanged. `mm autopull`
 prints nothing for pending delivery and records `delivering_detail` in its
 `success` breadcrumb; `mm status` surfaces live pending delivery in
 `_status_verdict(syncthing_pending=)` (after `left_out`, before `peers_overdue`).
-Once the folder catches up, the live verdict and the rendered pending clause
-in the last auto-pull line clear. The recorded breadcrumb remains available
-to diagnostics.
+The live pending verdict clears once the folder catches up. The last
+auto-pull line presents its recorded delivery count as a past observation
+without a retry command.
 
 ## Syncthing state and each peer's push (Track 92A)
 

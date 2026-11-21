@@ -4116,9 +4116,13 @@ def _wait_for_syncthing_delivery(
                 observed = syncthing.read_state(
                     storage_root, timeout=1.0, budget=min(budget, remaining)
                 )
-                # An incomplete timeout sample cannot disprove the last observation.
-                if observed.state == "unreachable" and observed.cause == "timeout":
-                    continue
+                # A poll cut short by our wait deadline leaves the prior observation in place.
+                if (
+                    remaining < budget
+                    and observed.state == "unreachable"
+                    and observed.cause == "timeout"
+                ):
+                    break
                 if not syncthing.delivery_pending(observed):
                     return False, None
                 state = observed
