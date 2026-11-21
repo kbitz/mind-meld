@@ -44,6 +44,12 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/memoryindex.py] Avoid overlapping qmd embedding processes if they interfere with sync
+
+- **Description:** With embeddings enabled, a completed refresh can start an embed while an earlier embed is still running. Track 159A leaves background embedding to qmd and keeps keyword search as the default.
+- **Evidence:** Greptile found the overlap possible on Track 159A. The review did not observe a failed refresh or search.
+- **Revisit:** If concurrent embeddings slow an owner's machine, repeat model downloads, or cause a refresh to fail. Measure the overlap before adding an embedding-specific guard.
+
 ### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Reject changed qmd collection output
 
 - **Test gap:** No demonstrated defect.
