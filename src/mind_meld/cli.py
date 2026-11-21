@@ -1000,6 +1000,7 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
         return [outputstyle._outcome_line(verb, part) for part in parts]
     assert isinstance(result, pullflow.PullResult)
     deleted = pullflow.deleted_clause(result)
+    retired = pullflow.retired_copies_clause(result)
     lead = (
         "no enabled sources"
         if result.no_sources
@@ -1009,6 +1010,8 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
         if result.total_applied
         else deleted
         if deleted
+        else retired
+        if retired
         else "no changes"
     )
     if result.total_conflicted:
@@ -1017,6 +1020,8 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
     parts = [lead]
     if deleted and result.total_applied:
         parts.append(deleted)
+    if retired and (result.total_applied or deleted):
+        parts.append(retired)
     if clause := pullflow.older_clause(result):
         parts.append(clause)
     if clause := pullflow.waiting_clause(result):
@@ -1986,6 +1991,7 @@ def _push_core(
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
     max_file_size = config["sync"]["max_file_size"]
+    core._configure_codex_memory(config)
 
     backend = get_backend(config)
     core._sync_progress_phase("Checking remote manifest")
@@ -4769,6 +4775,11 @@ def autopull() -> None:
                     f"mm: {pullflow.deleted_clause(result)}",
                     file=sys.stderr,
                 )
+            if result.retired_copies_removed:
+                print(
+                    f"mm: {pullflow.retired_copies_clause(result)}",
+                    file=sys.stderr,
+                )
             if result.total_failed:
                 # Per-file failures (decrypt error, conflict rename failure, write
                 # failure, ValueError on corrupted device_id) increment total_failed
@@ -4818,6 +4829,7 @@ def autopull() -> None:
                 degradations,
                 extra_success=(
                     pullflow.deleted_detail(result),
+                    pullflow.retired_copies_detail(result),
                     pullflow.older_clause(result),
                     pullflow.waiting_detail(result),
                     pullflow.old_form_detail(result),

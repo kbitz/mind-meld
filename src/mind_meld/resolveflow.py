@@ -40,8 +40,9 @@ from typing import Any, Literal
 
 import typer
 
+from mind_meld import config as _config_module
 from mind_meld import conflictmtime, core, fsutil, manifest, outputstyle, pullplan, sidecar
-from mind_meld.config import get_sources
+from mind_meld.config import get_sources, resolve_sources
 from mind_meld.conflictdiff import (
     count_divergent_lines,
     format_age_delta,
@@ -120,6 +121,15 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
             if candidate.is_dir() and not candidate.is_symlink():
                 dirs.append(candidate)
         return dirs
+    if src_type == "codex-memory":
+        copies_root = Path(_config_module.CODEX_MEMORY_COPIES_DIR).expanduser()
+        try:
+            st = copies_root.lstat()
+        except OSError:
+            return []
+        if stat.S_ISDIR(st.st_mode):
+            return [copies_root]
+        return []
     # generic: include_dirs (resolved) + base for single-file includes
     dirs = []
     for d in src_cfg.get("include_dirs", []):
@@ -331,9 +341,16 @@ def _find_conflict_files(
         seen.add(key)
         hits.append((src_name, conflict_path, canonical))
 
-    for src_cfg in get_sources(config):
+    sources_to_scan = list(get_sources(config))
+    seen_src_names = {s["name"] for s in sources_to_scan}
+    for src_cfg in resolve_sources(config).selected:
+        if src_cfg.get("type") == "codex-memory" and src_cfg["name"] not in seen_src_names:
+            sources_to_scan.append(src_cfg)
+            seen_src_names.add(src_cfg["name"])
+
+    for src_cfg in sources_to_scan:
         base_path = Path(src_cfg["path"]).expanduser().resolve()
-        if not base_path.exists():
+        if src_cfg.get("type") != "codex-memory" and not base_path.exists():
             continue
 
         # (1) Recursive scan in include_dirs / SYNCED_SUBDIRS.

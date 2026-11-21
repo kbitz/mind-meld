@@ -329,6 +329,24 @@ def _configure_project_names(config: dict) -> None:
     projectid.configure(Path(claude["path"]).expanduser(), retained=retained)
 
 
+def _configure_codex_memory(config: dict) -> None:
+    """Point the codex-memory wire codec at this device's ID and Codex home (Track 157A)."""
+    own_id = config.get("device", {}).get("id")
+    try:
+        src = next(
+            (s for s in get_sources(config) if s.get("name") == manifest.CODEX_MEMORY_SOURCE_NAME),
+            None,
+        )
+    except Exception:
+        src = None
+    codex_home = (
+        Path(src["path"]).expanduser()
+        if src is not None and src.get("type") == "codex-memory" and src.get("path")
+        else None
+    )
+    manifest.configure_codex_memory(own_id if isinstance(own_id, str) else None, codex_home)
+
+
 def _init_crypto_session(
     backend: LocalBackend,
     passphrase: str,
@@ -433,6 +451,7 @@ def _init_crypto_session(
     if not read_only:
         _apply_verified_crypto_repair(backend, fetch)
     _configure_project_names(config)
+    _configure_codex_memory(config)
 
     # Backfill local config if needed (first command after an upgrade or
     # a previously-uninitialized config). Silent one-time write.
@@ -1370,6 +1389,11 @@ def _has_mtime_only_changes_vs_remote(
     other sources.
     """
     for src_name, src_data in local_manifest.get("sources", {}).items():
+        if src_name == manifest.CODEX_MEMORY_SOURCE_NAME:
+            # Track 157A: each codex-memory file has one writer and Codex
+            # regenerates identical bytes with a fresh mtime; mtime-only drift
+            # must not trigger a manifest republish.
+            continue
         if source_filter is not None and src_name != source_filter:
             continue
         local_files = src_data.get("files", {})
@@ -1514,17 +1538,23 @@ def compute_mint_guard(
         base = Path(cfg["path"]).expanduser()
         ids = entry.get("root_ids") if isinstance(entry.get("root_ids"), dict) else {}
         status: dict[str, str] = {}
+        anchorless = cfg.get("type") == "codex-memory" and not manifest.scan_roots(cfg)
         for rel in absent:
             if ledger is not None and ledger.newest_stamp(name, rel) is not None:
                 guard.skip.add((name, rel))
                 continue
-            root = manifest.scan_root_for(cfg, rel)
-            if root is None:
-                guard.skip.add((name, rel))
-                continue
-            if root not in status:
-                status[root] = _root_status(base, root, ids.get(root))
-            if status[root] == "unchanged":
+            if anchorless:
+                root_state = "unchanged"
+                root = ""
+            else:
+                root = manifest.scan_root_for(cfg, rel)
+                if root is None:
+                    guard.skip.add((name, rel))
+                    continue
+                if root not in status:
+                    status[root] = _root_status(base, root, ids.get(root))
+                root_state = status[root]
+            if root_state == "unchanged":
                 if (name, rel) in guard.skip:
                     continue
                 prior_sha = entry["files"][rel].get("sha256")
@@ -1543,9 +1573,9 @@ def compute_mint_guard(
                     guard.skip.add((name, rel))
                 continue
             guard.skip.add((name, rel))
-            if status[root] != "unanchored":
+            if root_state != "unanchored":
                 guard.left_out.setdefault(name, set()).add(rel)
-                guard.reasons.setdefault(name, {})[root] = status[root]
+                guard.reasons.setdefault(name, {})[root] = root_state
                 guard.folders.setdefault((name, root), str(base / root if root else base))
                 guard.root_counts[(name, root)] = guard.root_counts.get((name, root), 0) + 1
     return guard
@@ -1819,9 +1849,11 @@ def encode_manifest(
             published.setdefault(wire, folder)
         entry["wire_folders"] = published
         wire_manifest["sources"]["claude"]["wire_folders"] = dict(published)
+        wire_manifest = manifest.codex_memory_to_wire(wire_manifest)
         data = serialize_manifest(wire_manifest)
     else:
-        data = serialize_manifest(local_manifest)
+        wire_manifest = manifest.codex_memory_to_wire(local_manifest)
+        data = serialize_manifest(wire_manifest)
     return encrypt_manifest(data, passphrase, memory_kb, wire_names=wire_names)
 
 
@@ -2107,6 +2139,12 @@ def _source_path_is_detected(source: dict[str, Any]) -> bool:
         return _config_module.grok_customization_dirs_exist(root)
     if source.get("type") == "muse" or source.get("name") == "muse":
         return _config_module.muse_memory_dir_exists(root)
+    if source.get("type") == "codex-memory" or source.get("name") == "codex-memory":
+        mem_dir = manifest.codex_memory_dir_name(root)
+        try:
+            return stat.S_ISDIR((root / mem_dir).lstat().st_mode)
+        except OSError:
+            return False
     if source.get("name") == "agy" and path_str == _config_module.DEFAULT_AGY_DIR:
         from mind_meld import host_usage as _host_usage
 
@@ -2468,7 +2506,11 @@ def _collect_peer_tombstones(
         # Per-peer try/except — one flaky peer must not abort recovery.
         try:
             peer_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
-            peer_manifests[did] = peer_fetch.manifest if peer_fetch.is_ok else None
+            if peer_fetch.is_ok and peer_fetch.manifest is not None:
+                confined, _ = manifest.confine_codex_memory(peer_fetch.manifest, did)
+                peer_manifests[did] = confined
+            else:
+                peer_manifests[did] = None
         except (OSError, MindMeldError):
             peer_manifests[did] = None
 

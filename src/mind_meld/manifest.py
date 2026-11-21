@@ -95,6 +95,60 @@ NESTED_REPO_SKIP_REASON = "nested git repository"
 # folder Claude created; the walker skips it (verbose-only).
 UNPLACEABLE_SKIP_REASON = projectid.UNPLACEABLE_SKIP_REASON
 CLAUDE_SOURCE_NAME = "claude"
+CODEX_MEMORY_SOURCE_NAME = "codex-memory"
+CODEX_MEMORY_DIRS: tuple[str, ...] = ("memories_v2", "memories")
+_CODEX_MEMORY_TOP_FILES: tuple[str, ...] = ("memory_summary.md", "MEMORY.md")
+_CODEX_MEMORY_ROLLOUT_DIR = "rollout_summaries"
+_CODEX_MEMORY_OWN_ID: str | None = None
+_CODEX_MEMORY_HOME: Path | None = None
+
+
+def configure_codex_memory(own_id: str | None, codex_home: Path | str | None) -> None:
+    """Configure the process-wide codex-memory wire codec context (Track 157A)."""
+    global _CODEX_MEMORY_OWN_ID, _CODEX_MEMORY_HOME
+    _CODEX_MEMORY_OWN_ID = own_id if isinstance(own_id, str) and own_id else None
+    _CODEX_MEMORY_HOME = Path(codex_home).expanduser() if codex_home is not None else None
+
+
+def codex_memory_dir_name(base: Path | str) -> str:
+    """Return the active Codex memory directory name under ``base``.
+
+    Prefers ``memories_v2`` when it is a real directory, else ``memories`` when
+    that is one, else ``memories_v2``. Never follows symlinks.
+    """
+    root = Path(base).expanduser()
+    for name in CODEX_MEMORY_DIRS:
+        candidate = root / name
+        try:
+            st = candidate.lstat()
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            return name
+    return CODEX_MEMORY_DIRS[0]
+
+
+def codex_memory_path_allowed(sub: str) -> bool:
+    """Return True when ``sub`` (below the memory folder / peer ID) is in the copy set.
+
+    Admits only ``memory_summary.md``, ``MEMORY.md``, and direct ``.md`` children
+    of ``rollout_summaries/`` (excluding conflict sidecars and ``EXCLUDED`` names).
+    """
+    if not isinstance(sub, str) or not sub or "\x00" in sub:
+        return False
+    if sub in _CODEX_MEMORY_TOP_FILES:
+        return True
+    prefix = f"{_CODEX_MEMORY_ROLLOUT_DIR}/"
+    if not sub.startswith(prefix):
+        return False
+    leaf = sub[len(prefix) :]
+    if not leaf or "/" in leaf or "\\" in leaf or leaf in (".", ".."):
+        return False
+    if not leaf.endswith(".md") or leaf == ".md":
+        return False
+    if leaf in EXCLUDED or is_conflict_filename(leaf):
+        return False
+    return True
 
 
 def is_conflict_filename(name: str) -> bool:
@@ -282,6 +336,8 @@ def scan_roots(src: dict) -> list[str]:
         return [*GROK_SYNCED_SUBDIRS, GROK_MEMORY_ROOT]
     if kind == "muse":
         return ["memory"]
+    if kind == "codex-memory":
+        return []
     roots: list[str] = []
     for entry in src.get("include_dirs") or []:
         root = str(entry).strip("/")
@@ -2694,6 +2750,186 @@ def walk_muse_source(
     return files
 
 
+def walk_codex_memory_source(
+    source_config: dict[str, Any],
+    max_file_size: int = 52_428_800,
+    on_skip: Any = None,
+    *,
+    strict: bool = False,
+    holds: SourceHolds | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Walk this machine's Codex memory folder and build the local-form files dict.
+
+    Reads only ``memory_summary.md``, ``MEMORY.md`` and direct ``.md`` children of
+    ``rollout_summaries/`` inside the active memory folder (``memories_v2`` or
+    ``memories``). Never enters ``.git``, ``.codex-baseline``, ``extensions/`` or
+    any other entry, never opens ``raw_memories.md`` or SQLite files, and never
+    writes into ``source_config["path"]``. Accepts only singly-linked regular files.
+    """
+    source_name = source_config.get("name")
+    base = Path(source_config["path"]).expanduser().resolve()
+    try:
+        base.stat()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    problem="could not be read",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
+        return {}
+
+    exclude_patterns = list(source_config.get("exclude_patterns") or [])
+    mem_dir = codex_memory_dir_name(base)
+    mem_root = base / mem_dir
+    mem_st = _lstat_or_none(mem_root, strict=strict, source_name=source_name, rel_path=mem_dir)
+    if mem_st is None:
+        return {}
+    if stat.S_ISLNK(mem_st.st_mode):
+        if on_skip:
+            on_skip(str(mem_root), "symlink")
+        return {}
+    if not stat.S_ISDIR(mem_st.st_mode):
+        return {}
+
+    collected_paths: list[Path] = []
+    for fname in _CODEX_MEMORY_TOP_FILES:
+        path = mem_root / fname
+        st = _lstat_or_none(
+            path, strict=strict, source_name=source_name, rel_path=f"{mem_dir}/{fname}"
+        )
+        if st is None:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            if on_skip:
+                on_skip(str(path), "symlink")
+            continue
+        if stat.S_ISREG(st.st_mode):
+            collected_paths.append(path)
+
+    rollout_dir = mem_root / _CODEX_MEMORY_ROLLOUT_DIR
+    rollout_st = _lstat_or_none(
+        rollout_dir,
+        strict=strict,
+        source_name=source_name,
+        rel_path=f"{mem_dir}/{_CODEX_MEMORY_ROLLOUT_DIR}",
+    )
+    if rollout_st is not None:
+        if stat.S_ISLNK(rollout_st.st_mode):
+            if on_skip:
+                on_skip(str(rollout_dir), "symlink")
+        elif stat.S_ISDIR(rollout_st.st_mode):
+            try:
+                with os.scandir(rollout_dir) as it:
+                    entries = list(it)
+            except OSError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=f"{mem_dir}/{_CODEX_MEMORY_ROLLOUT_DIR}",
+                            problem="could not be listed",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
+                entries = []
+            for entry in entries:
+                sub = f"{_CODEX_MEMORY_ROLLOUT_DIR}/{entry.name}"
+                if not codex_memory_path_allowed(sub):
+                    continue
+                entry_path = Path(entry.path)
+                rel = f"{mem_dir}/{sub}"
+                try:
+                    est = entry.stat(follow_symlinks=False)
+                except FileNotFoundError as e:
+                    if strict:
+                        if holds is not None:
+                            holds.candidates[rel] = "vanished"
+                            continue
+                        raise SnapshotError(
+                            snapshot_refusal(
+                                source=source_name,
+                                rel_path=rel,
+                                problem="changed while scanning",
+                                cause=os_error_cause(e),
+                                next_action="Run mm push again once writes finish.",
+                            )
+                        ) from e
+                    continue
+                except OSError as e:
+                    if strict:
+                        raise SnapshotError(
+                            snapshot_refusal(
+                                source=source_name,
+                                rel_path=rel,
+                                problem="could not be read",
+                                cause=os_error_cause(e),
+                                next_action="Restore read access, then run mm push.",
+                            )
+                        ) from e
+                    continue
+                if stat.S_ISLNK(est.st_mode):
+                    if on_skip:
+                        on_skip(str(entry_path), "symlink")
+                    continue
+                if stat.S_ISREG(est.st_mode):
+                    collected_paths.append(entry_path)
+
+    collected_paths.sort(
+        key=lambda p: str(p.relative_to(base)) if p.is_relative_to(base) else str(p)
+    )
+    files: dict[str, dict[str, Any]] = {}
+    seen: set[tuple[int, int]] = set()
+    for path in collected_paths:
+        if path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
+            if on_skip:
+                on_skip(str(path), "symlink")
+            continue
+        st = _stat_collected_file(
+            path,
+            base,
+            strict=strict,
+            source_name=source_name,
+            holds=holds,
+            exclude_patterns=exclude_patterns,
+        )
+        if st is None:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            if on_skip:
+                on_skip(str(path), "symlink")
+            continue
+        if st.st_nlink > 1:
+            if on_skip:
+                on_skip(str(path), "hardlink")
+            continue
+        identity = (st.st_dev, st.st_ino)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if result := _record_file(
+            path,
+            base,
+            max_file_size,
+            on_skip,
+            exclude_patterns,
+            strict=strict,
+            source_name=source_name,
+            source_type="codex-memory",
+            holds=holds,
+        ):
+            rel, info = result
+            files[rel] = info
+
+    return files
+
+
 def walk_generic_source(
     source_config: dict[str, Any],
     max_file_size: int = 52_428_800,
@@ -2943,6 +3179,10 @@ def walk_source(
         files = walk_grok_source(source_config, max_file_size, on_skip, strict=strict, holds=holds)
     elif source_type == "muse":
         files = walk_muse_source(source_config, max_file_size, on_skip, strict=strict, holds=holds)
+    elif source_type == "codex-memory":
+        files = walk_codex_memory_source(
+            source_config, max_file_size, on_skip, strict=strict, holds=holds
+        )
     elif source_type == "generic":
         files = walk_generic_source(
             source_config,
@@ -3494,7 +3734,195 @@ def load_manifest(data: bytes) -> dict[str, Any]:
             if rel:
                 _validate_rel_path(rel, where=f"tombstones[{key!r}] path part")
     manifest_from_wire(normalized)
+    codex_memory_from_wire(normalized)
     return normalized
+
+
+def codex_memory_to_wire(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``manifest`` with ``codex-memory`` keys in wire form.
+
+    Maps local keys ``<memdir>/<sub>`` (where ``<memdir>`` is in
+    ``CODEX_MEMORY_DIRS``) to ``<device_id>/<sub>`` in both ``sources`` and
+    ``tombstones``. Raises ``ManifestError`` if a file key is not in local form,
+    or if a tombstone collides with a mapped file key. Drops ``codex-memory:``
+    tombstones under any other device's prefix (e.g. from peer fallback).
+    Never mutates ``manifest``.
+    """
+    sources = manifest.get("sources")
+    entry = (
+        sources.get(CODEX_MEMORY_SOURCE_NAME)
+        if isinstance(sources, dict) and isinstance(sources.get(CODEX_MEMORY_SOURCE_NAME), dict)
+        else None
+    )
+    tombstones = manifest.get("tombstones")
+    tombstones_dict = tombstones if isinstance(tombstones, dict) else {}
+    tprefix = f"{CODEX_MEMORY_SOURCE_NAME}:"
+    has_codex_tombs = any(isinstance(k, str) and k.startswith(tprefix) for k in tombstones_dict)
+    if entry is None and not has_codex_tombs:
+        return manifest
+
+    device_id = manifest.get("device_id")
+    if not isinstance(device_id, str) or not device_id:
+        raise ManifestError("manifest: codex-memory requires a non-empty device_id")
+
+    new_files: dict[str, Any] = {}
+    if entry is not None and isinstance(entry.get("files"), dict):
+        for rel, info in entry["files"].items():
+            if not isinstance(rel, str):
+                raise ManifestError(f"manifest: invalid codex-memory file key {rel!r}")
+            first, sep, sub = rel.partition("/")
+            if not sep or first not in CODEX_MEMORY_DIRS or not sub:
+                raise ManifestError(f"manifest: codex-memory file key {rel!r} is not in local form")
+            wire_rel = f"{device_id}/{sub}"
+            if wire_rel in new_files:
+                raise ManifestError(f"manifest: duplicate codex-memory wire key {wire_rel!r}")
+            new_files[wire_rel] = info
+
+    new_tombstones: dict[str, Any] = {}
+    for key, info in tombstones_dict.items():
+        if not isinstance(key, str) or not key.startswith(tprefix):
+            new_tombstones[key] = info
+            continue
+        rel = key[len(tprefix) :]
+        first, sep, sub = rel.partition("/")
+        if not sep or not sub:
+            continue
+        if first in CODEX_MEMORY_DIRS:
+            wire_rel = f"{device_id}/{sub}"
+            if wire_rel in new_files:
+                raise ManifestError(
+                    f"manifest: codex-memory tombstone {key!r} collides with live file {wire_rel!r}"
+                )
+            new_tombstones[f"{tprefix}{wire_rel}"] = info
+        elif first == device_id:
+            if rel in new_files:
+                raise ManifestError(
+                    f"manifest: codex-memory tombstone {key!r} collides with live file {rel!r}"
+                )
+            new_tombstones[key] = info
+        # Any other prefix (e.g. from peer fallback recovery) is dropped.
+
+    out = dict(manifest)
+    if entry is not None:
+        out["sources"] = {
+            **sources,
+            CODEX_MEMORY_SOURCE_NAME: {**entry, "files": new_files},
+        }
+    out["tombstones"] = new_tombstones
+    return out
+
+
+def codex_memory_from_wire(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Decode this device's own ``codex-memory`` wire keys back to local form.
+
+    Mutates ``manifest`` in place and returns it. Runs at the end of
+    ``load_manifest`` after ``manifest_from_wire``. Leaves peer manifests
+    unchanged (in wire form ``<peer_id>/<sub>``).
+    """
+    if _CODEX_MEMORY_OWN_ID is None or manifest.get("device_id") != _CODEX_MEMORY_OWN_ID:
+        return manifest
+    memdir = (
+        codex_memory_dir_name(_CODEX_MEMORY_HOME)
+        if _CODEX_MEMORY_HOME is not None
+        else CODEX_MEMORY_DIRS[0]
+    )
+    own_prefix = f"{_CODEX_MEMORY_OWN_ID}/"
+
+    sources = manifest.get("sources")
+    entry = (
+        sources.get(CODEX_MEMORY_SOURCE_NAME)
+        if isinstance(sources, dict) and isinstance(sources.get(CODEX_MEMORY_SOURCE_NAME), dict)
+        else None
+    )
+    if entry is not None and isinstance(entry.get("files"), dict):
+        mapped_files: dict[str, Any] = {}
+        for rel, info in entry["files"].items():
+            if isinstance(rel, str) and rel.startswith(own_prefix):
+                sub = rel[len(own_prefix) :]
+                if sub:
+                    mapped_files[f"{memdir}/{sub}"] = info
+                    continue
+            mapped_files[rel] = info
+        entry["files"] = mapped_files
+
+    tombstones = manifest.get("tombstones")
+    if isinstance(tombstones, dict):
+        tprefix = f"{CODEX_MEMORY_SOURCE_NAME}:"
+        mapped_tombs: dict[str, Any] = {}
+        for key, info in tombstones.items():
+            if isinstance(key, str) and key.startswith(tprefix):
+                rel = key[len(tprefix) :]
+                if rel.startswith(own_prefix):
+                    sub = rel[len(own_prefix) :]
+                    if sub:
+                        mapped_tombs[f"{tprefix}{memdir}/{sub}"] = info
+                        continue
+            mapped_tombs[key] = info
+        manifest["tombstones"] = mapped_tombs
+    return manifest
+
+
+def confine_codex_memory(manifest: dict[str, Any], publisher_id: str) -> tuple[dict[str, Any], int]:
+    """Drop peer ``codex-memory`` files and tombstones outside ``<publisher_id>/<allowed>``.
+
+    Pure: returns ``(manifest, 0)`` when nothing is refused, or a shallow copy
+    with refused keys removed and the count of refused entries.
+    """
+    sources = manifest.get("sources")
+    entry = (
+        sources.get(CODEX_MEMORY_SOURCE_NAME)
+        if isinstance(sources, dict) and isinstance(sources.get(CODEX_MEMORY_SOURCE_NAME), dict)
+        else None
+    )
+    tombstones = manifest.get("tombstones")
+    tombstones_dict = tombstones if isinstance(tombstones, dict) else {}
+    tprefix = f"{CODEX_MEMORY_SOURCE_NAME}:"
+
+    def _allowed(rel: str) -> bool:
+        if not isinstance(rel, str):
+            return False
+        first, sep, sub = rel.partition("/")
+        return bool(sep) and first == publisher_id and codex_memory_path_allowed(sub)
+
+    refused = 0
+    new_files: dict[str, Any] | None = None
+    if entry is not None and isinstance(entry.get("files"), dict):
+        kept_files: dict[str, Any] = {}
+        for rel, info in entry["files"].items():
+            if _allowed(rel):
+                kept_files[rel] = info
+            else:
+                refused += 1
+        if len(kept_files) != len(entry["files"]):
+            new_files = kept_files
+
+    new_tombstones: dict[str, Any] | None = None
+    if tombstones_dict:
+        kept_tombs: dict[str, Any] = {}
+        for key, info in tombstones_dict.items():
+            if isinstance(key, str) and key.startswith(tprefix):
+                rel = key[len(tprefix) :]
+                if _allowed(rel):
+                    kept_tombs[key] = info
+                else:
+                    refused += 1
+            else:
+                kept_tombs[key] = info
+        if len(kept_tombs) != len(tombstones_dict):
+            new_tombstones = kept_tombs
+
+    if refused == 0:
+        return manifest, 0
+
+    out = dict(manifest)
+    if entry is not None and new_files is not None:
+        out["sources"] = {
+            **sources,
+            CODEX_MEMORY_SOURCE_NAME: {**entry, "files": new_files},
+        }
+    if new_tombstones is not None:
+        out["tombstones"] = new_tombstones
+    return out, refused
 
 
 @dataclass(eq=False, repr=False)

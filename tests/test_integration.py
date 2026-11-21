@@ -4707,7 +4707,7 @@ class TestAutoCommands:
 
         # Inputs match TestInitFlow pattern: storage, device name, passphrase,
         # confirm passphrase, then source prompts (Y claude, all others n).
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         # Init should complete despite the keyring write failure.
         assert result.exit_code == 0, result.output
@@ -5436,7 +5436,7 @@ class TestInitFlow:
         # Inputs: storage path, device name, passphrase, confirm passphrase,
         # then per-source prompts (claude Y, all others n) — we
         # need at least one source enabled for init to succeed.
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "bootstrapped" in result.output
@@ -5459,7 +5459,7 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         # Decline claude, accept gstack, decline the other sources.
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\nY\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\nY\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
 
@@ -5482,7 +5482,7 @@ class TestInitFlow:
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
 
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nY\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nY\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
 
@@ -5525,7 +5525,7 @@ class TestInitFlow:
 
         # Second-device init: start-or-join, storage, device name, per-source
         # prompts (claude Y, all others n), then 1 passphrase prompt.
-        stdin = f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\npw-shared\n"
+        stdin = f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\nn\npw-shared\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "Verified passphrase against existing mm-crypto-init" in result.output
@@ -5568,13 +5568,13 @@ class TestInitReInitGuard:
         self._setup(tmp_path, monkeypatch)
         storage, _backend = self._populated(tmp_path)
         first = runner.invoke(
-            app, ["init"], input=f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\npw-shared\n"
+            app, ["init"], input=f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\nn\npw-shared\n"
         )
         assert first.exit_code == 0, first.output
 
         # Inputs: overwrite confirm, start-or-join, storage path, device name,
         # per-source, orphan-confirm y, passphrase.
-        stdin = f"y\njoin\n{storage}\nMac C\nY\nn\nn\nn\nn\nn\nn\ny\npw-shared\n"
+        stdin = f"y\njoin\n{storage}\nMac C\nY\nn\nn\nn\nn\nn\nn\nn\ny\npw-shared\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "orphaning existing device" in result.output
@@ -5596,7 +5596,7 @@ class TestInitReInitGuard:
         refused = runner.invoke(app, ["init", "--new-fleet"], input=f"{storage}\n")
         assert refused.exit_code == 1, refused.output
         stopped = runner.invoke(
-            app, ["init"], input=f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\n"
+            app, ["init"], input=f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\nn\n"
         )
         assert stopped.exit_code == 1, stopped.output
         assert "holds fleet files" in " ".join(stopped.output.split())
@@ -5715,7 +5715,7 @@ class TestInitJoinPull89A:
         result = runner.invoke(
             app,
             ["init", "--new-fleet"],
-            input=f"{storage}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\nn\n",
+            input=f"{storage}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\nn\nn\n",
         )
         assert result.exit_code == 0, result.output
         assert "as the root of a Syncthing folder" in " ".join(result.output.split())
@@ -5800,7 +5800,7 @@ class TestInitTerminalAndHelp89A:
         assert DEFAULT_STORAGE_PATH == "~/Sync/mind-meld"
         expected = tmp_path / "Sync" / "mind-meld"
         # Accepting the prompt default names the expanded path and creates nothing.
-        result = runner.invoke(app, ["init"], input="j\n\n\nY\nn\nn\nn\nn\nn\nn\n")
+        result = runner.invoke(app, ["init"], input="j\n\n\nY\nn\nn\nn\nn\nn\nn\nn\n")
         assert result.exit_code == 1, result.output
         assert str(expected).replace(" ", "") in "".join(result.output.split())
         assert not expected.exists()
@@ -11797,7 +11797,7 @@ class TestMmEventsOwnership59A:
         result = runner.invoke(
             app,
             ["init", "--new-fleet"],
-            input=f"{tmp_path / 'storage'}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\nn\n",
+            input=f"{tmp_path / 'storage'}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\nn\nn\n",
         )
         assert result.exit_code == 0, result.output
         assert calls == [True]
@@ -12122,7 +12122,7 @@ class TestNewerStorage66A:
         stdin = (
             f"{storage}\nMac A\npw\npw\n"
             if race
-            else f"join\n{storage}\nMac A\nY\nn\nn\nn\nn\nn\nn\n"
+            else f"join\n{storage}\nMac A\nY\nn\nn\nn\nn\nn\nn\nn\n"
         )
         result = runner.invoke(app, args, input=stdin)
         assert result.exit_code == 1, result.output
@@ -12585,7 +12585,7 @@ class TestCryptoInspection60A:
         result = runner.invoke(
             app,
             ["init"],
-            input=f"join\n{storage}\nMac A\nY\nn\nn\nn\nn\nn\nn\n{PASSPHRASE}\n",
+            input=f"join\n{storage}\nMac A\nY\nn\nn\nn\nn\nn\nn\nn\n{PASSPHRASE}\n",
         )
         assert result.exit_code == 1, result.output
         assert "nothing was published" in _preview_text(result)

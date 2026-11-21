@@ -884,6 +884,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 Mind Meld treats Codex as a first-class peer of Claude Code. Grok Build, Muse and Antigravity are also usage-reader hosts (see [Grok Build](#grok-build), [Muse](#muse) and [Antigravity](#antigravity-agy)).
 
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`, except Codex's own installed plugin versions (`plugins/cache/*` and `plugins/.remote-plugin-install-staging/*`): Codex installs and removes those itself, and a removal there would otherwise delete the same files on your other Macs.
+- `codex-memory` (opt-in via `mm enable-source codex-memory`, or during `mm init`) publishes this machine's Codex memory summaries (`memory_summary.md`, `MEMORY.md`, and `rollout_summaries/*.md` from `~/.codex/memories_v2/` or `~/.codex/memories/`) under this machine's device ID and places every other machine's copies in `~/.local/share/mind-meld/codex-memory/<peer device id>/`. Nothing is ever written into `~/.codex`, and `.git`, SQLite stores, and files outside the set stay local. Copies are read-only — to correct a Codex memory, fix it on the machine that wrote it and let the next push and pull replace the copies.
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
 - Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source agy` is the corresponding verb: it adds a scoped Antigravity source (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`) and opts this Mac into reading step token totals from local conversation databases. Session databases, settings, and chat history stay on the Mac.
 - The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`.
@@ -894,6 +895,7 @@ Fresh installs are asked about the `codex` source during `mm init`. That choice 
 
 ```bash
 mm enable-source codex
+mm enable-source codex-memory
 mm enable-source grok
 mm enable-source agy
 mm enable-source muse

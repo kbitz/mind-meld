@@ -24,7 +24,10 @@ Read BEFORE editing any of these:
 - `src/mind_meld/initflow.py` — `_register_and_save` / `_publish_syncthing_record_best_effort` / (also read init-devices.md)
 - `src/mind_meld/resolveflow.py` — `_ensure_inversion_marker` / (also read conflicts.md)
 - `src/mind_meld/attemptlog.py` — `write` / `run_details` / `_MESH_DETAIL_RE` / (also read events-retro.md)
-- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `walk_muse_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `BROWSER_PROFILE_MARKER`
+- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `walk_muse_source` / `walk_codex_memory_source` / `CODEX_MEMORY_SOURCE_NAME` / `CODEX_MEMORY_DIRS` / `codex_memory_dir_name` / `codex_memory_path_allowed` / `configure_codex_memory` / `codex_memory_to_wire` / `codex_memory_from_wire` / `confine_codex_memory` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `BROWSER_PROFILE_MARKER`
+- `src/mind_meld/core.py` — `_configure_codex_memory` / `encode_manifest` / `compute_mint_guard`
+- `src/mind_meld/pullflow.py` — `_ensure_codex_memory_copies_dir` / `_remove_retired_codex_memory_copies` / `retired_copies_clause` / `retired_copies_detail`
+- `src/mind_meld/config.py` — `CODEX_MEMORY_COPIES_DIR`
 - `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths`
 - `src/mind_meld/core.py` — `_prove_omitted_paths_absent`
 - `src/mind_meld/cli.py` — `_warn_push_growth`
@@ -47,7 +50,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/syncdiag.py` — local historical pull and anchor observations
 - `src/mind_meld/syncthing.py` / `src/mind_meld/statusflow.py` — `_peer_states` / `_overdue_peers_line` / `_format_peer_state` / `_syncthing_status_lines` / `_syncthing_diag` / `_print_syncthing_diag` / `src/mind_meld/pullflow.py` — `_record_peer_cursors` / `src/mind_meld/statedb.py` — `read_cursors` / `commit_cursors` / `src/mind_meld/core.py` — `_manifest_cursor_hash` / `_manifest_content_hash` / `ManifestFetch.canonical_hash` / `_prefetch_manifests` (`canonical_hashes_out`) (see "Syncthing state and each peer's push (Track 92A)")
 
-Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_push_anchors.py` (anchors, mint guard, `left_out`, and ancestry), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables), and for Track 92A Syncthing inspection and peer push state `tests/test_syncthing.py`, `tests/test_diag.py`, `tests/test_pullflow.py`, `tests/test_projectid.py` and `tests/test_statedb.py`.
+Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_push_anchors.py` (anchors, mint guard, `left_out`, and ancestry), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables), and for Track 92A Syncthing inspection and peer push state `tests/test_syncthing.py`, `tests/test_diag.py`, `tests/test_pullflow.py`, `tests/test_projectid.py` and `tests/test_statedb.py`, and for Track 157A Codex memory copies `tests/test_codex_memory_source.py`.
 
 ---
 
@@ -2271,3 +2274,74 @@ facts; only existing latest_attempt_superseded proof hides a capture row.
 No history engine or future capture counters are introduced here; peer-state
 assessment is in Track 92A above. Track 78A changes exits/tails only as
 described above.
+
+## Codex memory copies (Track 157A)
+
+The opt-in `codex-memory` source (`OPT_IN_SOURCE_NAMES`) publishes this
+machine's Codex memory summaries without ever writing into `~/.codex`, and
+places peers' copies under `config.CODEX_MEMORY_COPIES_DIR`
+(`~/.local/share/mind-meld/codex-memory/<peer device id>/`).
+
+- **Hardcoded folder and copy set.** `manifest.codex_memory_dir_name(base)`
+  returns `memories_v2` when it is a real directory, else `memories` when that
+  is one, else `memories_v2`. `manifest.walk_codex_memory_source` reads only
+  `memory_summary.md`, `MEMORY.md`, and direct `.md` children of
+  `rollout_summaries/` (`manifest.codex_memory_path_allowed`), accepting only
+  singly-linked regular files (`st_nlink == 1`) and skipping symlinks. It never
+  enters `.git`, `.codex-baseline`, `extensions/`, or SQLite stores. Config
+  validation reserves type `codex-memory` for name `codex-memory` and refuses
+  `include_dirs`, `include_files`, and `include_patterns`.
+- **Local vs. wire form and the encode guard.** Local push manifests and the
+  last-push sidecar keep local keys `<memdir>/<sub>` under `~/.codex`, so
+  upload verification, omission proofs, and held-file injection resolve
+  `base / rel` unchanged. `core.encode_manifest` applies
+  `manifest.codex_memory_to_wire` on a copy in both `wire_names` and old-form
+  branches, mapping `<memdir>/<sub>` to `<device id>/<sub>` so published
+  manifests never carry the local folder name. A file key whose first segment
+  is not in `CODEX_MEMORY_DIRS`, or a tombstone colliding with a mapped file,
+  raises `ManifestError` before anything is encrypted or published. Tombstones
+  under any other device's prefix (e.g. from peer-fallback recovery) are
+  dropped. `manifest.codex_memory_from_wire` runs at the end of `load_manifest`
+  (after `manifest_from_wire`) and maps only this device's own manifest back to
+  local form via `manifest.configure_codex_memory` (called by
+  `core._configure_codex_memory` in `_init_crypto_session`, `_push_core`, and
+  `_pull_core`). Peer manifests stay in wire form.
+- **Anchorless deletions.** `manifest.scan_roots` returns `[]` for
+  `codex-memory` so `publish_anchors` / `observe_anchors` never write
+  `.mind-meld-anchor` into Codex's git-tracked memory folder. In
+  `core.compute_mint_guard`, a `codex-memory` source with empty `scan_roots`
+  mints absent paths as if their root were unchanged while retaining every
+  other guard (`still_present`, `prior_accepted`, readable ledger,
+  `newest_stamp`, and held-digest resolution).
+- **One-writer confinement of files and deletion records.** On pull (when
+  building `filtered_cache`, before downloads, `all_tombstones`, and
+  `deletion_manifests`) and in peer-fallback collection
+  (`core._collect_peer_tombstones`), `manifest.confine_codex_memory(m, did)`
+  keyed by storage-key `did` drops any `codex-memory` file or `codex-memory:`
+  tombstone whose path is not `<did>/<allowed>`. Refused paths are not `failed`
+  outcomes (so they do not block legitimate deletions); attended pulls and
+  autopull print one sanitized `mm: warning:` line per offending peer naming
+  the count and `upgrade mm on that machine`.
+- **Pull root (mode 0700) and conflict discovery.** A selected `codex-memory`
+  source joins `pull_sources` even when `~/.codex` is absent, with
+  `local_sources_map["codex-memory"]["path"]` pointing at
+  `CODEX_MEMORY_COPIES_DIR`. Before applying files,
+  `pullflow._ensure_codex_memory_copies_dir` creates `~/.local/share/mind-meld`
+  and `codex-memory` at mode `0700` without following symlinks; a symlinked or
+  unwritable root fails that source's files with one warning. No source walks
+  `codex-memory/` on push (`mm-events` lists only `events/`).
+  `resolveflow._synced_scan_dirs` returns the copies root (never `~/.codex`) so
+  `mm conflicts` and `mm resolve` find conflict sidecars created if a copy is
+  edited locally.
+- **Retirement removal.** On real pulls when `codex-memory` is selected (and
+  `source_filter` is `None` or `"codex-memory"`),
+  `pullflow._remove_retired_codex_memory_copies` reads authenticated
+  `retired/*.enc` records (`devices.read_retirement_records`), validates each
+  retired ID via `storage.keys._validate_component`, moves regular files under
+  `<copies root>/<id>/` into the 30-day recovery folder without following
+  symlinks, removes emptied directories, and reports one pull-summary clause
+  (`retired_copies_clause` / `retired_copies_detail`). Unreadable or vanished
+  records remove nothing, and previews write nothing.
+- **Disable deletes nothing.** Disabling `codex-memory` on one machine drops
+  its prior entries through `_filter_unselected_sources` without minting
+  deletion records, so peers keep existing copies.
