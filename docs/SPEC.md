@@ -107,6 +107,23 @@ to yes. O2 adds approval by name or short ID, retirement, and managed
 device names. Init shows each Enter default. The owner confirmed retirement
 and name correction on managed machines and kept destructive confirmations
 defaulted to no. O4, target, audience and release policy are unchanged.
+Amended 2026-11-21 by `/project-spec` to rewrite O9 (cross-model memory) and
+move it before 2.0, on the developer's words: "my thinking around o9 is that
+maybe the right setup is that locally we set up a store that incorporates all
+provider memories, and agents can query it w/ qmd? as we sync memories across
+machines, they will get incorporated into local store naturally, or removed";
+"o9 - why just codex? current design seems like we should throw out and start
+over"; "reaching for the search tool -- we would want to recommend a line in
+agents.md as part of setup"; "we would want to facilitate installed qmd just
+like we do syncthing on setup"; "memories contradicting each other is
+valuable as it gives us the opportunity to correct the conflict"; and, on
+three questions, "1 c / 2 a / 3 a". O9 now covers every provider's memory
+through one local qmd index per machine, with Codex memory roaming as
+per-machine copies; keyword search is the baseline and embeddings are opt-in.
+It is planned now rather than after 2.0.0, keeps its own MINOR checkpoint and
+does not gate 2.0.0. The O9 non-goal, the supported conditions, the accepted
+manual steps and the checkpoint's criteria list follow. Target, audience,
+O1 to O8 and the other release rules are unchanged.
 Earlier text lives in
 `git log -- docs/SPEC.md`.
 
@@ -122,6 +139,9 @@ several machines:
 2. **Usage reporting.** `retro-fleet` reports what the agents did across every
    machine as one fleet: tokens, cost, active days and commits from Claude
    Code, Codex, Grok Build, Muse and Antigravity.
+
+Cross-model memory (O9, planned) builds on sync: every agent on every machine
+can search what any agent learned, through one local index.
 
 A command either says briefly what happened, or says what broke and how to fix
 it, and every command says it in the same style.
@@ -146,8 +166,9 @@ first install sets Syncthing up so it just works.
 | mmm-factory | Nothing: `~/.mmm/` stays local, and the factory moves between hosts with mmm-factory's own tool ([factory handover](#factory-handover)) | — (factory workers' tokens count under their host's row) |
 | mm | Its activity log, which `retro-fleet` reads | Git commits per machine |
 
-Intentional gaps: Codex memory does not sync until cross-model memory (O9,
-after 2.0); session transcripts and credentials never sync. Grok
+Intentional gaps: Codex memory does not sync until cross-model memory (O9),
+which carries it as per-machine copies, never into another machine's Codex
+store; session transcripts and credentials never sync. Grok
 Build's `config.toml`, credentials, hooks and plugins stay local, as Claude
 Code's and Codex's whole-file settings do; its generated memory index
 (`MEMORY.md`) and memory databases are rebuilt on each machine and never sync.
@@ -170,7 +191,9 @@ Grok row counts Grok Build's own runs only.
   script if missing; a desktop keyring (Keychain, or an unlocked Secret
   Service collection); a handful of machines with no always-on peer; sync sets
   of about 40k files and 1.3 GB; attended `mm push` and `mm pull` plus the
-  documented Claude Code and Codex hooks. A Mac not yet moved to Syncthing
+  documented Claude Code and Codex hooks. Cross-model memory (O9) adds qmd
+  2.8.3 or newer (Node 22+ or Bun) on each machine that uses it, installed by
+  the bootstrap script if missing. A Mac not yet moved to Syncthing
   keeps syncing over iCloud Drive until the owner moves it; it holds no other
   machine up.
 - Current achieved stage and evidence: see PROGRESS.md `## Acceptance`.
@@ -185,8 +208,9 @@ Grok row counts Grok Build's own runs only.
 
 MVP-1 on the 1.x iCloud store, macOS only, was achieved with v1.0.0 on
 2026-09-22; the outcomes below redefine MVP-1 for Syncthing and Linux.
-Cross-model memory (O9) is planned after 2.0 for the same owner fleet. It is
-a capability, not an audience stage, and does not gate 2.0.
+Cross-model memory (O9) is planned now, before 2.0.0, for the same owner
+fleet (developer, 2026-11-21: "1 c"). It is a capability with its own
+checkpoint, not an audience stage, and does not gate 2.0.0.
 
 ## Selected target acceptance
 ### O1: Sync converges across macOS and Linux over Syncthing
@@ -386,29 +410,55 @@ manual step.
    prefix and fix-command form), so they all read as one tool. The agent
    hooks stay silent (O8.3).
 
-## Planned after 2.0
+## Planned capability: cross-model memory
 
 ### O9: Cross-model memory
-What one agent learned on any of the owner's machines can be found by the
-other agents on every machine (Claude Code, Codex, and agents that read
-`AGENTS.md`), by searching, without mm copying a memory into another agent's
-store. Design: [cross-model memory](designs/cross-model-memory.md).
-1. Each machine publishes its own Codex memory files as per-machine copies,
-   one writer per file. Peers receive them outside every host's native store,
-   so they never conflict, and forgetting follows the source machine's own
-   regeneration.
-2. Static "search, don't read" pointers in the owner's `AGENTS.md` and
-   `CLAUDE.md`, installed once with the owner's approval, say where the other
-   agents' memories are and to search them rather than load them. mm never
-   writes into generated memory files.
-3. Phase 2, not part of acceptance: a per-machine search index (qmd) over the
-   same markdown, never synced and rebuilt after `mm pull`, when grep proves
-   too blunt or the owner accepts its dependencies.
-4. Evidence: two live checks in isolated homes before implementation (fresh
-   Codex and Claude sessions follow the pointer and find the other agent's
-   memory by search; regenerating per-machine copies does not churn sync),
-   then the owner's own sessions on two machines, recorded in PROGRESS.md
-   `## Acceptance`.
+Anything one agent learned on any of the owner's machines can be found by
+every agent on every machine (Claude Code, Codex, Grok Build, Muse and any
+agent that can run a command or call an MCP server) through one local search
+index. mm never copies a memory into another agent's store. Design:
+[cross-model memory](designs/cross-model-memory.md).
+1. **Memory sources.** mm keeps syncing each provider's own memory (Claude
+   project memory, Grok memory topics, Muse `memory/`). Codex memories, which
+   each machine regenerates, roam as per-machine copies: each machine
+   publishes its own Codex memory files, peers receive them in an mm-owned
+   folder outside every native store, each file has one writer, and a copy
+   changes or disappears only when its source machine's Codex regenerates it
+   or the machine leaves the fleet. mm never writes into Codex's memory
+   folder.
+2. **One local index.** Each machine where the owner turns it on keeps one
+   qmd index over every enabled provider's memory folders and the Codex
+   copies. The markdown stays the truth; the index is derived, never synced,
+   and refreshed after each `mm push` and `mm pull`, so synced additions and
+   deletions reach search. The agent hooks start the refresh in the
+   background and never wait; a failed refresh never changes a sync's outcome
+   and `mm status` reports it with its fix. mm manages only its own qmd
+   collections.
+3. **Search and the pointer line.** Agents search with `qmd search` (keyword,
+   no models) or qmd's MCP server, and every hit names its provider and, for
+   Codex, its machine. With the owner's approval, setup adds one recommended
+   line to the owner's global `CLAUDE.md` and `AGENTS.md`: search memory with
+   qmd before assuming, and show the owner both memories when they disagree.
+   For an instruction file that is a symlink (such as one in the owner's
+   config repository), setup prints the line and changes nothing. mm never
+   edits an agent's MCP configuration; setup prints the commands.
+4. **Setup.** The bootstrap script installs qmd as it installs Syncthing.
+   `mm init` offers the index (Enter = yes when qmd runs) and, separately,
+   qmd's embedding model for semantic search (Enter = no; it downloads about
+   334 MB and runs `qmd embed` in the background). A later command turns the
+   index on or off.
+5. **Contradictions are surfaced, not resolved.** One search lists every
+   matching memory from every provider and machine side by side, so memories
+   that contradict each other are visible together; the owner corrects the
+   wrong one at its source and the next sync and refresh carry the fix. mm
+   does not detect or merge contradictions itself.
+6. Evidence: a qualification before implementation, in isolated homes
+   (temporary `HOME` and `CODEX_HOME`, never the owner's real stores): fresh
+   Codex and Claude Code sessions with only the recommended line find
+   another agent's memory through `qmd search`, and report both sides of a
+   seeded contradiction. Then the owner's own sessions on one Mac and one
+   Linux machine find a memory another agent wrote on another machine,
+   recorded in PROGRESS.md `## Acceptance`.
 
 ## Constraints and accepted limitations
 - End-to-end encryption is mandatory; no plaintext sync data reaches storage.
@@ -459,7 +509,10 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   as introducer there; moving each machine off iCloud Drive by uninstalling and
   reinstalling mm; `mm resolve` for real conflicts; unlocking the Linux
   keyring before hooks run; re-joining a machine restored from backup or
-  cloned; and removing retired devices in Syncthing on owner-managed machines.
+  cloned; removing retired devices in Syncthing on owner-managed machines;
+  turning on Codex's `memories` feature on each machine whose Codex memory
+  should be found (O9); and adding O9's pointer line by hand to an
+  instruction file that is a symlink.
   Managed peers can pair a removed device again while its Mind Meld
   registration still vouches for it. An owner-managed introducer that still
   lists a retired device can reintroduce it until removed there.
@@ -502,8 +555,18 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   automatically) and hooks. No such user-authored files exist on the owner's
   machines (2026-11-05). Revisit when the owner keeps a plugin or hook there
   that other machines need.
-- Cross-model memory before 2.0, and writing into any host's native memory
-  store at any time. O9 starts after 2.0.0.
+- Writing one provider's memory into another provider's store, or into
+  Codex's own memory folder, at any time; syncing O9's search index; and
+  detecting or merging contradicting memories automatically (developer,
+  2026-11-20: contradictions are "valuable as it gives us the opportunity to
+  correct the conflict"). Revisit when the owner finds contradictions too
+  many to correct by hand.
+- Semantic search as an O9 requirement: keyword search is the baseline and
+  qmd's embedding model is opt-in (developer, 2026-11-21: "3 a"). Revisit
+  when keyword search misses memories the owner expected to find.
+- Feeding other agents' memories into Codex's own memory consolidation.
+  codex-cli 0.171.0 lists `external_agent_memory_import` as under
+  development. Revisit when Codex ships it as stable.
 - <a id="factory-handover"></a>Carrying mmm-factory's durable state
   (`~/.mmm/`) through mm, for backup or for handover between hosts (owner,
   2026-11-06: "hm, don't love that -- let's future this card and move on to
@@ -530,8 +593,9 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
 - Owner-only, before any public stage: ordinary releases are PATCH;
   documentation-only changes take no bump.
 - Capability checkpoints, each a MINOR when accepted: **quiet output** (O8),
-  **complete usage** (O7 criteria 1 to 3 on the owner's machines) and, after
-  2.0, **cross-model memory** (O9 criteria 1, 2 and 4; owner, 2026-10-29).
+  **complete usage** (O7 criteria 1 to 3 on the owner's machines) and
+  **cross-model memory** (O9 criteria 1 to 6; owner, 2026-10-29; planned
+  before 2.0 since 2026-11-21).
 - Stage versions: MVP-1 on iCloud (macOS) = 1.0.0, achieved. MVP-1 on
   Syncthing (macOS and Linux) = **2.0.0**: O1 to O4 accepted on the
   owner's own observation on one Mac and both Linux machines in the
@@ -575,8 +639,9 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
     scope; the design's Cursor material is historical as of 2026-11-07.
   - [Multi-source sync](designs/sync-gstack-context.md): shipped design still
     cited by invariants.
-  - [Cross-model memory](designs/cross-model-memory.md): O9's design and
-    its qualification record.
+  - [Cross-model memory](designs/cross-model-memory.md): O9's design
+    (2026-11-21, local qmd index over every provider's memory) and its
+    qualification record.
   - [Memory continuity](designs/memory-continuity.md) and the
     [Codex memory contract](designs/codex-memory-contract.md): Track 68A
     evidence. Their cross-agent design is superseded by cross-model memory
@@ -591,6 +656,9 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
     2026-10-19. Evidence: the "Why a new store" hazard table (the Syncthing
     problems the 1.x store must handle), §7 portable paths, §10 Syncthing
     folder options, §11 Linux and §13 cutover.
+  - [Cross-model memory, 2026-10-29](archive/cross-model-memory-2026-10-29.md):
+    the Codex-only grep-pointer design the developer replaced on 2026-11-21;
+    consult it only for the 2026-10-29 Codex memory observations.
   - [Conflict policies](archive/conflict-policies.md): the 2.1 policies and
     2.2 resolver designed on store-v2's version vectors; superseded
     2026-10-19 with that design.

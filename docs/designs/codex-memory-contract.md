@@ -541,8 +541,9 @@ This table assigns work, without claiming a prototype settled a native gate.
 | Q17 | Device re-registration (registry maps a new device ID to its durable origin) and alias carry-over exercised in model; production durable identity/enrollment evidence still needed | transport identity owner |
 | Q18 | Raw Claude file sync can resurrect/echo outside controlled view; narrow/disable or establish replica evidence and test actual path before bridge | parity / bridge |
 
-Transport, two-Mac parity, cross-agent sharing and Cursor discovery stay in
-their existing [Future packages](../roadmap-future.md#codex-memory-sync).
+Transport, two-Mac parity and cross-agent sharing are superseded by
+[cross-model memory](cross-model-memory.md); Cursor discovery was killed on
+2026-11-07.
 Production host-store/sync code, shared settings and release bookkeeping are
 unchanged. A no-route result is evidence for those owners, not a feature gate waiver.
 
