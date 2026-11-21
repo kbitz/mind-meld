@@ -366,9 +366,12 @@ committing cursor state and stamps completion no earlier than that row's timesta
 Init and explicit recapture confirm their exact Git snapshot (compared in wire
 form via `events.wire_row`); recapture uses the
 requested full window rather than incremental cursors. `write_push_event`
-serializes `git-snapshot` rows through `events.wire_row`, stripping
-`projects[].local_path` and `skipped[].path` so repository paths stay off the
-synced log (Track 155A); in-memory capture rows keep both fields for
+serializes new `git-snapshot` rows through `events.wire_row`, omitting the
+checkout fields `projects[].local_path` and `skipped[].path` (Track 155A).
+The `projects[].remote` label can contain directory components when `origin`
+is a local path. Previously published rows can carry the checkout fields
+until their day files age out under the 90-day retention policy.
+In-memory capture rows keep both fields for
 `_apply_repo_cursors_to_cache`, `preview_pending_repositories`, and recapture
 dry-run listing. Before `write_push_event` appends a push batch with git rows,
 `events_tail._run_events_tail` records the batch's completed and failed root
