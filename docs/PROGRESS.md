@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.78 | 2026-11-21 | An opt-in local qmd index lets one search cover memories from every synced agent and machine, and a successful sync refreshes it. |
 | 1.12.77 | 2026-11-21 | `mm pull` waits briefly for Syncthing to finish delivering a peer's push and says when files are still on their way, while `mm status` separates live delivery from the last hook observation. |
 | 1.12.76 | 2026-11-21 | Opt-in Codex memory sharing publishes this machine's summaries, stores every other machine's copies outside Codex, and keeps a retired machine's copies in local recovery for 30 days. |
 | 1.12.75 | 2026-11-21 | Reinstall commands that `mm` prints now work for both pipx backends, `mm status` drops a Syncthing removal wait once a later sync finds nothing waiting, and routine capture notices show in `mm status` and `mm diag` until the next attended push. |
