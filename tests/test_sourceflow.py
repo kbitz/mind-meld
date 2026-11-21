@@ -315,7 +315,7 @@ def test_reconfigure_abort_exits_1_and_writes_nothing(cfg, monkeypatch):
     def abort(prompt, default):
         raise typer.Abort()
 
-    monkeypatch.setattr(typer, "confirm", abort)
+    monkeypatch.setattr(core, "ask_yes_no", abort)
     before = cfg.read_bytes()
     result = runner.invoke(app, ["reconfigure-sources"])
     assert result.exit_code == 1, result.output
@@ -327,9 +327,10 @@ def test_reconfigure_abort_exits_1_and_writes_nothing(cfg, monkeypatch):
     assert cfg.read_bytes() == before
 
 
-def test_reconfigure_accepting_defaults_updates_the_configuration(cfg, monkeypatch):
-    monkeypatch.setattr(typer, "confirm", lambda prompt, default: default)
-    result = runner.invoke(app, ["reconfigure-sources"])
+def test_reconfigure_accepting_defaults_updates_the_configuration(cfg):
+    result = runner.invoke(app, ["reconfigure-sources"], input="\n" * 8)
+    assert "Sync 'claude' source" in result.stdout
+    assert "Sync 'codex' source at ~/.codex? (not detected) [y/n] (Enter = n)" in result.stdout
     assert result.exit_code == 0, result.output
     assert _lines(result.stdout)[0] == "Reconfigure sources for this device."
     assert _lines(result.stdout)[-1] == "Reconfigure: source configuration updated."

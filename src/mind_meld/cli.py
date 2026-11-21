@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 import typer
 from packaging.version import Version
+from rich.markup import escape
 from rich.table import Table
 from typer.core import TyperGroup
 
@@ -56,7 +57,6 @@ from mind_meld import (
     statedb,
     statusflow,
     syncdiag,
-    syncthing,
     token_usage,
     upgrade,
 )
@@ -224,6 +224,20 @@ app = typer.Typer(
     # `mm init` frames hold the passphrase; a traceback must never print it.
     pretty_exceptions_show_locals=False,
 )
+
+
+def _help_text(text: str) -> str:
+    """Escape literal text when Typer renders help with Rich markup."""
+    return escape(text) if app.rich_markup_mode == "rich" else text
+
+
+def _literal_help(command: Callable[..., None]) -> Callable[..., None]:
+    """Preserve bracketed choices and config sections in command help."""
+    if command.__doc__:
+        command.__doc__ = _help_text(command.__doc__)
+    return command
+
+
 # `console` / `stderr_console` now live in `mind_meld.consoles` (Track 16A) so
 # `resolveflow` and `retention` can render through the SAME objects without
 # importing `cli` — see that module's docstring for why sharing the instances is
@@ -256,9 +270,9 @@ def _main(
     no_check_version: bool = typer.Option(
         False,
         "--no-check-version",
-        help=(
+        help=_help_text(
             "Skip the update check for this invocation: no nudge and no "
-            "automatic update. Force-skips regardless of \\[upgrade] auto_check in config."
+            "automatic update. Force-skips regardless of [upgrade] auto_check in config."
         ),
     ),
 ) -> None:
@@ -634,8 +648,8 @@ def init(
     a default Syncthing configuration), the device name and the sources first,
     and saves those answers locally (never the passphrase). On a default
     Syncthing configuration it adds the fleet device as introducer, prints this
-    machine's device ID and 'mm devices approve <id>' to run on the fleet
-    machine, waits up to 10 minutes for that approval, accepts the 'mind-meld'
+    machine's device ID and short ID with both 'mm devices approve' commands
+    to run on the fleet machine, waits up to 10 minutes for approval, accepts the 'mind-meld'
     folder offer once shared, and waits up to two minutes for Syncthing to
     deliver mm-crypto-init (if the approval or header wait times out or is
     stopped with Ctrl-C, it prints a waiting outcome ending 'Run: mm init',
@@ -1241,7 +1255,11 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
             if notice is not None:
                 core._notice(notice)
         lines = _sync_success(verb, result)
-        if mesh_clause := state.get("mesh_outcome"):
+        mesh_outcomes = state.get("mesh_outcomes")
+        if mesh_outcomes:
+            for mesh_clause in mesh_outcomes:
+                lines.append(outputstyle._outcome_line(verb, mesh_clause))
+        elif mesh_clause := state.get("mesh_outcome"):
             lines.append(outputstyle._outcome_line(verb, mesh_clause))
         _emit_sync_outcome(lines, failed=False)
         _emit_update_lines(update)
@@ -2955,17 +2973,22 @@ def _attended_pull(
             if not dry_run:
                 if not join:
                     if mesh_res is not None and mesh_res.snapshot_taken:
-                        if msg := pullflow.compose_pending_syncthing_join_message(
-                            syncthing.pending_join_message(mesh_res.unvouched_pending),
-                            mesh_res.unpublished_names,
+                        for msg, fix in pullflow.compose_pending_syncthing_join_items(
+                            pending_count=mesh_res.unvouched_pending,
+                            pending_device_names=(mesh_res.unvouched_pending_devices or None),
+                            unpublished_names=mesh_res.unpublished_names,
+                            superseded=mesh_res.superseded_registrations,
                         ):
-                            core._notice(msg, fix=syncthing.PENDING_JOIN_FIX)
+                            core._notice(msg, fix=fix)
                     else:
                         pullflow.notice_pending_syncthing_join(
                             config,
                             vouched_ids=mesh_res.vouched_ids if mesh_res is not None else None,
                             unpublished_names=(
                                 mesh_res.unpublished_names if mesh_res is not None else ()
+                            ),
+                            superseded=(
+                                mesh_res.superseded_registrations if mesh_res is not None else ()
                             ),
                         )
                 _sync_update(config, verbose=verbose)
@@ -3050,7 +3073,7 @@ def devices(
         case_sensitive=False,
     ),
 ) -> None:
-    """List all registered devices, or approve a joining machine (`approve`).
+    """List registered devices, approve a joining machine (`approve`), or retire one (`retire`).
 
     ``--format=json`` emits a single JSON array on stdout. Each entry has the
     keys ``device_id``, ``device_name``, ``last_seen``, ``last_seen_version``;
@@ -3065,19 +3088,54 @@ def devices(
 
 @devices_app.command("approve")
 def devices_approve(
-    device_id: str = typer.Argument(
-        ...,
-        help="The new machine's Syncthing device ID, as its 'mm init' printed it.",
+    device_id: str | None = typer.Argument(
+        None,
+        help=(
+            "Pending machine's device name, short Syncthing ID (at least 4 chars), "
+            "or full Syncthing device ID; omit to list and choose interactively."
+        ),
     ),
 ) -> None:
-    """Approve a joining machine by its Syncthing device ID on an mm-managed fleet machine.
+    """Approve a joining machine on an mm-managed fleet machine (by ID, short ID, or name).
 
-    Requires an exact match among Syncthing's pending devices, then adds the
-    device, marks it as introducer, and shares the fleet folder with it. A rerun
-    finishes an earlier half-finished approval. Never automatic; owner-managed
-    machines approve by hand in Syncthing's GUI.
+    Accepts four forms: no argument (lists pending devices and prompts on a
+    terminal), a device name, a short Syncthing device-ID prefix (at least 4
+    base32 characters; terminal required), or the full 56-character Syncthing
+    device ID (works with or without a terminal, and finishes an earlier
+    half-finished approval). Adds the device, marks it as introducer, and shares
+    the fleet folder with it. Never automatic; owner-managed machines approve by
+    hand in Syncthing's GUI.
     """
     devicesflow.approve(device_id)
+
+
+@devices_app.command("retire")
+@_literal_help
+def devices_retire(
+    device: str = typer.Argument(
+        ...,
+        help=(
+            "Registered machine's device name (interactive terminal only) or exact "
+            "Mind Meld device ID from 'mm devices'."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt (requires an exact Mind Meld device ID).",
+    ),
+) -> None:
+    """Retire a fleet machine by Mind Meld device name or ID (`mm devices`).
+
+    Writes an encrypted retirement record (`retired/<id>.enc`), removes
+    `syncthing/<id>.enc` and `devices/<id>.json` under the mm lock, and lets
+    each mm-managed peer remove the retired Syncthing device on its next push
+    or pull once the device stops connecting. Interactive runs confirm with
+    `[y/n] (Enter = n)`; `--yes` and non-terminal runs require an exact Mind
+    Meld device ID from `mm devices`.
+    """
+    devicesflow.retire(device, yes=yes)
 
 
 # ── diff ──────────────────────────────────────────────────────────────
@@ -3132,6 +3190,7 @@ def gc(
 
 
 @app.command()
+@_literal_help
 def sources() -> None:
     """List configured sync sources.
 
@@ -3149,6 +3208,7 @@ def sources() -> None:
 
 
 @app.command(name="disable-source")
+@_literal_help
 def disable_source(
     name: str = typer.Argument(..., help="Source name to disable on this device"),
     force: bool = typer.Option(
@@ -3172,6 +3232,7 @@ def disable_source(
 
 
 @app.command(name="enable-source")
+@_literal_help
 def enable_source(
     name: str = typer.Argument(..., help="Source name to enable on this device"),
     force: bool = typer.Option(
@@ -3201,6 +3262,7 @@ def enable_source(
 
 
 @app.command(name="reconfigure-sources")
+@_literal_help
 def reconfigure_sources() -> None:
     """Re-run the source picker against the current config + new defaults.
 
@@ -3217,6 +3279,7 @@ def reconfigure_sources() -> None:
 
 
 @app.command(name="migrate-config")
+@_literal_help
 def migrate_config(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
     dry_run: bool = typer.Option(
@@ -3775,6 +3838,7 @@ def update() -> None:
 
 
 @app.command(name="refresh-identity")
+@_literal_help
 def refresh_identity_cmd(
     json_output: bool = typer.Option(
         False, "--json", help="Emit the resulting email list as JSON to stdout."
@@ -4208,6 +4272,7 @@ def recover(
 
 
 @app.command()
+@_literal_help
 def resolve(
     path: str | None = typer.Argument(
         None,

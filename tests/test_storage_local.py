@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,39 @@ def _always_valid(_: Path) -> bool:
 
 def _always_invalid(_: Path) -> bool:
     return False
+
+
+def test_retirement_writer_uses_platform_full_flush_on_both_descriptors(tmp_path, monkeypatch):
+    flushed = []
+
+    def observe(fd, operation):
+        assert operation == fsutil.fcntl.F_FULLFSYNC
+        flushed.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+
+    monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
+    monkeypatch.setattr(fsutil.fcntl, "F_FULLFSYNC", 123, raising=False)
+    monkeypatch.setattr(fsutil.fcntl, "fcntl", observe)
+    LocalBackend(tmp_path).put("retired/abcd1234.enc", b"encrypted test record")
+    assert flushed == ["file", "directory"]
+
+
+def test_retirement_delete_uses_platform_full_flush(tmp_path, monkeypatch):
+    backend = LocalBackend(tmp_path)
+    record = "devices/abcd1234.json"
+    backend.put(record, b"registry fixture")
+    flushed = []
+
+    def observe(fd, operation):
+        assert operation == fsutil.fcntl.F_FULLFSYNC
+        assert stat.S_ISDIR(os.fstat(fd).st_mode)
+        assert not backend.exists(record)
+        flushed.append(fd)
+
+    monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
+    monkeypatch.setattr(fsutil.fcntl, "F_FULLFSYNC", 123, raising=False)
+    monkeypatch.setattr(fsutil.fcntl, "fcntl", observe)
+    backend.delete(record, durable_flat=True)
+    assert len(flushed) == 1
 
 
 class TestLocalBackend:

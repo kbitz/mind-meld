@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import errno
+import fnmatch
 import os
 import stat
 import sys
@@ -861,11 +862,11 @@ def _validate_exclude_patterns(patterns: Any, source_name: str) -> None:
 def grok_customization_dirs_exist(root: Path) -> bool:
     """True if at least one hardcoded Grok customization dir exists under ``root``.
 
-    A label only ("detected" in the init and reconfigure prompts). It is
-    never an activation or consent signal: the default grok source activates
-    only through ``mm enable-source grok``, or an explicit "y" at the
-    ``mm init`` or ``mm reconfigure-sources`` prompt. Both prompts default
-    to N.
+    Drives the ``detected`` label and ``mm init`` default (yes when detected,
+    no otherwise; ``mm reconfigure-sources`` defaults to the source's current
+    setting, or to detected on a legacy config without explicit sources).
+    Background resolution still requires explicit consent in ``config.toml`` or
+    ``mm enable-source grok``.
     """
     from mind_meld.manifest import GROK_SYNCED_SUBDIRS
 
@@ -880,23 +881,33 @@ def grok_customization_dirs_exist(root: Path) -> bool:
 
 
 def muse_memory_dir_exists(root: Path) -> bool:
-    """True if the hardcoded Muse ``memory/`` dir exists under ``root``.
+    """True if Muse's real ``memory/`` dir under ``root`` holds a syncable file.
 
-    A label only ("detected" in the init and reconfigure prompts). It is
-    never an activation or consent signal: Muse creates ``memory/`` itself
-    on first run, so the default muse source activates only through
-    ``mm enable-source muse``, or an explicit "y" at the ``mm init`` or
-    ``mm reconfigure-sources`` prompt. Both prompts default to N.
+    Muse creates an empty ``memory/`` directory on first run, so detection
+    requires ``memory/`` to be a real directory (not a symlink) containing at
+    least one regular file (not a symlink) whose basename does not match
+    ``MUSE_EXCLUDE_PATTERNS``. Drives the ``detected`` label and ``mm init``
+    default; background resolution still requires explicit consent in
+    ``config.toml`` or ``mm enable-source muse``.
     """
-    from mind_meld.manifest import MUSE_SYNCED_SUBDIRS
+    from mind_meld.manifest import MUSE_EXCLUDE_PATTERNS, MUSE_SYNCED_SUBDIRS
 
-    for name in MUSE_SYNCED_SUBDIRS:
-        try:
-            st = (root / name).lstat()
-        except OSError:
-            continue
-        if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
-            return True
+    try:
+        stack = [root / name for name in MUSE_SYNCED_SUBDIRS if (root / name).is_dir()]
+        while stack:
+            directory = stack.pop()
+            if directory.is_symlink():
+                continue
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False) and not any(
+                        fnmatch.fnmatch(entry.name, pattern) for pattern in MUSE_EXCLUDE_PATTERNS
+                    ):
+                        return True
+    except OSError:
+        return False
     return False
 
 

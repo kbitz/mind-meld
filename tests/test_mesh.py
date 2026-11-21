@@ -266,11 +266,13 @@ def test_push_publishes_missing_and_stale_skips_equal_and_autopush_no_change_pub
     # 3. Equal record on next push is not rewritten (no churn)
     cipher_before = backend.get(rec_key)
     fake_syncthing.requests.clear()
+    fake_syncthing.bodies.clear()
     res_eq = runner.invoke(app, ["push"])
     assert res_eq.exit_code == 0, res_eq.output
     assert backend.get(rec_key) == cipher_before
-    # With no other vouched device and an equal record, zero Syncthing requests are sent
-    assert fake_syncthing.requests == []
+    # Managed pass runs GET snapshot even without other vouched peers, sending zero writes
+    assert all(req[0] == "GET" for req in fake_syncthing.requests)
+    assert fake_syncthing.bodies == []
 
     # 4. Stale record is rewritten on next push
     stale_id = _valid_syncthing_id("Z")
@@ -752,8 +754,7 @@ def test_attended_pull_pending_notice_counts_only_unvouched_even_after_partial_p
     res = runner.invoke(app, ["pull"])
     assert res.exit_code == 0, res.output
     assert (
-        "mm: notice: Syncthing: 1 device is asking to join; use the ID the new machine printed. "
-        "Run: mm devices approve <device-id>"
+        "mm: notice: Syncthing: 1 device is asking to join. Run: mm devices approve"
     ) in res.output
 
 
@@ -1039,3 +1040,426 @@ def test_mesh_pairs_vouched_peer_with_one_registry_read(
     assert result.stop_cause is None
     assert result.shared == [("mac-b", peer)]
     assert reads == 1
+
+
+def test_mesh_pass_retirement_removals_holds_introducer_and_device_renames(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    """Track 154A AC9, AC10, C7, C8, C9, C24, C27, C30, E2, E3, E7, E8, E13, E16."""
+    from mind_meld.storage.keys import retired_record_key
+
+    storage_dir, backend, my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    ret_st_id = _valid_syncthing_id("R")
+    peer_b_st_id = _valid_syncthing_id("B")
+
+    # Configure ret_st_id in local Syncthing (disconnected, sharing mind-meld)
+    # and set own Syncthing name to stale "old-mac-a" while config.toml has "mac-a"
+    ok_folder = {
+        **fake_syncthing.stock_folder(storage_dir, shared_with=[ret_st_id, peer_b_st_id]),
+        "id": "mind-meld",
+    }
+    fake_syncthing.set_config(
+        devices=[
+            {
+                "deviceID": ret_st_id,
+                "name": "mac-retired",
+                "addresses": ["dynamic"],
+                "introducer": False,
+                "autoAcceptFolders": False,
+                "paused": False,
+            },
+            {
+                "deviceID": peer_b_st_id,
+                "name": "",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            },
+        ],
+        folders=[ok_folder],
+    )
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = "old-mac-a"
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {
+            ret_st_id: {"connected": False},
+            peer_b_st_id: {"connected": True},
+        }
+    }
+
+    # Write retirement record for dev-ret -> ret_st_id
+    devices.write_retirement_record(
+        backend, "dev-ret", "mac-retired", ret_st_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+
+    # 1. Removal hold when an unpublished live peer exists (dev-unpub has no syncthing record)
+    register_device(backend, "dev-unpub", "cachyos")
+    register_device(backend, "dev-b", "mac-b-renamed")
+    devices.publish_record(backend, "dev-b", peer_b_st_id, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.bodies.clear()
+
+    res_hold = runner.invoke(app, ["pull"])
+    assert res_hold.exit_code == 0, res_hold.output
+    assert (
+        "mm: notice: Syncthing device removals wait for cachyos (dev-unpub) to publish "
+        "its Syncthing ID; run 'mm update' and 'mm push' on cachyos"
+    ) in res_hold.output
+    # Renames still run even while removals hold!
+    assert "Pull: Syncthing named this device mac-a" in res_hold.output
+    assert "Pull: Syncthing renamed mac-b-renamed" in res_hold.output
+    assert not any(m == "DELETE" for m, _, _ in fake_syncthing.bodies)
+
+    # 2. Removal hold when a superseded unretired registration exists
+    from mind_meld import core
+
+    backend.put(
+        device_key("dev-unpub"),
+        json.dumps(
+            {
+                "device_id": "dev-unpub",
+                "device_name": "mac-b-renamed",
+                "registered": "2026-01-01T00:00:00+00:00",
+                "last_seen": "2026-01-02T00:00:00+00:00",
+                "last_seen_version": core.__version__,
+            }
+        ).encode("utf-8"),
+    )
+    backend.put(
+        device_key("dev-b"),
+        json.dumps(
+            {
+                "device_id": "dev-b",
+                "device_name": "mac-b-renamed",
+                "registered": "2026-02-01T00:00:00+00:00",
+                "last_seen": "2026-02-02T00:00:00+00:00",
+                "last_seen_version": core.__version__,
+            }
+        ).encode("utf-8"),
+    )
+    fake_syncthing.bodies.clear()
+    res_sup_hold = runner.invoke(app, ["pull"])
+    assert res_sup_hold.exit_code == 0, res_sup_hold.output
+    assert (
+        "mm: notice: Syncthing device removals wait for superseded registration "
+        "mac-b-renamed (dev-unpub). Run: mm devices retire dev-unpub"
+    ) in res_sup_hold.output
+    assert not any(m == "DELETE" for m, _, _ in fake_syncthing.bodies)
+    # Also zero rename writes on second run since names now match
+    assert fake_syncthing.bodies == []
+
+    # Remove the superseded registration so holds clear
+    backend.delete(device_key("dev-unpub"))
+
+    # 3. Introducer rule (E8): ret_st_id has introducedBy = peer_b_st_id (active vouched peer)
+    fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = peer_b_st_id
+    res_intro = runner.invoke(app, ["pull"])
+    assert res_intro.exit_code == 0, res_intro.output
+    assert (
+        f"mm: notice: mac-retired ({ret_st_id[:7]}) stays until mac-b-renamed drops it"
+        in res_intro.output
+    )
+    assert fake_syncthing.bodies == []
+    fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = ""
+
+    # 4. Connected device refusal (device-connected)
+    fake_syncthing.responses["/rest/system/connections"]["connections"][ret_st_id] = {
+        "connected": True
+    }
+    res_conn = runner.invoke(app, ["pull"])
+    assert res_conn.exit_code == 0, res_conn.output
+    assert (
+        f"mm: notice: mac-retired ({ret_st_id[:7]}) is retired but still connected; "
+        "shut it down or stop Syncthing there, or remove it in Syncthing's web UI"
+    ) in res_conn.output
+    assert fake_syncthing.bodies == []
+
+    # 5. Multi-folder device refusal (shared-in-other-folder)
+    fake_syncthing.responses["/rest/system/connections"]["connections"][ret_st_id] = {
+        "connected": False
+    }
+    extra_folder = {
+        **fake_syncthing.stock_folder(tmp_path / "other", shared_with=[ret_st_id]),
+        "id": "other-folder",
+    }
+    fake_syncthing.responses["/rest/config/folders"] = [ok_folder, extra_folder]
+    res_multi = runner.invoke(app, ["pull"])
+    assert res_multi.exit_code == 0, res_multi.output
+    assert (
+        f"mm: notice: mac-retired ({ret_st_id[:7]}) is retired from Mind Meld but also "
+        "shares another Syncthing folder on this machine; remove it in Syncthing's web UI"
+    ) in res_multi.output
+    assert fake_syncthing.bodies == []
+
+    # 6. Unreadable retirement record surfaces degradation without blocking valid removal
+    backend.put(retired_record_key("badret11"), b"corrupt-ciphertext")
+    fake_syncthing.responses["/rest/config/folders"] = [ok_folder]
+    res_remove = runner.invoke(app, ["pull"])
+    assert res_remove.exit_code == 0, res_remove.output
+    assert (
+        "mm: notice: Retirement file retired/badret11.enc is unreadable. "
+        "Remove it by hand if it stays unreadable." in res_remove.output
+    )
+    assert (
+        f"Pull: Syncthing removed retired device mac-retired ({ret_st_id[:7]})."
+        in res_remove.output
+    )
+    assert ("DELETE", f"/rest/config/devices/{ret_st_id}", None) in fake_syncthing.bodies
+    assert ret_st_id not in {
+        d["deviceID"] for d in fake_syncthing.responses["/rest/config/devices"]
+    }
+    assert ret_st_id not in {
+        d["deviceID"] for d in fake_syncthing.responses["/rest/config/folders"][0]["devices"]
+    }
+    # An introducer can reinsert the retired device between two mesh passes.
+    fake_syncthing.set_folder(
+        storage_dir,
+        peers=[(ret_st_id, "mac-retired", False), (peer_b_st_id, "mac-b-renamed", True)],
+    )
+    fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = peer_b_st_id
+    fake_syncthing.bodies.clear()
+    res_again = runner.invoke(app, ["pull"])
+    assert res_again.exit_code == 0, res_again.output
+    assert "stays until mac-b-renamed drops it" in res_again.output
+    assert not any(method == "DELETE" for method, _, _ in fake_syncthing.bodies)
+
+
+@pytest.mark.parametrize("remove_fails", [False, True])
+def test_attended_retirement_leaves_budget_for_both_renames(
+    fake_syncthing, tmp_path, monkeypatch, remove_fails
+):
+    root, backend, my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    retired_id = _valid_syncthing_id("R")
+    current_id = _valid_syncthing_id("B")
+    fake_syncthing.set_folder(
+        root, peers=[(retired_id, "retired", False), (current_id, "old name", True)]
+    )
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = "old own name"
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {retired_id: {"connected": False}}
+    }
+    devices.write_retirement_record(
+        backend, "dev-ret", "retired", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    register_device(backend, "dev-b", "mac-b")
+    devices.publish_record(backend, "dev-b", current_id, PASSPHRASE, TEST_MEMORY_KB)
+    now = 1000.0
+    real_get = syncthing._get_json
+    real_send = syncthing._send_json
+
+    def slow_get(*args, **kwargs):
+        nonlocal now
+        now += 0.55
+        return real_get(*args, **kwargs)
+
+    def slow_send(endpoint, method, *args, **kwargs):
+        nonlocal now
+        now += 0.55
+        if method == "DELETE" and remove_fails:
+            return "error", "http-500"
+        return real_send(endpoint, method, *args, **kwargs)
+
+    monkeypatch.setattr(syncthing.time, "monotonic", lambda: now)
+    monkeypatch.setattr(syncthing, "_get_json", slow_get)
+    monkeypatch.setattr(syncthing, "_send_json", slow_send)
+    result = meshflow.run(
+        config.load_config(),
+        PASSPHRASE,
+        TEST_MEMORY_KB,
+        verb="pull",
+        attended=True,
+        backend=backend,
+    )
+
+    assert result.stop_cause is None
+    assert result.renamed == [("mac-a", my_id, True), ("mac-b", current_id, False)]
+    assert result.removed == ([] if remove_fails else [("retired", retired_id)])
+    if remove_fails:
+        assert any("http-500" in detail for detail in result.degradations)
+    else:
+        assert ("DELETE", f"/rest/config/devices/{retired_id}", None) in fake_syncthing.bodies
+
+
+@pytest.mark.parametrize(
+    "late_change",
+    ["folder", "introducer", "registration", "listing-error", "retirement", "connection"],
+)
+def test_retirement_rechecks_eligibility_after_initial_snapshot(
+    fake_syncthing, tmp_path, monkeypatch, late_change
+):
+    root, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    retired_id = _valid_syncthing_id("R")
+    current_id = _valid_syncthing_id("B")
+    fake_syncthing.set_folder(
+        root, peers=[(retired_id, "retired", False), (current_id, "mac-b", True)]
+    )
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {retired_id: {"connected": False}}
+    }
+    devices.write_retirement_record(
+        backend, "dev-ret", "retired", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    register_device(backend, "dev-b", "mac-b")
+    devices.publish_record(backend, "dev-b", current_id, PASSPHRASE, TEST_MEMORY_KB)
+    take_snapshot = syncthing.SyncthingWriter.mesh_snapshot
+
+    def snapshot_then_change(writer, folder_id):
+        snapshot = take_snapshot(writer, folder_id)
+        if late_change == "folder":
+            fake_syncthing.responses["/rest/config/folders"] = []
+        elif late_change == "introducer":
+            fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = current_id
+        elif late_change == "registration":
+            register_device(backend, "dev-ret", "retired")
+            devices.publish_record(backend, "dev-ret", retired_id, PASSPHRASE, TEST_MEMORY_KB)
+        elif late_change == "retirement":
+            from mind_meld.storage.keys import retired_record_key
+
+            backend.delete(retired_record_key("dev-ret"))
+        elif late_change == "connection":
+            read_retirements = devices.read_retirement_records
+
+            def reconnect_during_read(*args, **kwargs):
+                if kwargs.get("strict"):
+                    conns = fake_syncthing.responses["/rest/system/connections"]["connections"]
+                    conns[retired_id]["connected"] = True
+                return read_retirements(*args, **kwargs)
+
+            monkeypatch.setattr(devices, "read_retirement_records", reconnect_during_read)
+        else:
+            real_list = LocalBackend.list_keys
+
+            def list_keys(self, prefix, *, strict=False):
+                if prefix == "devices/" and strict:
+                    raise PermissionError(errno.EACCES, "Cannot list registry")
+                return real_list(self, prefix, strict=strict)
+
+            monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
+        return snapshot
+
+    monkeypatch.setattr(syncthing.SyncthingWriter, "mesh_snapshot", snapshot_then_change)
+    result = meshflow.run(
+        config.load_config(),
+        PASSPHRASE,
+        TEST_MEMORY_KB,
+        verb="pull",
+        attended=True,
+        backend=backend,
+    )
+    assert result.removed == []
+    assert not any(method == "DELETE" for method, _, _ in fake_syncthing.bodies)
+
+
+@pytest.mark.parametrize("inventory", ["clean", "dropped", "vanished"])
+def test_retirement_with_no_vouched_peer_requires_complete_registry(
+    fake_syncthing, tmp_path, monkeypatch, inventory
+):
+    root, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch, publish_own=False)
+    retired_id = _valid_syncthing_id("R")
+    fake_syncthing.set_folder(root, peers=[(retired_id, "retired", False)])
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {retired_id: {"connected": False}}
+    }
+    devices.write_retirement_record(
+        backend, "dev-ret", "retired", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    if inventory != "clean":
+        peer_key = device_key("dev-b")
+        backend.put(peer_key, b"unreadable")
+        if inventory == "vanished":
+            read = LocalBackend.get
+
+            def vanish(self, key, *, expected=False):
+                if key == peer_key:
+                    raise StorageNotFound(key, vanished=True)
+                return read(self, key, expected=expected)
+
+            monkeypatch.setattr(LocalBackend, "get", vanish)
+    result = meshflow.run(
+        config.load_config(),
+        PASSPHRASE,
+        TEST_MEMORY_KB,
+        verb="pull",
+        attended=False,
+        backend=backend,
+    )
+    if inventory == "clean":
+        assert result.removed == [("retired", retired_id)]
+    else:
+        assert result.removed == []
+        assert any(
+            "removals wait for" in detail and "dev-b" in detail for detail in result.degradations
+        )
+
+
+def test_autopush_neither_removes_connected_retired_device_nor_readds_knocker(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    root, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    retired_id = _valid_syncthing_id("R")
+    fake_syncthing.set_folder(root, peers=[(retired_id, "retired", False)])
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {retired_id: {"connected": True}}
+    }
+    devices.write_retirement_record(
+        backend, "dev-ret", "retired", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    first = runner.invoke(app, ["autopush"])
+    assert first.exit_code == 0 and not first.output
+    crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["push"]
+    assert "is retired but still connected" in crumb["detail"]
+    assert not any(method == "DELETE" for method, _, _ in fake_syncthing.bodies)
+
+    fake_syncthing.set_folder(root, peers=[])
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {retired_id: {"name": "retired"}}
+    fake_syncthing.bodies.clear()
+    fake_syncthing.requests.clear()
+    second = runner.invoke(app, ["autopush"])
+    assert second.exit_code == 0 and not second.output
+    assert any(
+        method == "GET" and path == "/rest/cluster/pending/devices"
+        for method, path, _ in fake_syncthing.requests
+    )
+    assert fake_syncthing.bodies == []
+
+
+def test_corrupt_own_record_preserves_diagnostic_without_holding_peer_retirement(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    root, backend, _ = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    backend.put(syncthing_record_key("dev-a"), b"corrupt")
+    retired_id = _valid_syncthing_id("R")
+    fake_syncthing.set_folder(root, peers=[(retired_id, "old-box", False)])
+    devices.write_retirement_record(
+        backend, "dev-ret", "old-box", retired_id, PASSPHRASE, TEST_MEMORY_KB
+    )
+    res = runner.invoke(app, ["pull"])
+    assert res.exit_code == 0, res.output
+    assert "the Syncthing record of device dev-a is unreadable" in res.output
+    assert ("DELETE", f"/rest/config/devices/{retired_id}", None) in fake_syncthing.bodies
+
+
+def test_mesh_still_renames_when_pairing_loses_fleet_folder(fake_syncthing, tmp_path, monkeypatch):
+    root, backend, own_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    joining_id = _valid_syncthing_id("B")
+    peer_id = _valid_syncthing_id("C")
+    for mm_id, name, st_id in (("dev-b", "linux-a", joining_id), ("dev-c", "linux-b", peer_id)):
+        register_device(backend, mm_id, name)
+        devices.publish_record(backend, mm_id, st_id, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.set_folder(root, peers=[(peer_id, "old-peer-name", True)])
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = "old-own-name"
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {joining_id: {}}
+
+    def move_folder_after_add(method, path, body):
+        if method == "POST" and path == "/rest/config/devices":
+            fake_syncthing.responses["/rest/config/folders"][0]["path"] = str(tmp_path / "rebound")
+
+    fake_syncthing.on_write = move_folder_after_add
+    res = runner.invoke(app, ["pull"])
+    assert res.exit_code == 0 and "not-mm-folder" in res.output
+    assert not any(path.startswith("/rest/config/folders/") for _, path, _ in fake_syncthing.bodies)
+    assert ("PATCH", f"/rest/config/devices/{own_id}", {"name": "mac-a"}) in fake_syncthing.bodies
+    assert (
+        "PATCH",
+        f"/rest/config/devices/{peer_id}",
+        {"name": "linux-b"},
+    ) in fake_syncthing.bodies

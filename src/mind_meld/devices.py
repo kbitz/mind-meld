@@ -5,24 +5,29 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shlex
 import sys
 import time
 import uuid
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from mind_meld import __version__, crypto, fsutil, syncthing
+from mind_meld import __version__, crypto, fsutil, safety, syncthing
 from mind_meld.config import DEFAULT_ARGON2_MEMORY_KB
 from mind_meld.errors import CryptoError, NewerFormatError, StorageError, StorageNotFound
 from mind_meld.storage.keys import (
     DEVICES_PREFIX,
+    RETIRED_PREFIX,
     SYNCTHING_PREFIX,
     device_key,
     parse_device_key,
+    parse_retired_record_key,
     parse_syncthing_record_key,
+    retired_record_key,
     syncthing_record_key,
 )
 from mind_meld.storage.local import LocalBackend, is_conflict_name
@@ -221,8 +226,9 @@ def generate_unique_short_device_id(
     devices: list[dict[str, Any]],
     *,
     max_retries: int = _GENERATE_DEVICE_ID_RETRY_BUDGET,
+    backend: LocalBackend | None = None,
 ) -> str:
-    """Generate an 8-char device id that doesn't collide with existing peers.
+    """Generate an 8-char device id that doesn't collide with existing or retired peers.
 
     Today's ``device_id`` is ``uuid.uuid4().hex[:8]`` (32 bits). Collisions
     inside a fleet are extremely unlikely under healthy RNG (~1 in 4 billion
@@ -231,6 +237,9 @@ def generate_unique_short_device_id(
     is cheap; running ``list_devices`` once and retrying on collision gives
     forward defense plus a warning if the retry budget is exhausted.
 
+    When ``backend`` is supplied, keys under ``retired/`` are also excluded so
+    a newly initialized machine never draws an already-retired mm device ID.
+
     Returns the freshly-generated id. After ``max_retries`` consecutive
     collisions, emits a ``mm: warning:`` to stderr and returns the last id
     drawn -- the conflict-prompt-ux runtime still defends in depth via
@@ -238,6 +247,12 @@ def generate_unique_short_device_id(
     install isn't catastrophic, just degraded for attribution.
     """
     existing = {d.get("device_id") for d in devices if isinstance(d.get("device_id"), str)}
+    if backend is not None:
+        for key in backend.list_keys(RETIRED_PREFIX):
+            if not is_conflict_name(key.rsplit("/", 1)[-1]):
+                retired_id = parse_retired_record_key(key)
+                if retired_id is not None:
+                    existing.add(retired_id)
     last_drawn = ""
     for _attempt in range(max_retries):
         candidate = uuid.uuid4().hex[:8]
@@ -298,7 +313,7 @@ def lookup_device_by_short_id(
     return (None, count)
 
 
-def inventory_devices(backend: LocalBackend) -> DeviceInventory:
+def inventory_devices(backend: LocalBackend, *, strict: bool = False) -> DeviceInventory:
     """Read ``devices/`` once (see `DeviceInventory`).
 
     A file counts as a device only when its name is that device's key
@@ -307,7 +322,12 @@ def inventory_devices(backend: LocalBackend) -> DeviceInventory:
     ``<id> 2.json`` would otherwise list the same device twice.
     """
     inventory = DeviceInventory()
-    for key in backend.list_keys(DEVICES_PREFIX):
+    keys = (
+        backend.list_keys(DEVICES_PREFIX, strict=True)
+        if strict
+        else backend.list_keys(DEVICES_PREFIX)
+    )
+    for key in keys:
         key_id = parse_device_key(key)
         if key_id is None or is_conflict_name(key.rsplit("/", 1)[-1]):
             # Not `devices/<id>.json`, or a conflict copy of one: never read,
@@ -315,7 +335,7 @@ def inventory_devices(backend: LocalBackend) -> DeviceInventory:
             inventory.foreign.append(key)
             continue
         try:
-            raw = json.loads(backend.get(key, expected=True))
+            raw = json.loads(backend.get(key, expected=not strict))
         except StorageNotFound:
             # Listed, then gone after the bounded retry: Syncthing is replacing
             # it. Not corrupt; the pull reports it as waiting.
@@ -397,6 +417,7 @@ def read_fleet_records(
     memory_kb: int = DEFAULT_ARGON2_MEMORY_KB,
     *,
     own_device_id: str | None = None,
+    strict: bool = False,
 ) -> FleetSyncthingRecords:
     """Read and authenticate ``syncthing/*.enc`` records under the fleet key.
 
@@ -406,10 +427,14 @@ def read_fleet_records(
     registry device name.
     """
     records = FleetSyncthingRecords()
-    keys = backend.list_keys(SYNCTHING_PREFIX)
-    if not keys:
+    keys = (
+        backend.list_keys(SYNCTHING_PREFIX, strict=True)
+        if strict
+        else backend.list_keys(SYNCTHING_PREFIX)
+    )
+    if not keys and not strict:
         return records
-    inventory = inventory_devices(backend)
+    inventory = inventory_devices(backend, strict=True) if strict else inventory_devices(backend)
     records.inventory = inventory
     registered: dict[str, dict[str, Any]] = {d["device_id"]: d for d in inventory.valid}
     best_rank: dict[str, tuple[str, str, str]] = {}
@@ -437,7 +462,7 @@ def read_fleet_records(
             records.unreadable.append(key_id)
             continue
         try:
-            raw = backend.get(key, expected=True)
+            raw = backend.get(key, expected=not strict)
         except StorageNotFound:
             records.vanished.append(key_id)
             continue
@@ -488,3 +513,451 @@ def read_fleet_records(
             best_rank[st_id] = rank
             records.vouched[st_id] = (key_id, dev_name)
     return records
+
+
+def read_single_syncthing_record(
+    backend: LocalBackend,
+    device_id: str,
+    passphrase: str,
+    memory_kb: int = DEFAULT_ARGON2_MEMORY_KB,
+) -> str | None:
+    """Read and authenticate ``syncthing/<device_id>.enc`` directly, or return ``None``."""
+    try:
+        key = syncthing_record_key(device_id)
+    except ValueError:
+        return None
+    path = backend.root / key
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if st.st_size > MAX_SYNCTHING_RECORD_BYTES:
+        return None
+    try:
+        raw = backend.get(key, expected=True)
+    except (StorageNotFound, StorageError, OSError):
+        return None
+    if len(raw) > MAX_SYNCTHING_RECORD_BYTES:
+        return None
+    try:
+        plaintext = crypto.decrypt(raw, passphrase, memory_kb)
+        payload = json.loads(plaintext.decode("utf-8"))
+    except (NewerFormatError, CryptoError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("mm_device_id") != device_id:
+        return None
+    st_id = payload.get("syncthing_device_id")
+    if (
+        isinstance(st_id, str)
+        and syncthing.is_device_id(st_id)
+        and syncthing.has_valid_device_id_check_digits(st_id)
+    ):
+        return st_id
+    return None
+
+
+def retire_command(device_id: str, *, yes: bool = False) -> str:
+    """Format an exact single-line shell argument from the registry identity."""
+    if safety.safe_terminal_str(device_id) != device_id:
+        return "mm devices"
+    argument = shlex.quote(device_id)
+    if device_id.startswith("-"):
+        return f"mm devices retire {'--yes ' if yes else ''}-- {argument}"
+    return f"mm devices retire {argument}{' --yes' if yes else ''}"
+
+
+def normalize_device_name(raw_name: object) -> str:
+    """Return the sanitized, trimmed, casefolded comparison key for a device name."""
+    return safety.safe_terminal_str(str(raw_name or "")).strip().casefold()
+
+
+def _parse_iso_ts(raw: object) -> datetime | None:
+    """Parse an ISO-8601 timestamp string into an aware UTC datetime, or None."""
+    if not isinstance(raw, str) or not raw.strip() or len(raw) > 64:
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+        return dt.astimezone(timezone.utc) if dt.utcoffset() is not None else None
+    except (ValueError, OverflowError):
+        return None
+
+
+@dataclass(frozen=True)
+class SupersededRegistration:
+    """An unpublished registration superseded by a later published registration."""
+
+    old_id: str
+    name: str
+    newer_id: str
+
+
+@dataclass(frozen=True)
+class UnpublishedSplit:
+    """Result of splitting unpublished peer registrations into still-to-publish vs superseded."""
+
+    unpublished_names: tuple[str, ...] = ()
+    superseded: tuple[SupersededRegistration, ...] = ()
+    unpublished_ids: tuple[str, ...] = ()
+    unpublished_by_norm_name: dict[str, str] = field(default_factory=dict)
+
+
+def published_record_mm_ids(
+    backend: LocalBackend,
+    records: FleetSyncthingRecords | None = None,
+) -> set[str]:
+    """Return every mm ``device_id`` that has a non-conflict ``syncthing/<id>.enc`` key.
+
+    A device counts as having a published record whenever its non-conflict
+    ``syncthing/<id>.enc`` key exists on disk, whether or not the payload
+    decrypts on this machine.
+    """
+    if records is not None and records.inventory is not None:
+        return set(records.by_mm_id).union(
+            records.unreadable, records.newer_format, records.vanished
+        )
+    out: set[str] = set()
+    try:
+        for key in backend.list_keys(SYNCTHING_PREFIX):
+            leaf = key.rsplit("/", 1)[-1]
+            if is_conflict_name(leaf):
+                continue
+            mm_id = parse_syncthing_record_key(key)
+            if mm_id is not None:
+                out.add(mm_id)
+    except (OSError, StorageError):
+        if records is not None:
+            return set(records.by_mm_id).union(
+                records.unreadable, records.newer_format, records.vanished
+            )
+    return out
+
+
+def split_unpublished(
+    inventory: DeviceInventory,
+    published_mm_ids: set[str] | frozenset[str],
+    *,
+    own_device_id: str | None = None,
+) -> UnpublishedSplit:
+    """Split unpublished peer registrations into still-to-publish vs superseded.
+
+    An unpublished registration ``d`` is superseded when another valid
+    registration in ``inventory.valid`` shares the same normalized sanitized
+    device name, has a published ``syncthing/<id>.enc`` key in
+    ``published_mm_ids``, has a strictly later valid ``registered`` timestamp,
+    and ``d``'s ``last_seen`` is missing or not later than that newer
+    registration's ``registered`` timestamp. Missing or unparseable timestamps
+    never supersede or get superseded.
+    """
+    published_by_norm: dict[str, list[tuple[datetime, str]]] = {}
+    for entry in inventory.valid:
+        did = entry["device_id"]
+        if did not in published_mm_ids:
+            continue
+        reg_dt = _parse_iso_ts(entry.get("registered"))
+        if reg_dt is None:
+            continue
+        norm = normalize_device_name(entry.get("device_name") or did)
+        if not norm:
+            continue
+        published_by_norm.setdefault(norm, []).append((reg_dt, did))
+
+    unpublished_names: list[str] = []
+    unpublished_ids: list[str] = []
+    superseded: list[SupersededRegistration] = []
+    by_norm: dict[str, str] = {}
+
+    for entry in sorted(inventory.valid, key=lambda item: item["device_id"]):
+        did = entry["device_id"]
+        if did == own_device_id or did in published_mm_ids:
+            continue
+        safe_name = safety.safe_terminal_str(str(entry.get("device_name") or "")).strip() or did
+        norm = safe_name.casefold()
+        reg_dt = _parse_iso_ts(entry.get("registered"))
+        raw_last_seen = entry.get("last_seen")
+        if raw_last_seen is None or raw_last_seen == "":
+            last_seen_dt: datetime | None = None
+            last_seen_ok = True
+        else:
+            last_seen_dt = _parse_iso_ts(raw_last_seen)
+            last_seen_ok = last_seen_dt is not None
+
+        candidates: list[tuple[datetime, str]] = []
+        if reg_dt is not None and last_seen_ok:
+            for pub_reg_dt, pub_id in published_by_norm.get(norm, ()):
+                if pub_id == did or pub_reg_dt <= reg_dt:
+                    continue
+                if last_seen_dt is None or last_seen_dt <= pub_reg_dt:
+                    candidates.append((pub_reg_dt, pub_id))
+
+        if candidates:
+            _, newer_id = max(candidates, key=lambda item: (item[0], item[1]))
+            superseded.append(SupersededRegistration(old_id=did, name=safe_name, newer_id=newer_id))
+        else:
+            unpublished_names.append(safe_name)
+            unpublished_ids.append(did)
+            by_norm.setdefault(norm, safe_name)
+
+    return UnpublishedSplit(
+        unpublished_names=tuple(unpublished_names),
+        superseded=tuple(superseded),
+        unpublished_ids=tuple(unpublished_ids),
+        unpublished_by_norm_name=by_norm,
+    )
+
+
+def compose_pending_syncthing_join_message(
+    base_message: str | None,
+    unpublished_names: Sequence[str] = (),
+) -> str | None:
+    """Append an unpublished-machines remedy clause to ``base_message`` when needed."""
+    if not base_message:
+        return None
+    names = [
+        cleaned
+        for raw in unpublished_names
+        if (cleaned := safety.safe_terminal_str(str(raw)).strip())
+    ]
+    if not names:
+        return base_message
+    verb = "has" if len(names) == 1 else "have"
+    target = "that machine" if len(names) == 1 else "those machines"
+    return (
+        f"{base_message} Registered fleet "
+        f"{'machine' if len(names) == 1 else 'machines'} {', '.join(names)} "
+        f"{verb} not published a Syncthing ID yet; run 'mm update' and 'mm push' on {target}."
+    )
+
+
+def compose_pending_syncthing_join_items(
+    *,
+    pending_count: int | None,
+    pending_device_names: dict[str, str] | None = None,
+    unpublished_names: Sequence[str] = (),
+    superseded: Sequence[SupersededRegistration] = (),
+) -> list[tuple[str, str]]:
+    """Build ``(message, fix_command)`` pairs for knocking and superseded Syncthing devices."""
+    count = (
+        pending_count
+        if not isinstance(pending_count, bool) and isinstance(pending_count, int)
+        else 0
+    )
+    if count < 1:
+        return []
+
+    unpub_by_norm: dict[str, str] = {}
+    cleaned_unpub: list[str] = []
+    for raw in unpublished_names:
+        cleaned = safety.safe_terminal_str(str(raw)).strip()
+        if cleaned:
+            cleaned_unpub.append(cleaned)
+            unpub_by_norm.setdefault(cleaned.casefold(), cleaned)
+
+    matched_names: list[str] = []
+    unmatched_count = 0
+    if pending_device_names:
+        for _pid, raw_pname in sorted(pending_device_names.items()):
+            norm_p = normalize_device_name(raw_pname)
+            if norm_p and norm_p in unpub_by_norm:
+                m_name = unpub_by_norm[norm_p]
+                if m_name not in matched_names:
+                    matched_names.append(m_name)
+            else:
+                unmatched_count += 1
+    else:
+        unmatched_count = count
+
+    items: list[tuple[str, str]] = []
+    if matched_names:
+        noun = "machine" if len(matched_names) == 1 else "machines"
+        verb = "is" if len(matched_names) == 1 else "are"
+        has_verb = "has" if len(matched_names) == 1 else "have"
+        target = "that machine" if len(matched_names) == 1 else "those machines"
+        items.append(
+            (
+                f"Syncthing: registered fleet {noun} {', '.join(matched_names)} {verb} "
+                f"asking to join and {has_verb} not published a Syncthing ID yet; "
+                f"on {target}, run 'mm update', then 'mm push'.",
+                "mm update",
+            )
+        )
+    if unmatched_count > 0:
+        remaining_unpub = [n for n in cleaned_unpub if n not in matched_names]
+        msg = compose_pending_syncthing_join_message(
+            syncthing.pending_join_message(unmatched_count),
+            remaining_unpub,
+        )
+        if msg:
+            items.append((msg, syncthing.PENDING_JOIN_FIX))
+    for sup in superseded:
+        s_name = safety.safe_terminal_str(sup.name).strip() or sup.old_id
+        s_old = safety.safe_terminal_str(sup.old_id).strip()
+        s_new = safety.safe_terminal_str(sup.newer_id).strip()
+        items.append(
+            (
+                f"Syncthing: old {s_name} registration {s_old} superseded by {s_new}.",
+                retire_command(sup.old_id),
+            )
+        )
+    return items
+
+
+@dataclass(frozen=True)
+class RetirementRecord:
+    """Authenticated retirement record from ``retired/<mm-id>.enc``."""
+
+    mm_device_id: str
+    device_name: str
+    syncthing_device_id: str | None = None
+
+
+@dataclass
+class FleetRetirementRecords:
+    """Decoded retirement records and per-key diagnostic buckets."""
+
+    records: dict[str, RetirementRecord] = field(default_factory=dict)
+    by_syncthing_id: dict[str, list[RetirementRecord]] = field(default_factory=dict)
+    newer_format: list[str] = field(default_factory=list)
+    unreadable: list[str] = field(default_factory=list)
+    vanished: list[str] = field(default_factory=list)
+
+
+def write_retirement_record(
+    backend: LocalBackend,
+    mm_device_id: str,
+    device_name: str,
+    syncthing_device_id: str | None,
+    passphrase: str,
+    memory_kb: int = DEFAULT_ARGON2_MEMORY_KB,
+) -> RetirementRecord:
+    """Write ``retired/<mm_device_id>.enc`` durably (format 0x02, fsynced)."""
+    clean_st_id: str | None = None
+    if syncthing_device_id is not None:
+        if not (
+            isinstance(syncthing_device_id, str)
+            and syncthing.is_device_id(syncthing_device_id)
+            and syncthing.has_valid_device_id_check_digits(syncthing_device_id)
+        ):
+            raise ValueError(f"invalid syncthing_device_id: {syncthing_device_id!r}")
+        clean_st_id = syncthing_device_id
+    clean_name = (
+        device_name.strip()
+        if isinstance(device_name, str) and device_name.strip()
+        else mm_device_id
+    )
+    key = retired_record_key(mm_device_id)
+    if parse_retired_record_key(key) != mm_device_id or is_conflict_name(key.rsplit("/", 1)[-1]):
+        raise StorageError("storage: device ID does not form a readable retirement record")
+    payload = {
+        "mm_device_id": mm_device_id,
+        "device_name": clean_name,
+        "syncthing_device_id": clean_st_id,
+    }
+    plaintext = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    encrypted = crypto.encrypt(plaintext, passphrase, memory_kb)
+    if len(encrypted) > MAX_SYNCTHING_RECORD_BYTES:
+        # Preserve a readable removal target even for an unusually long name.
+        clean_name = clean_name[:128]
+        payload["device_name"] = clean_name
+        plaintext = json.dumps(payload, sort_keys=True).encode("utf-8")
+        encrypted = crypto.encrypt(plaintext, passphrase, memory_kb)
+    if len(encrypted) > MAX_SYNCTHING_RECORD_BYTES:
+        raise StorageError("storage: retirement record exceeds its readable size limit")
+    backend.put(key, encrypted)
+    fsutil.fsync_dir(backend.root)
+    return RetirementRecord(
+        mm_device_id=mm_device_id,
+        device_name=clean_name,
+        syncthing_device_id=clean_st_id,
+    )
+
+
+def read_retirement_records(
+    backend: LocalBackend,
+    passphrase: str,
+    memory_kb: int = DEFAULT_ARGON2_MEMORY_KB,
+    *,
+    strict: bool = False,
+) -> FleetRetirementRecords:
+    """Read and authenticate ``retired/*.enc`` records under the fleet key."""
+    out = FleetRetirementRecords()
+    keys = (
+        backend.list_keys(RETIRED_PREFIX, strict=True)
+        if strict
+        else backend.list_keys(RETIRED_PREFIX)
+    )
+    if not keys:
+        return out
+    for key in sorted(keys):
+        leaf = key.rsplit("/", 1)[-1]
+        if is_conflict_name(leaf):
+            continue
+        key_id = parse_retired_record_key(key)
+        if key_id is None:
+            continue
+        path = backend.root / key
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            st = None
+        except OSError:
+            out.unreadable.append(key_id)
+            continue
+        if st is not None and st.st_size > MAX_SYNCTHING_RECORD_BYTES:
+            out.unreadable.append(key_id)
+            continue
+        try:
+            raw = backend.get(key, expected=not strict)
+        except StorageNotFound:
+            out.vanished.append(key_id)
+            continue
+        except (StorageError, OSError):
+            out.unreadable.append(key_id)
+            continue
+        if len(raw) > MAX_SYNCTHING_RECORD_BYTES:
+            out.unreadable.append(key_id)
+            continue
+        try:
+            plaintext = crypto.decrypt(raw, passphrase, memory_kb)
+        except NewerFormatError:
+            out.newer_format.append(key_id)
+            continue
+        except CryptoError:
+            out.unreadable.append(key_id)
+            continue
+        try:
+            payload = json.loads(plaintext.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            out.unreadable.append(key_id)
+            continue
+        if not isinstance(payload, dict):
+            out.unreadable.append(key_id)
+            continue
+        mm_id = payload.get("mm_device_id")
+        dev_name = payload.get("device_name")
+        st_id = payload.get("syncthing_device_id")
+        st_id_valid = st_id is None or (
+            isinstance(st_id, str)
+            and syncthing.is_device_id(st_id)
+            and syncthing.has_valid_device_id_check_digits(st_id)
+        )
+        if (
+            not isinstance(mm_id, str)
+            or mm_id != key_id
+            or not isinstance(dev_name, str)
+            or not dev_name.strip()
+            or not st_id_valid
+        ):
+            out.unreadable.append(key_id)
+            continue
+        record = RetirementRecord(
+            mm_device_id=mm_id,
+            device_name=dev_name.strip(),
+            syncthing_device_id=st_id,
+        )
+        out.records[key_id] = record
+        if st_id is not None:
+            out.by_syncthing_id.setdefault(st_id, []).append(record)
+    return out

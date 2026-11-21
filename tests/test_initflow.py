@@ -424,8 +424,9 @@ def test_new_fleet_on_a_configured_machine_names_the_store_it_would_replace(env)
     assert first.exit_code == 0, first.output
     saved = config.CONFIG_PATH.read_text()
     fingerprint = tomllib.loads(saved)["crypto"]["root_salt_fp"]
-    result, text = _new_fleet("n\n")
+    result, text = _new_fleet("\n")
     assert result.exit_code == 0, result.output
+    assert "Overwrite? [y/n] (Enter = n)" in text
     assert fingerprint in text
     assert "separate fleet" in text
     assert config.CONFIG_PATH.read_text() == saved
@@ -517,9 +518,10 @@ def test_a_configured_machine_declining_re_init_changes_nothing(env):
     first, _text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
     assert first.exit_code == 0, first.output
     saved = config.CONFIG_PATH.read_bytes()
-    result, text = _run(f"y\njoin\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}n\n")
+    result, text = _run(f"y\nj\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}\n")
     assert result.exit_code == 0, result.output
     assert "orphaning existing device" in text
+    assert "Proceed? [y/n] (Enter = n)" in text
     assert "Device registration cancelled." in text
     assert config.CONFIG_PATH.read_bytes() == saved
     assert len(_device_keys(backend)) == 2
@@ -530,9 +532,18 @@ def test_populated_folder_join_overwrite_declined(env):
     _populate(backend)
     first, _text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}{PASSPHRASE}\n")
     assert first.exit_code == 0, first.output
-    result, _text = _run("n\n")
+    result, text = _run("\n")
     assert result.exit_code == 0, result.output
+    assert "Overwrite? [y/n] (Enter = n)" in text
     assert len(_device_keys(backend)) == 2
+    from mind_meld.cli import app
+
+    before = config.CONFIG_PATH.read_bytes()
+    eof = CliRunner().invoke(app, ["init"], input="")
+    assert eof.exit_code == 1
+    assert "Overwrite? [y/n] (Enter = n)" in eof.output
+    assert "needs a terminal" in eof.output
+    assert config.CONFIG_PATH.read_bytes() == before
 
 
 def test_populated_folder_wrong_passphrase(env):
@@ -991,6 +1002,8 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
         initflow.APPROVAL_WAIT_SECONDS // initflow.APPROVAL_POLL_SECONDS
     )
     assert my_id in text1
+    assert f"(short ID: {my_id[:7]})" in text1
+    assert f"mm devices approve {my_id[:7]}" in text1
     assert f"mm devices approve {my_id}" in text1
     assert (
         f"Init: waiting for a fleet machine to approve this one ('mm devices approve {my_id}'); "
@@ -1107,6 +1120,7 @@ def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
     assert fake_syncthing.bodies == []
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert core.SYNCTHING_GUIDE_HEADING in text_new
+    assert "(another device is configured, a non-default folder is configured)" in text_new
     assert text_new.endswith(NEW_FLEET_OUTCOME)
     if not stale_record:
         assert not config.syncthing_record_path().exists()
@@ -1121,6 +1135,29 @@ def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
     assert core.SYNCTHING_GUIDE_HEADING in text_join
     assert text_join.endswith(JOIN_OUTCOME)
     assert not (storage / ".stignore").exists()
+
+
+@pytest.mark.parametrize(
+    ("shared", "reason"),
+    [(True, "the Default Folder is shared"), (False, "the Default Folder is non-empty")],
+)
+def test_init_explains_why_default_folder_is_owner_managed(
+    env, fake_syncthing, tmp_path, monkeypatch, shared, reason
+):
+    stock_root, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    if not shared:
+        stock_root.mkdir(parents=True)
+        (stock_root / "notes.txt").write_text("existing data\n")
+    folder = fake_syncthing.stock_folder(stock_root, shared_with=[peer_id] if shared else [])
+    fake_syncthing.set_shape(folders=[folder])
+
+    result, text = _run("")
+
+    assert result.exit_code == 1
+    assert f"Syncthing on this machine already has its own configuration ({reason})." in text
+    assert core.SYNCTHING_GUIDE_HEADING in text
+    assert not fake_syncthing.bodies
+    assert not config.syncthing_record_path().exists()
 
 
 @pytest.mark.parametrize(
@@ -1272,6 +1309,7 @@ def test_unsupported_gui_address_with_offline_pre_existing_config_continues_with
         }
 
     assert core.SYNCTHING_GUIDE_HEADING in text
+    assert "a non-default folder is configured" in text
     assert fake_syncthing.requests == []
     assert fake_syncthing.bodies == []
     assert not config.syncthing_record_path().exists()
@@ -1985,8 +2023,8 @@ def test_declining_continue_joining_forgets_answers_and_leaves_syncthing_pairing
     run2, text2 = _run("n\n")
     assert run2.exit_code == 1, run2.output
     assert f"fleet machine {peer_id}" in text2
-    assert "Continue joining?" in text2
-    assert "Start a new fleet or join an existing one? (new/join)" in text2
+    assert "Continue joining? [y/n] (Enter = y)" in text2
+    assert "Start a new fleet or join an existing one? [n/j]:" in text2
     assert not config.join_record_path().exists()
     assert fake_syncthing.bodies == bodies_after_run1
     assert config.load_syncthing_record() == my_id
@@ -2070,18 +2108,19 @@ def test_new_fleet_flag_and_interactive_new_answer(env, tmp_path):
     assert not config.join_record_path().exists()
     assert backend.exists("mm-crypto-init")
 
-    # Reset for interactive "new" answer (with an invalid response first).
+    # Both a blank and an invalid response re-ask before accepting the new-fleet choice.
     config.CONFIG_PATH.unlink()
     storage2 = tmp_path / "storage-interactive-new"
     backend2 = LocalBackend(storage2)
     _joined.clear()
 
     res_new, text_new = _run(
-        f"maybe\nNEW\n{storage2}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}",
+        f"\nmaybe\nN\n{storage2}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}",
         command="capture",
     )
     assert res_new.exit_code == 0, res_new.output
-    assert "Answer 'new' or 'join'." in text_new
+    assert text_new.count("Start a new fleet or join an existing one? [n/j]:") == 3
+    assert "Answer n (new) or j (join)." in text_new
     assert backend2.exists("mm-crypto-init")
     assert _joined == [None]
 
@@ -2387,9 +2426,10 @@ def test_interactive_new_confirms_fleet_identity_before_overwrite(env):
     before = config.CONFIG_PATH.read_bytes()
     fingerprint = tomllib.loads(before.decode())["crypto"]["root_salt_fp"]
 
-    result, text = _run("y\nnew\nn\n")
+    result, text = _run("y\nnew\n\n")
 
     assert result.exit_code == 0, text
+    assert text.count("Overwrite? [y/n] (Enter = n)") == 2
     assert f"storage {storage}, root_salt fp {fingerprint}" in text
     assert "starts a separate fleet" in text
     assert config.CONFIG_PATH.read_bytes() == before

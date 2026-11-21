@@ -38,6 +38,10 @@ def _call_op(writer: syncthing.SyncthingWriter, op_name: str, peer_id: str, fold
         return writer.mesh_snapshot("mind-meld")
     if op_name == "set_own_device_name":
         return writer.set_own_device_name("Mac A")
+    if op_name == "set_device_name":
+        return writer.set_device_name(peer_id, "mac-b")
+    if op_name == "remove_device":
+        return writer.remove_device(peer_id)
     if op_name == "mark_introducer":
         return writer.mark_introducer(peer_id)
     if op_name == "remove_default_folder":
@@ -54,6 +58,8 @@ _ALL_OPS = (
     "approval_state",
     "mesh_snapshot",
     "set_own_device_name",
+    "set_device_name",
+    "remove_device",
     "mark_introducer",
     "remove_default_folder",
 )
@@ -512,6 +518,7 @@ def test_set_own_device_name_validations_idempotence_and_patch(fake_syncthing, i
         ("PATCH", "/rest/config/folders/{id}"),
         ("PATCH", "/rest/config/devices/{id}"),
         ("DELETE", "/rest/config/folders/default"),
+        ("DELETE", "/rest/config/devices/{id}"),
     )
     fake_syncthing.set_config(devices=(), folders=())
 
@@ -588,6 +595,8 @@ def test_set_own_device_name_referenced_only_by_managed_setup_paths():
     entry_points = {
         ("initflow", "_managed_join"),
         ("initflow", "_managed_new_fleet_folder"),
+        ("meshflow", "run"),
+        ("meshflow", "_run_inner"),
     }
     call_sites: set[tuple[str, str]] = set()
     entry_refs: set[tuple[str, str, str]] = set()
@@ -630,16 +639,137 @@ def test_set_own_device_name_referenced_only_by_managed_setup_paths():
     assert call_sites == {
         ("initflow.py", "_managed_join"),
         ("initflow.py", "_managed_new_fleet_folder"),
+        ("meshflow.py", "_run_inner"),
     }
     assert raw_occurrences == {
         ("syncthing.py", "SyncthingWriter"),
         ("initflow.py", "_managed_join"),
         ("initflow.py", "_managed_new_fleet_folder"),
+        ("meshflow.py", "_run_inner"),
     }
     assert entry_refs == {
         ("initflow.py", "init", "initflow._managed_join"),
         ("initflow.py", "init", "initflow._managed_new_fleet_folder"),
+        ("cli.py", "push", "meshflow.run"),
+        ("cli.py", "_attended_pull", "meshflow.run"),
+        ("cli.py", "autopush", "meshflow.run"),
+        ("cli.py", "autopull", "meshflow.run"),
+        ("meshflow.py", "run", "meshflow._run_inner"),
     }
+
+
+def test_set_device_name_and_remove_device_validations_and_mutations(fake_syncthing, isolated_home):
+    target = isolated_home / "Sync" / "mind-meld"
+    ok_folder = {
+        **fake_syncthing.stock_folder(target, shared_with=[fake_syncthing.peer_id]),
+        "id": "mind-meld",
+    }
+    fake_syncthing.set_config(
+        devices=[
+            {
+                "deviceID": fake_syncthing.peer_id,
+                "name": "",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            }
+        ],
+        folders=[ok_folder],
+    )
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {fake_syncthing.peer_id: {"connected": False}}
+    }
+    writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(fake_syncthing.my_id))
+
+    # 1. set_device_name validations
+    assert writer.set_device_name("not-an-id", "mac-b") == syncthing.WriteResult(
+        "refused", "bad-device-id"
+    )
+    assert writer.set_device_name(fake_syncthing.my_id, "mac-a") == syncthing.WriteResult(
+        "refused", "own-device"
+    )
+    for bad_name in ("", "   ", None):
+        assert writer.set_device_name(
+            fake_syncthing.peer_id,
+            bad_name,  # type: ignore[arg-type]
+        ) == syncthing.WriteResult("refused", "bad-device-name")
+    assert writer.set_device_name(fake_syncthing.peer2_id, "linux-a") == syncthing.WriteResult(
+        "refused", "device-not-configured"
+    )
+    assert fake_syncthing.bodies == []
+
+    # PATCH when name differs, then unchanged when equal
+    res_name = writer.set_device_name(fake_syncthing.peer_id, "mac-b")
+    assert res_name == syncthing.WriteResult("ok", None, write_attempted=True)
+    assert fake_syncthing.bodies == [
+        ("PATCH", f"/rest/config/devices/{fake_syncthing.peer_id}", {"name": "mac-b"})
+    ]
+    fake_syncthing.bodies.clear()
+    assert writer.set_device_name(fake_syncthing.peer_id, "mac-b") == syncthing.WriteResult(
+        "unchanged", None
+    )
+    assert fake_syncthing.bodies == []
+
+    # 2. remove_device validations and pre-DELETE recheck
+    assert writer.remove_device("not-an-id") == syncthing.WriteResult("refused", "bad-device-id")
+    assert writer.remove_device(fake_syncthing.my_id) == syncthing.WriteResult(
+        "refused", "own-device"
+    )
+    assert writer.remove_device(fake_syncthing.peer2_id) == syncthing.WriteResult("unchanged", None)
+
+    # Connected peer -> refused (device-connected), 0 DELETEs
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {fake_syncthing.peer_id: {"connected": True}}
+    }
+    assert writer.remove_device(fake_syncthing.peer_id) == syncthing.WriteResult(
+        "refused", "device-connected"
+    )
+    assert fake_syncthing.bodies == []
+
+    for invalid_entry in ({}, None, {"connected": None}, {"connected": 0}):
+        fake_syncthing.responses["/rest/system/connections"] = {
+            "connections": {fake_syncthing.peer_id: invalid_entry}
+        }
+        assert writer.remove_device(fake_syncthing.peer_id) == syncthing.WriteResult(
+            "error", "bad-response"
+        )
+        assert fake_syncthing.bodies == []
+
+    # Disconnected peer also in a non-mind-meld folder -> refused (shared-in-other-folder)
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {fake_syncthing.peer_id: {"connected": False}}
+    }
+    other_folder = {
+        **fake_syncthing.stock_folder(
+            isolated_home / "Notes", shared_with=[fake_syncthing.peer_id]
+        ),
+        "id": "notes",
+    }
+    fake_syncthing.responses["/rest/config/folders"] = [ok_folder, other_folder]
+    assert writer.remove_device(fake_syncthing.peer_id) == syncthing.WriteResult(
+        "refused", "shared-in-other-folder"
+    )
+    assert fake_syncthing.bodies == []
+
+    # Disconnected peer only in mind-meld folder -> DELETE and pruned from folder devices
+    fake_syncthing.responses["/rest/config/folders"] = [ok_folder]
+    res_rem = writer.remove_device(fake_syncthing.peer_id)
+    assert res_rem == syncthing.WriteResult("ok", None, write_attempted=True)
+    assert fake_syncthing.bodies == [
+        ("DELETE", f"/rest/config/devices/{fake_syncthing.peer_id}", None)
+    ]
+    remaining_dev_ids = {d["deviceID"] for d in fake_syncthing.responses["/rest/config/devices"]}
+    assert fake_syncthing.peer_id not in remaining_dev_ids
+    folder_dev_ids = {
+        d["deviceID"] for d in fake_syncthing.responses["/rest/config/folders"][0]["devices"]
+    }
+    assert fake_syncthing.peer_id not in folder_dev_ids
+
+    # Second call on already-removed device -> unchanged, no second DELETE
+    fake_syncthing.bodies.clear()
+    assert writer.remove_device(fake_syncthing.peer_id) == syncthing.WriteResult("unchanged", None)
+    assert fake_syncthing.bodies == []
 
 
 def test_mark_introducer_validations_and_patch(fake_syncthing, isolated_home):
@@ -1125,6 +1255,8 @@ def test_mesh_snapshot_shapes_no_names_and_errors(fake_syncthing, isolated_home,
     assert snap.folder_path == target.resolve(strict=False)
     assert snap.folder_problems == ()
     assert snap.folder_device_ids == frozenset({fake_syncthing.my_id, fake_syncthing.peer_id})
+    assert snap.own_name == "mac-a"
+    assert snap.pending_devices == {fake_syncthing.peer2_id: hostile_pending_name}
     assert snap.devices == {
         fake_syncthing.peer_id: syncthing.ConfiguredDevice(
             device_id=fake_syncthing.peer_id,
@@ -1132,6 +1264,7 @@ def test_mesh_snapshot_shapes_no_names_and_errors(fake_syncthing, isolated_home,
             introducer=True,
             introduced_by="",
             paused=False,
+            name=hostile_config_name,
         ),
         fake_syncthing.peer2_id: syncthing.ConfiguredDevice(
             device_id=fake_syncthing.peer2_id,
@@ -1139,6 +1272,7 @@ def test_mesh_snapshot_shapes_no_names_and_errors(fake_syncthing, isolated_home,
             introducer=False,
             introduced_by="<non-empty>",
             paused=True,
+            name=hostile_config_name,
         ),
     }
     # Steady state is 4 GETs and 0 non-GETs; no peer-controlled name is stored

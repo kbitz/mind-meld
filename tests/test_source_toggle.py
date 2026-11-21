@@ -111,7 +111,7 @@ class TestPromptSourceToggle:
             captured["default"] = default
             return default
 
-        monkeypatch.setattr(typer, "confirm", fake_confirm)
+        monkeypatch.setattr(core, "ask_yes_no", fake_confirm)
         result = core._prompt_source_toggle(
             {"name": "claude", "path": str(tmp_path)}, current_state=True
         )
@@ -123,7 +123,7 @@ class TestPromptSourceToggle:
         def fake_confirm(prompt, default):
             return default
 
-        monkeypatch.setattr(typer, "confirm", fake_confirm)
+        monkeypatch.setattr(core, "ask_yes_no", fake_confirm)
         result = core._prompt_source_toggle(
             {"name": "gstack", "path": str(tmp_path)}, current_state=False
         )
@@ -371,7 +371,7 @@ class TestRetiredSourceToggle:
             prompts.append(prompt)
             return keep_claude and "'claude'" in prompt
 
-        monkeypatch.setattr(typer, "confirm", choose)
+        monkeypatch.setattr(core, "ask_yes_no", choose)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0, result.output
         on_disk = load_config(cfg)
@@ -545,7 +545,7 @@ class TestReconfigureSources:
                 defaults.append(default)
             return default
 
-        monkeypatch.setattr(typer, "confirm", accept_default)
+        monkeypatch.setattr(core, "ask_yes_no", accept_default)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0, result.output
         assert defaults == [detected_tree is not None]
@@ -564,7 +564,7 @@ class TestReconfigureSources:
             prompts.append((prompt, default))
             return default
 
-        monkeypatch.setattr(typer, "confirm", accept)
+        monkeypatch.setattr(core, "ask_yes_no", accept)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0
         assert not any("opencode" in p for p, _ in prompts)
@@ -573,10 +573,10 @@ class TestReconfigureSources:
         assert grok_prompts[0][1] is False
 
     @pytest.mark.parametrize("detected_subdir", [None, "skills"])
-    def test_grok_defaults_off_even_when_detected(
+    def test_grok_defaults_follow_detection_on_legacy_config(
         self, cfg, isolated_seen_sources, monkeypatch, tmp_path, detected_subdir
     ):
-        """Reconfigure must not turn a detected ~/.grok tree into source or consent without Y."""
+        """Legacy config without explicit sources defaults grok to detected state."""
         import tomllib
 
         from mind_meld.config import load_config
@@ -605,21 +605,25 @@ class TestReconfigureSources:
                 grok_prompt.update(prompt=prompt, default=default)
             return default
 
-        monkeypatch.setattr(typer, "confirm", accept_default)
+        monkeypatch.setattr(core, "ask_yes_no", accept_default)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0, result.output
         expected_suffix = "(detected)" if detected_subdir else "(not detected)"
         assert grok_prompt == {
             "prompt": f"Sync 'grok' source at ~/.grok? {expected_suffix}",
-            "default": False,
+            "default": detected_subdir is not None,
         }
 
         with open(cfg, "rb") as f:
             on_disk = tomllib.load(f)
-        assert "grok" not in [s["name"] for s in on_disk["sync"]["sources"]]
+        assert ("grok" in [s["name"] for s in on_disk["sync"]["sources"]]) is (
+            detected_subdir is not None
+        )
 
-    def test_bare_muse_root_defaults_off(self, cfg, isolated_seen_sources, monkeypatch, tmp_path):
-        """Reconfigure must not turn a stock Muse data root into source or consent."""
+    def test_bare_muse_root_and_empty_memory_default_off_until_syncable_file_exists(
+        self, cfg, isolated_seen_sources, monkeypatch, tmp_path
+    ):
+        """Empty Muse memory/ defaults off; a real non-excluded file defaults on."""
         import tomllib
 
         from mind_meld.config import load_config
@@ -627,7 +631,10 @@ class TestReconfigureSources:
         home = tmp_path / "home"
         claude = home / ".claude"
         claude.mkdir(parents=True)
-        (home / ".local" / "share" / "muse" / "sessions").mkdir(parents=True)
+        muse_root = home / ".local" / "share" / "muse"
+        (muse_root / "sessions").mkdir(parents=True)
+        (muse_root / "memory" / "personal").mkdir(parents=True)
+        (muse_root / "memory" / "personal" / ".muse-memory.lock").write_text("pid=123\n")
         monkeypatch.setenv("HOME", str(home))
 
         config = load_config(cfg)
@@ -644,7 +651,7 @@ class TestReconfigureSources:
                 muse_prompt.update(prompt=prompt, default=default)
             return default
 
-        monkeypatch.setattr(typer, "confirm", accept_default)
+        monkeypatch.setattr(core, "ask_yes_no", accept_default)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0, result.output
         assert muse_prompt == {
@@ -655,6 +662,20 @@ class TestReconfigureSources:
         with open(cfg, "rb") as f:
             on_disk = tomllib.load(f)
         assert "muse" not in [s["name"] for s in on_disk["sync"]["sources"]]
+
+        # Now add a real syncable file under memory/personal -> detected and defaults True
+        (muse_root / "memory" / "personal" / "MEMORY.md").write_text("# Memory\n")
+        save_config(config, cfg)
+        muse_prompt.clear()
+        result2 = runner.invoke(app, ["reconfigure-sources"])
+        assert result2.exit_code == 0, result2.output
+        assert muse_prompt == {
+            "prompt": "Sync 'muse' source at ~/.local/share/muse? (detected)",
+            "default": True,
+        }
+        with open(cfg, "rb") as f:
+            on_disk2 = tomllib.load(f)
+        assert "muse" in [s["name"] for s in on_disk2["sync"]["sources"]]
 
     def test_explicit_empty_sources_defaults_all_off(self, cfg, isolated_seen_sources, monkeypatch):
         """An explicit empty sources list means nothing is currently active —
@@ -678,7 +699,7 @@ class TestReconfigureSources:
                 claude_prompt.update(prompt=prompt, default=default)
             return default
 
-        monkeypatch.setattr(typer, "confirm", accept_default)
+        monkeypatch.setattr(core, "ask_yes_no", accept_default)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0, result.output
         assert claude_prompt["default"] is False
@@ -703,8 +724,8 @@ class TestReconfigureSources:
         assert grok_usage_consented(load_config(cfg)) is False
 
         monkeypatch.setattr(
-            typer,
-            "confirm",
+            core,
+            "ask_yes_no",
             lambda prompt, default: True if "'grok'" in prompt else default,
         )
         result = runner.invoke(app, ["reconfigure-sources"])
@@ -946,3 +967,70 @@ def test_source_command_shells_keep_their_parameters(command, expected):
 
     params = typer.main.get_command(app).commands[command].params
     assert [(p.name, p.opts) for p in params] == expected
+
+
+def test_unified_yes_no_helper_and_no_confirm_calls_or_missing_retired_prefixes(
+    monkeypatch, capsys
+):
+    """Track 154A AC4, owner-plan-review, C15, E4: unified yes/no prompts and static bans."""
+    import ast
+    from pathlib import Path
+
+    from mind_meld import initflow
+    from mind_meld.storage import local as local_storage
+
+    # 1. Static check: no typer.confirm, click.confirm, or rich.prompt.Confirm calls in src/
+    src_root = Path(__file__).resolve().parents[1] / "src" / "mind_meld"
+    forbidden_calls: list[str] = []
+    for path in sorted(src_root.rglob("*.py")):
+        rel = str(path.relative_to(src_root))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        banned = {"click.confirm", "typer.confirm", "rich.prompt.Confirm"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and ast.unparse(node) in banned:
+                forbidden_calls.append(f"{rel}:{node.lineno}")
+            elif isinstance(node, ast.ImportFrom) and any(
+                f"{node.module}.{alias.name}" in banned for alias in node.names
+            ):
+                forbidden_calls.append(f"{rel}:{node.lineno}")
+            elif (
+                isinstance(node, ast.Call)
+                and ast.unparse(node.func) == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and f"{ast.unparse(node.args[0])}.{node.args[1].value}" in banned
+            ):
+                forbidden_calls.append(f"{rel}:{node.lineno}")
+    assert forbidden_calls == []
+
+    # 2. Pin "retired" in initflow._FLEET_DIRS and "retired/" in local._DURABLE_PREFIXES
+    assert "retired" in initflow._FLEET_DIRS
+    assert "retired/" in local_storage._DURABLE_PREFIXES
+
+    # 3. ask_yes_no renders lowercase [y/n] (Enter = y|n), accepts y/yes/n/no, and re-asks
+    prompts_seen: list[str] = []
+    answers = iter(["invalid", "YES", "maybe", "No", "", ""])
+
+    def fake_prompt(text: str, *, default: str = "", show_default: bool = True) -> str:
+        assert show_default is False
+        prompts_seen.append(text)
+        ans = next(answers)
+        return default if ans == "" else ans
+
+    monkeypatch.setattr(typer, "prompt", fake_prompt)
+
+    assert core.ask_yes_no("Continue joining?", default=True) is True
+    out1 = capsys.readouterr().out
+    assert "Answer y or n; Enter means yes here." in out1
+    assert prompts_seen[-1] == "Continue joining? [y/n] (Enter = y)"
+
+    assert core.ask_yes_no("Overwrite?", default=False) is False
+    out2 = capsys.readouterr().out
+    assert "Answer y or n; Enter means no here." in out2
+    assert prompts_seen[-1] == "Overwrite? [y/n] (Enter = n)"
+
+    assert core.ask_yes_no("Apply these updates?", default=True) is True
+    assert prompts_seen[-1] == "Apply these updates? [y/n] (Enter = y)"
+
+    assert core.ask_yes_no("Retire mac-b (11112222)?", default=False) is False
+    assert prompts_seen[-1] == "Retire mac-b (11112222)? [y/n] (Enter = n)"

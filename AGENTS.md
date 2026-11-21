@@ -90,7 +90,7 @@ mm reads `Path.home()` at import: never run or import `tests/` outside `./bin/ch
 
 ## Commands
 
-mm --version | init | push | pull | status | diag | devices | devices approve | diff | gc | sources | conflicts | resolve | recover | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet | recapture | update
+mm --version | init | push | pull | status | diag | devices | devices approve | devices retire | diff | gc | sources | conflicts | resolve | recover | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet | recapture | update
 
 Attended `mm push` refreshes consented host usage under the lock. Exit 0 means content sync succeeded regardless of capture outcome; verify recorded capture/publication with `mm status`. Autopush stays change-gated and never warms; previews never capture. Flags and exit codes: README and SPEC.
 
@@ -110,5 +110,5 @@ AGENTS.md stays under 12 KiB (`tests/test_docs_routing.py`).
 - [README](README.md): commands, configuration, previews, integration, and development.
 - [Project spec](docs/SPEC.md): purpose, audience, selected target, acceptance and release policy.
 - [SPEC](SPEC.md): architecture, data model and CLI reference; Project Structure, Implementation Order, and original push algorithm are historical. 2.0 carries this store onto Syncthing ([docs/SPEC.md](docs/SPEC.md)).
-- Design decisions: [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md); the Grok reader design is archived at [docs/archive/grok-build-usage-reader.md](docs/archive/grok-build-usage-reader.md); the v1 review record is archived at [docs/archive/mind-meld-v1.md](docs/archive/mind-meld-v1.md).
+- Design decisions: [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md); archived: [Grok reader](docs/archive/grok-build-usage-reader.md), [v1 review](docs/archive/mind-meld-v1.md).
 - [ROADMAP](docs/ROADMAP.md): execution plan (edited only by /roadmap, except a `/ship` review fix to one card when roadmap-audit passes with `GROUP_DEPS` unchanged); [TODOS](docs/TODOS.md): deferred work; [PROGRESS](docs/PROGRESS.md): release rows. Superseded designs live in `docs/archive/`.

@@ -374,7 +374,10 @@ bundled skills and plugin caches at the same root never roam, and
 reader's consent, matching Codex and Grok; there is no retro bit. Unlike
 Grok's user-authored customization dirs, Muse creates `memory/` itself on
 first run (holding only its `.muse-memory.lock` PID file, which never
-roams), so the source never auto-activates: explicit enable only.
+roams), so background resolution never auto-activates the source without an
+explicit `[[sync.sources]]` entry, and `config.muse_memory_dir_exists` treats
+Muse as detected in `mm init` only when `memory/` is a real directory containing
+at least one non-excluded regular file.
 
 The reader counts terminal `model_completed` events in
 `sessions/YYYY/MM/DD/<id>/session.jsonl` (plus `subagent/` descendants)

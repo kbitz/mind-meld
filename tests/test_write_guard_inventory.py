@@ -208,6 +208,18 @@ REVIEWED = {
             "replace(diff, deleted=[p for p in diff.deleted if p not in left_out])",
         ],
     ),
+    "devicesflow.py:_looks_like_full_device_id_attempt": (
+        *_READ_ONLY,
+        ["candidate.replace('-', '')"],
+    ),
+    "devicesflow.py:_match_pending_candidates": (
+        *_READ_ONLY,
+        ["trimmed.replace('-', '')", "item.device_id.replace('-', '')"],
+    ),
+    "devicesflow.py:approve": (
+        *_READ_ONLY,
+        ["trimmed.replace('-', '')"],
+    ),
     "pullflow.py:_make_copy_dirs": (
         *_GUARDED,
         [
@@ -767,6 +779,16 @@ REVIEWED = {
             "path.parent.mkdir(parents=True, exist_ok=True)",
         ],
     ),
+    "storage/local.py:LocalBackend._put_retirement": (
+        *_GUARDED,
+        [
+            "path.parent.mkdir(parents=True, exist_ok=True)",
+            "os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)",
+            "os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 384, dir_fd=directory_fd)",
+            "os.replace(temp, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)",
+            "os.unlink(temp, dir_fd=directory_fd)",
+        ],
+    ),
     "storage/local.py:LocalBackend.put_exclusive": (
         *_GUARDED,
         [
@@ -782,6 +804,8 @@ REVIEWED = {
     "storage/local.py:LocalBackend.delete": (
         *_GUARDED,
         [
+            "os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)",
+            "os.unlink(path.name, dir_fd=directory_fd)",
             "path.unlink()",
         ],
     ),

@@ -40,7 +40,7 @@ from mind_meld.consoles import console
 from mind_meld.errors import ConfigError
 from mind_meld.manifest import _is_excluded as _manifest_is_excluded
 from mind_meld.manifest import walk_source
-from mind_meld.safety import safe_terminal_str
+from mind_meld.safety import safe_str, safe_terminal_str
 
 
 def sources() -> None:
@@ -326,7 +326,6 @@ def reconfigure_sources() -> None:
     explicit_names = [s["name"] for s in explicit_sources]
     has_explicit_sources = "sources" in sync
     disabled = list(sync.get("disabled_sources", []) or [])
-    default_names = [s["name"] for s in DEFAULT_SOURCES]
 
     # Unified ordered list: DEFAULT_SOURCES first (canonical surfacing
     # order), then any user-customized names not in defaults. Prefer the
@@ -354,7 +353,7 @@ def reconfigure_sources() -> None:
     console.print("[bold]Reconfigure sources for this device.[/bold]")
     console.print(
         "[dim]Disabling marks the source in disabled_sources (per-machine, "
-        "not synced). Disabling does NOT delete the [[sync.sources]] entry — "
+        f"not synced). Disabling does NOT delete the {safe_str('[[sync.sources]]')} entry — "
         "re-enabling preserves customizations. Retired source blocks are removed.[/dim]\n"
     )
 
@@ -368,18 +367,8 @@ def reconfigure_sources() -> None:
         for item in ordered:
             iname = item["name"]
             detected = core._source_path_is_detected(item)
-            default_active = iname in default_names
-            if iname in ("grok", "muse"):
-                # Grok and Muse never default on: their trees are host-created
-                # or opt-in only, so even a detected root is not consent for
-                # sync or usage reads.
-                default_active = False
-            elif iname == "agy":
-                # Interactive enrollment follows init's detected-host default;
-                # background resolution still requires explicit consent.
-                default_active = detected
             currently_active = (
-                iname in explicit_names or (not has_explicit_sources and default_active)
+                iname in explicit_names or (not has_explicit_sources and detected)
             ) and iname not in disabled
             answered = core._prompt_source_toggle(
                 item, current_state=currently_active, detected=detected

@@ -2959,10 +2959,11 @@ class TestMigrateConfigCommand:
             return original(config, **kwargs)
 
         monkeypatch.setattr(core, "_maybe_prompt_migration", prompt)
-        monkeypatch.setattr(typer, "confirm", lambda *a, **kw: True)
-        result = runner.invoke(app, ["push"])
+        result = runner.invoke(app, ["push"], input="\n\n")
         assert result.exit_code == 0, result.output
         output = " ".join(result.output.split())
+        assert "Run 'mm migrate-config' now? [y/n] (Enter = y)" in output
+        assert "Apply these updates? [y/n] (Enter = y)" in output
         assert "Config is missing recommended exclude_patterns for source(s): gstack" in output
         assert "for gstack: virtualenvs, app bundles, archives and binaries, QA evidence" in output
         assert "writes no tombstones, and every machine keeps its copy" in output
@@ -5799,7 +5800,7 @@ class TestInitTerminalAndHelp89A:
         assert DEFAULT_STORAGE_PATH == "~/Sync/mind-meld"
         expected = tmp_path / "Sync" / "mind-meld"
         # Accepting the prompt default names the expanded path and creates nothing.
-        result = runner.invoke(app, ["init"], input="\n\n\nY\nn\nn\nn\nn\nn\nn\n")
+        result = runner.invoke(app, ["init"], input="j\n\n\nY\nn\nn\nn\nn\nn\nn\n")
         assert result.exit_code == 1, result.output
         assert str(expected).replace(" ", "") in "".join(result.output.split())
         assert not expected.exists()
@@ -9964,6 +9965,7 @@ COMMAND_INTENTS62 = {
         "pull",
         "gc",
         "devices approve",
+        "devices retire",
         "disable-source",
         "enable-source",
         "reconfigure-sources",
@@ -10761,7 +10763,7 @@ def test_preview_tty_notice62(preview62, monkeypatch, command):
         return original(config, **kwargs)
 
     monkeypatch.setattr(core, "_maybe_prompt_migration", prompt)
-    monkeypatch.setattr(typer, "confirm", lambda *a, **kw: confirms.append(True) or True)
+    monkeypatch.setattr(core, "ask_yes_no", lambda *a, **kw: confirms.append(True) or True)
     result = preview62["audit"]([command, "--dry-run", *(["1d"] if command == "recapture" else [])])
     assert result.exit_code == 0, result.output
     assert confirms == []
@@ -11334,6 +11336,26 @@ def test_pull_preview_output62(preview62, monkeypatch, state):
 
 
 @pytest.mark.parametrize(
+    ("command", "literal"),
+    [
+        ([], "[upgrade] auto_check"),
+        (["sources"], "[sync].disabled_sources"),
+        (["disable-source"], "[[sync.sources]]"),
+        (["enable-source"], "[[sync.sources]]"),
+        (["reconfigure-sources"], "[[sync.sources]]"),
+        (["migrate-config"], "[[sync.sources]]"),
+        (["refresh-identity"], "[retro].author_emails"),
+        (["resolve"], "[default]"),
+    ],
+)
+def test_command_help_preserves_literal_brackets(command, literal):
+    result = runner.invoke(app, [*command, "--help"], env={"COLUMNS": "180"})
+
+    assert result.exit_code == 0, result.output
+    assert literal in _preview_text(result)
+
+
+@pytest.mark.parametrize(
     "command,phrases",
     [
         (
@@ -11517,7 +11539,7 @@ class TestPushPreviewNoMutation56A:
             return original(config, **kwargs)
 
         monkeypatch.setattr(core, "_maybe_prompt_migration", migration)
-        monkeypatch.setattr(typer, "confirm", lambda *a, **kw: pytest.fail("preview prompted"))
+        monkeypatch.setattr(core, "ask_yes_no", lambda *a, **kw: pytest.fail("preview prompted"))
         result = env["invoke"]()
         _assert_preview_complete(result)
         assert "config missing recommended excludes" not in result.stdout

@@ -252,9 +252,9 @@ def _stdin_is_terminal() -> bool:
         return False
 
 
-def _get_passphrase_or_exit() -> str:
+def _get_passphrase_or_exit(*, non_interactive: bool = False) -> str:
     try:
-        return get_passphrase()
+        return get_passphrase(non_interactive=True) if non_interactive else get_passphrase()
     except CryptoError as e:
         if (
             _SYNC_OUTPUT.get() is not None
@@ -2033,16 +2033,50 @@ def _resolve_all_configured_sources(config: dict) -> list[dict[str, Any]]:
     return get_sources(config_no_disable)
 
 
+def _both_streams_are_terminals() -> bool:
+    """Return True when both stdin and stdout are attached to a terminal."""
+    try:
+        return _stdin_is_terminal() and sys.stdout is not None and sys.stdout.isatty()
+    except (OSError, ValueError):
+        return False
+
+
+def ask_yes_no(prompt: str, *, default: bool) -> bool:
+    """Ask a unified yes/no question with explicit [y/n] and Enter default.
+
+    Renders ``<prompt> [y/n] (Enter = y)`` or ``<prompt> [y/n] (Enter = n)``.
+    Accepts ``y``, ``yes``, ``n``, ``no`` in any case; Enter takes ``default``;
+    any other input prints a one-line hint naming what Enter does and re-asks.
+    Raises ``typer.Abort`` on EOF/Ctrl-C.
+    """
+    default_token = "y" if default else "n"
+    default_word = "yes" if default else "no"
+    full_prompt = f"{prompt} [y/n] (Enter = {default_token})"
+    while True:
+        try:
+            raw = typer.prompt(full_prompt, default=default_token, show_default=False)
+        except (OSError, ValueError):
+            raise typer.Abort() from None
+        choice = raw.strip().lower()
+        if not choice:
+            return default
+        if choice in ("y", "yes"):
+            return True
+        if choice in ("n", "no"):
+            return False
+        console.print(f"  Answer y or n; Enter means {default_word} here.")
+
+
 def _prompt_source_toggle(
     source: dict[str, Any], *, current_state: bool, detected: bool | None = None
 ) -> bool:
-    """One Y/n confirm for a single source.
+    """One yes/no confirm for a single source.
 
-    Single source of truth for the prompt copy + default-Y/N rule. Used
+    Single source of truth for the prompt copy and default rule. Used
     by `_prompt_sources` (init flow) and `reconfigure_sources` (eng-review
     D5). `current_state` is the default answer:
       - init: whether the source has a qualifying on-disk tree
-      - reconfigure: existing consent, or detected Antigravity on legacy config
+      - reconfigure: existing consent, or detected state on legacy config
     """
     name = source["name"]
     path_str = str(source.get("path", ""))
@@ -2053,15 +2087,15 @@ def _prompt_source_toggle(
         prompt = f"Sync '{name}' source at {path_str}? ({detection_label})"
     else:
         prompt = f"Sync '{name}' source?"
-    return typer.confirm(prompt, default=current_state)
+    return ask_yes_no(prompt, default=current_state)
 
 
 def _source_path_is_detected(source: dict[str, Any]) -> bool:
-    """Return whether a source has the on-disk state that warrants a Y default.
+    """Return whether a source has the on-disk state that warrants a yes default.
 
     Grok detection requires at least one hardcoded customization directory
-    (``skills/``, ``commands/``, ``rules/``), and Muse detection requires its
-    hardcoded ``memory/`` tree, though both prompts still default off.
+    (``skills/``, ``commands/``, ``rules/``), and Muse detection requires at
+    least one non-excluded regular file inside its real ``memory/`` directory.
     Antigravity's default source is also detected by its separate local
     conversations root. Custom paths use their own existence.
     """
@@ -2971,7 +3005,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
     sources = config.get("sync", {}).get("sources")
     if not sources:
         console.print(
-            "[dim]Config has no explicit [[sync.sources]] entries — "
+            f"[dim]Config has no explicit {safe_str('[[sync.sources]]')} entries — "
             "nothing to migrate. DEFAULT_SOURCES already include the "
             "recommended excludes.[/dim]"
         )
@@ -3067,7 +3101,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         for rname in retired:
             console.print(
                 f"  [bold]{rname}[/bold] — already stopped syncing; remove the leftover "
-                "[[sync.sources]] block and record the name in disabled_sources. "
+                f"{safe_str('[[sync.sources]]')} block and record the name in disabled_sources. "
                 "Local files are preserved."
             )
 
@@ -3075,7 +3109,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         console.print(DRY_RUN_COMPLETE_LOCK_FREE)
         return False
 
-    if not yes and not typer.confirm("\nApply these updates?", default=True):
+    if not yes and not ask_yes_no("\nApply these updates?", default=True):
         console.print("[yellow]Cancelled.[/yellow]")
         return False
 
@@ -3175,7 +3209,7 @@ def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
     retired_sources = _explicit_retired_sources(config.get("sync", {}).get("sources"))
     if not missing and not retired_sources:
         return
-    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    is_tty = _both_streams_are_terminals()
     if read_only or not is_tty:
         # Skip the confirm prompt for a read-only preview, or when either
         # stream is not a TTY (CI, piped invocation).
@@ -3206,7 +3240,7 @@ def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
             "their inert blocks and records their names in disabled_sources. "
             "Local files are preserved."
         )
-    if typer.confirm("Run 'mm migrate-config' now?", default=True):
+    if ask_yes_no("Run 'mm migrate-config' now?", default=True):
         # Call the core directly so typer's option machinery isn't in the
         # way; the inner "Apply these updates?" prompt still confirms
         # before writing.

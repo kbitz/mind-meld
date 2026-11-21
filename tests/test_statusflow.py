@@ -679,10 +679,7 @@ def test_status_reports_pending_syncthing_join_by_count_without_printing_id_or_n
     st_lines_one = [line for line in lines_one if line.startswith("  Syncthing:")]
     assert st_lines_one == [
         "  Syncthing: connected 2 of 2 devices; up to date",
-        (
-            "  Syncthing: 1 device is asking to join; use the ID the new machine printed. "
-            "Run: mm devices approve <device-id>"
-        ),
+        "  Syncthing: 1 device is asking to join. Run: mm devices approve",
     ]
     combined_one = res_one.stdout + res_one.stderr
     assert joining_a not in combined_one
@@ -702,10 +699,7 @@ def test_status_reports_pending_syncthing_join_by_count_without_printing_id_or_n
     st_lines_two = [line for line in res_two.stdout.splitlines() if line.startswith("  Syncthing:")]
     assert st_lines_two == [
         "  Syncthing: connected 2 of 2 devices; up to date",
-        (
-            "  Syncthing: 2 devices are asking to join; use the ID each new machine printed. "
-            "Run: mm devices approve <device-id>"
-        ),
+        "  Syncthing: 2 devices are asking to join. Run: mm devices approve",
     ]
     combined_two = res_two.stdout + res_two.stderr
     assert joining_a not in combined_two
@@ -729,10 +723,7 @@ def test_status_reports_pending_syncthing_join_by_count_without_printing_id_or_n
     ]
     assert st_lines_filtered == [
         "  Syncthing: connected 2 of 2 devices; up to date",
-        (
-            "  Syncthing: 1 device is asking to join; use the ID the new machine printed. "
-            "Run: mm devices approve <device-id>"
-        ),
+        "  Syncthing: 1 device is asking to join. Run: mm devices approve",
     ]
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []
@@ -753,10 +744,7 @@ def test_status_reports_pending_syncthing_join_by_count_without_printing_id_or_n
     ]
     assert st_lines_fallback == [
         "  Syncthing: connected 2 of 2 devices; up to date",
-        (
-            "  Syncthing: 2 devices are asking to join; use the ID each new machine printed. "
-            "Run: mm devices approve <device-id>"
-        ),
+        "  Syncthing: 2 devices are asking to join. Run: mm devices approve",
     ]
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []
@@ -776,6 +764,71 @@ def test_status_reports_pending_syncthing_join_by_count_without_printing_id_or_n
     assert "mm devices approve" not in res_all_vouched.stdout + res_all_vouched.stderr
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert fake_syncthing.bodies == []
+
+    # Knocking unpublished fleet machine + superseded registration + genuinely new knocker
+    import json
+
+    from mind_meld.storage.keys import device_key
+
+    joining_c = _valid_id("L")
+    joining_d = _valid_id("M")
+    # Unpublished fleet machine "cachyos" whose name matches joining_c
+    devices.register_device(backend, "peer-c", "cachyos")
+    # Old superseded registration "old11111" for "linux-b" (registered earlier than peer-b)
+    backend.put(
+        device_key("old11111"),
+        json.dumps(
+            {
+                "device_id": "old11111",
+                "device_name": "linux-b",
+                "registered": "2026-01-01T00:00:00+00:00",
+                "last_seen": "2026-01-02T00:00:00+00:00",
+            }
+        ).encode("utf-8"),
+    )
+    backend.put(
+        device_key("peer-b"),
+        json.dumps(
+            {
+                "device_id": "peer-b",
+                "device_name": "linux-b",
+                "registered": "2026-02-01T00:00:00+00:00",
+            }
+        ).encode("utf-8"),
+    )
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
+        joining_c: {"name": "CachyOS"},
+        joining_d: {"name": "unverified-new-box"},
+    }
+    res_mixed = runner.invoke(app, ["status"])
+    assert res_mixed.exit_code == 0, res_mixed.output
+    st_lines_mixed = [
+        line for line in res_mixed.stdout.splitlines() if line.startswith("  Syncthing:")
+    ]
+    assert st_lines_mixed == [
+        "  Syncthing: connected 2 of 2 devices; up to date",
+        (
+            "  Syncthing: registered fleet machine cachyos is asking to join and has not "
+            "published a Syncthing ID yet; on that machine, run 'mm update', then 'mm push'. "
+            "Run: mm update"
+        ),
+        "  Syncthing: 1 device is asking to join. Run: mm devices approve",
+        (
+            "  Syncthing: old linux-b registration old11111 superseded by peer-b. "
+            "Run: mm devices retire old11111"
+        ),
+    ]
+    assert "unverified-new-box" not in res_mixed.stdout + res_mixed.stderr
+    assert joining_c not in res_mixed.stdout + res_mixed.stderr
+    assert joining_d not in res_mixed.stdout + res_mixed.stderr
+
+    from mind_meld.storage.keys import syncthing_record_key
+
+    backend.delete(syncthing_record_key("peer-b"))
+    unpublished = runner.invoke(app, ["status"])
+    assert unpublished.exit_code == 0, unpublished.output
+    assert "linux-b, linux-b have not published a Syncthing ID yet" in unpublished.stdout
+    assert "superseded by peer-b" not in unpublished.stdout
 
 
 def test_status_pending_syncthing_join_stays_silent_for_zero_unmanaged_and_errors(
