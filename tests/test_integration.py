@@ -11954,7 +11954,9 @@ class TestMmEventsOwnership59A:
         monkeypatch.setattr(cli_module.events_tail, "_run_events_tail", no_tail)
         breadcrumbs = []
         monkeypatch.setattr(
-            cli_module, "_write_autorun_breadcrumb", lambda *args: breadcrumbs.append(args)
+            cli_module,
+            "_write_autorun_breadcrumb",
+            lambda *args, **kwargs: breadcrumbs.append(args),
         )
         result = runner.invoke(app, [command])
         assert result.exit_code == 0, result.output
