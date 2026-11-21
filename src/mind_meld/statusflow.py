@@ -1187,14 +1187,14 @@ def status(
             mi_state = memoryindex.read_state()
             mi_rec_state = mi_state["state"]
             mi_result = mi_state["result"]
-            problem_key: str | None = None
+            problem_state: str | None = None
             if mi_rec_state == "recorded":
                 if mi_result in ("qmd-missing", "failed", "timed-out"):
-                    problem_key = mi_result
+                    problem_state = mi_result
             elif mi_rec_state in ("missing", "malformed", "empty", "non_dict", "unreadable"):
-                problem_key = mi_rec_state
-            if problem_key is not None:
-                problem, fix = memoryindex.problem_text(problem_key)
+                problem_state = mi_rec_state
+            if problem_state is not None:
+                problem, fix = memoryindex.problem_text(problem_state)
                 console.print(
                     f"  [yellow]Memory index:[/yellow] {safe_str(problem)}. Run: {safe_str(fix)}",
                     soft_wrap=True,
