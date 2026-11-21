@@ -17,6 +17,9 @@ from mind_meld.storage.local import LocalBackend
 
 runner = CliRunner()
 FULL_ID_APPROVE_WORDS = ["mm", "devices", "approve", "<device-id>"]
+JOIN_CONTINUES = (
+    "The waiting mm init continues on the joining machine. If it stopped there, Run: mm init"
+)
 
 
 def _valid_syncthing_id(seed_char: str) -> str:
@@ -59,7 +62,7 @@ def test_approve_pending_device_adds_marks_introducer_and_shares_folder(
     assert res.exit_code == 0, res.output
     assert res.output == (
         f"Approve: approved {joining_id}: Syncthing here shares the fleet folder with it "
-        "and marks it as introducer. On the new machine, Run: mm init\n"
+        f"and marks it as introducer. {JOIN_CONTINUES}\n"
     )
     assert fake_syncthing.bodies == [
         (
@@ -264,7 +267,7 @@ def test_approve_resumes_after_syncthing_stops_between_add_and_share(
     assert second.output == (
         f"Approve: finished approving {joining_id}: Syncthing here now marks it as "
         "introducer and shares the fleet folder with it (it was already added). "
-        "On the new machine, Run: mm init\n"
+        f"{JOIN_CONTINUES}\n"
     )
     assert fake_syncthing.bodies == [
         ("PATCH", f"/rest/config/devices/{joining_id}", {"introducer": True}),
@@ -316,7 +319,7 @@ def test_approve_resumes_after_syncthing_stops_between_introducer_and_share(
     assert second.output == (
         f"Approve: finished approving {joining_id}: Syncthing here now shares the "
         "fleet folder with it (it was already added and marked as introducer). "
-        "On the new machine, Run: mm init\n"
+        f"{JOIN_CONTINUES}\n"
     )
     assert fake_syncthing.bodies == [
         (
@@ -365,7 +368,7 @@ def test_approve_share_http_500_reports_mm_diag_and_rerun_finishes_share_only(
     assert second.output == (
         f"Approve: finished approving {joining_id}: Syncthing here now shares the "
         "fleet folder with it (it was already added and marked as introducer). "
-        "On the new machine, Run: mm init\n"
+        f"{JOIN_CONTINUES}\n"
     )
     assert fake_syncthing.bodies == [
         (
@@ -1129,7 +1132,7 @@ def test_approve_outcome_lines_emit_no_ansi_under_forced_terminal(
     lines = buf.getvalue().splitlines()
     assert lines == [
         f"Approve: approved {joining_id}: Syncthing here shares the fleet folder with it "
-        "and marks it as introducer. On the new machine, Run: mm init",
+        f"and marks it as introducer. {JOIN_CONTINUES}",
         f"Approve: {joining_id} is already approved: Syncthing on this machine already "
         "shares the fleet folder with it.",
     ]
@@ -1201,6 +1204,7 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
     assert res_short.exit_code == 0, res_short.output
     assert f"Approve cachyos ({joining_id[:7]})? [y/n] (Enter = y)" in res_short.output
     assert f"Approve: approved cachyos ({joining_id})" in res_short.output
+    assert res_short.output.rstrip().endswith(JOIN_CONTINUES)
     assert len(fake_syncthing.bodies) == 3
 
     # 6. Configured & already shared device queried by name or short ID -> already approved (exit 0)
@@ -1232,6 +1236,8 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
     res_short_prefix = runner.invoke(app, ["devices", "approve", joining_2[:3]])
     assert res_short_prefix.exit_code == 1
     assert "short-ID prefixes need at least 4 characters" in res_short_prefix.output
+    assert f"omarchy-2 ({joining_2[:7]})" in res_short_prefix.output
+    assert res_short_prefix.output.rstrip().endswith(f"Run: mm devices approve {joining_2[:7]}")
 
     # 9. Multiple pending devices: ambiguity refusal on name/prefix arg, and interactive chooser
     # Construct a second device ID sharing the first 4 chars with joining_2
@@ -1247,10 +1253,19 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
     res_ambig = runner.invoke(app, ["devices", "approve", "twin-box"])
     assert res_ambig.exit_code == 1
     assert "matches 2 pending devices" in res_ambig.output
-    assert "Run: mm devices approve <longer short-ID prefix>" in res_ambig.output
+    assert res_ambig.output.rstrip().endswith("Run: mm devices approve <short ID>")
     prefix_collision = runner.invoke(app, ["devices", "approve", joining_2[:4]])
     assert prefix_collision.exit_code == 1
     assert "matches 2 pending devices" in prefix_collision.output
+    assert prefix_collision.output.rstrip().endswith(
+        "Run: mm devices approve <longer short-ID prefix>"
+    )
+    unmatched = runner.invoke(app, ["devices", "approve", "ZZZZ"])
+    assert unmatched.exit_code == 1
+    assert f"twin-box ({joining_2[:7]})" in unmatched.output
+    assert f"twin-box ({joining_2b[:7]})" in unmatched.output
+    assert unmatched.output.rstrip().endswith("Run: mm devices approve <short ID>")
+    assert fake_syncthing.bodies == []
 
     # Chooser: Enter cancels (exit 0); invalid choice re-asks once then approves 7-char prefix
     res_choose_cancel = runner.invoke(app, ["devices", "approve"], input="\n")

@@ -252,24 +252,35 @@ def _format_pending_candidate(item: _PendingCandidate) -> str:
 def _match_pending_candidates(
     query: str,
     candidates: list[_PendingCandidate],
-) -> list[_PendingCandidate]:
-    """Match ``query`` by exact casefolded sanitized name union >=4-char base32 ID prefix."""
+) -> tuple[list[_PendingCandidate], int]:
+    """Return name or prefix matches and the count of prefix matches."""
     trimmed = query.strip()
     if not trimmed:
-        return []
+        return [], 0
     norm_name = _devices_module.normalize_device_name(trimmed)
     compact = trimmed.replace("-", "").upper()
     is_prefix = len(compact) >= 4 and all(
         ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" for ch in compact
     )
     matched: list[_PendingCandidate] = []
+    prefix_matches = 0
     for item in candidates:
         item_norm = _devices_module.normalize_device_name(item.raw_name)
         name_hit = bool(norm_name and item_norm and item_norm == norm_name)
         prefix_hit = bool(is_prefix and item.device_id.replace("-", "").upper().startswith(compact))
+        if prefix_hit:
+            prefix_matches += 1
         if name_hit or prefix_hit:
             matched.append(item)
-    return matched
+    return matched, prefix_matches
+
+
+def _print_approved(text: str) -> None:
+    core._print_outcome(
+        outputstyle._outcome_line("approve", text)
+        + " The waiting mm init continues on the joining machine. If it stopped there, "
+        + outputstyle._fix_line("mm init")
+    )
 
 
 @dataclass
@@ -419,13 +430,9 @@ def approve(device_id: str | None = None) -> None:
                         outcome=share_res.outcome,
                         cause=share_res.cause,
                     )
-                core._print_outcome(
-                    outputstyle._outcome_line(
-                        "approve",
-                        f"approved {safe_terminal_str(candidate)}: Syncthing here shares the "
-                        "fleet folder with it and marks it as introducer",
-                    )
-                    + f" On the new machine, {outputstyle._fix_line('mm init')}"
+                _print_approved(
+                    f"approved {safe_terminal_str(candidate)}: Syncthing here shares the "
+                    "fleet folder with it and marks it as introducer"
                 )
                 return
 
@@ -447,24 +454,16 @@ def approve(device_id: str | None = None) -> None:
                         cause=share_res.cause,
                     )
                 if intro_res.outcome == "unchanged":
-                    core._print_outcome(
-                        outputstyle._outcome_line(
-                            "approve",
-                            f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
-                            "now shares the fleet folder with it (it was already added and "
-                            "marked as introducer)",
-                        )
-                        + f" On the new machine, {outputstyle._fix_line('mm init')}"
+                    _print_approved(
+                        f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
+                        "now shares the fleet folder with it (it was already added and "
+                        "marked as introducer)"
                     )
                 else:
-                    core._print_outcome(
-                        outputstyle._outcome_line(
-                            "approve",
-                            f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
-                            "now marks it as introducer and shares the fleet folder with it "
-                            "(it was already added)",
-                        )
-                        + f" On the new machine, {outputstyle._fix_line('mm init')}"
+                    _print_approved(
+                        f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
+                        "now marks it as introducer and shares the fleet folder with it "
+                        "(it was already added)"
                     )
                 return
 
@@ -554,7 +553,7 @@ def approve(device_id: str | None = None) -> None:
 
     if device_id is not None:
         trimmed = device_id.strip()
-        matches = _match_pending_candidates(trimmed, unvouched_candidates)
+        matches, prefix_matches = _match_pending_candidates(trimmed, unvouched_candidates)
         if not matches:
             # Check configured devices read-only (X4)
             configured_list = [
@@ -566,7 +565,7 @@ def approve(device_id: str | None = None) -> None:
                 )
                 for cid, cdev in sorted(snap.devices.items())
             ]
-            cfg_matches = _match_pending_candidates(trimmed, configured_list)
+            cfg_matches, _ = _match_pending_candidates(trimmed, configured_list)
             if len(cfg_matches) == 1:
                 cm = cfg_matches[0]
                 cdev = snap.devices[cm.device_id]
@@ -597,18 +596,25 @@ def approve(device_id: str | None = None) -> None:
             console.print("Pending devices asking to join:")
             for item in unvouched_candidates:
                 console.print(f"  {safe_str(_format_pending_candidate(item))}", soft_wrap=True)
+            live_candidates = [item for item in unvouched_candidates if not item.is_retired]
+            short_id = "<short ID>"
+            if not live_candidates:
+                short_id = "<full device ID>"
+            elif len(unvouched_candidates) == 1:
+                short_id = live_candidates[0].short_id
+            fix = f"mm devices approve {short_id}"
             compact = trimmed.replace("-", "")
             if len(compact) < 4:
                 core._error(
                     f"devices approve: '{safe_terminal_str(trimmed)}' did not match any pending "
                     "device name (short-ID prefixes need at least 4 characters). "
                     "Nothing was changed.",
-                    fix="mm devices approve <longer short-ID prefix>",
+                    fix=fix,
                 )
             core._error(
                 f"devices approve: '{safe_terminal_str(trimmed)}' is not among Syncthing's "
                 "pending devices on this machine. Nothing was changed.",
-                fix="mm devices approve <longer short-ID prefix>",
+                fix=fix,
             )
         if len(matches) > 1:
             console.print("Matching pending devices:")
@@ -617,7 +623,11 @@ def approve(device_id: str | None = None) -> None:
             core._error(
                 f"devices approve: '{safe_terminal_str(trimmed)}' matches {len(matches)} "
                 "pending devices. Nothing was changed.",
-                fix="mm devices approve <longer short-ID prefix>",
+                fix=(
+                    "mm devices approve <longer short-ID prefix>"
+                    if prefix_matches > 1
+                    else "mm devices approve <short ID>"
+                ),
             )
         chosen = matches[0]
         if chosen.is_retired:
@@ -701,7 +711,7 @@ def approve(device_id: str | None = None) -> None:
                 if not choice:
                     core._print_outcome(outputstyle._outcome_line("approve", "Nothing was changed"))
                     return
-                matches = _match_pending_candidates(choice, unvouched_candidates)
+                matches, _ = _match_pending_candidates(choice, unvouched_candidates)
                 if len(matches) == 1:
                     chosen = matches[0]
                     if chosen.is_retired:
@@ -800,29 +810,27 @@ def approve(device_id: str | None = None) -> None:
             outcome=share_res.outcome,
             cause=share_res.cause,
         )
-    core._print_outcome(
-        outputstyle._outcome_line(
-            "approve",
-            f"approved {safe_terminal_str(target_candidate.display_name)} "
-            f"({safe_terminal_str(full_id)}): Syncthing here shares the fleet folder with it "
-            "and marks it as introducer",
-        )
-        + f" On the new machine, {outputstyle._fix_line('mm init')}"
+    _print_approved(
+        f"approved {safe_terminal_str(target_candidate.display_name)} "
+        f"({safe_terminal_str(full_id)}): Syncthing here shares the fleet folder with it "
+        "and marks it as introducer"
     )
 
 
-def _retire_consequence_clause(
+def _retire_consequences(
     syncthing_id: str | None,
     retired_mm_id: str,
     fleet_records: _devices_module.FleetSyncthingRecords,
     valid_by_id: dict[str, dict[str, Any]],
-) -> str:
-    """Return the three-branch Syncthing consequence clause for ``mm devices retire``."""
+) -> tuple[str, str]:
+    """Return the explanation before confirmation and the short outcome clause."""
     if syncthing_id is None:
         return (
             "mm has no Syncthing ID on record for it, so no machine will remove it from "
-            "Syncthing automatically; remove it in Syncthing's web UI wherever Syncthing "
-            "still lists it"
+            "Syncthing automatically. Remove it in Syncthing's web UI wherever it still "
+            "appears",
+            "No Syncthing ID is on record. Remove it in Syncthing's web UI wherever it "
+            "still appears",
         )
     short_id = syncthing.short_device_id(syncthing_id)
     other_holders = [
@@ -834,16 +842,19 @@ def _retire_consequence_clause(
         other_id = other_holders[0]
         raw_other_name = valid_by_id[other_id].get("device_name") or other_id
         other_name = safe_terminal_str(str(raw_other_name)).strip() or other_id
-        return (
+        stays = (
             f"Syncthing device {safe_terminal_str(short_id)} stays because registration "
             f"{other_name} ({safe_terminal_str(other_id)}) still uses it"
         )
+        return stays, stays
     return (
         f"each machine where mm manages Syncthing removes {safe_terminal_str(short_id)} "
         "from Syncthing at its first push or pull after the device stops connecting "
         "(stopping mm alone does not stop Syncthing there, and a machine that is still "
         "running re-registers on its next push); on owner-managed machines, remove it in "
-        "Syncthing's web UI"
+        "Syncthing's web UI",
+        "Managed peers remove its Syncthing device on their next push or pull once it "
+        "stops connecting",
     )
 
 
@@ -1072,7 +1083,7 @@ def retire(target: str, *, yes: bool = False) -> None:
                     fix=_devices_module.retire_command(target_id, yes=yes),
                 )
             rec = retirements.records[target_id]
-            consequence = _retire_consequence_clause(
+            _, outcome = _retire_consequences(
                 rec.syncthing_device_id,
                 target_id,
                 fleet_records,
@@ -1082,7 +1093,7 @@ def retire(target: str, *, yes: bool = False) -> None:
                 outputstyle._outcome_line(
                     "retire",
                     f"{safe_terminal_str(target_name)} ({safe_terminal_str(target_id)}) "
-                    f"is already retired; {consequence}",
+                    f"is already retired. {outcome}",
                 )
             )
             return
@@ -1107,10 +1118,12 @@ def retire(target: str, *, yes: bool = False) -> None:
         prior_retirement = retirements.records.get(target_id)
         syncthing_id = recorded_id or (prior_retirement and prior_retirement.syncthing_device_id)
 
-        old_gc_peers = [
+        unknown_version_peers = [
             safe_terminal_str(pid)
             for pid in sorted((dropped_ids | vanished_ids) - {own_id, target_id})
         ]
+        no_push_peers: list[str] = []
+        old_gc_peers: list[str] = []
         old_release_peers: list[str] = []
         min_gc_ver = Version("1.7.1")
         curr_ver = Version(core.__version__)
@@ -1121,31 +1134,42 @@ def retire(target: str, *, yes: bool = False) -> None:
             pname = safe_terminal_str(str(peer.get("device_name") or pid)).strip() or pid
             plabel = f"{pname} ({safe_terminal_str(pid)})"
             raw_ver = peer.get("last_seen_version")
+            if raw_ver is None and peer.get("last_seen") is None:
+                no_push_peers.append(plabel)
+                continue
             if not isinstance(raw_ver, str) or not raw_ver.strip():
-                old_gc_peers.append(plabel)
+                unknown_version_peers.append(plabel)
                 continue
             try:
                 parsed_ver = Version(raw_ver.strip())
             except InvalidVersion:
-                old_gc_peers.append(plabel)
+                unknown_version_peers.append(plabel)
                 continue
             if parsed_ver <= min_gc_ver:
                 old_gc_peers.append(plabel)
             elif parsed_ver < curr_ver:
                 old_release_peers.append(plabel)
 
-        if old_gc_peers and yes:
+        gc_compatibility_notes = [
+            f"Fleet machine(s) {', '.join(peers)} {description}."
+            for peers, description in (
+                (old_gc_peers, "last pushed from mm 1.7.1 or older"),
+                (no_push_peers, "have no synced push yet"),
+                (unknown_version_peers, "have an unknown last-push mm version"),
+            )
+            if peers
+        ]
+        if gc_compatibility_notes and yes:
+            notes = " ".join(gc_compatibility_notes)
             core._error(
-                f"devices retire: fleet machine(s) {', '.join(old_gc_peers)} last pushed from "
-                "mm 1.7.1 or older (or have never pushed); retiring with --yes is refused until "
-                "they are updated so 'mm gc' there knows this device was retired. "
+                f"devices retire: {notes} Update mm there and push before retiring with "
+                "--yes so 'mm gc' recognizes the retirement. "
                 "Nothing was changed.",
                 fix="mm update",
             )
-        if old_gc_peers:
+        for note in gc_compatibility_notes:
             core._warning(
-                f"fleet machine(s) {', '.join(old_gc_peers)} last pushed from mm 1.7.1 or older "
-                "(or have never pushed); update mm there before running 'mm gc' on them.",
+                f"{note} Update mm there before running 'mm gc'.",
                 fix="mm update",
             )
         if old_release_peers:
@@ -1155,7 +1179,7 @@ def retire(target: str, *, yes: bool = False) -> None:
                 fix="mm update",
             )
 
-        consequence = _retire_consequence_clause(
+        explanation, outcome = _retire_consequences(
             syncthing_id, target_id, fleet_records, valid_by_id
         )
         if syncthing_id is None:
@@ -1163,17 +1187,19 @@ def retire(target: str, *, yes: bool = False) -> None:
                 inventory, _devices_module.published_record_mm_ids(backend, fleet_records)
             )
             if any(entry.old_id == target_id for entry in unpublished.superseded):
-                consequence += (
-                    "; if the machine rejoined under the same Syncthing ID, keep that device"
+                keep_rejoined = (
+                    ". If the machine rejoined under the same Syncthing ID, keep that device"
                 )
+                explanation += keep_rejoined
+                outcome += keep_rejoined
         console.print(
             f"  Before retiring {safe_str(target_name)} ({safe_str(target_id)}), pull on a "
             "machine with the same home if it had unpulled project memory. Shut it down "
             "or stop Syncthing there before retiring it.",
             soft_wrap=True,
         )
+        console.print(f"  After retirement, {safe_str(explanation)}.", soft_wrap=True)
         if not yes:
-            console.print(f"  After retirement, {safe_str(consequence)}.", soft_wrap=True)
             if not core.ask_yes_no(
                 f"Retire {safe_terminal_str(target_name)} ({safe_terminal_str(target_id)})?",
                 default=False,
@@ -1251,8 +1277,8 @@ def retire(target: str, *, yes: bool = False) -> None:
         core._print_outcome(
             outputstyle._outcome_line(
                 "retire",
-                f"retired {safe_terminal_str(target_name)} ({safe_terminal_str(target_id)}); "
-                f"{consequence}",
+                f"retired {safe_terminal_str(target_name)} ({safe_terminal_str(target_id)}). "
+                f"{outcome}",
             )
         )
     finally:

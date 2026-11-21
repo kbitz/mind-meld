@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 import typer
 from packaging.version import Version
+from rich.markup import escape
 from rich.table import Table
 from typer.core import TyperGroup
 
@@ -223,6 +224,20 @@ app = typer.Typer(
     # `mm init` frames hold the passphrase; a traceback must never print it.
     pretty_exceptions_show_locals=False,
 )
+
+
+def _help_text(text: str) -> str:
+    """Escape literal text when Typer renders help with Rich markup."""
+    return escape(text) if app.rich_markup_mode == "rich" else text
+
+
+def _literal_help(command: Callable[..., None]) -> Callable[..., None]:
+    """Preserve bracketed choices and config sections in command help."""
+    if command.__doc__:
+        command.__doc__ = _help_text(command.__doc__)
+    return command
+
+
 # `console` / `stderr_console` now live in `mind_meld.consoles` (Track 16A) so
 # `resolveflow` and `retention` can render through the SAME objects without
 # importing `cli` — see that module's docstring for why sharing the instances is
@@ -255,9 +270,9 @@ def _main(
     no_check_version: bool = typer.Option(
         False,
         "--no-check-version",
-        help=(
+        help=_help_text(
             "Skip the update check for this invocation: no nudge and no "
-            "automatic update. Force-skips regardless of \\[upgrade] auto_check in config."
+            "automatic update. Force-skips regardless of [upgrade] auto_check in config."
         ),
     ),
 ) -> None:
@@ -3095,6 +3110,7 @@ def devices_approve(
 
 
 @devices_app.command("retire")
+@_literal_help
 def devices_retire(
     device: str = typer.Argument(
         ...,
@@ -3174,6 +3190,7 @@ def gc(
 
 
 @app.command()
+@_literal_help
 def sources() -> None:
     """List configured sync sources.
 
@@ -3191,6 +3208,7 @@ def sources() -> None:
 
 
 @app.command(name="disable-source")
+@_literal_help
 def disable_source(
     name: str = typer.Argument(..., help="Source name to disable on this device"),
     force: bool = typer.Option(
@@ -3214,6 +3232,7 @@ def disable_source(
 
 
 @app.command(name="enable-source")
+@_literal_help
 def enable_source(
     name: str = typer.Argument(..., help="Source name to enable on this device"),
     force: bool = typer.Option(
@@ -3243,6 +3262,7 @@ def enable_source(
 
 
 @app.command(name="reconfigure-sources")
+@_literal_help
 def reconfigure_sources() -> None:
     """Re-run the source picker against the current config + new defaults.
 
@@ -3259,6 +3279,7 @@ def reconfigure_sources() -> None:
 
 
 @app.command(name="migrate-config")
+@_literal_help
 def migrate_config(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
     dry_run: bool = typer.Option(
@@ -3817,6 +3838,7 @@ def update() -> None:
 
 
 @app.command(name="refresh-identity")
+@_literal_help
 def refresh_identity_cmd(
     json_output: bool = typer.Option(
         False, "--json", help="Emit the resulting email list as JSON to stdout."
@@ -4250,6 +4272,7 @@ def recover(
 
 
 @app.command()
+@_literal_help
 def resolve(
     path: str | None = typer.Argument(
         None,

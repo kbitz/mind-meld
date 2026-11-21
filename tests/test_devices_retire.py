@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,15 @@ from mind_meld.storage.local import LocalBackend
 runner = CliRunner()
 PASSPHRASE = "retire-test-passphrase"
 TEST_MEMORY_KB = 1024
+
+
+def test_retire_help_keeps_yes_no_choices():
+    result = runner.invoke(app, ["devices", "retire", "--help"])
+
+    assert result.exit_code == 0, result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "[y/n] (Enter = n)" in " ".join(plain.split())
+    assert "\\[y/n]" not in plain
 
 
 def _valid_syncthing_id(seed_char: str) -> str:
@@ -158,11 +168,13 @@ def test_retire_interactive_by_name_and_id_three_outcome_branches_and_idempotenc
     # 2. Confirm retirement by name -> Branch 3 outcome, manifest & blob preserved
     res_ok = runner.invoke(app, ["devices", "retire", "cachyos"], input="y\n")
     assert res_ok.exit_code == 0, res_ok.output
-    assert (
-        f"Retire: retired cachyos (bbbb2222); each machine where mm manages Syncthing "
-        f"removes {st_b[:7]} from Syncthing at its first push or pull after the device "
-        "stops connecting"
-    ) in " ".join(res_ok.output.split())
+    explanation = f"removes {st_b[:7]} from Syncthing at its first push or pull"
+    assert " ".join(res_ok.output.split()).count(explanation) == 1
+    assert res_ok.output.index(explanation) < res_ok.output.index("Retire cachyos (bbbb2222)?")
+    assert res_ok.output.rstrip().splitlines()[-1] == (
+        "Retire: retired cachyos (bbbb2222). Managed peers remove its Syncthing device "
+        "on their next push or pull once it stops connecting."
+    )
     assert not backend.exists(device_key("bbbb2222"))
     assert not backend.exists(syncthing_record_key("bbbb2222"))
     assert backend.exists(retired_record_key("bbbb2222"))
@@ -180,8 +192,8 @@ def test_retire_interactive_by_name_and_id_three_outcome_branches_and_idempotenc
         res_again = runner.invoke(app, ["devices", "retire", target])
         assert res_again.exit_code == 0, res_again.output
         assert (
-            f"Retire: cachyos (bbbb2222) is already retired; each machine where mm manages "
-            f"Syncthing removes {st_b[:7]}"
+            "Retire: cachyos (bbbb2222) is already retired. Managed peers remove its Syncthing "
+            "device on their next push or pull once it stops connecting."
         ) in " ".join(res_again.output.split())
 
     # 4. Branch 1 outcome: retiring a device with no published Syncthing ID
@@ -203,9 +215,8 @@ def test_retire_interactive_by_name_and_id_three_outcome_branches_and_idempotenc
     res_b1 = runner.invoke(app, ["devices", "retire", "cccc3333", "--yes"])
     assert res_b1.exit_code == 0, res_b1.output
     assert (
-        "Retire: retired no-st-box (cccc3333); mm has no Syncthing ID on record for it, "
-        "so no machine will remove it from Syncthing automatically; remove it in Syncthing's "
-        "web UI wherever Syncthing still lists it."
+        "Retire: retired no-st-box (cccc3333). No Syncthing ID is on record. "
+        "Remove it in Syncthing's web UI wherever it still appears."
     ) in " ".join(res_b1.output.split())
 
     # 5. Branch 2 outcome: retiring a device whose Syncthing ID is still vouched
@@ -227,7 +238,7 @@ def test_retire_interactive_by_name_and_id_three_outcome_branches_and_idempotenc
     res_b2 = runner.invoke(app, ["devices", "retire", "dddd4444", "--yes"])
     assert res_b2.exit_code == 0, res_b2.output
     assert (
-        f"Retire: retired reinit-box (dddd4444); Syncthing device {st_shared[:7]} stays "
+        f"Retire: retired reinit-box (dddd4444). Syncthing device {st_shared[:7]} stays "
         "because registration reinit-box (eeee5555) still uses it."
     ) in " ".join(res_b2.output.split())
 
@@ -380,9 +391,8 @@ def test_retire_refusals_multi_match_chooser_partial_completion_and_old_peer_gat
     )
     res_old_yes = runner.invoke(app, ["devices", "retire", "target99", "--yes"])
     assert res_old_yes.exit_code == 1
-    assert "retiring with --yes is refused until they are updated" in " ".join(
-        res_old_yes.output.split()
-    )
+    assert "mac-old (oldpeer1) last pushed from mm 1.7.1 or older" in res_old_yes.output
+    assert "push before retiring with --yes" in res_old_yes.output
     assert "Run: mm update" in res_old_yes.output
     assert backend.exists(device_key("target99"))
 
@@ -402,6 +412,32 @@ def test_retire_refusals_multi_match_chooser_partial_completion_and_old_peer_gat
     assert res_lock.exit_code == 1
     assert "lock held" in res_lock.output
     assert backend.exists(device_key("locked11"))
+
+
+def test_retire_distinguishes_unsynced_push_from_unknown_version(tmp_path, monkeypatch):
+    backend = _setup_retire_fleet(tmp_path, monkeypatch)
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
+    register_device(backend, "peer-new", "mac-new")
+    register_device(backend, "target-a", "mac-target")
+    backend.put(
+        device_key("peer-unk"),
+        json.dumps(
+            {
+                "device_id": "peer-unk",
+                "device_name": "mac-unknown",
+                "registered": "2026-01-01T00:00:00+00:00",
+                "last_seen": "2026-01-02T00:00:00+00:00",
+            }
+        ).encode("utf-8"),
+    )
+
+    for args, confirmation, exit_code in [(["--yes"], None, 1), ([], "n\n", 0)]:
+        result = runner.invoke(app, ["devices", "retire", "target-a", *args], input=confirmation)
+        assert result.exit_code == exit_code, result.output
+        assert "mac-new (peer-new) have no synced push yet" in result.output
+        assert "mac-unknown (peer-unk) have an unknown last-push mm version" in result.output
+        assert "last pushed from mm 1.7.1 or older" not in result.output
+        assert backend.exists(device_key("target-a"))
 
 
 def test_retire_command_intent_and_read_only_policy():

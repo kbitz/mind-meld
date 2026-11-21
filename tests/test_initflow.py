@@ -1120,6 +1120,7 @@ def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
     assert fake_syncthing.bodies == []
     assert all(req[0] == "GET" for req in fake_syncthing.requests)
     assert core.SYNCTHING_GUIDE_HEADING in text_new
+    assert "(another device is configured, a non-default folder is configured)" in text_new
     assert text_new.endswith(NEW_FLEET_OUTCOME)
     if not stale_record:
         assert not config.syncthing_record_path().exists()
@@ -1134,6 +1135,29 @@ def test_pre_existing_syncthing_writes_nothing_and_prints_guide_on_both_flows(
     assert core.SYNCTHING_GUIDE_HEADING in text_join
     assert text_join.endswith(JOIN_OUTCOME)
     assert not (storage / ".stignore").exists()
+
+
+@pytest.mark.parametrize(
+    ("shared", "reason"),
+    [(True, "the Default Folder is shared"), (False, "the Default Folder is non-empty")],
+)
+def test_init_explains_why_default_folder_is_owner_managed(
+    env, fake_syncthing, tmp_path, monkeypatch, shared, reason
+):
+    stock_root, _, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
+    if not shared:
+        stock_root.mkdir(parents=True)
+        (stock_root / "notes.txt").write_text("existing data\n")
+    folder = fake_syncthing.stock_folder(stock_root, shared_with=[peer_id] if shared else [])
+    fake_syncthing.set_shape(folders=[folder])
+
+    result, text = _run("")
+
+    assert result.exit_code == 1
+    assert f"Syncthing on this machine already has its own configuration ({reason})." in text
+    assert core.SYNCTHING_GUIDE_HEADING in text
+    assert not fake_syncthing.bodies
+    assert not config.syncthing_record_path().exists()
 
 
 @pytest.mark.parametrize(
@@ -1285,6 +1309,7 @@ def test_unsupported_gui_address_with_offline_pre_existing_config_continues_with
         }
 
     assert core.SYNCTHING_GUIDE_HEADING in text
+    assert "a non-default folder is configured" in text
     assert fake_syncthing.requests == []
     assert fake_syncthing.bodies == []
     assert not config.syncthing_record_path().exists()
@@ -1999,7 +2024,7 @@ def test_declining_continue_joining_forgets_answers_and_leaves_syncthing_pairing
     assert run2.exit_code == 1, run2.output
     assert f"fleet machine {peer_id}" in text2
     assert "Continue joining? [y/n] (Enter = y)" in text2
-    assert "Start a new fleet or join an existing one? [n/j] (Enter = j)" in text2
+    assert "Start a new fleet or join an existing one? [n/j]:" in text2
     assert not config.join_record_path().exists()
     assert fake_syncthing.bodies == bodies_after_run1
     assert config.load_syncthing_record() == my_id
@@ -2083,18 +2108,19 @@ def test_new_fleet_flag_and_interactive_new_answer(env, tmp_path):
     assert not config.join_record_path().exists()
     assert backend.exists("mm-crypto-init")
 
-    # Reset for interactive "new" answer (with an invalid response first).
+    # Both a blank and an invalid response re-ask before accepting the new-fleet choice.
     config.CONFIG_PATH.unlink()
     storage2 = tmp_path / "storage-interactive-new"
     backend2 = LocalBackend(storage2)
     _joined.clear()
 
     res_new, text_new = _run(
-        f"maybe\nN\n{storage2}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}",
+        f"\nmaybe\nN\n{storage2}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}",
         command="capture",
     )
     assert res_new.exit_code == 0, res_new.output
-    assert "Answer n (new) or j (join); Enter joins." in text_new
+    assert text_new.count("Start a new fleet or join an existing one? [n/j]:") == 3
+    assert "Answer n (new) or j (join)." in text_new
     assert backend2.exists("mm-crypto-init")
     assert _joined == [None]
 

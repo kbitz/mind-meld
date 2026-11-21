@@ -162,10 +162,18 @@ def _check_syncthing() -> _SyncthingSetup:
     if (check.reach == "ok" and check.state == "pre-existing") or (
         check.reach == "address-unsupported" and check.state == "pre-existing"
     ):
+        reason_text = {
+            "paired": "another device is configured",
+            "folder": "a non-default folder is configured",
+            "shared": "the Default Folder is shared",
+            "not-empty": "the Default Folder is non-empty",
+        }
+        reasons = ", ".join(dict.fromkeys(reason_text[reason.why] for reason in check.reasons))
         console.print(
-            "  Syncthing on this machine already has its own configuration, so mm "
-            f'changes nothing in it. Set it up as README "{core.SYNCTHING_GUIDE_HEADING}" '
-            "describes."
+            f"  Syncthing on this machine already has its own configuration ({reasons}). "
+            f'Set it up as README "{core.SYNCTHING_GUIDE_HEADING}" describes.',
+            markup=False,
+            soft_wrap=True,
         )
         return _SyncthingSetup(
             record=None,
@@ -354,17 +362,13 @@ def _forget_join_record(*, required: bool = False) -> None:
 def _ask_start_or_join() -> str:
     """Ask whether to start a new fleet or join an existing one."""
     while True:
-        raw = typer.prompt(
-            "Start a new fleet or join an existing one? [n/j] (Enter = j)",
-            default="join",
-            show_default=False,
-        )
+        raw = typer.prompt("Start a new fleet or join an existing one? [n/j]")
         choice = raw.strip().lower()
         if choice in ("n", "new"):
             return "new"
-        if choice in ("", "j", "join"):
+        if choice in ("j", "join"):
             return "join"
-        console.print("  Answer n (new) or j (join); Enter joins.")
+        console.print("  Answer n (new) or j (join).")
 
 
 def _sources_from_names(names: tuple[str, ...]) -> list[dict[str, Any]]:

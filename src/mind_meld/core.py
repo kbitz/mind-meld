@@ -3005,7 +3005,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
     sources = config.get("sync", {}).get("sources")
     if not sources:
         console.print(
-            "[dim]Config has no explicit [[sync.sources]] entries — "
+            f"[dim]Config has no explicit {safe_str('[[sync.sources]]')} entries — "
             "nothing to migrate. DEFAULT_SOURCES already include the "
             "recommended excludes.[/dim]"
         )
@@ -3101,7 +3101,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         for rname in retired:
             console.print(
                 f"  [bold]{rname}[/bold] — already stopped syncing; remove the leftover "
-                "[[sync.sources]] block and record the name in disabled_sources. "
+                f"{safe_str('[[sync.sources]]')} block and record the name in disabled_sources. "
                 "Local files are preserved."
             )
 

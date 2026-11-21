@@ -377,7 +377,8 @@ def recapture(
                     console.print(
                         "  If the retro is still short, the gap is on another machine "
                         "(mm devices) or in a repo discovery cannot see "
-                        "(mm diag, then [retro] repo_roots)."
+                        "(mm diag, then [retro] repo_roots).",
+                        markup=False,
                     )
                 rec_count = core._count(len(records), "commit record", "commit records")
                 final_outcome = outputstyle._outcome_line(

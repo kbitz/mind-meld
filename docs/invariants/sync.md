@@ -1507,13 +1507,14 @@ has its own walker shape (`skills/`, `commands/`, `rules/`, and the allowlisted
 `~/.grok`, refusing child links, hard links and every other path under `~/.grok`,
 with `GROK_EXCLUDE_PATTERNS` applied on push and pull) and never auto-activates:
 neither a legacy config without explicit `[[sync.sources]]` nor `_retain_prior_default_sources`
-re-selects it. `mm init` defaults it to N; `mm reconfigure-sources` defaults it
-to N unless an explicit Grok source is already enabled. `config.grok_customization_dirs_exist`
-checks only `skills/`, `commands/`, and `rules/` (ignoring `memory-v2/`, which Grok Build
-can create on its own when memory is enabled) so detection labels do not treat an
-auto-created `memory-v2/` tree as customization presence.
+re-selects it. `mm init` defaults to yes when `config.grok_customization_dirs_exist`
+finds a real `skills/`, `commands/`, or `rules/` directory and defaults to no otherwise.
+Grok Build can create `memory-v2/` on its own, so that tree alone never makes
+Grok detected. `mm reconfigure-sources` defaults to the current active state
+with explicit sources and to detection on legacy configs. A disabled Grok
+source defaults to no.
 Only `mm enable-source grok` (which also clears `"grok"` from `disabled_sources`),
-or an explicit "y" at `mm init` / `mm reconfigure-sources`, or a pre-v1.11.8
+or accepting the Grok prompt in `mm init` or `mm reconfigure-sources`, or a pre-v1.11.8
 config that still carries an enabled `grok` block selects file sync.
 `scan_roots` for `type: "grok"` returns `["skills", "commands", "rules", "memory-v2"]`,
 so `~/.grok/memory-v2/.mind-meld-anchor` anchors deletion propagation across all
@@ -1632,7 +1633,7 @@ resolved sources with `[sync].disabled_sources` bypassed
 in `Enabled`, while a source whose path is missing on disk does not appear
 (except mm's default `mm-events` root before creation).
 
-The `_prompt_source_toggle(source, *, current_state)` helper (extracted from
+The `_prompt_source_toggle(source, *, current_state, detected=None)` helper (extracted from
 `_prompt_sources` in v0.10.0) is the single source of truth for the per-source
 yes/no prompt copy + default rule (`core.ask_yes_no`, rendering
 `[y/n] (Enter = y)` or `[y/n] (Enter = n)`). `_prompt_sources` (init) and

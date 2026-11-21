@@ -225,14 +225,16 @@ approval on one fleet machine is the only approval a new machine needs.
 1. **Default configuration.** Syncthing has its default configuration when it
    has no paired device and no folder except its stock Default Folder,
    unshared and empty. Changes to the GUI or other options do not count. Any
-   paired device or any other folder is a pre-existing configuration. mm
+   paired device, any other folder, or a shared or non-empty Default Folder
+   makes the configuration pre-existing. `mm init` reports those reasons. mm
    manages Syncthing on a machine only if it found the default configuration
    there when it set Syncthing up; the owner manages Syncthing on every other
    machine.
 2. **Setup.** On a machine whose Syncthing has its default configuration, the
    install starts Syncthing at login and mm configures it. `mm init`, on
    macOS or Linux, first asks whether this machine starts a new fleet or
-   joins an existing one (`[n/j] (Enter = j)`); `mm init --new-fleet` answers "new" without asking.
+   joins an existing one (`[n/j]`). Pressing Enter asks again.
+   `mm init --new-fleet` answers "new" without asking.
    Starting a new fleet creates the shared folder with mm's folder options.
    Joining asks for one fleet machine's Syncthing device ID, pairs with it
    and prints this machine's own device ID (with its 7-character short ID) and copyable

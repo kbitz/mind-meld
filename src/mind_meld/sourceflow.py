@@ -40,7 +40,7 @@ from mind_meld.consoles import console
 from mind_meld.errors import ConfigError
 from mind_meld.manifest import _is_excluded as _manifest_is_excluded
 from mind_meld.manifest import walk_source
-from mind_meld.safety import safe_terminal_str
+from mind_meld.safety import safe_str, safe_terminal_str
 
 
 def sources() -> None:
@@ -353,7 +353,7 @@ def reconfigure_sources() -> None:
     console.print("[bold]Reconfigure sources for this device.[/bold]")
     console.print(
         "[dim]Disabling marks the source in disabled_sources (per-machine, "
-        "not synced). Disabling does NOT delete the [[sync.sources]] entry — "
+        f"not synced). Disabling does NOT delete the {safe_str('[[sync.sources]]')} entry — "
         "re-enabling preserves customizations. Retired source blocks are removed.[/dim]\n"
     )
 

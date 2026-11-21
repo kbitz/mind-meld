@@ -30,25 +30,25 @@ Run `mm update` and then `mm push` on each existing Syncthing fleet machine.
 See [Syncthing folder options](#syncthing-folder-options) for the one-approval join steps.
 
 **Plain `mm init` prompt order, approval wait, and saved join answers (Tracks 151A, 154A):**
-plain `mm init` asks whether to start a new fleet or join an existing one
-(`Start a new fleet or join an existing one? [n/j] (Enter = j)`, accepting `n`/`new` or `j`/`join`;
-`mm init --new-fleet` skips that question). Before waiting, a fresh join asks
+plain `mm init` asks `Start a new fleet or join an existing one? [n/j]`.
+Answer `n`/`new` or `j`/`join`. Pressing Enter asks again, and
+`mm init --new-fleet` skips the question. Before waiting, a fresh join asks
 for the storage path, the fleet machine's Syncthing device ID if mm needs to
 pair, the device name and the sources (every yes/no question uses `[y/n] (Enter = y)` or `[y/n] (Enter = n)`, and every source defaults to yes when detected on disk). It saves those answers locally in
 `~/.config/mind-meld/join.toml` (never the passphrase). When a managed join
 needs approval, the same run prints both the short-ID and full-ID `mm devices approve` commands and waits for up to about 10 minutes plus local
 Syncthing request time. A stopped join offers to resume from the saved answers
 with `Continue joining? [y/n] (Enter = y)`.
-Scripts and tests that supply input for a fresh join must send `j`, `join`, or
-a blank line before the storage path, then supply the device name and source
-answers before the passphrase.
+Scripts and tests that supply input for a fresh join must send `j` or `join`
+before the storage path, then supply the device name and source answers before
+the passphrase.
 
 **Fleet approval and retirement (Track 154A).** Update the approving machine to use
 a name or short ID at a terminal. For an older release or a script, use the full
 Syncthing ID printed by the joining machine. Init offers Grok Build and Muse and
-defaults to yes when it detects their supported files or directories. On managed
-machines, each push or pull applies Mind Meld device names to Syncthing. A name
-changed in Syncthing's web UI returns to the Mind Meld name on the next pass.
+defaults to yes when it detects their supported files or directories. On each
+managed machine, a push or pull restores the Mind Meld name in Syncthing for this
+machine and configured peers that a fleet record vouches for.
 Update managed peers so they apply new [retirements](#retiring-a-dead-machine).
 
 **`mm retro-fleet --no-save` removed (Track 145A):** `mm retro-fleet --no-save` is
@@ -695,8 +695,8 @@ To add another Mac or an Arch-based Linux machine to a Syncthing fleet (for a Ma
 2. On Linux, install `libsecret` and `gnome-keyring` and unlock the login keyring in your desktop session before hooks run (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)).
 3. Run Claude Code once so `~/.claude` exists.
 4. Run `mm init` on the new machine:
-   - **Default Syncthing configuration (managed by `mm`).** Answer `j` or `join` (the default), choose an empty storage folder (normally `~/Sync/mind-meld`), paste the Syncthing device ID of a machine already in the fleet (printed when the first machine starts the fleet, or shown in Syncthing's **Actions > Show ID**), and enter the device name (on macOS, the Mac's local hostname when available, otherwise the machine's hostname) and sources. `mm init` saves those answers locally (never the passphrase), sets this machine's Syncthing device name to the device name entered (before adding the fleet machine, so the fleet first sees that name; `--new-fleet` sets the first machine's Syncthing device name the same way), adds that fleet machine as an introducer, prints this machine's Syncthing device ID (and 7-character short ID) with copyable `mm devices approve <short-id>` and `mm devices approve <device-id>` commands, and removes the unshared empty stock Default Folder at `~/Sync` when the target is inside it. While it waits, run `mm devices approve <short-id>` (or `mm devices approve` / `mm devices approve <name>` / `mm devices approve <device-id>`) on the fleet machine whose ID you pasted if `mm` manages Syncthing there. On an owner-managed fleet machine, approve by hand as described in [Configuring Syncthing yourself](#configuring-syncthing-yourself). The waiting `mm init` accepts the folder offer with mm's options, waits for Syncthing to deliver the key header (`mm-crypto-init`), verifies the **same passphrase**, writes `(?d)tmp*.tmp` to `.stignore`, registers the new device, and tries to publish this machine's encrypted Syncthing record (`syncthing/<id>.enc`). It tries to remove the saved join answers and warns if that fails, then pulls. If a wait stops before the join finishes, rerun `mm init` and confirm `Continue joining? [y/n] (Enter = y)`.
-   - **Pre-existing Syncthing configuration (owner-managed):** `mm init` changes nothing in Syncthing and names [Configuring Syncthing yourself](#configuring-syncthing-yourself). Answer `j` or `join`, the storage path, the device name and the sources (`mm init` saves those answers locally so a rerun can confirm `Continue joining? [y/n] (Enter = y)` without asking them again). Pair the machines, share the `mind-meld` folder at `~/Sync/mind-meld` with the [Syncthing folder options](#syncthing-folder-options), add `(?d)tmp*.tmp` to `~/Sync/mind-meld/.stignore`, wait for Syncthing to deliver `mm-crypto-init`, and run `mm init` to verify the passphrase, register the device, publish its encrypted Syncthing record (`syncthing/<id>.enc`) when its Syncthing ID is known, and finish joining.
+   - **Default Syncthing configuration (managed by `mm`).** Answer `j` or `join`, choose an empty storage folder (normally `~/Sync/mind-meld`), paste the Syncthing device ID of a machine already in the fleet (printed when the first machine starts the fleet, or shown in Syncthing's **Actions > Show ID**), and enter the device name (on macOS, the Mac's local hostname when available, otherwise the machine's hostname) and sources. `mm init` saves those answers locally (never the passphrase), sets this machine's Syncthing device name to the device name entered (before adding the fleet machine, so the fleet first sees that name; `--new-fleet` sets the first machine's Syncthing device name the same way), adds that fleet machine as an introducer, prints this machine's Syncthing device ID (and 7-character short ID) with copyable `mm devices approve <short-id>` and `mm devices approve <device-id>` commands, and removes the unshared empty stock Default Folder at `~/Sync` when the target is inside it. While it waits, run `mm devices approve <short-id>` (or `mm devices approve` / `mm devices approve <name>` / `mm devices approve <device-id>`) on the fleet machine whose ID you pasted if `mm` manages Syncthing there. On an owner-managed fleet machine, approve by hand as described in [Configuring Syncthing yourself](#configuring-syncthing-yourself). The waiting `mm init` accepts the folder offer with mm's options, waits for Syncthing to deliver the key header (`mm-crypto-init`), verifies the **same passphrase**, writes `(?d)tmp*.tmp` to `.stignore`, registers the new device, and tries to publish this machine's encrypted Syncthing record (`syncthing/<id>.enc`). It tries to remove the saved join answers and warns if that fails, then pulls. If a wait stops before the join finishes, rerun `mm init` and confirm `Continue joining? [y/n] (Enter = y)`.
+   - **Pre-existing Syncthing configuration (owner-managed):** `mm init` reports what makes the configuration non-default and points to [Configuring Syncthing yourself](#configuring-syncthing-yourself). Answer `j` or `join`, the storage path, the device name and the sources (`mm init` saves those answers locally so a rerun can confirm `Continue joining? [y/n] (Enter = y)` without asking them again). Pair the machines, share the `mind-meld` folder at `~/Sync/mind-meld` with the [Syncthing folder options](#syncthing-folder-options), add `(?d)tmp*.tmp` to `~/Sync/mind-meld/.stignore`, wait for Syncthing to deliver `mm-crypto-init`, and run `mm init` to verify the passphrase, register the device, publish its encrypted Syncthing record (`syncthing/<id>.enc`) when its Syncthing ID is known, and finish joining.
 5. If the folder is still syncing blobs after `mm init` finishes, run `mm pull` again when delivery finishes.
 6. `mm push` — publishes anything this machine has that the others don't; push is what shares this machine's own files.
 7. Add the `# Mind Meld` hook block to your global agent instructions ([Claude Code Integration](#claude-code-integration)).
@@ -2022,8 +2022,10 @@ Run `mm devices retire <name|id>` from any remaining fleet machine to retire a d
 
 A hook may need several passes on a slow Syncthing. Run an attended
 `mm pull` or `mm push` for a longer pass. Removal waits for fleet registrations
-to finish publishing and for the retired device to disconnect. Remove the
-device in Syncthing's web UI on owner-managed peers that still list it.
+to finish publishing and for the retired device to disconnect. If mm names a
+machine that still needs to publish its Syncthing ID, run `mm update` and
+`mm push` there. Remove the device in Syncthing's web UI on owner-managed peers
+that still list it.
 An owner-managed introducer can reintroduce it until it is removed there.
 For a machine with no published Syncthing ID, identify the correct device in
 Syncthing before removing it. Keep the device if a newer registration still

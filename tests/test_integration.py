@@ -5800,7 +5800,7 @@ class TestInitTerminalAndHelp89A:
         assert DEFAULT_STORAGE_PATH == "~/Sync/mind-meld"
         expected = tmp_path / "Sync" / "mind-meld"
         # Accepting the prompt default names the expanded path and creates nothing.
-        result = runner.invoke(app, ["init"], input="\n\n\nY\nn\nn\nn\nn\nn\nn\n")
+        result = runner.invoke(app, ["init"], input="j\n\n\nY\nn\nn\nn\nn\nn\nn\n")
         assert result.exit_code == 1, result.output
         assert str(expected).replace(" ", "") in "".join(result.output.split())
         assert not expected.exists()
@@ -11333,6 +11333,26 @@ def test_pull_preview_output62(preview62, monkeypatch, state):
         assert "Dry run for" not in text
         if state != "unknown":
             assert "source '" not in text
+
+
+@pytest.mark.parametrize(
+    ("command", "literal"),
+    [
+        ([], "[upgrade] auto_check"),
+        (["sources"], "[sync].disabled_sources"),
+        (["disable-source"], "[[sync.sources]]"),
+        (["enable-source"], "[[sync.sources]]"),
+        (["reconfigure-sources"], "[[sync.sources]]"),
+        (["migrate-config"], "[[sync.sources]]"),
+        (["refresh-identity"], "[retro].author_emails"),
+        (["resolve"], "[default]"),
+    ],
+)
+def test_command_help_preserves_literal_brackets(command, literal):
+    result = runner.invoke(app, [*command, "--help"], env={"COLUMNS": "180"})
+
+    assert result.exit_code == 0, result.output
+    assert literal in _preview_text(result)
 
 
 @pytest.mark.parametrize(
