@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.74] - 2026-11-20
+
+Mind Meld leaves conflicted files untouched when one changes after the prompt, omits repository folders from new synced event rows, and saves a new fleet's storage path as an absolute path.
+
+### Changed
+
+- `mm resolve` leaves both files untouched when either one changed after it showed the conflict, the synced event log no longer names the folders where repositories live, and `mm init` saves a relative storage path as an absolute one when starting a new fleet.
+- New `git-snapshot` rows omit checkout paths from project and skip entries.
+- `mm init` saves relative new-fleet storage paths as absolute paths.
+
+### Fixed
+
+- `mm resolve` stops before writing if either file in the conflict pair changes while the prompt waits.
+
+### Upgrade notes
+
+- Event rows published before this release keep naming repository folders until they age out after 90 days, and a `storage.path` that an earlier `mm init --new-fleet` saved as relative stays relative until you make it absolute in `config.toml`.
+
 ## [1.12.73] - 2026-11-20
 
 Mind Meld now asks whether you are starting or joining a fleet, then lets you approve and retire Syncthing devices while managed machines keep their fleet names.
