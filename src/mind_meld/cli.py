@@ -658,22 +658,16 @@ def init(
     stopped with Ctrl-C, it prints a waiting outcome ending 'Run: mm init',
     stops and writes nothing to the Mind Meld store; it never creates a key
     header). Once the header arrives and your passphrase verifies, it writes
-    .stignore, registers this device, saves config, runs the first memory-index
-    refresh and pointer-line update if chosen, and pulls.
+    .stignore, registers this device, saves config, and pulls. After the pull,
+    it refreshes the memory index and adds the pointer line if chosen.
 
     Running init again on a configured machine asks before it replaces this
     device's entry.
     """
     if sys.stdin is None or getattr(sys.stdin, "closed", False):
         _init_needs_terminal()
-    try:
-        passphrase = initflow.init(new_fleet=new_fleet)
-    except typer.Abort:
-        if core._stdin_is_terminal():
-            raise
-        _init_needs_terminal()
-        return
-    if passphrase is not None:
+
+    def pull_join(passphrase: str, finish_memory_setup: Callable[[], None]) -> None:
         _attended_pull(
             from_device=None,
             source=None,
@@ -682,7 +676,15 @@ def init(
             conflict_mode="keep-both",
             passphrase=passphrase,
             join=True,
+            finish_memory_setup=finish_memory_setup,
         )
+
+    try:
+        initflow.init(new_fleet=new_fleet, pull_join=pull_join)
+    except typer.Abort:
+        if core._stdin_is_terminal():
+            raise
+        _init_needs_terminal()
 
 
 def _capture_notice(message: str) -> None:
@@ -2901,6 +2903,7 @@ def _attended_pull(
     conflict_mode: pullflow.ConflictMode,
     passphrase: str | None = None,
     join: bool = False,
+    finish_memory_setup: Callable[[], None] | None = None,
 ) -> None:
     """The body of `mm pull`, shared with `mm init`'s join (``join=True``).
 
@@ -3022,7 +3025,10 @@ def _attended_pull(
                             ),
                         )
                 if not pulled.total_failed:
-                    _sync_memory_index(config)
+                    if finish_memory_setup is None:
+                        _sync_memory_index(config)
+                    else:
+                        finish_memory_setup()
                 _sync_update(config, verbose=verbose)
 
 

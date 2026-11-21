@@ -5,7 +5,7 @@ offers to resume from saved join answers in `join.toml`), while
 `mm init --new-fleet` skips the question and is the only path that creates the
 key header (mm-crypto-init) in an empty folder. Joining asks every question
 except the passphrase first (storage path, fleet machine's Syncthing device ID
-when pairing is needed, device name, sources), saves those answers in
+when pairing is needed, device name, sources, memory setup), saves those answers in
 `join.toml` (never the passphrase), waits up to `APPROVAL_WAIT_SECONDS`
 (`APPROVAL_POLL_SECONDS` per step) for the fleet machine's approval, accepts
 the folder offer, and waits up to `HEADER_WAIT_SECONDS` (`HEADER_POLL_SECONDS`
@@ -36,6 +36,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -664,14 +665,29 @@ def _format_saved_bool(value: bool | None) -> str:
     return "yes" if value else "no"
 
 
-def _pointer_target_paths() -> tuple[Path, Path]:
+def _pointer_target_paths() -> tuple[Path, Path | None]:
     """Resolve the two global agent instruction files at call time."""
     home = Path.home()
     claude_target = home / ".claude" / "CLAUDE.md"
-    codex_home_raw = os.environ.get("CODEX_HOME", "").strip()
-    codex_base = Path(codex_home_raw).expanduser() if codex_home_raw else home / ".codex"
-    codex_target = codex_base / "AGENTS.md"
-    return (claude_target, codex_target)
+    codex_home_raw = os.environ.get("CODEX_HOME")
+    try:
+        codex_base = Path(codex_home_raw).expanduser() if codex_home_raw else home / ".codex"
+    except RuntimeError:
+        return (claude_target, None)
+    return (claude_target, codex_base.absolute() / "AGENTS.md")
+
+
+def _show_pointer_targets() -> None:
+    claude_target, codex_target = _pointer_target_paths()
+    codex_display = (
+        safe_str(safe_terminal_str(codex_target))
+        if codex_target is not None
+        else "Codex's AGENTS.md (could not expand CODEX_HOME)"
+    )
+    console.print(
+        f"  Target files: {safe_str(safe_terminal_str(claude_target))} and {codex_display}",
+        soft_wrap=True,
+    )
 
 
 def _ask_memory_setup(
@@ -686,11 +702,6 @@ def _ask_memory_setup(
         status, version = memoryindex.probe_qmd()
         if status == "ok":
             mem_index = core.ask_yes_no("Index agent memories for search with qmd?", default=True)
-            if mem_index:
-                embeddings = core.ask_yes_no(
-                    "Also download qmd's embedding model (334 MB) for semantic search?",
-                    default=False,
-                )
         else:
             hint = memoryindex.install_hint()
             if status == "version-too-old" and version is not None:
@@ -705,14 +716,13 @@ def _ask_memory_setup(
                     f"Install qmd with: {safe_str(hint)}",
                     soft_wrap=True,
                 )
-    elif mem_index is True and embeddings is None:
+    if mem_index is True and embeddings is None:
         embeddings = core.ask_yes_no(
             "Also download qmd's embedding model (334 MB) for semantic search?",
             default=False,
         )
 
     if pointer_line is None:
-        claude_target, codex_target = _pointer_target_paths()
         console.print("  Recommended line for your agent instruction files:")
         console.print(
             f"    {memoryindex.POINTER_LINE}",
@@ -720,11 +730,7 @@ def _ask_memory_setup(
             highlight=False,
             soft_wrap=True,
         )
-        console.print(
-            f"  Target files: {safe_str(safe_terminal_str(claude_target))} and "
-            f"{safe_str(safe_terminal_str(codex_target))}",
-            soft_wrap=True,
-        )
+        _show_pointer_targets()
         pointer_line = core.ask_yes_no("Add this line?", default=False)
 
     return (mem_index, embeddings, pointer_line)
@@ -733,7 +739,7 @@ def _ask_memory_setup(
 def _print_pointer_line_manual(target: Path) -> None:
     try:
         resolved = target.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         resolved = target
     console.print(
         f"  Add this line by hand to {safe_str(safe_terminal_str(resolved))}:",
@@ -754,15 +760,25 @@ def _write_pointer_line(target: Path) -> str:
     Symlinks, non-regular files, paths resolving outside ``Path.home()``, and
     missing files whose parent folder does not exist are print-only no-ops.
     """
-    home_resolved = Path.home().resolve()
+    home = Path.home().absolute()
+    home_resolved = home.resolve()
+    absolute = target.absolute()
+    unlinked = (
+        home_resolved / absolute.relative_to(home) if absolute.is_relative_to(home) else absolute
+    )
+    try:
+        resolved = target.resolve()
+    except RuntimeError:  # A symlink loop on Python 3.11 or 3.12.
+        _print_pointer_line_manual(target)
+        return "printed"
+    if resolved != unlinked or not resolved.is_relative_to(home_resolved):
+        _print_pointer_line_manual(target)
+        return "printed"
+
     try:
         st = target.lstat()
     except FileNotFoundError:
         if not target.parent.is_dir():
-            _print_pointer_line_manual(target)
-            return "printed"
-        parent_resolved = target.parent.resolve()
-        if not parent_resolved.is_relative_to(home_resolved):
             _print_pointer_line_manual(target)
             return "printed"
         fsutil.refuse_real_state_write_under_pytest(target)
@@ -772,11 +788,6 @@ def _write_pointer_line(target: Path) -> str:
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
         _print_pointer_line_manual(target)
         return "printed"
-    resolved = target.resolve()
-    if not resolved.is_relative_to(home_resolved):
-        _print_pointer_line_manual(target)
-        return "printed"
-
     fsutil.refuse_real_state_write_under_pytest(target)
     existing = target.read_bytes()
     line_bytes = memoryindex.POINTER_LINE.encode("utf-8")
@@ -794,11 +805,15 @@ def _write_pointer_line(target: Path) -> str:
 def _apply_pointer_line() -> None:
     """Apply the recommended pointer line to each target instruction file."""
     for target in _pointer_target_paths():
+        if target is None:
+            core._warning("could not expand CODEX_HOME. Add the memory search line by hand.")
+            continue
         try:
             outcome = _write_pointer_line(target)
-        except OSError as e:
+        except (OSError, StorageError) as e:
+            cause = e.__cause__ if isinstance(e.__cause__, OSError) else e
             core._warning(
-                f"could not update {safe_terminal_str(target)} ({os_error_cause(e)}); "
+                f"could not update {safe_terminal_str(target)} ({os_error_cause(cause)}); "
                 "add the memory search line by hand."
             )
             continue
@@ -1264,7 +1279,11 @@ def _wait_for_header(backend: LocalBackend, full_path: Path) -> CryptoInitFetch:
     return CryptoInitFetch(status="missing")
 
 
-def init(new_fleet: bool = False) -> str | None:
+def init(
+    new_fleet: bool = False,
+    *,
+    pull_join: Callable[[str, Callable[[], None]], None] | None = None,
+) -> str | None:
     """Run init; return the verified passphrase after a join, otherwise None."""
     # Capture prior device metadata BEFORE any prompt so the orphan-case
     # warning can name the device about to be left behind.
@@ -1305,6 +1324,8 @@ def init(new_fleet: bool = False) -> str | None:
                 f"sources {sources_s}{memory_part}.",
                 soft_wrap=True,
             )
+            if saved.pointer_line is True:
+                _show_pointer_targets()
             if not core.ask_yes_no("Continue joining?", default=True):
                 _forget_join_record(required=True)
                 saved = None
@@ -1521,10 +1542,14 @@ def init(new_fleet: bool = False) -> str | None:
     )
     _forget_join_record()
 
-    if memory_index_answer is True:
-        _refresh_memory_index_best_effort(config)
-    if pointer_line_answer is True:
-        _apply_pointer_line()
+    def finish_memory_setup() -> None:
+        if memory_index_answer is True:
+            _refresh_memory_index_best_effort(config)
+        if pointer_line_answer is True:
+            _apply_pointer_line()
+
+    if new_fleet or pull_join is None:
+        finish_memory_setup()
 
     # Seam 1 — transition detection (init path). Seeds the
     # last_seen_self_version cache so any subsequent upgrade transition is
@@ -1587,6 +1612,9 @@ def init(new_fleet: bool = False) -> str | None:
             "run 'mm pull' again when delivery finishes",
         )
     )
+    if pull_join is not None:
+        # Let the pull install fleet files before touching a synced AGENTS.md.
+        pull_join(passphrase, finish_memory_setup)
     return passphrase
 
 

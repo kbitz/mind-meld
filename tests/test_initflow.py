@@ -73,7 +73,9 @@ def _root() -> None:
     """No-op group callback."""
 
 
-_app.command("init")(initflow.init)
+@_app.command("init")
+def _init(new_fleet: bool = False) -> None:
+    initflow.init(new_fleet=new_fleet)
 
 
 @_app.command("capture")
@@ -2920,20 +2922,80 @@ class TestInitMemorySetup160A:
             "refresh",
             lambda _cfg: memoryindex.RefreshResult("failed"),
         )
-        orig_atomic = fsutil.atomic_write_bytes
+        orig_mkstemp = tempfile.mkstemp
 
-        def fail_claude(path, data: bytes, **kw):
-            if path == claude_md:
+        def fail_claude(*args, **kwargs):
+            if kwargs.get("dir") == claude_md.parent:
                 raise PermissionError(errno.EACCES, "Permission denied")
-            return orig_atomic(path, data, **kw)
+            return orig_mkstemp(*args, **kwargs)
 
-        monkeypatch.setattr(fsutil, "atomic_write_bytes", fail_claude)
+        monkeypatch.setattr(tempfile, "mkstemp", fail_claude)
 
         res, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}y\nn\ny\n{PASSPHRASE}\n")
         assert res.exit_code == 0, text
         assert "mm: notice: memory index enabled, but last refresh failed." in text
         assert "mm: warning: could not update" in text
+        assert claude_md.read_text(encoding="utf-8") == "# Claude\n"
         assert memoryindex.POINTER_LINE in codex_md.read_text(encoding="utf-8")
+
+    def test_join_pulls_codex_instructions_before_appending_and_refreshes_once(
+        self, env, real_memory_setup_gate, tmp_path, monkeypatch
+    ):
+        from mind_meld import cli, memoryindex
+
+        storage, backend = env
+        _populate(backend)
+        home = self._iso_home(tmp_path, monkeypatch)
+        peer_codex = tmp_path / "peer-codex"
+        peer_codex.mkdir()
+        peer_instructions = "# Fleet instructions\n"
+        (peer_codex / "AGENTS.md").write_text(peer_instructions, encoding="utf-8")
+        join_config = config.CONFIG_PATH
+        peer_config = tmp_path / "peer.toml"
+        config.save_config(
+            {
+                "device": {"id": PEER, "name": "Peer B"},
+                "storage": {"path": str(storage)},
+                "sync": {
+                    "sources": [{**config.get_default_source("codex"), "path": str(peer_codex)}],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+                "update": {"auto_install": False},
+            },
+            peer_config,
+        )
+        runner = CliRunner()
+        with monkeypatch.context() as peer:
+            peer.setattr(config, "CONFIG_PATH", peer_config)
+            peer.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+            pushed = runner.invoke(cli.app, ["push"])
+        assert pushed.exit_code == 0, pushed.output
+        assert config.CONFIG_PATH == join_config
+
+        target = home / ".codex" / "AGENTS.md"
+        target.parent.mkdir()
+        monkeypatch.setattr(
+            initflow,
+            "_prompt_sources",
+            lambda: [{**config.get_default_source("codex"), "path": str(target.parent)}],
+        )
+        monkeypatch.setattr(memoryindex, "probe_qmd", lambda: ("ok", "2.8.3"))
+        refreshed = []
+
+        def refresh(cfg):
+            instructions = target.read_text(encoding="utf-8") if target.exists() else None
+            refreshed.append((cfg["memory_index"], instructions))
+            return memoryindex.RefreshResult("ok")
+
+        monkeypatch.setattr(memoryindex, "refresh", refresh)
+        joined = runner.invoke(
+            cli.app, ["init"], input=f"join\n{storage}\nMac B\ny\ny\ny\n{PASSPHRASE}\n"
+        )
+        assert joined.exit_code == 0, joined.output
+        assert target.read_text(encoding="utf-8") == (
+            peer_instructions + memoryindex.POINTER_LINE + "\n"
+        )
+        assert refreshed == [({"enabled": True, "embeddings": True}, peer_instructions)]
 
     def test_pointer_line_writer_regular_idempotent_create_symlink_outside_and_missing_parent(
         self, tmp_path, monkeypatch
@@ -2987,8 +3049,30 @@ class TestInitMemorySetup160A:
         assert initflow._write_pointer_line(missing_parent_target) == "printed"
         assert not missing_parent_target.parent.exists()
 
+    def test_pointer_line_skips_parent_symlinks_and_unresolvable_codex_home(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mind_meld import memoryindex
+
+        home = self._iso_home(tmp_path, monkeypatch)
+        repository = home / "dotfiles"
+        repository.mkdir()
+        claude = repository / "CLAUDE.md"
+        claude.write_text("# Managed by dotfiles\n", encoding="utf-8")
+        (home / ".claude").symlink_to(repository, target_is_directory=True)
+        monkeypatch.setenv("CODEX_HOME", "~mm-test-nonexistent-home-user")
+
+        initflow._apply_pointer_line()
+        out, err = capsys.readouterr()
+        assert str(claude) in " ".join(out.split())
+        assert memoryindex.POINTER_LINE in " ".join(out.split())
+        assert "could not expand CODEX_HOME" in err
+        assert claude.read_text(encoding="utf-8") == "# Managed by dotfiles\n"
+        assert not (home / ".codex").exists()
+
+    @pytest.mark.parametrize("embed_start_fails", [False, True])
     def test_real_refresh_wiring_runs_qmd_collections_update_and_embed(
-        self, env, real_memory_setup_gate, tmp_path, monkeypatch
+        self, env, real_memory_setup_gate, tmp_path, monkeypatch, embed_start_fails
     ):
         import stat as stat_mod
 
@@ -3035,6 +3119,15 @@ exit 0
         )
         qmd_script.chmod(qmd_script.stat().st_mode | stat_mod.S_IXUSR)
         monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+        if embed_start_fails:
+            original_popen = subprocess.Popen
+
+            def fail_embed_start(argv, *args, **kwargs):
+                if argv == [str(qmd_script), "--index", "index", "embed"]:
+                    raise OSError(errno.EAGAIN, "Could not start qmd embed")
+                return original_popen(argv, *args, **kwargs)
+
+            monkeypatch.setattr(subprocess, "Popen", fail_embed_start)
 
         res, text = _run(f"join\n{storage}\nMac B\n{SOURCES_CLAUDE_ONLY}y\ny\nn\n{PASSPHRASE}\n")
         assert res.exit_code == 0, text
@@ -3042,6 +3135,11 @@ exit 0
         assert "--version" in logged
         assert any("collection add" in line and "mm-claude" in line for line in logged), logged
         assert any(line.endswith("update") for line in logged), logged
+        if embed_start_fails:
+            assert "mm: notice: memory index enabled, but last refresh failed." in text
+            assert config.load_config()["memory_index"]["embeddings"] is True
+            assert not any(line.endswith("embed") for line in logged), logged
+            return
         import time
 
         # Wait briefly for detached embed stub to log if scheduled.

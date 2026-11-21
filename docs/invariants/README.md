@@ -330,7 +330,7 @@ mutation, and the static census reviews them:
 | `retention.py:_gc_deleted_copies` | each recovery folder before its `shutil.rmtree` | a preview, an empty listing and an unparseable folder name never guard or remove |
 | `manifest.py:write_anchor` | the `.mind-meld-anchor` path before `atomic_write_bytes` | `read_anchor`, and a root that is not a directory, never guard |
 | `config.py:delete_join_record` | the `join.toml` path (`join_record_path()`) before `unlink(missing_ok=True)` | missing file still calls the guard first (`save_join_record` writes through `save_config`, already guarded) |
-| `initflow.py:_write_pointer_line` | the target instruction file (`~/.claude/CLAUDE.md` or `CODEX_HOME/AGENTS.md`) before `atomic_write_bytes` (creates no parent folders) | symlinks, non-regular files, paths resolving outside `Path.home()`, and missing files whose parent folder does not exist are print-only no-ops and never guard; an already-present line returns without writing |
+| `initflow.py:_write_pointer_line` | the target instruction file (`~/.claude/CLAUDE.md` or `CODEX_HOME/AGENTS.md`) before `atomic_write_bytes` (creates no parent folders) | symlinked files or containing folders, non-regular files, paths resolving outside `Path.home()`, and missing files whose parent folder does not exist are print-only and never guard; an already-present line returns without writing |
 
 `fsutil.fsync_file` opens read-only with `O_NOFOLLOW | O_NONBLOCK`, requires a
 regular descriptor and mutates nothing.

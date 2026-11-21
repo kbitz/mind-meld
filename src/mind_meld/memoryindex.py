@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -637,7 +638,7 @@ def install_hint() -> str:
     if _find_on_abs_path("bun") is not None:
         return "bun install -g @tobilu/qmd"
     prefix = Path.home() / ".local"
-    return f"npm install -g --prefix {prefix} @tobilu/qmd"
+    return f"npm install -g --prefix {shlex.quote(str(prefix))} @tobilu/qmd"
 
 
 def remove_mm_collections() -> RemoveResult:

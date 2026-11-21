@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -104,6 +105,10 @@ exit 2
             directory / "bun",
             "bun",
             f"""\
+if [ "$#" -eq 3 ] && [ "$1 $2 $3" = "pm bin -g" ]; then
+  printf '%s\\n' "{dest}"
+  exit 0
+fi
 if [ "${{1:-}}" = "install" ] && [ "${{2:-}}" = "-g" ] && [ "${{3:-}}" = "@tobilu/qmd" ]; then
   if [ "${{MM_TEST_BUN_FAIL:-0}}" = "1" ]; then
     exit 1
@@ -1928,20 +1933,48 @@ class TestBootstrapQmd:
         assert ["bun", "install", "-g", "@tobilu/qmd"] in harness.calls()
         assert "bootstrap: installed qmd." in proc.stdout
 
-    def test_npm_install_off_path_names_local_bin(
+    @pytest.mark.parametrize("runtime", ["bun", "npm"])
+    def test_off_path_qmd_reports_bin_and_does_not_reinstall(
+        self, harness: BootstrapHarness, tmp_path: Path, runtime: str
+    ) -> None:
+        self._ready_arch(harness)
+        other_home = tmp_path / "other-home"
+        other_home.mkdir()
+        if runtime == "bun":
+            local_bin = other_home / "custom bun bin"
+            local_bin.mkdir()
+            harness.install_bun(harness.sysbin, target_dir=local_bin)
+        else:
+            local_bin = other_home / ".local" / "bin"
+            harness.install_node(harness.sysbin, "22.14.0")
+            harness.install_npm(harness.sysbin)
+
+        for _ in range(2):
+            proc = harness.run(extra_env={"HOME": str(other_home)})
+            assert proc.returncode == 0, proc.stdout
+            assert (local_bin / "qmd").is_file()
+            assert str(local_bin) in proc.stdout
+            assert "not on PATH" in proc.stdout
+            assert "mm init" in _last_line(proc.stdout)
+            assert sum(row[:2] == [runtime, "install"] for row in harness.calls()) == 1
+
+    def test_npm_failure_hint_keeps_the_quoted_home_prefix_as_one_arg(
         self, harness: BootstrapHarness, tmp_path: Path
     ) -> None:
         self._ready_arch(harness)
-        harness.install_node(harness.sysbin, "22.14.0")
+        harness.install_node(harness.sysbin)
         harness.install_npm(harness.sysbin)
-        other_home = tmp_path / "other-home"
+        other_home = tmp_path / "owner's home"
         other_home.mkdir()
 
-        proc = harness.run(extra_env={"HOME": str(other_home)})
+        proc = harness.run(extra_env={"HOME": str(other_home), "MM_TEST_NPM_FAIL": "1"})
         assert proc.returncode == 0, proc.stdout
-        local_bin = other_home / ".local" / "bin"
-        assert (local_bin / "qmd").is_file()
-        assert str(local_bin) in proc.stdout
-        assert "not on PATH" in proc.stdout
-        assert "bootstrap: installed qmd." not in proc.stdout
-        assert "mm init" in _last_line(proc.stdout)
+        line = next(line for line in proc.stdout.splitlines() if "could not install qmd;" in line)
+        assert shlex.split(line.partition("run: ")[2]) == [
+            "npm",
+            "install",
+            "-g",
+            "--prefix",
+            str(other_home / ".local"),
+            "@tobilu/qmd",
+        ]

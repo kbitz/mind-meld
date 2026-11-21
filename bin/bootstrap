@@ -48,7 +48,7 @@ read_node_major() {
   if ! command -v node >/dev/null 2>&1; then
     return 1
   fi
-  node_out=$(node --version 2>&1 || true)
+  node_out=$(node --version 2>&1) || return 1
   node_ver=$(printf '%s\n' "$node_out" | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p' | sed -n '1p')
   [ -n "$node_ver" ]
 }
@@ -230,6 +230,15 @@ ensure_syncthing_at_login() {
   fi
 }
 
+qmd_bin_ready() {
+  [ -x "$1/qmd" ] && "$1/qmd" --version >/dev/null 2>&1 || return 1
+  if command -v qmd >/dev/null 2>&1; then
+    say "qmd in $1 works; put $1 first on PATH to use it."
+  else
+    say "qmd in $1 works but is not on PATH; add $1 to PATH and open a new terminal."
+  fi
+}
+
 ensure_qmd() {
   if command -v qmd >/dev/null 2>&1 && qmd --version >/dev/null 2>&1; then
     say "qmd is already installed."
@@ -237,11 +246,28 @@ ensure_qmd() {
   fi
 
   qmd_prefix="$HOME/.local"
-  qmd_branch="npm"
-  qmd_manual_cmd="npm install -g --prefix $qmd_prefix @tobilu/qmd"
+  qmd_bin="$qmd_prefix/bin"
+  if qmd_bin_ready "$qmd_bin"; then
+    return 0
+  fi
+  case "$qmd_prefix" in
+    *[!a-zA-Z0-9_./-]*)
+      qmd_quoted_prefix="'$(printf '%s' "$qmd_prefix" | sed "s/'/'\\\\''/g")'"
+      ;;
+    *) qmd_quoted_prefix="$qmd_prefix" ;;
+  esac
+  qmd_manual_cmd="npm install -g --prefix $qmd_quoted_prefix @tobilu/qmd"
 
   if command -v bun >/dev/null 2>&1; then
-    qmd_branch="bun"
+    # Bun permits a custom global binary directory. This query installs nothing.
+    qmd_bun_bin=$(bun pm bin -g 2>/dev/null) || qmd_bun_bin=""
+    case "$qmd_bun_bin" in
+      /*) qmd_bin="$qmd_bun_bin" ;;
+      *) qmd_bin="${BUN_INSTALL_BIN:-${BUN_INSTALL:-$HOME/.bun}/bin}" ;;
+    esac
+    if qmd_bin_ready "$qmd_bin"; then
+      return 0
+    fi
     qmd_manual_cmd="bun install -g @tobilu/qmd"
     say "installing qmd with bun"
     if ! bun install -g @tobilu/qmd; then
@@ -277,7 +303,7 @@ ensure_qmd() {
     fi
     hash -r 2>/dev/null || true
     if ! node_version_ok || ! command -v npm >/dev/null 2>&1; then
-      say "Node 22+ and npm are still not ready for qmd; to install qmd yourself, run: $qmd_manual_cmd"
+      say "put Node 22+ and npm on PATH, then run: $qmd_manual_cmd"
       return 0
     fi
     say "installing qmd with npm"
@@ -292,8 +318,7 @@ ensure_qmd() {
     say "installed qmd."
     return 0
   fi
-  if [ "$qmd_branch" = "npm" ] && [ -x "$qmd_prefix/bin/qmd" ] && "$qmd_prefix/bin/qmd" --version >/dev/null 2>&1; then
-    say "installed qmd in $qmd_prefix/bin, which is not on PATH; add $qmd_prefix/bin to PATH and open a new terminal."
+  if qmd_bin_ready "$qmd_bin"; then
     return 0
   fi
   say "qmd could not be verified after install; to install it yourself, run: $qmd_manual_cmd"
