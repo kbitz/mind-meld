@@ -1140,7 +1140,7 @@ def init(new_fleet: bool = False) -> str | None:
     else:
         storage_path = typer.prompt("Storage folder path", default=DEFAULT_STORAGE_PATH)
     full_path = Path(storage_path).expanduser()
-    if not new_fleet and not full_path.is_absolute():
+    if not full_path.is_absolute():
         full_path = full_path.absolute()
         storage_path = str(full_path)
     console.print(f"  Storage: {safe_str(full_path)}")

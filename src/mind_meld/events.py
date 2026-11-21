@@ -157,8 +157,10 @@ WALK_SKIP_RAISED = "raised"
 """Typed ``skipped[].reason`` values from ``walk_git_projects``.
 
 Never interpolate raw git stderr into these: ``git log`` puts branch
-names and absolute paths on stderr, and the skip list is written onto a
-synced row. ``no_commits`` is the empty-``git init`` case (rc=128 +
+names and absolute paths on stderr, and the skip reasons reach the
+synced row (``skipped[].path`` and ``projects[].local_path`` stay in
+memory only and are stripped by ``wire_row`` at write time).
+``no_commits`` is the empty-``git init`` case (rc=128 +
 "does not have any commits yet") — it fires on every push forever, so
 it is benign and must not degrade ``mm status``."""
 
@@ -325,11 +327,13 @@ GitCommit = TypedDict(
 
 class GitSnapshotProject(TypedDict, total=False):
     remote: str
+    # In-memory only for local cursor accounting; stripped by wire_row before write.
     local_path: str
     commits: list[GitCommit]
 
 
 class GitSnapshotSkip(TypedDict, total=False):
+    # In-memory only for local cursor accounting and dry-run display; stripped by wire_row.
     path: str
     reason: str
 
@@ -553,6 +557,9 @@ canonicalize_remote_url = projectid.canonicalize_remote_url
 # ---------------------------------------------------------------------------
 
 
+MAX_UNCOMMITTED_PUSH_ROOTS = 8
+
+
 def _default_git_capture_cache() -> dict:
     return {
         "version": 1,
@@ -565,10 +572,33 @@ def _default_git_capture_cache() -> dict:
         "repo_cursors": {},
         # path -> common git dir, so a removed checkout still maps to its store.
         "repo_cursor_stores": {},
+        # Track 155A: local journal of push_ts -> {"completed": [...], "failed": [...]}
+        # written before appending pathless wire rows; read by reconcile_uncommitted_push_cursors.
+        "uncommitted_push_roots": {},
         "incomplete_streak": 0,
         # Track 102A: per host-record prober unit index (local only, never on the wire).
         "probe_index": {},
     }
+
+
+def _normalize_uncommitted_push_roots(raw: object) -> dict[str, dict[str, list[str]]]:
+    """Keep only aware-ts entries whose value has string lists ``completed`` and ``failed``."""
+    if not isinstance(raw, dict):
+        return {}
+    clean: dict[str, dict[str, list[str]]] = {}
+    for key, entry in raw.items():
+        if not isinstance(key, str) or parse_aware_ts(key) is None or not isinstance(entry, dict):
+            continue
+        completed = entry.get("completed")
+        failed = entry.get("failed")
+        if (
+            isinstance(completed, list)
+            and all(isinstance(p, str) for p in completed)
+            and isinstance(failed, list)
+            and all(isinstance(p, str) for p in failed)
+        ):
+            clean[key] = {"completed": list(completed), "failed": list(failed)}
+    return clean
 
 
 def _normalize_probe_index(index: object) -> dict:
@@ -640,6 +670,9 @@ def _normalize_git_capture_cache(cache: dict) -> None:
         cache["pending_refresh_since"] = None
     if type(cache.get("incomplete_streak")) is not int or cache["incomplete_streak"] < 0:
         cache["incomplete_streak"] = 0
+    cache["uncommitted_push_roots"] = _normalize_uncommitted_push_roots(
+        cache.get("uncommitted_push_roots")
+    )
     cache["probe_index"] = _normalize_probe_index(cache.get("probe_index"))
 
 
@@ -3227,21 +3260,8 @@ def _prune_invalid_repo_cursors(cursors: dict, stores: Mapping[str, object] | No
             stores.pop(root, None)
 
 
-def _apply_repo_cursors_to_cache(
-    cache: dict,
-    git_rows: Sequence[dict],
-    *,
-    since: datetime,
-    cursor_ts: datetime,
-    recorded: datetime | None,
-    complete: bool,
-    reconciling: bool = False,
-    prune_invalid_roots: bool = True,
-) -> bool:
-    previous = parse_aware_ts(cache.get("last_committed_push_ts"))
-    if recorded is not None and previous is not None and recorded <= previous:
-        return False
-    stamp = max(cursor_ts, recorded) if recorded is not None else cursor_ts
+def _repo_outcomes(git_rows: Sequence[dict]) -> tuple[set[str], set[str]]:
+    """Extract ``(completed, failed)`` local repository root sets from in-memory git rows."""
     completed: set[str] = set()
     failed: set[str] = set()
     for row in git_rows:
@@ -3255,6 +3275,66 @@ def _apply_repo_cursors_to_cache(
                 completed.add(skipped["path"])
             else:
                 failed.add(skipped["path"])
+    return completed, failed
+
+
+def record_uncommitted_push_roots(
+    git_rows: Sequence[dict],
+    *,
+    push_ts: str,
+) -> None:
+    """Journal repository walk outcomes locally before appending pathless wire rows."""
+    if parse_aware_ts(push_ts) is None:
+        return
+    completed, failed = _repo_outcomes(git_rows)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=CURSOR_SCAN_DAYS)
+    try:
+        with lockedjson.locked_json_rmw(mm_config.GIT_CAPTURE_CACHE_PATH) as state:
+            cache = state.data
+            _normalize_git_capture_cache(cache)
+            committed = parse_aware_ts(cache.get("last_committed_push_ts"))
+            uncommitted: dict[str, dict[str, list[str]]] = cache["uncommitted_push_roots"]
+            uncommitted[push_ts] = {
+                "completed": sorted(completed),
+                "failed": sorted(failed),
+            }
+            kept: list[tuple[datetime, str, dict[str, list[str]]]] = []
+            for key, entry in uncommitted.items():
+                ts = parse_aware_ts(key)
+                if ts is None or ts < cutoff:
+                    continue
+                if committed is not None and ts <= committed:
+                    continue
+                kept.append((ts, key, entry))
+            kept.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            cache["uncommitted_push_roots"] = {
+                key: entry for _ts, key, entry in kept[:MAX_UNCOMMITTED_PUSH_ROOTS]
+            }
+    except OSError:
+        pass
+
+
+def _apply_repo_cursors_to_cache(
+    cache: dict,
+    git_rows: Sequence[dict],
+    *,
+    since: datetime,
+    cursor_ts: datetime,
+    recorded: datetime | None,
+    complete: bool,
+    reconciling: bool = False,
+    prune_invalid_roots: bool = True,
+    outcomes: tuple[set[str], set[str]] | None = None,
+) -> bool:
+    previous = parse_aware_ts(cache.get("last_committed_push_ts"))
+    if recorded is not None and previous is not None and recorded <= previous:
+        return False
+    stamp = max(cursor_ts, recorded) if recorded is not None else cursor_ts
+    if outcomes is None:
+        completed, failed = _repo_outcomes(git_rows)
+    else:
+        completed = {p for p in outcomes[0] if isinstance(p, str)}
+        failed = {p for p in outcomes[1] if isinstance(p, str)}
     cursors = cache["repo_cursors"]
     stores = _remember_cursor_stores(cache)
     now = datetime.now(timezone.utc)
@@ -3303,6 +3383,14 @@ def _apply_repo_cursors_to_cache(
         cache["incomplete_streak"] = cache["incomplete_streak"] + 1
     if recorded is not None:
         cache["last_committed_push_ts"] = recorded.isoformat()
+        uncommitted = cache.get("uncommitted_push_roots")
+        if isinstance(uncommitted, dict):
+            for key in [
+                k
+                for k in uncommitted
+                if (parsed := parse_aware_ts(k)) is None or parsed <= recorded
+            ]:
+                uncommitted.pop(key, None)
     return True
 
 
@@ -3377,11 +3465,23 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
             cache = state.data
             _normalize_git_capture_cache(cache)
             mutated = False
+            uncommitted = cache.get("uncommitted_push_roots")
+            if not isinstance(uncommitted, dict):
+                uncommitted = {}
             for ts, row, git_rows in ordered:
                 cap = row.get("git_capture")
                 since = parse_aware_ts(cap.get("since")) if isinstance(cap, dict) else None
                 if since is None:
                     continue
+                raw_ts = row.get("ts")
+                journal_entry = uncommitted.get(raw_ts) if isinstance(raw_ts, str) else None
+                outcomes = (
+                    (set(journal_entry["completed"]), set(journal_entry["failed"]))
+                    if isinstance(journal_entry, dict)
+                    and isinstance(journal_entry.get("completed"), list)
+                    and isinstance(journal_entry.get("failed"), list)
+                    else None
+                )
                 aborts, errors = walk_skip_counts(
                     [skip for git_row in git_rows for skip in git_row.get("skipped") or []]
                 )
@@ -3394,6 +3494,7 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
                     complete=capture_advances_cursor(cap) and aborts == 0 and errors == 0,
                     reconciling=True,
                     prune_invalid_roots=False,
+                    outcomes=outcomes,
                 ):
                     mutated = True
             if mutated:
@@ -3899,6 +4000,31 @@ class EventAppendSkipped:
     path: Path
 
 
+def wire_row(row: dict) -> dict:
+    """Return the wire projection of an event row without mutating ``row``.
+
+    For ``git-snapshot`` rows, strips ``local_path`` from ``projects`` entries
+    and ``path`` from ``skipped`` entries so local filesystem paths never reach
+    synced ``mm-events`` files. Other row types are returned unchanged.
+    """
+    if not isinstance(row, dict) or row.get("type") != "git-snapshot":
+        return row
+    out = dict(row)
+    projects = row.get("projects")
+    if isinstance(projects, list):
+        out["projects"] = [
+            {k: v for k, v in proj.items() if k != "local_path"} if isinstance(proj, dict) else proj
+            for proj in projects
+        ]
+    skipped = row.get("skipped")
+    if isinstance(skipped, list):
+        out["skipped"] = [
+            {k: v for k, v in entry.items() if k != "path"} if isinstance(entry, dict) else entry
+            for entry in skipped
+        ]
+    return out
+
+
 def write_push_event(
     events_dir: Path,
     device_id: str,
@@ -3908,6 +4034,9 @@ def write_push_event(
     max_file_size: int = DEFAULT_MAX_FILE_SIZE,
 ) -> Path | EventAppendSkipped | None:
     """Append `events` to a per-device JSONL no earlier than any row's UTC date.
+
+    ``git-snapshot`` rows are serialized in wire form via ``wire_row``
+    (``projects[].local_path`` and ``skipped[].path`` omitted).
 
     Order invariant (CT-4): when an ``mm-push`` row is present, it MUST
     be last so a partial write cannot advance the cursor. Host-only attended
@@ -3941,7 +4070,7 @@ def write_push_event(
                 pass  # Invalid UTC timestamps are rejected by consumers.
     safe_device = _safe_device_filename(device_id)
     path = events_dir / f"{safe_device}-{today.isoformat()}.jsonl"
-    lines = [json.dumps(e, sort_keys=True).encode("utf-8") for e in events]
+    lines = [json.dumps(wire_row(e), sort_keys=True).encode("utf-8") for e in events]
     try:
         fsutil.flock_append_jsonl(path, lines, mode=0o600, strict=strict, max_bytes=max_file_size)
     except fsutil.AppendSizeLimit:

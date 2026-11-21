@@ -175,7 +175,8 @@ def recapture(
             since_day = prepared.since.date().isoformat()
             until_day = until.date().isoformat()
             row_bytes = sum(
-                len(json.dumps(row, sort_keys=True).encode("utf-8")) for row in prepared.git_rows
+                len(json.dumps(events.wire_row(row), sort_keys=True).encode("utf-8"))
+                for row in prepared.git_rows
             )
 
             if dry_run:

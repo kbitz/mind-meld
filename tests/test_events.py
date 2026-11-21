@@ -3279,6 +3279,17 @@ def test_three_budget_limited_pushes_finish_index_git_and_identity(tmp_path, mon
     monkeypatch.setattr(events, "_read_cwd_from_latest_jsonl", one_directory)
     monkeypatch.setattr(identity, "_do_full_gather", lambda **kw: ["test@example.com"])
     monkeypatch.setattr(events_tail, "_decide_token_walk_policy", lambda *a, **kw: False)
+    captured: set[str] = set()
+    real_write_push_event = events.write_push_event
+
+    def record_and_write(events_dir, device_id, rows, **kwargs):
+        for event in rows:
+            for project in event.get("projects", []):
+                if project.get("commits"):
+                    captured.add(project["local_path"])
+        return real_write_push_event(events_dir, device_id, rows, **kwargs)
+
+    monkeypatch.setattr(events, "write_push_event", record_and_write)
     for push in range(3):
         clock[0] = 0.0
         events_tail._run_events_tail(
@@ -3295,13 +3306,14 @@ def test_three_budget_limited_pushes_finish_index_git_and_identity(tmp_path, mon
     assert set(cache["repo_cursors"]) == {str(root) for root in roots}
     assert cache["incomplete_streak"] == 0
     assert events.count_pending_repositories(roots, datetime.fromisoformat(row["ts"])) == 0
-    captured = set()
+    assert captured == {str(root) for root in roots}
+    written_commits = 0
     for file in (tmp_path / "activity" / "events").glob("*.jsonl"):
         for event in map(json.loads, file.read_text().splitlines()):
             for project in event.get("projects", []):
-                if project.get("commits"):
-                    captured.add(project["local_path"])
-    assert captured == {str(root) for root in roots}
+                assert "local_path" not in project
+                written_commits += len(project.get("commits", []))
+    assert written_commits >= len(roots)
 
 
 @pytest.mark.parametrize("failure", ["skipped", "error", "unconfirmed"])
@@ -4202,7 +4214,8 @@ def test_repo_slower_than_old_cap_is_captured_by_recapture_and_skipped_by_push(
             "git-snapshot"
         ]
         assert snapshot["projects"] == []
-        assert [Path(s["path"]).resolve() for s in snapshot["skipped"]] == [repo.resolve()]
+        assert len(snapshot["skipped"]) == 1
+        assert "path" not in snapshot["skipped"][0]
         # One repository hits the walk deadline first; a stalled host can land on the timeout.
         assert snapshot["skipped"][0]["reason"] in {
             events.WALK_SKIP_BUDGET_ABORT,
@@ -4649,3 +4662,279 @@ class TestGitPendingLeftAndProgressCarry131A:
             for r in git_and_push_bad[-2:]:
                 assert "pending_left" not in r["git_capture"]
         assert forbidden_count_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Track 155A — strip repository paths from wire git-snapshot rows and journal
+# uncommitted push roots locally for reconciliation.
+# ---------------------------------------------------------------------------
+
+
+def test_write_push_event_strips_local_path_and_skipped_path_from_wire_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    skipped_root = tmp_path / "repo-skipped"
+    for repo in (repo_a, repo_b, skipped_root):
+        _init_git_repo(repo)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                f"https://github.com/user/{repo.name}.git",
+            ],
+            check=True,
+        )
+    _seed_commit(repo_a)
+    _seed_commit(repo_b)
+
+    real_walk_one = events._walk_one_repo
+
+    def walk_with_one_skip(
+        root: Path, since_iso: str, timeout_ms: int, *extra: object
+    ) -> tuple[dict | None, str | None]:
+        if root == skipped_root:
+            return None, events.WALK_SKIP_TIMEOUT
+        return real_walk_one(root, since_iso, timeout_ms, *extra)
+
+    monkeypatch.setattr(events, "_walk_one_repo", walk_with_one_skip)
+
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    git_rows = events.walk_git_projects(
+        [repo_a, repo_b, skipped_root],
+        since=since,
+        total_budget_ms=5000,
+    )
+    assert len(git_rows) == 1
+    in_mem_row = git_rows[0]
+    assert [p["local_path"] for p in in_mem_row["projects"]] == sorted([str(repo_a), str(repo_b)])
+    assert in_mem_row["skipped"] == [
+        {"path": str(skipped_root), "reason": events.WALK_SKIP_TIMEOUT}
+    ]
+
+    events_dir = tmp_path / "events"
+    push_row = events.make_mm_push_event(device="dev-a", mm_version="1.12.73")
+    written_path = events.write_push_event(events_dir, "dev-a", [*git_rows, push_row], strict=True)
+    assert isinstance(written_path, Path)
+
+    # Caller's in-memory rows were not mutated.
+    assert [p["local_path"] for p in in_mem_row["projects"]] == sorted([str(repo_a), str(repo_b)])
+    assert in_mem_row["skipped"] == [
+        {"path": str(skipped_root), "reason": events.WALK_SKIP_TIMEOUT}
+    ]
+
+    # Written rows hold no local_path and no skipped[].path; remotes, commits and reasons survive.
+    disk_rows = [
+        json.loads(line)
+        for line in written_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    disk_git = [r for r in disk_rows if r["type"] == "git-snapshot"]
+    assert len(disk_git) == 1
+    for proj in disk_git[0]["projects"]:
+        assert "local_path" not in proj
+        assert proj["remote"] in ("github.com/user/repo-a", "github.com/user/repo-b")
+        assert len(proj["commits"]) == 1
+    assert disk_git[0]["skipped"] == [{"reason": events.WALK_SKIP_TIMEOUT}]
+
+
+def test_events_tail_journals_and_clears_uncommitted_push_roots_while_stripping_wire_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mind_meld import events_tail
+
+    events_dir = tmp_path / "mm-events" / "events"
+    events_dir.mkdir(parents=True)
+    sources = [
+        {
+            "name": "mm-events",
+            "type": "generic",
+            "path": str(tmp_path / "mm-events"),
+            "include_dirs": ["events"],
+        }
+    ]
+    completed = tmp_path / "repo-ok"
+    timed_out = tmp_path / "repo-timeout"
+    _init_git_repo(completed)
+    _init_git_repo(timed_out)
+
+    monkeypatch.setattr(
+        events,
+        "discover_git_roots",
+        lambda _cfg, **_kw: events.GitRootDiscovery(
+            (completed, timed_out), (), False, (), (), (), ("claude",)
+        ),
+    )
+    monkeypatch.setattr(
+        events,
+        "walk_git_projects",
+        lambda roots, since, total_budget_ms, **_kw: [
+            {
+                "v": 2,
+                "type": "git-snapshot",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "device": "dev-a",
+                "projects": [
+                    {
+                        "remote": "github.com/user/repo-ok",
+                        "local_path": str(completed),
+                        "commits": [],
+                    }
+                ],
+                "skipped": [{"path": str(timed_out), "reason": events.WALK_SKIP_TIMEOUT}],
+            }
+        ],
+    )
+
+    events_tail._run_events_tail(
+        {}, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
+    )
+
+    disk_rows = [
+        json.loads(line)
+        for p in sorted(events_dir.glob("dev-a-*.jsonl"))
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    git_rows = [r for r in disk_rows if r["type"] == "git-snapshot"]
+    push_rows = [r for r in disk_rows if r["type"] == "mm-push"]
+    assert len(git_rows) == 1
+    assert len(push_rows) == 1
+    assert git_rows[0]["projects"] == [{"remote": "github.com/user/repo-ok", "commits": []}]
+    assert git_rows[0]["skipped"] == [{"reason": events.WALK_SKIP_TIMEOUT}]
+
+    push_row = push_rows[0]
+    cache = events.read_git_capture_cache()
+    assert cache["repo_cursors"][str(completed)] == push_row["ts"]
+    assert cache["repo_cursors"][str(timed_out)] == push_row["git_capture"]["since"]
+    assert cache["uncommitted_push_roots"] == {}
+
+
+def test_interrupted_events_tail_reconciles_cursors_from_local_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mind_meld import config as mm_config
+    from mind_meld import events_tail
+
+    events_dir = tmp_path / "mm-events" / "events"
+    events_dir.mkdir(parents=True)
+    sources = [
+        {
+            "name": "mm-events",
+            "type": "generic",
+            "path": str(tmp_path / "mm-events"),
+            "include_dirs": ["events"],
+        }
+    ]
+    completed = tmp_path / "repo-ok"
+    timed_out = tmp_path / "repo-timeout"
+    _init_git_repo(completed)
+    _init_git_repo(timed_out)
+
+    monkeypatch.setattr(
+        events,
+        "discover_git_roots",
+        lambda _cfg, **_kw: events.GitRootDiscovery(
+            (completed, timed_out), (), False, (), (), (), ("claude",)
+        ),
+    )
+    monkeypatch.setattr(
+        events,
+        "walk_git_projects",
+        lambda roots, since, total_budget_ms, **_kw: [
+            {
+                "v": 2,
+                "type": "git-snapshot",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "device": "dev-a",
+                "projects": [
+                    {
+                        "remote": "github.com/user/repo-ok",
+                        "local_path": str(completed),
+                        "commits": [],
+                    }
+                ],
+                "skipped": [{"path": str(timed_out), "reason": events.WALK_SKIP_TIMEOUT}],
+            }
+        ],
+    )
+    monkeypatch.setattr(events, "commit_repo_cursors", lambda *a, **kw: None)
+
+    events_tail._run_events_tail(
+        {}, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
+    )
+
+    push_row = events.latest_mm_push_row(events_dir, "dev-a")
+    assert push_row is not None
+    before_reconcile = events.read_git_capture_cache()
+    assert before_reconcile["repo_cursors"] == {}
+    assert before_reconcile["uncommitted_push_roots"] == {
+        push_row["ts"]: {
+            "completed": [str(completed)],
+            "failed": [str(timed_out)],
+        }
+    }
+
+    events.reconcile_uncommitted_push_cursors(events_dir, "dev-a")
+    cache = events.read_git_capture_cache()
+    assert cache["repo_cursors"] == {
+        str(completed): push_row["ts"],
+        str(timed_out): push_row["git_capture"]["since"],
+    }
+    assert cache["last_committed_push_ts"] == push_row["ts"]
+    assert cache["uncommitted_push_roots"] == {}
+
+    cache_bytes = mm_config.GIT_CAPTURE_CACHE_PATH.read_bytes()
+    events.reconcile_uncommitted_push_cursors(events_dir, "dev-a")
+    assert mm_config.GIT_CAPTURE_CACHE_PATH.read_bytes() == cache_bytes
+
+
+def test_reconcile_uncommitted_push_cursors_without_journal_or_wire_paths_commits_batch_cleanly(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "existing-repo"
+    _init_git_repo(repo)
+    existing_cursor = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    events.commit_repo_cursors(
+        [{"projects": [{"local_path": str(repo)}], "skipped": []}],
+        since=datetime.now(timezone.utc) - timedelta(days=7),
+        cursor_ts=datetime.fromisoformat(existing_cursor),
+        recorded_ts=existing_cursor,
+        complete=True,
+    )
+
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    ts = datetime.now(timezone.utc)
+    events_dir = tmp_path / "events"
+    cap = events.make_git_capture(
+        since=since, discovery="complete", walk_budget_aborts=1, walk_errors=0
+    )
+    rows = [
+        {
+            "v": 2,
+            "type": "git-snapshot",
+            "ts": ts.isoformat(),
+            "device": "dev-a",
+            "projects": [{"remote": "github.com/user/repo", "commits": []}],
+            "skipped": [{"reason": events.WALK_SKIP_BUDGET_ABORT}],
+        },
+        {
+            "v": 2,
+            "type": "mm-push",
+            "ts": ts.isoformat(),
+            "device": "dev-a",
+            "git_capture": cap,
+        },
+    ]
+    events.write_push_event(events_dir, "dev-a", rows)
+
+    events.reconcile_uncommitted_push_cursors(events_dir, "dev-a")
+    cache = events.read_git_capture_cache()
+    assert cache["last_committed_push_ts"] == ts.isoformat()
+    assert cache["repo_cursors"] == {str(repo): existing_cursor}
+    assert cache["uncommitted_push_roots"] == {}

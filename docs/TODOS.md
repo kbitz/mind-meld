@@ -44,6 +44,91 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/events.py|src/mind_meld/projectid.py] Base issue: Local Git origins can disclose directory names
+
+- **Base issue:** Present at `cf5edc0`. The Git activity walker canonicalizes an absolute local `origin` into a remote label that still contains its directory components.
+- **Evidence:** The base and reviewed candidate use the same canonicalizer for `projects[].remote`. Track 155A’s projection removes the two explicit checkout-path fields and preserves the remote label.
+- **Context:** Track 155A review at `1f36308`. Changing remote labels needs a separate decision about how fleet reports identify repositories.
+- **Revisit:** When a machine uses a local Git origin or the next Track changes usage metadata.
+
+### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: Resolve handles a pre-prompt stat failure
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** A failed identity read before the prompt should use the existing read-failure path and preserve both files. Existing cases inject read errors after successful stats.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/resolveflow.py:819`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: Resolve continues after a stale pair
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** A stale pair should count as failed while the following pair can resolve. The current stale-pair cases each use one conflict.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/resolveflow.py:1053`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+### [review:files=src/mind_meld/events.py|tests/test_events.py] Test gap: Git append size ceiling uses projected bytes
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Exercise a batch that fits the ceiling after the checkout path fields are removed. Existing size-boundary tests use a push marker.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events.py:4073`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+### [review:files=src/mind_meld/events_tail.py|tests/test_events.py] Test gap: Push journals roots before the append
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Check that the matching local journal entry exists at append time and that an entry without a terminal row cannot replay. The existing interruption fixture interrupts cursor commit.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events_tail.py:1939`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+### [review:files=src/mind_meld/events.py|tests/test_events.py] Test gap: Push appends when the journal cannot be written
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Inject an OSError in the added local journal write and verify the event append remains usable. Existing fault cases target the event writer.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events.py:3313`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+### [review:files=src/mind_meld/events.py|tests/test_events.py] Test gap: Git capture journal rejects malformed entries
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Use a local cache with valid and malformed entries and verify the valid outcomes survive normalization.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events.py:584`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+### [review:files=src/mind_meld/events.py|tests/test_events.py] Test gap: Git capture journal prunes by age and commit order
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Exercise the age cutoff, eight-entry cap, and preservation of newer entries after committing an older batch. Existing tests clear a single batch.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events.py:3301`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+### [review:files=src/mind_meld/events.py|tests/test_events_budget_scope.py] Test gap: Legacy git rows restore cursors without a journal
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Replay a retained older own-device batch that still carries path fields, then verify completed and skipped roots. The two no-journal paths now need distinct fixtures.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events.py:3476`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+### [review:files=src/mind_meld/events_tail.py|tests/test_recapture.py] Test gap: Recapture refuses a different recorded snapshot
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Place a different persisted git snapshot in the event file and verify it cannot authorize a cursor commit for the current batch. Existing coverage uses an empty file or an exact match.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/events_tail.py:2271`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+### [review:files=src/mind_meld/recaptureflow.py|tests/test_recapture.py] Test gap: Recapture reports the projected payload size
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Compare the reported estimate with the encoded pathless JSON payload. Existing tests assert preview labels and cursor state.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/recaptureflow.py:177`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+### [review:files=src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: New fleet init preserves a tilde storage setting
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Assert the saved form retains its tilde and still expands at load time. The new-fleet relative-path fixture checks a bare relative answer.
+- **Evidence:** Coverage audit of `1f36308` at `src/mind_meld/initflow.py:1142`. The six approved criteria have existing assertions.
+- **Revisit:** On the next Track that touches the named files.
+
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-21 (O9 rewritten as one local qmd index, moved before 2.0; four bugs carded)

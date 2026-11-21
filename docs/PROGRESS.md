@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.74 | 2026-11-20 | Mind Meld leaves conflicted files untouched when one changes after the prompt, omits repository folders from new synced event rows, and saves a new fleet's storage path as an absolute path. |
 | 1.12.73 | 2026-11-20 | Mind Meld now asks whether you are starting or joining a fleet, then lets you approve and retire Syncthing devices while managed machines keep their fleet names. |
 | 1.12.72 | 2026-11-19 | Mind Meld now names a managed Syncthing device during setup and only asks you to approve join requests that no fleet machine vouches for. |
 | 1.12.71 | 2026-11-19 | Mind Meld now publishes encrypted Syncthing device IDs, pairs vouched pending peers on managed machines during sync, and reports how that pairing went. |

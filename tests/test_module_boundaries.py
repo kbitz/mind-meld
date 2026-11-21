@@ -397,13 +397,21 @@ def test_mtime_primitives_are_shared_not_copied() -> None:
     and the resolver's (l)ocal / (p)romote branches) in different modules, so
     pin that they still share one function object.
     """
-    from mind_meld import conflictmtime, pullflow
+    from mind_meld import conflictmtime, pullflow, resolveflow
 
     assert pullflow._stat_mtime_btime is conflictmtime._stat_mtime_btime
     assert pullflow._bump_canonical_mtime_post_resolve is (
         conflictmtime._bump_canonical_mtime_post_resolve
     )
     assert pullflow._restore_mtime_best_effort is conflictmtime._restore_mtime_best_effort
+    assert pullflow.conflictmtime._unchanged_since is conflictmtime._unchanged_since
+    assert resolveflow.conflictmtime._unchanged_since is conflictmtime._unchanged_since
+    others = [
+        str(p.relative_to(SRC))
+        for p in SRC.rglob("*.py")
+        if p.name != "conflictmtime.py" and "def _unchanged_since" in p.read_text(encoding="utf-8")
+    ]
+    assert others == [], f"_unchanged_since defined outside conflictmtime.py: {others}"
 
 
 def test_future_clamp_constant_has_one_owner() -> None:
