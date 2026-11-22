@@ -796,7 +796,7 @@ def _enable_index() -> None:
         detail = f"found {ver}" if ver is not None else ver_status
         core._error(
             f"could not verify qmd {MIN_QMD_VERSION}+ ({detail}).",
-            fix="install qmd (2.8.3+) and re-run mm memory-index on",
+            fix=install_hint(),
         )
 
     try:

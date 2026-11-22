@@ -5,10 +5,12 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import textwrap
+import threading
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,6 +25,7 @@ from mind_meld import (
     core,
     crypto,
     devices,
+    lockedjson,
     memoryindex,
     meshflow,
     pullflow,
@@ -148,6 +151,9 @@ _QMD_STUB_SOURCE = textwrap.dedent(
             docs = state["docs"]
 
             if sub == "list":
+                if "QMD_STUB_LIST_STDOUT" in os.environ:
+                    sys.stdout.write(os.environ["QMD_STUB_LIST_STDOUT"])
+                    return
                 if not cols:
                     print("No collections found.")
                     return
@@ -157,6 +163,9 @@ _QMD_STUB_SOURCE = textwrap.dedent(
                 return
 
             if sub == "show":
+                if "QMD_STUB_SHOW_STDOUT" in os.environ:
+                    sys.stdout.write(os.environ["QMD_STUB_SHOW_STDOUT"])
+                    return
                 if len(argv) < 3 or argv[2] not in cols:
                     print("Collection not found", file=sys.stderr)
                     sys.exit(1)
@@ -746,16 +755,26 @@ def test_memory_index_command_bare_on_off(tmp_path: Path, monkeypatch: pytest.Mo
     assert "not found" in r_bare_miss.output
     assert not memoryindex.state_path().exists()
 
-    # `on` with missing qmd fails and leaves config untouched.
+    # `on` with missing qmd fails with install_hint() and leaves config untouched.
     r_on_miss = runner.invoke(cli.app, ["memory-index", "on"])
     assert r_on_miss.exit_code == 1
+    assert r_on_miss.stdout == ""
+    assert (
+        r_on_miss.stderr.splitlines()[0] == "mm: error: could not verify qmd 2.8.3+ (qmd-missing)."
+    )
+    assert r_on_miss.stderr.splitlines()[-1] == f"Run: {memoryindex.install_hint()}"
     assert config.memory_index_enabled(config.load_config(env.cfg_path)) is False
 
-    # Restore stub, test old qmd version leaves config untouched.
+    # Restore stub, test old qmd version fails with install_hint() and leaves config untouched.
     monkeypatch.setenv("PATH", f"{stub.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("QMD_STUB_VERSION", "qmd 2.7.0")
     r_on_old = runner.invoke(cli.app, ["memory-index", "on"])
     assert r_on_old.exit_code == 1
+    assert r_on_old.stdout == ""
+    assert (
+        r_on_old.stderr.splitlines()[0] == "mm: error: could not verify qmd 2.8.3+ (found 2.7.0)."
+    )
+    assert r_on_old.stderr.splitlines()[-1] == f"Run: {memoryindex.install_hint()}"
     assert config.memory_index_enabled(config.load_config(env.cfg_path)) is False
     monkeypatch.setenv("QMD_STUB_VERSION", "qmd 2.8.3")
 
@@ -1463,3 +1482,231 @@ def test_mcp_add_commands_documented_only_never_in_src() -> None:
         assert cmd in readme
         for py in (root / "src").rglob("*.py"):
             assert cmd not in py.read_text(encoding="utf-8"), f"{py} must not contain {cmd!r}"
+
+
+# ── Track 162A: Old/missing qmd hint, malformed qmd output, off lock retry ───
+
+
+def test_memory_index_on_old_version_prints_runtime_install_hint_and_preserves_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _make_qmd_stub(tmp_path, monkeypatch, version="qmd 2.8.2")
+    claude_dir = tmp_path / "claude"
+    (claude_dir / "projects" / "p" / "memory").mkdir(parents=True)
+    user_dir = tmp_path / "user-docs"
+    user_dir.mkdir()
+    stub.seed_collection("keep-me", user_dir)
+    stub.seed_collection("mm-claude", claude_dir, mask="*/memory/**/*.md")
+
+    env = _setup_device_env(
+        tmp_path,
+        monkeypatch,
+        device_id="old162a1",
+        enabled=False,
+        embeddings=True,
+        sources=[{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+    )
+
+    cfg_bytes = env.cfg_path.read_bytes()
+    cols_before = stub.state()["collections"]
+
+    # Bun branch: fake bun on isolated PATH yields the bun install command.
+    bun_dir = tmp_path / "bun-bin"
+    bun_dir.mkdir()
+    fake_bun = bun_dir / "bun"
+    fake_bun.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_bun.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub.bin_dir}{os.pathsep}{bun_dir}")
+
+    r_bun = runner.invoke(cli.app, ["memory-index", "on"])
+    assert r_bun.exit_code == 1
+    assert r_bun.stdout == ""
+    assert r_bun.stderr.splitlines()[0] == "mm: error: could not verify qmd 2.8.3+ (found 2.8.2)."
+    assert r_bun.stderr.splitlines()[-1] == "Run: bun install -g @tobilu/qmd"
+    assert env.cfg_path.read_bytes() == cfg_bytes
+    assert config.load_config(env.cfg_path)["memory_index"] == {
+        "enabled": False,
+        "embeddings": True,
+    }
+    assert not memoryindex.state_path().exists()
+    assert stub.state()["collections"] == cols_before
+    assert stub.calls() == [["--version"]]
+
+    # npm branch: strict PATH without bun yields the npm prefix install command.
+    monkeypatch.setenv("PATH", str(stub.bin_dir))
+    before_npm = len(stub.calls())
+    r_npm = runner.invoke(cli.app, ["memory-index", "on"])
+    expected_npm_hint = (
+        f"npm install -g --prefix {shlex.quote(str(env.home / '.local'))} @tobilu/qmd"
+    )
+    assert memoryindex.install_hint() == expected_npm_hint
+    assert r_npm.exit_code == 1
+    assert r_npm.stdout == ""
+    assert r_npm.stderr.splitlines()[0] == "mm: error: could not verify qmd 2.8.3+ (found 2.8.2)."
+    assert r_npm.stderr.splitlines()[-1] == f"Run: {expected_npm_hint}"
+    assert env.cfg_path.read_bytes() == cfg_bytes
+    assert not memoryindex.state_path().exists()
+    assert stub.state()["collections"] == cols_before
+    assert stub.calls()[before_npm:] == [["--version"]]
+
+    # Bare read-only inspection with old qmd exits 0, shows minimum, and writes nothing.
+    before_bare = len(stub.calls())
+    stub_bytes = stub.state_path.read_bytes()
+    r_bare = runner.invoke(cli.app, ["memory-index"])
+    assert r_bare.exit_code == 0, r_bare.output
+    assert "2.8.2 (requires 2.8.3+)" in r_bare.output
+    assert env.cfg_path.read_bytes() == cfg_bytes
+    assert not memoryindex.state_path().exists()
+    assert stub.state_path.read_bytes() == stub_bytes
+    assert stub.calls()[before_bare:] == [["--version"]]
+
+
+def test_refresh_rejects_malformed_zero_exit_collection_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _make_qmd_stub(tmp_path, monkeypatch)
+    claude_dir = tmp_path / "claude"
+    (claude_dir / "projects" / "p" / "memory").mkdir(parents=True)
+    (claude_dir / "projects" / "p" / "memory" / "MEMORY.md").write_text(
+        "# Note\nhello\n", encoding="utf-8"
+    )
+    user_dir = tmp_path / "personal-notes"
+    user_dir.mkdir()
+    stale_dir = tmp_path / "stale-claude"
+    stale_dir.mkdir()
+    stub.seed_collection("personal-notes", user_dir)
+
+    env = _setup_device_env(
+        tmp_path,
+        monkeypatch,
+        device_id="malf162a",
+        enabled=True,
+        embeddings=False,
+        sources=[{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+    )
+
+    # Establish a prior recorded "ok" state in memory-index.json.
+    init_res = memoryindex.refresh(env.cfg)
+    assert init_res.status == "ok"
+    assert memoryindex.read_state()["result"] == "ok"
+    ok_state_bytes = memoryindex.state_path().read_bytes()
+
+    # Point mm-claude at a stale directory so any fallthrough to reconciliation mutates stub state.
+    stub.seed_collection("mm-claude", stale_dir, mask="*/memory/**/*.md")
+    expected_collections = stub.state()["collections"]
+
+    malformed_list_payloads = [
+        "Collections:\n  mm-claude  (qmd://mm-claude/)\n",
+        "Collections (2):\n  mm-claude  (qmd://mm-claude/)\n",
+        "",
+    ]
+    for payload in malformed_list_payloads:
+        memoryindex.state_path().write_bytes(ok_state_bytes)
+        assert memoryindex.read_state()["result"] == "ok"
+        before = len(stub.calls())
+        with monkeypatch.context() as mp:
+            mp.setenv("QMD_STUB_LIST_STDOUT", payload)
+            res = memoryindex.refresh(env.cfg)
+        assert res.status == "failed"
+        assert memoryindex.read_state()["result"] == "failed"
+        assert stub.calls()[before:] == [["--version"], ["collection", "list"]]
+        assert stub.state()["collections"] == expected_collections
+
+    malformed_show_payloads = [
+        "Collection: mm-claude\n  Pattern: */memory/**/*.md\n",
+        "Collection: mm-claude\n  Path: /tmp/old-projects\n",
+    ]
+    for payload in malformed_show_payloads:
+        memoryindex.state_path().write_bytes(ok_state_bytes)
+        assert memoryindex.read_state()["result"] == "ok"
+        before = len(stub.calls())
+        with monkeypatch.context() as mp:
+            mp.setenv("QMD_STUB_SHOW_STDOUT", payload)
+            res = memoryindex.refresh(env.cfg)
+        assert res.status == "failed"
+        assert memoryindex.read_state()["result"] == "failed"
+        assert stub.calls()[before:] == [
+            ["--version"],
+            ["collection", "list"],
+            ["collection", "show", "mm-claude"],
+        ]
+        assert stub.state()["collections"] == expected_collections
+
+
+def test_memory_index_off_waits_for_active_refresh_and_removes_collections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _make_qmd_stub(tmp_path, monkeypatch)
+    claude_dir = tmp_path / "claude"
+    (claude_dir / "projects" / "p" / "memory").mkdir(parents=True)
+    (claude_dir / "projects" / "p" / "memory" / "MEMORY.md").write_text(
+        "# Note\nhello\n", encoding="utf-8"
+    )
+    user_dir = tmp_path / "user-docs"
+    user_dir.mkdir()
+    stub.seed_collection("keep-me", user_dir)
+
+    env = _setup_device_env(
+        tmp_path,
+        monkeypatch,
+        device_id="offw162a",
+        enabled=True,
+        embeddings=False,
+        sources=[{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+    )
+
+    refresh_holding_lock = threading.Event()
+    allow_refresh_finish = threading.Event()
+    refresh_finished = threading.Event()
+    real_run_qmd = memoryindex._run_qmd
+
+    def paused_run_qmd(qmd, args, deadline, *, inspect=False):
+        if list(args) == ["update"]:
+            refresh_holding_lock.set()
+            assert allow_refresh_finish.wait(timeout=10.0)
+        return real_run_qmd(qmd, args, deadline, inspect=inspect)
+
+    monkeypatch.setattr(memoryindex, "_run_qmd", paused_run_qmd)
+
+    refresh_results: list[memoryindex.RefreshResult] = []
+    worker_errors: list[BaseException] = []
+
+    def run_refresh() -> None:
+        try:
+            refresh_results.append(memoryindex.refresh(env.cfg))
+        except BaseException as exc:
+            worker_errors.append(exc)
+        finally:
+            refresh_finished.set()
+
+    thread = threading.Thread(target=run_refresh)
+    thread.start()
+    retry_delays: list[float] = []
+    try:
+        assert refresh_holding_lock.wait(timeout=10.0)
+
+        def release_on_first_retry(delay: float) -> None:
+            retry_delays.append(delay)
+            allow_refresh_finish.set()
+            assert refresh_finished.wait(timeout=10.0)
+
+        monkeypatch.setattr(lockedjson, "time", SimpleNamespace(sleep=release_on_first_retry))
+        r_off = runner.invoke(cli.app, ["memory-index", "off"])
+    finally:
+        allow_refresh_finish.set()
+        thread.join(timeout=10.0)
+
+    assert not thread.is_alive()
+    assert not worker_errors
+    assert len(refresh_results) == 1
+    assert refresh_results[0].status == "ok"
+    assert retry_delays == [0.1]
+    assert r_off.exit_code == 0, r_off.output
+    assert "Memory-Index: disabled on this device (1 collection removed)." in r_off.output
+    assert config.load_config(env.cfg_path)["memory_index"] == {
+        "enabled": False,
+        "embeddings": False,
+    }
+    assert "mm-claude" not in stub.state()["collections"]
+    assert "keep-me" in stub.state()["collections"]
+    assert memoryindex.read_state()["state"] == "missing"
