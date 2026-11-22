@@ -755,7 +755,9 @@ def test_memory_index_command_bare_on_off(tmp_path: Path, monkeypatch: pytest.Mo
     assert "not found" in r_bare_miss.output
     assert not memoryindex.state_path().exists()
 
-    # `on` with missing qmd fails with install_hint() and leaves config untouched.
+    # `on` with missing qmd fails with install_hint() and leaves index data untouched.
+    config_before = env.cfg_path.read_bytes()
+    collections_before = stub.state_path.read_bytes()
     r_on_miss = runner.invoke(cli.app, ["memory-index", "on"])
     assert r_on_miss.exit_code == 1
     assert r_on_miss.stdout == ""
@@ -764,6 +766,9 @@ def test_memory_index_command_bare_on_off(tmp_path: Path, monkeypatch: pytest.Mo
     )
     assert r_on_miss.stderr.splitlines()[-1] == f"Run: {memoryindex.install_hint()}"
     assert config.memory_index_enabled(config.load_config(env.cfg_path)) is False
+    assert env.cfg_path.read_bytes() == config_before
+    assert stub.state_path.read_bytes() == collections_before
+    assert not memoryindex.state_path().exists()
 
     # Restore stub, test old qmd version fails with install_hint() and leaves config untouched.
     monkeypatch.setenv("PATH", f"{stub.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
