@@ -217,6 +217,14 @@ here by hand, use the H3 form.
 - **Evidence:** Track 161B coverage audit. The serial and three 16-worker suites passed.
 - **Revisit:** When a Track next changes the nested check environment.
 
+### [review:files=bin/_check.py|tests/test_bin_check.py] Revisit original Track 161B failure attribution
+
+- **Reproduced:** Injecting a timeout into `git merge-base` reproduced both assertion failures. The fallback suite exited successfully and printed neither `merge base moved` nor `ran 0 of 4`.
+- **Observed:** The original logs show two xdist worker disconnects and a nested pytest exit 137, which indicates SIGKILL. The available kernel and systemd-oomd logs contain no matching OOM kill.
+- **Open:** The original nested output was missing. It remains unclear whether a Git timeout caused the original assertions, who sent SIGKILL, or why the workers disconnected.
+- **Revisit:** If either failure recurs during 16-worker verification or the original logs surface, capture load averages, nested stdout and stderr, runner and worker exits, and kernel and supervisor logs before retrying.
+- **Context:** The developer deferred the original-cause attribution for AC1 and AC2 on 2026-11-22. [Track 161B review](https://github.com/kbitz/mind-meld/pull/373)
+
 ## Drain records
 
 ### Roadmap card run — 2026-11-21 (Codex memory folded into the `codex` source; affected-selection tests carded; Tracks 156A to 160A recorded)
