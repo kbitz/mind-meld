@@ -715,7 +715,8 @@ def check(root: Path, *args: str, env: dict | None = None, timeout: float = 180)
     )
 
 
-def test_default_parallel_run_keeps_runner_tests_on_one_worker(tmp_path: Path) -> None:
+@pytest.mark.parametrize("distribution", ["default", "environment", "config", "chunk"])
+def test_parallel_runner_respects_load_distribution(tmp_path: Path, distribution: str) -> None:
     grouped = {
         "tests/test_bin_check.py::TestArgv::test_default_scope_is_tests",
         "tests/test_bin_check.py::TestAffectedArgv::test_flags_parse",
@@ -723,26 +724,94 @@ def test_default_parallel_run_keeps_runner_tests_on_one_worker(tmp_path: Path) -
     }
     independent = "tests/test_docs_routing.py::test_bin_check_exists_and_is_executable"
     nodes = sorted(grouped | {independent})
-    proc = check(
-        ROOT,
-        *nodes,
-        "--",
-        "-v",
-        "--color=no",
-        "-o",
-        f"cache_dir={tmp_path / 'cache'}",
-        env={"MM_PYTEST_WORKERS": "2", "RAN_LOG": str(tmp_path / "ran")},
-    )
+    argv = ["-v", "--color=no", "-o", f"cache_dir={tmp_path / 'cache'}"]
+    env = {"MM_PYTEST_WORKERS": "2", "RAN_LOG": str(tmp_path / "ran")}
+    parallel = importlib.util.find_spec("xdist") is not None
+    if parallel and distribution == "environment":
+        env["PYTEST_ADDOPTS"] = "--dist=load"
+    if parallel and distribution == "config":
+        argv.extend(["-o", "addopts=--dist load"])
+    if parallel and distribution == "chunk":
+        argv.append("--maxschedchunk=1")
+    proc = check(ROOT, *nodes, "--", *argv, env=env)
     assert proc.returncode == 0, both(proc)
-    if importlib.util.find_spec("xdist") is None:
+    if not parallel:
         assert f"{len(nodes)} passed" in proc.stdout, both(proc)
         return
     assignments = {
         node: worker for worker, node in re.findall(r"(?m)^\[(gw\d+)\].* PASSED (\S+)", proc.stdout)
     }
     assert assignments.keys() == set(nodes), both(proc)
-    assert len({assignments[node] for node in grouped}) == 1, both(proc)
-    assert assignments[independent] not in {assignments[node] for node in grouped}, both(proc)
+    if distribution == "default":
+        grouped_workers = {assignments[node] for node in grouped}
+        assert len(grouped_workers) == 1, both(proc)
+        assert assignments[independent] not in grouped_workers, both(proc)
+    else:
+        assert "scheduling tests via LoadScheduling" in proc.stdout, both(proc)
+
+
+def _make_scheduler_project(tmp_path: Path) -> Path:
+    root = tmp_path / "project"
+    tests = root / "tests"
+    tests.mkdir(parents=True)
+    (tmp_path / "home").mkdir()
+    shutil.copyfile(ROOT / "tests" / "conftest.py", tests / "conftest.py")
+    (tests / "test_unrelated.py").write_text("def test_other():\n    pass\n")
+    return root
+
+
+def test_parallel_run_keeps_duplicate_file_scopes(tmp_path: Path) -> None:
+    root = _make_scheduler_project(tmp_path)
+    scope = "tests/test_unrelated.py"
+    proc = check(
+        root,
+        scope,
+        scope,
+        "--",
+        "--keep-duplicates",
+        "--color=no",
+        env={"HOME": str(tmp_path / "home"), "MM_PYTEST_WORKERS": "2"},
+    )
+    assert proc.returncode == 0, both(proc)
+    assert "2 passed" in proc.stdout, both(proc)
+
+
+def test_parallel_worker_crash_reports_failure_without_retrying(tmp_path: Path) -> None:
+    root = _make_scheduler_project(tmp_path)
+    tests = root / "tests"
+    (tests / "test_bin_check.py").write_text(
+        """\
+import os
+from pathlib import Path
+
+def test_crash_once():
+    crash_runs = Path(__file__).with_name("crash-runs")
+    first_attempt = not crash_runs.exists()
+    with crash_runs.open("a") as out:
+        out.write("crash\\n")
+    if first_attempt and os.environ.get("PYTEST_XDIST_WORKER"):
+        os._exit(3)
+
+def test_remaining_work():
+    with Path(os.environ["RAN_LOG"]).open("a") as out:
+        out.write("healthy\\n")
+"""
+    )
+    proc = check(
+        root, "--", "--color=no", env={"HOME": str(tmp_path / "home"), "MM_PYTEST_WORKERS": "2"}
+    )
+    if importlib.util.find_spec("xdist") is not None:
+        assert proc.returncode == 1, both(proc)
+        assert "crashed while running 'tests/test_bin_check.py::test_crash_once'" in both(proc), (
+            both(proc)
+        )
+    else:
+        assert proc.returncode == 0, both(proc)
+    crash_runs = tests / "crash-runs"
+    assert crash_runs.is_file(), both(proc)
+    assert crash_runs.read_text().splitlines() == ["crash"], both(proc)
+    assert ran_log(root).is_file(), both(proc)
+    assert ran_log(root).read_text().splitlines() == ["healthy"], both(proc)
 
 
 def ran_log(root: Path) -> Path:
@@ -990,7 +1059,9 @@ class TestAffectedSelection:
         proc = check(root, "--affected", env=env)
         assert proc.returncode == 0, both(proc)
         assert ran(root) == ALL_TESTS, both(proc)
-        record = json.loads((root / ".mm-test-selection" / "record.json").read_text())
+        record_path = root / ".mm-test-selection" / "record.json"
+        assert record_path.is_file(), both(proc)
+        record = json.loads(record_path.read_text())
         assert len(record["nodes"]) == 4, both(proc)
         edit(root, "src/mind_meld/leaf.py", "return 1", "return int(1)")
         proc = check(root, "--affected", env=env)
