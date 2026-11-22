@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.82] - 2026-11-22
+
+This release does not change anything people see or do in mind-meld.
+
+### Upgrade notes
+
+- No upgrade steps are required.
+
 ## [1.12.81] - 2026-11-22
 
 The check runner now keeps the pytest-xdist queue and scheduling controls the caller set.
