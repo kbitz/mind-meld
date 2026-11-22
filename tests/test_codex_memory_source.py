@@ -971,7 +971,9 @@ class TestCodexMemoryPullAndConfinement:
 
 
 class TestCodexMemoryInitAndSourceCommands:
-    def test_repoint_to_absent_codex_home_does_not_block_other_sources(self, tmp_path, monkeypatch):
+    def test_legacy_memory_repoint_to_absent_codex_home_preserves_other_sources(
+        self, tmp_path, monkeypatch
+    ):
         env = _MultiDeviceCodexMemoryEnv(
             tmp_path, monkeypatch, ((DEV_A, "Mac A"), (DEV_B, "Linux B"))
         )
@@ -988,6 +990,15 @@ class TestCodexMemoryInitAndSourceCommands:
         )
         dev.cfg["sync"]["sources"][0]["path"] = str(old_home)
         env.push(DEV_A)
+        # Older releases could publish memory alone while Codex was unavailable.
+        legacy = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert not legacy["sources"].pop("codex")["files"]
+        env.backend.put(
+            storage_keys.manifest_key(DEV_A),
+            crypto.encrypt_manifest(
+                manifest.serialize_manifest(legacy), PASSPHRASE, MEMORY_KB, wire_names=False
+            ),
+        )
         env.pull(DEV_B)
 
         dev.cfg["sync"]["sources"][0]["path"] = str(dev.codex)
@@ -1004,8 +1015,9 @@ class TestCodexMemoryInitAndSourceCommands:
         env.pull(DEV_B)
         assert (env.devices[DEV_B].copies_dir / DEV_A / "MEMORY.md").read_text() == "old memory\n"
 
+    @pytest.mark.parametrize("via_symlink", [False, True])
     def test_legacy_missing_previously_published_codex_home_refuses_push(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, via_symlink
     ):
         env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch, ((DEV_A, "Mac A"),))
         dev = env.devices[DEV_A]
@@ -1013,13 +1025,20 @@ class TestCodexMemoryInitAndSourceCommands:
         claude = dev.home / ".claude"
         claude.mkdir()
         dev.cfg["sync"]["claude_dir"] = str(claude)
+        if via_symlink:
+            physical_root = dev.root / "physical-codex"
+            dev.codex.rename(physical_root)
+            dev.codex.symlink_to(physical_root)
         (dev.codex / "memories_v2").mkdir()
         (dev.codex / "memories_v2" / "MEMORY.md").write_text("old memory\n")
         env.push(DEV_A)
         before = _decrypt_raw_manifest(env.backend, DEV_A)
         assert before["sources"]["codex-memory"]["files"]
 
-        dev.codex.rename(dev.root / "offline-codex")
+        if via_symlink:
+            dev.codex.unlink()
+        else:
+            dev.codex.rename(dev.root / "offline-codex")
         with pytest.raises(SnapshotError, match=r"source codex-memory .*mm disable-source codex'"):
             env.push(DEV_A)
         assert _decrypt_raw_manifest(env.backend, DEV_A) == before

@@ -1233,7 +1233,11 @@ def _filter_unavailable_repointed_codex_memory(
     name = manifest.CODEX_MEMORY_SOURCE_NAME
     sources = prior.get("sources", {})
     old_root = sources.get(name, {}).get("base_path")
-    if not old_root:
+    if not isinstance(old_root, str) or not old_root:
+        return prior
+    if old_root == sources.get("codex", {}).get("base_path"):
+        # Both sources published from a shared root. If its symlink goes
+        # missing, the configured path may no longer resolve to that root.
         return prior
     memory = next((src for src in resolution.selected if src["name"] == name), None)
     if memory is None or memory in resolution.available:
