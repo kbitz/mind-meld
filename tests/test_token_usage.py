@@ -217,27 +217,44 @@ class TestMergeUsageBucket:
 
 
 class TestMergeUsageBucketPerf:
-    """Track 10A perf-pin: helper extraction adds ~80-150ns per call
-    of Python function-call overhead. With 10k+ calls per push (D9),
-    that's a few ms — well under the 250ms autopush budget. This pin
-    catches future regressions where someone adds expensive logic to
-    the helper that pushes the cost into the budget."""
+    """Track 10A perf-pin: helper extraction adds ~80-150ns per call of Python
+    function-call overhead. With 10k+ calls per push (D9), a 10µs/call CPU
+    budget (100ms across 10k calls) stays well under the 250ms autopush budget
+    while catching order-of-magnitude regressions such as I/O, deep copies, or
+    linear scans added to the helper."""
 
-    def test_merge_usage_bucket_under_2us_per_call(self) -> None:
-        """Empirical budget: 2µs per call is conservative. CI runners
-        vary; 5x margin keeps the test stable while still catching
-        order-of-magnitude regressions."""
-        target = tu.zero_model_bucket()
+    def test_merge_usage_bucket_under_10us_cpu_per_call(self) -> None:
+        """Budget 10µs/call of single-threaded CPU time (time.thread_time()) so
+        OS scheduler preemption pauses and unrelated worker threads are never
+        billed to merge_usage_bucket, while still catching order-of-magnitude
+        regressions (I/O, deep copies, linear scans)."""
         src = {"input": 100, "cache_create": 200, "cache_read": 1000, "output": 50}
+        warmup = tu.zero_model_bucket()
+        for _ in range(100):
+            tu.merge_usage_bucket(warmup, src)
+
         n = 10_000
-        start = time.perf_counter()
-        for _ in range(n):
-            tu.merge_usage_bucket(target, src)
-        elapsed = time.perf_counter() - start
-        per_call_us = (elapsed / n) * 1_000_000
-        # 10µs per call = 50× the typical cost; trips on actual
-        # algorithmic regression but stays stable under CI noise.
-        assert per_call_us < 10.0, f"merge_usage_bucket took {per_call_us:.2f}µs/call"
+        rounds = 3
+        expected = {k: v * n for k, v in src.items()}
+        samples_us: list[float] = []
+        for _ in range(rounds):
+            target = tu.zero_model_bucket()
+            start = time.thread_time()
+            for _ in range(n):
+                tu.merge_usage_bucket(target, src)
+            elapsed = time.thread_time() - start
+            assert target == expected
+            samples_us.append((elapsed / n) * 1_000_000)
+
+        best_us = min(samples_us)
+        budget_us = 10.0
+        # 10µs/call CPU time (100ms for 10k calls vs the 250ms autopush budget)
+        # removes scheduler-pause noise via thread_time() and still catches
+        # order-of-magnitude regressions like I/O, deep copies, or linear scans.
+        assert best_us < budget_us, (
+            f"merge_usage_bucket took best {best_us:.2f}µs/call "
+            f"(samples={[round(s, 2) for s in samples_us]}, budget={budget_us:.1f}µs/call)"
+        )
 
 
 class TestMergeByModel:
