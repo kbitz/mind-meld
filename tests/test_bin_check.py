@@ -1517,7 +1517,7 @@ class TestAffectedSelection:
             mod._merge_parts(out_dir)
 
     def test_same_interpreter_probe_env_runs_in_process_without_subprocess_timeout(
-        self, proj: Path, tmp_path: Path, monkeypatch
+        self, proj: Path, tmp_path: Path, monkeypatch, capfd
     ) -> None:
         mod = load_check()
         real_run = subprocess.run
@@ -1550,15 +1550,19 @@ class TestAffectedSelection:
         monkeypatch.chdir(proj)
         doc = proj / "README.md"
         doc.write_text("dirty at refresh\n")
-        assert mod.main(["--no-bootstrap", "--tests", "--affected", "--refresh", "--serial"]) == 0
+        rc = mod.main(["--no-bootstrap", "--tests", "--affected", "--refresh", "--serial"])
+        refresh = capfd.readouterr()
+        assert rc == 0, refresh.out + refresh.err
         assert (
             "README.md"
             in json.loads((proj / ".mm-test-selection" / "record.json").read_text())["files"]
-        )
+        ), refresh.out + refresh.err
         ran(proj)
         doc.unlink()
-        assert mod.main(["--no-bootstrap", "--tests", "--affected", "--serial"]) == 0
-        assert ran(proj) == ALL_TESTS
+        rc = mod.main(["--no-bootstrap", "--tests", "--affected", "--serial"])
+        followup = capfd.readouterr()
+        assert rc == 0, followup.out + followup.err
+        assert ran(proj) == ALL_TESTS, followup.out + followup.err
 
     def test_probe_env_distinguishes_venvs_that_share_a_python_binary(
         self, tmp_path: Path, monkeypatch
