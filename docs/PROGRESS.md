@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.81 | 2026-11-22 | The check runner now keeps the pytest-xdist queue and scheduling controls the caller set. |
 | 1.12.80 | 2026-11-22 | Codex memory copies now sync automatically with the `codex` source, with one setup question and no separate memory source to enable. |
 | 1.12.79 | 2026-11-21 | Setup can install qmd and turn on memory search, including the recommended search line for agent instruction files. |
 | 1.12.78 | 2026-11-21 | An opt-in local qmd index lets one search cover memories from every synced agent and machine, and a successful sync refreshes it. |
