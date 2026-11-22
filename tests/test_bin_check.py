@@ -1550,19 +1550,22 @@ class TestAffectedSelection:
         monkeypatch.chdir(proj)
         doc = proj / "README.md"
         doc.write_text("dirty at refresh\n")
+
+        def nested_output() -> str:
+            output = capfd.readouterr()
+            return output.out + output.err
+
         rc = mod.main(["--no-bootstrap", "--tests", "--affected", "--refresh", "--serial"])
-        refresh = capfd.readouterr()
-        assert rc == 0, refresh.out + refresh.err
+        assert rc == 0, nested_output()
         assert (
             "README.md"
             in json.loads((proj / ".mm-test-selection" / "record.json").read_text())["files"]
-        ), refresh.out + refresh.err
+        ), nested_output()
         ran(proj)
         doc.unlink()
         rc = mod.main(["--no-bootstrap", "--tests", "--affected", "--serial"])
-        followup = capfd.readouterr()
-        assert rc == 0, followup.out + followup.err
-        assert ran(proj) == ALL_TESTS, followup.out + followup.err
+        assert rc == 0, nested_output()
+        assert ran(proj) == ALL_TESTS, nested_output()
 
     def test_probe_env_distinguishes_venvs_that_share_a_python_binary(
         self, tmp_path: Path, monkeypatch
