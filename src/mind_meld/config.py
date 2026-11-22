@@ -47,7 +47,7 @@ RETIRED_SOURCE_NAMES: frozenset[str] = frozenset({"opencode"})
 
 # Only `mm enable-source`, or explicit inclusion at `mm init` or
 # `mm reconfigure-sources`, activates these sources.
-OPT_IN_SOURCE_NAMES: frozenset[str] = frozenset({"grok", "muse", "agy", "codex-memory"})
+OPT_IN_SOURCE_NAMES: frozenset[str] = frozenset({"grok", "muse", "agy"})
 
 UsageCaptureReadiness = Literal["ready", "disabled", "unavailable", "no-reader", "unknown"]
 
@@ -475,17 +475,6 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
             "plugins/.remote-plugin-install-staging/*",
             *_GENERATED_HOST_SKILL_GLOBS,
         ],
-    },
-    {
-        # Same Claude-shaped entry: name/path/type only. The walker
-        # hardcodes the active memory folder (memories_v2/ or memories/)
-        # and file set — not user-editable include_dirs — so a config edit
-        # cannot widen the walk onto sessions/, .git/, or SQLite stores.
-        # Pull places peers' copies under CODEX_MEMORY_COPIES_DIR/<peer id>/
-        # and never writes into ~/.codex.
-        "name": "codex-memory",
-        "path": DEFAULT_CODEX_DIR,
-        "type": "codex-memory",
     },
     {
         # Same Claude-shaped entry: name/path/type only. The walker
@@ -1103,7 +1092,11 @@ def _configured_sources(
     if explicit_sources:
         sources = []
         for src in sync["sources"]:
-            if src.get("name") in RETIRED_SOURCE_NAMES or src.get("name") in disabled:
+            if (
+                src.get("name") in RETIRED_SOURCE_NAMES
+                or src.get("name") == "codex-memory"
+                or src.get("name") in disabled
+            ):
                 continue
             try:
                 path = _resolve_source_path(src["path"], label=f"source {src['name']!r}")
@@ -1228,6 +1221,20 @@ def resolve_sources(
     disabled = config.get("sync", {}).get("disabled_sources", []) or []
     if disabled:
         sources = [s for s in sources if s["name"] not in disabled]
+
+    # Track 161A: Codex memory follows the selected `codex` source. Derive
+    # the internal `codex-memory` source with `codex`'s resolved path verbatim
+    # after disabled-source filtering so stale `codex-memory` entries or
+    # disabled names never affect selection.
+    codex_source = next((s for s in sources if s["name"] == "codex"), None)
+    if codex_source is not None:
+        sources.append(
+            {
+                "name": "codex-memory",
+                "path": codex_source["path"],
+                "type": "codex-memory",
+            }
+        )
 
     # Only explicit writers bootstrap. Missing default roots remain empty
     # walks for inspection and previews; custom roots are never created.
@@ -1534,7 +1541,7 @@ def join_record_path() -> Path:
 def _valid_join_source_names() -> frozenset[str]:
     return frozenset(
         s["name"] for s in DEFAULT_SOURCES if s["name"] not in MM_INTERNAL_SOURCE_NAMES
-    )
+    ) | frozenset({"codex-memory"})
 
 
 def save_join_record(record: JoinRecord) -> None:

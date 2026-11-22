@@ -2328,10 +2328,9 @@ described above.
 
 ## Codex memory copies (Track 157A)
 
-The opt-in `codex-memory` source (`OPT_IN_SOURCE_NAMES`) publishes this
-machine's Codex memory summaries without ever writing into `~/.codex`, and
-places peers' copies under `config.CODEX_MEMORY_COPIES_DIR`
-(`~/.local/share/mind-meld/codex-memory/<peer device id>/`).
+**Track 161A fold:** `codex-memory` is no longer a separate opt-in source or `DEFAULT_SOURCES` entry. When `codex` survives disabled-source filtering in `config.resolve_sources`, resolution derives one internal `{"name": "codex-memory", "path": <codex path>, "type": "codex-memory"}` entry; explicit `codex-memory` config entries and stale `"codex-memory"` names in `disabled_sources` are ignored at resolution (`config._configured_sources`, `core._filter_disabled_sources`) and removed by `mm migrate-config` (or silently dropped by `mm reconfigure-sources`). `mm enable-source codex-memory` / `mm disable-source codex-memory` redirect with one shared-style notice line and write nothing; `mm sources` folds the derived entry's kept file count into the `codex` row. The wire name (`codex-memory`), manifest keys, and consumer boundaries (which gate on the resolved selected sources) are unchanged.
+
+This derived `codex-memory` source publishes this machine's Codex memory summaries without ever writing into `~/.codex`, and places peers' copies under `config.CODEX_MEMORY_COPIES_DIR` (`~/.local/share/mind-meld/codex-memory/<peer device id>/`).
 
 - **Hardcoded folder and copy set.** `manifest.codex_memory_dir_name(base)`
   returns `memories_v2` when it is a real directory, else `memories` when that
@@ -2406,8 +2405,10 @@ places peers' copies under `config.CODEX_MEMORY_COPIES_DIR`
   and reports one pull-summary clause
   (`retired_copies_clause` / `retired_copies_detail`). Unreadable or vanished
   records remove nothing, and previews write nothing.
-- **Disable deletes nothing.** Disabling `codex-memory` on one machine drops
-  its prior entries through `_filter_unselected_sources` without minting
+- **Disable deletes nothing.** Disabling `codex` on one machine drops
+  both `codex` and derived `codex-memory` prior entries through
+  `_filter_unselected_sources` (and strips both from peer manifests in
+  `_filter_disabled_sources` while preserving tombstones) without minting
   deletion records, so peers keep existing copies.
 
 Tests: `tests/test_codex_memory_source.py`.

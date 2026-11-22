@@ -5525,7 +5525,7 @@ class TestInitFlow:
 
         # Second-device init: start-or-join, storage, device name, per-source
         # prompts (claude Y, all others n), then 1 passphrase prompt.
-        stdin = f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\nn\npw-shared\n"
+        stdin = f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\npw-shared\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "Verified passphrase against existing mm-crypto-init" in result.output
@@ -5568,13 +5568,13 @@ class TestInitReInitGuard:
         self._setup(tmp_path, monkeypatch)
         storage, _backend = self._populated(tmp_path)
         first = runner.invoke(
-            app, ["init"], input=f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\nn\npw-shared\n"
+            app, ["init"], input=f"join\n{storage}\nMac B\nY\nn\nn\nn\nn\nn\nn\npw-shared\n"
         )
         assert first.exit_code == 0, first.output
 
         # Inputs: overwrite confirm, start-or-join, storage path, device name,
         # per-source, orphan-confirm y, passphrase.
-        stdin = f"y\njoin\n{storage}\nMac C\nY\nn\nn\nn\nn\nn\nn\nn\ny\npw-shared\n"
+        stdin = f"y\njoin\n{storage}\nMac C\nY\nn\nn\nn\nn\nn\nn\ny\npw-shared\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "orphaning existing device" in result.output
@@ -12586,7 +12586,7 @@ class TestCryptoInspection60A:
         result = runner.invoke(
             app,
             ["init"],
-            input=f"join\n{storage}\nMac A\nY\nn\nn\nn\nn\nn\nn\nn\n{PASSPHRASE}\n",
+            input=f"join\n{storage}\nMac A\nY\nn\nn\nn\nn\nn\nn\n{PASSPHRASE}\n",
         )
         assert result.exit_code == 1, result.output
         assert "nothing was published" in _preview_text(result)

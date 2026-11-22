@@ -59,7 +59,29 @@ def sources() -> None:
     table.add_column("Files")
     table.add_column("Excluded")
 
+    codex_memory_kept = 0
     for src in src_list:
+        if src["name"] != "codex-memory":
+            continue
+        src_no_excludes = {
+            k: v for k, v in src.items() if k not in ("exclude_patterns", "include_patterns")
+        }
+        _, all_files = walk_source(src_no_excludes, max_file_size)
+        patterns = src.get("exclude_patterns") or []
+        includes = src.get("include_patterns") or []
+        if patterns or includes:
+            excluded_count = sum(
+                1
+                for rel in all_files
+                if _manifest_is_excluded(rel, patterns, None, includes or None)
+            )
+            codex_memory_kept += len(all_files) - excluded_count
+        else:
+            codex_memory_kept += len(all_files)
+
+    for src in src_list:
+        if src["name"] == "codex-memory":
+            continue
         # Walk WITHOUT exclude_patterns so we count what the per-source
         # globs would have stripped. `all_files` is already post-EXCLUDED
         # (the global junk list runs inside `_record_file`), so any match
@@ -84,6 +106,8 @@ def sources() -> None:
         else:
             kept = len(all_files)
             excluded_display = "—"
+        if src["name"] == "codex":
+            kept += codex_memory_kept
         is_disabled = src["name"] in disabled_set
         enabled_display = "[red]N[/red]" if is_disabled else "[green]Y[/green]"
         # Dim the row's data columns when disabled to make the state
@@ -164,6 +188,12 @@ def _record_seen(names: list[str]) -> None:
 def disable_source(name: str, *, force: bool = False) -> None:
     """Disable a sync source on this device only."""
     config = core._get_config(read_only=False)
+    if name == "codex-memory":
+        core._notice(
+            "Codex memory follows the 'codex' source.",
+            fix="mm disable-source codex",
+        )
+        return
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:
@@ -213,6 +243,12 @@ def _print_grok_enable_notes() -> None:
 def enable_source(name: str, *, force: bool = False) -> None:
     """Enable a sync source on this device."""
     config = core._get_config(read_only=False)
+    if name == "codex-memory":
+        core._notice(
+            "Codex memory follows the 'codex' source.",
+            fix="mm enable-source codex",
+        )
+        return
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:
@@ -316,21 +352,6 @@ def enable_source(name: str, *, force: bool = False) -> None:
             highlight=False,
             soft_wrap=True,
         )
-    elif name == "codex-memory":
-        console.print(
-            "[dim]Publishes this machine's Codex memory summaries and places peers' copies in "
-            "~/.local/share/mind-meld/codex-memory/. Nothing is written into ~/.codex.[/dim]"
-        )
-        console.print(
-            "[dim]Codex keeps memories off until enabled in Codex; this machine still receives "
-            "other machines' copies.[/dim]"
-        )
-        console.print(
-            outputstyle._fix_line("mm disable-source codex-memory"),
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
-        )
 
 
 def reconfigure_sources() -> None:
@@ -353,7 +374,7 @@ def reconfigure_sources() -> None:
         existing = next((s for s in explicit_sources if s["name"] == d["name"]), None)
         ordered.append(existing if existing is not None else d)
     for s in explicit_sources:
-        if s["name"] in _config_module.RETIRED_SOURCE_NAMES:
+        if s["name"] in _config_module.RETIRED_SOURCE_NAMES or s["name"] == "codex-memory":
             continue
         if s["name"] not in seen_names:
             seen_names.add(s["name"])

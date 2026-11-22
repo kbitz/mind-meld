@@ -551,7 +551,7 @@ The command body and own-device blob collection (`gc`, `_do_gc`) live in `gcflow
 ### `mm sources`
 
 1. Load `config.toml` read-only (`core._get_config(read_only=True)`).
-2. Resolve configured sources and include disabled rows (`core._resolve_all_configured_sources` calls `config.resolve_sources` with `disabled_sources` cleared). List available paths, including the default `mm-events` root before bootstrap when `_preview_mm_events_bootstrap` reports `would_create`. A configured `codex-memory` source appears even when its Codex home is absent.
+2. Resolve configured sources and include disabled rows (`core._resolve_all_configured_sources` calls `config.resolve_sources` with `disabled_sources` cleared). List available paths, including the default `mm-events` root before bootstrap when `_preview_mm_events_bootstrap` reports `would_create`. The derived `codex-memory` source is walked and its kept file count is merged into the `codex` row with no separate `codex-memory` row.
 3. Print one `Configured Sources` table with columns `Name`, `Path`, `Type`, `Enabled` (`N` and row dimmed when the name is in `disabled_sources`, `Y` otherwise), `Files` (files kept after the source's `exclude_patterns` and `include_patterns`), and `Excluded` (how many files those per-source patterns removed after global junk exclusions, or `—` when the source has neither `exclude_patterns` nor `include_patterns`). It does not print `include_dirs`, `include_files`, or a path-exists column.
 
 ---
@@ -701,7 +701,7 @@ SYNCED_SUBDIRS = ["memory", "todos"]
 
 **`muse` type** — Claude-shaped walker for `~/.local/share/muse`. Hardcodes `memory/` at the source root; Muse's `.muse-memory.lock` is excluded on push and pull. Sessions, the session index and bundled skills are never entered, and `~/.config/muse` is not a source. See [host parity](docs/designs/host-parity.md#muse-1x-minor-2026-10-14).
 
-**`codex-memory` type** — Claude-shaped, opt-in walker for a machine's Codex home (`~/.codex` by default). Hardcodes the active memory folder (`memories_v2/` when present as a real directory, else `memories/`) and copy set (`memory_summary.md`, `MEMORY.md`, and direct `.md` children of `rollout_summaries/`), accepting only singly-linked regular files and never entering `.git`, `.codex-baseline`, `extensions/`, or SQLite stores. Local push paths use `<memdir>/<sub>` and are encoded at `core.encode_manifest` to wire form `<device id>/<sub>` (decoded back to local form only for this machine's own manifest at `load_manifest`).
+**`codex-memory` type** — Internal Claude-shaped walker derived automatically by `config.resolve_sources` from the selected `codex` source (using the `codex` source's path, `~/.codex` by default). Hardcodes the active memory folder (`memories_v2/` when present as a real directory, else `memories/`) and copy set (`memory_summary.md`, `MEMORY.md`, and direct `.md` children of `rollout_summaries/`), accepting only singly-linked regular files and never entering `.git`, `.codex-baseline`, `extensions/`, or SQLite stores. Local push paths use `<memdir>/<sub>` and are encoded at `core.encode_manifest` to wire form `<device id>/<sub>` (decoded back to local form only for this machine's own manifest at `load_manifest`).
 
 On pull, peers' files land in `~/.local/share/mind-meld/codex-memory/<peer device id>/`. Mind Meld creates the `codex-memory/` root with mode 0700 and leaves the Codex home untouched. Peer paths and deletion records must match the publisher's device ID and the copy set. Edits that conflict with the publisher's update use the configured conflict mode. With the default mode, the publisher's version lands in a conflict sidecar. Because Codex tracks its memory folder in Git, `scan_roots` is empty and deletions propagate without `.mind-meld-anchor` files while retaining the remaining mint-guard checks.
 
@@ -828,7 +828,7 @@ Mind Meld supports syncing multiple data sources beyond `~/.claude`. Each source
 
 - **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present. Session jsonls under `projects/` are never synced.
 - **`muse`** — Claude-shaped walker. Scans `memory/` at `~/.local/share/muse`. Sessions and the session index are never synced. Background resolution never auto-activates it without an explicit `[[sync.sources]]` entry: `mm init` defaults to yes (`[y/n] (Enter = y)`) when `memory/` is a real directory containing at least one non-excluded regular file and no (`[y/n] (Enter = n)`) otherwise, and `mm reconfigure-sources` defaults to the current setting (or to detected on a legacy config without explicit sources).
-- **`codex-memory`** — Opt-in source for [per-device Codex memory copies](#source-types-and-synced-paths). `mm init` defaults to yes when the active memory directory exists and no otherwise. Enabling this source alone lets a machine receive peer copies.
+- **`codex-memory`** — Internal source derived from the selected `codex` source for [per-device Codex memory copies](#source-types-and-synced-paths). Not configured separately and not prompted during `mm init`; enabling `codex` also exchanges per-device memory copies (including receiving peer copies on a machine without its own Codex home).
 - **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively (never into a nested git checkout) and picks up `include_files` at the source root. A non-empty `include_patterns` allowlist narrows that set, and a directory holding a regular, non-symlink `Local State` file is skipped. Used for `~/.gstack`, `mm-events`, and the Codex and Antigravity customization allowlists.
 
 Default generic sources (see `config.py:DEFAULT_SOURCES`):
@@ -881,7 +881,7 @@ The Agents table orders Claude, Codex, Grok, Muse, Antigravity and Unclassified.
 | Host | Context sync and consent |
 |---|---|
 | Claude Code | Project `memory/` and `todos/`; session transcripts stay local. |
-| Codex | `codex` syncs `skills/`, `plugins/`, and `AGENTS.md` and authorizes usage capture. Enable `codex-memory` to exchange per-device memory copies. |
+| Codex | `codex` syncs `skills/`, `plugins/`, `AGENTS.md`, and per-device memory copies, and authorizes usage capture. |
 | Muse | `memory/` only; explicit opt-in authorizes local usage capture. |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config`; `mm enable-source agy` also authorizes conversation-step usage capture. |
 

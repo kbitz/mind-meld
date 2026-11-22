@@ -24,6 +24,8 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Codex memory folded into `codex` (Track 161A).** Codex memory copies now sync automatically with the `codex` source, with no separate `codex-memory` source to enable and no extra `mm init` question. Run `mm migrate-config` once on each machine to remove any leftover `codex-memory` entry and `disabled_sources` name; until you do, both are ignored and memory follows `codex` (no deletion records are minted, and peers on 1.12.76–1.12.79 keep exchanging copies). Note two consequences of the fold: a machine that had disabled only `codex-memory` while keeping `codex` enabled resumes publishing its Codex memory after upgrading, and a hand-customized `codex-memory` path that differed from the `codex` source's path is repointed to the `codex` path (files under the old root stop publishing without deletion records, so peers keep their existing copies).
+
 **Automatic Syncthing pairing (Track 152A).** The first `mm push` after upgrading
 publishes this machine's encrypted Syncthing record when Syncthing is running.
 Run `mm update` and then `mm push` on each existing Syncthing fleet machine.
@@ -908,7 +910,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 Mind Meld treats Codex as a first-class peer of Claude Code. Grok Build, Muse and Antigravity are also usage-reader hosts (see [Grok Build](#grok-build), [Muse](#muse) and [Antigravity](#antigravity-agy)).
 
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`, except Codex's own installed plugin versions (`plugins/cache/*` and `plugins/.remote-plugin-install-staging/*`): Codex installs and removes those itself, and a removal there would otherwise delete the same files on your other Macs.
-- Enable `codex-memory` with `mm enable-source codex-memory` or select it during `mm init`. On `mm push` it publishes `memory_summary.md`, `MEMORY.md`, and direct `rollout_summaries/*.md` files from `~/.codex/memories_v2/`, with `~/.codex/memories/` as the fallback. This source leaves the Codex home untouched. Git metadata, SQLite stores, and files outside the copy set stay local. Each publisher's copies land in `~/.local/share/mind-meld/codex-memory/<peer device id>/` on machines that enable the source, including machines without their own Codex memory folder. Treat the copies as read-only. To correct a memory, fix it on the machine that wrote it, then push from that machine and pull on its peers.
+- Codex memory copies follow the `codex` source automatically — no separate source to enable. On `mm push`, `codex` also publishes `memory_summary.md`, `MEMORY.md`, and direct `rollout_summaries/*.md` files from `~/.codex/memories_v2/`, with `~/.codex/memories/` as the fallback. Mind Meld leaves the Codex home untouched; Git metadata, SQLite stores, and files outside the copy set stay local. Each publisher's copies land in `~/.local/share/mind-meld/codex-memory/<peer device id>/` on machines with `codex` enabled, including machines without their own Codex memory folder. Treat the copies as read-only. To correct a memory, fix it on the machine that wrote it, then push from that machine and pull on its peers.
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
 - Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source agy` is the corresponding verb: it adds a scoped Antigravity source (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`) and opts this Mac into reading step token totals from local conversation databases. Session databases, settings, and chat history stay on the Mac.
 - The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`.
@@ -919,7 +921,6 @@ Fresh installs are asked about the `codex` source during `mm init`. That choice 
 
 ```bash
 mm enable-source codex
-mm enable-source codex-memory
 mm enable-source grok
 mm enable-source agy
 mm enable-source muse
@@ -2072,7 +2073,7 @@ command above), then check `mm status`. See [Upgrading](#upgrading).
 
 Run `mm devices retire <name|id>` from any remaining fleet machine to retire a decommissioned machine or an old registration left behind after re-running `mm init`. Retirement writes an encrypted retirement record (`retired/<id>.enc`), removes `syncthing/<id>.enc` and `devices/<id>.json` under the mm lock, drops the machine's `mm status` and `retro-fleet` rows, and lets each fleet machine where `mm` manages Syncthing automatically remove the retired Syncthing device on its next `mm push`, `mm pull`, `mm autopush`, or `mm autopull` once the retired machine stops connecting.
 
-Once a machine receives the retirement record, its next pull with `codex-memory` enabled moves the retired device's copies into the [30-day recovery folder](#recovering-a-deleted-file).
+Once a machine receives the retirement record, its next pull with `codex` enabled moves the retired device's copies into the [30-day recovery folder](#recovering-a-deleted-file).
 
 1. Update any machine at 1.7.1 or older first (`mm update`): its GC deletes an unregistered machine's blobs, including the only copy of a file only that machine had.
 2. On a machine with the **same home folder** as the dead one, run `mm pull` first so its project memory is on disk.

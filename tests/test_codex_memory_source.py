@@ -101,18 +101,15 @@ class _MultiDeviceCodexMemoryEnv:
             sidecar_dir.mkdir(parents=True)
             cfg_path = dev_root / "config.toml"
             copies_dir = home / ".local" / "share" / "mind-meld" / "codex-memory"
+            codex_src = config.get_default_source("codex")
+            assert codex_src is not None
+            codex_src["path"] = str(codex_dir)
             cfg = {
                 "device": {"id": did, "name": dname},
                 "storage": {"path": str(self.storage_dir)},
                 "sync": {
                     "max_file_size": 52_428_800,
-                    "sources": [
-                        {
-                            "name": "codex-memory",
-                            "path": str(codex_dir),
-                            "type": "codex-memory",
-                        }
-                    ],
+                    "sources": [codex_src],
                 },
                 "crypto": {"argon2_memory_kb": MEMORY_KB},
             }
@@ -188,21 +185,47 @@ class TestCodexMemoryConfig:
         (tmp_path / ".codex" / "memories_v2" / "MEMORY.md").write_text("# mem\n")
         (tmp_path / ".claude").mkdir(parents=True)
 
-        assert "codex-memory" in config.OPT_IN_SOURCE_NAMES
-        default = config.get_default_source("codex-memory")
-        assert default == {
-            "name": "codex-memory",
-            "path": config.DEFAULT_CODEX_DIR,
-            "type": "codex-memory",
-        }
-        # Legacy non-explicit config must not auto-activate codex-memory.
+        assert "codex-memory" not in config.OPT_IN_SOURCE_NAMES
+        assert config.get_default_source("codex-memory") is None
+
+        # Legacy non-explicit config derives codex-memory when codex is auto-detected.
         cfg = {
             "device": {"id": DEV_A, "name": "Mac A"},
             "storage": {"path": str(tmp_path / "store")},
             "sync": {},
         }
         resolved_names = {s["name"] for s in config.get_sources(cfg)}
-        assert "codex-memory" not in resolved_names
+        assert "codex" in resolved_names
+        assert "codex-memory" in resolved_names
+
+        # Disabling codex removes both codex and derived codex-memory.
+        cfg_disabled = {**cfg, "sync": {"disabled_sources": ["codex"]}}
+        disabled_names = {s["name"] for s in config.get_sources(cfg_disabled)}
+        assert "codex" not in disabled_names
+        assert "codex-memory" not in disabled_names
+
+    def test_filter_disabled_sources_translates_codex_and_ignores_stale_codex_memory(self):
+        sample = {
+            "version": 2,
+            "sources": {
+                "claude": {"files": {"a.md": {"sha256": "1"}}},
+                "codex": {"files": {"AGENTS.md": {"sha256": "2"}}},
+                "codex-memory": {"files": {f"{DEV_A}/MEMORY.md": {"sha256": "3"}}},
+            },
+            "tombstones": {
+                "codex:old.md": {"deleted_at": "2026-11-21T00:00:00Z"},
+                f"codex-memory:{DEV_A}/memory_summary.md": {"deleted_at": "2026-11-21T00:00:00Z"},
+            },
+        }
+        # Stale codex-memory in disabled_sources has no effect.
+        kept = core._filter_disabled_sources(sample, ["codex-memory"])
+        assert set(kept["sources"]) == {"claude", "codex", "codex-memory"}
+        assert kept["tombstones"] == sample["tombstones"]
+
+        # Disabling codex strips both codex and codex-memory files, preserving tombstones.
+        stripped = core._filter_disabled_sources(sample, ["codex"])
+        assert set(stripped["sources"]) == {"claude"}
+        assert stripped["tombstones"] == sample["tombstones"]
 
     @pytest.mark.parametrize(
         "bad_source",
@@ -404,11 +427,11 @@ class TestCodexMemoryPublication:
         (mem / "MEMORY.md").write_text("memory A\n")
         (mem / "rollout_summaries" / "x.md").write_text("rollout X\n")
 
-        before = _snapshot_tree(dev_a.codex)
+        before = _snapshot_tree(mem)
         env.push(DEV_A)
-        after = _snapshot_tree(dev_a.codex)
+        after = _snapshot_tree(mem)
         assert before == after
-        assert not list(dev_a.codex.rglob(manifest.ANCHOR_NAME))
+        assert not list(mem.rglob(manifest.ANCHOR_NAME))
 
         raw_m = _decrypt_raw_manifest(env.backend, DEV_A)
         wire_keys = sorted(raw_m["sources"]["codex-memory"]["files"].keys())
@@ -604,10 +627,69 @@ class TestCodexMemoryPullAndConfinement:
         monkeypatch.setattr(statusflow, "_syncthing_status_lines", lambda *a, **k: [])
         sources = runner.invoke(cli.app, ["sources"], env={"COLUMNS": "180"})
         assert sources.exit_code == 0, sources.output
-        assert "codex-memory" in sources.output
+        assert "codex-memory" not in sources.output
         status = runner.invoke(cli.app, ["status", "--source", "codex-memory"])
         assert status.exit_code == 0, status.output
         assert "Source 'codex-memory'" in status.output
+
+    def test_wire_format_byte_identical_between_legacy_and_codex_only_configs(
+        self, tmp_path, monkeypatch
+    ):
+        env_new = _MultiDeviceCodexMemoryEnv(
+            tmp_path / "new", monkeypatch, ((DEV_A, "Mac A"), (DEV_B, "Linux B"))
+        )
+        env_legacy = _MultiDeviceCodexMemoryEnv(
+            tmp_path / "legacy", monkeypatch, ((DEV_A, "Mac A"), (DEV_B, "Linux B"))
+        )
+        # Legacy-shaped config lists both codex and codex-memory pointing at the same root.
+        legacy_a = env_legacy.devices[DEV_A]
+        legacy_a.cfg["sync"]["sources"].append(
+            {"name": "codex-memory", "path": str(legacy_a.codex), "type": "codex-memory"}
+        )
+        config.save_config(legacy_a.cfg, legacy_a.cfg_path)
+
+        for env in (env_new, env_legacy):
+            dev_a = env.devices[DEV_A]
+            (dev_a.codex / "memories_v2" / "rollout_summaries").mkdir(parents=True)
+            (dev_a.codex / "memories_v2" / "MEMORY.md").write_text("wire memory\n")
+            (dev_a.codex / "memories_v2" / "rollout_summaries" / "r1.md").write_text("r1\n")
+            env.push(DEV_A)
+
+        raw_new = _decrypt_raw_manifest(env_new.backend, DEV_A)
+        raw_legacy = _decrypt_raw_manifest(env_legacy.backend, DEV_A)
+        expected_keys = {f"{DEV_A}/MEMORY.md", f"{DEV_A}/rollout_summaries/r1.md"}
+        assert set(raw_new["sources"]["codex-memory"]["files"]) == expected_keys
+        assert set(raw_legacy["sources"]["codex-memory"]["files"]) == expected_keys
+        for rel in expected_keys:
+            assert (
+                raw_new["sources"]["codex-memory"]["files"][rel]["sha256"]
+                == raw_legacy["sources"]["codex-memory"]["files"][rel]["sha256"]
+            )
+            assert (
+                raw_new["sources"]["codex-memory"]["files"][rel]["size"]
+                == raw_legacy["sources"]["codex-memory"]["files"][rel]["size"]
+            )
+
+        # Delete r1.md on both and verify identical tombstone keys.
+        for env in (env_new, env_legacy):
+            (env.devices[DEV_A].codex / "memories_v2" / "rollout_summaries" / "r1.md").unlink()
+            env.push(DEV_A)
+
+        raw_new_del = _decrypt_raw_manifest(env_new.backend, DEV_A)
+        raw_legacy_del = _decrypt_raw_manifest(env_legacy.backend, DEV_A)
+        tkey = f"codex-memory:{DEV_A}/rollout_summaries/r1.md"
+        assert tkey in raw_new_del["tombstones"]
+        assert tkey in raw_legacy_del["tombstones"]
+        assert (
+            raw_new_del["tombstones"][tkey]["sha256"]
+            == raw_legacy_del["tombstones"][tkey]["sha256"]
+        )
+
+        # Pull under a codex-only config applies a manifest pushed under the legacy shape.
+        env_legacy.pull(DEV_B)
+        dev_b_legacy = env_legacy.devices[DEV_B]
+        assert (dev_b_legacy.copies_dir / DEV_A / "MEMORY.md").read_text() == "wire memory\n"
+        assert not (dev_b_legacy.copies_dir / DEV_A / "rollout_summaries" / "r1.md").exists()
 
     def test_missing_copies_root_does_not_block_other_source_deletions(self, tmp_path, monkeypatch):
         env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch)
@@ -890,7 +972,9 @@ class TestCodexMemoryPullAndConfinement:
 
 class TestCodexMemoryInitAndSourceCommands:
     @pytest.mark.parametrize("detected", [False, True])
-    def test_init_enter_persists_the_detected_default(self, tmp_path, monkeypatch, detected):
+    def test_init_never_persists_separate_codex_memory_source(
+        self, tmp_path, monkeypatch, detected
+    ):
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -906,23 +990,23 @@ class TestCodexMemoryInitAndSourceCommands:
             (active / "memory_summary.md").write_text("init summary\n")
         storage = tmp_path / "storage"
         storage.mkdir()
-        inputs = f"{storage}\nMac A\npw\npw\ny\n" + "\n" * 7
+        inputs = f"{storage}\nMac A\npw\npw\ny\n" + "\n" * 6
         initialized = runner.invoke(cli.app, ["init", "--new-fleet"], input=inputs)
         assert initialized.exit_code == 0, initialized.output
+        assert "codex-memory" not in initialized.output
         saved = config.load_config(config.CONFIG_PATH)
-        assert any(src["name"] == "codex-memory" for src in saved["sync"]["sources"]) is detected
+        assert not any(src["name"] == "codex-memory" for src in saved["sync"]["sources"])
+        assert any(src["name"] == "codex" for src in saved["sync"]["sources"]) is detected
 
-    def test_detection_for_memories_v2_and_absent(self, tmp_path, monkeypatch):
+    def test_init_prompts_never_ask_about_codex_memory(self, tmp_path, monkeypatch):
         from mind_meld import initflow
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         codex = tmp_path / ".codex"
-        codex.mkdir()
-        src = {"name": "codex-memory", "path": str(codex), "type": "codex-memory"}
-        assert core._source_path_is_detected(src) is False
+        (codex / "memories_v2").mkdir(parents=True)
+        (codex / "memories_v2" / "memory_summary.md").write_text("hi\n")
 
-        # Without memories_v2, init prompt defaults to n (Enter = n).
         seen_prompts: list[tuple[str, bool]] = []
 
         def fake_ask(prompt: str, *, default: bool = True) -> bool:
@@ -930,23 +1014,12 @@ class TestCodexMemoryInitAndSourceCommands:
             return default
 
         monkeypatch.setattr(core, "ask_yes_no", fake_ask)
-        selected_absent = initflow._prompt_sources()
-        cm_prompt_absent = [p for p in seen_prompts if "'codex-memory'" in p[0]]
-        assert cm_prompt_absent and cm_prompt_absent[0][1] is False
-        assert not any(s["name"] == "codex-memory" for s in selected_absent)
+        selected = initflow._prompt_sources()
+        assert not any("codex-memory" in p[0] for p in seen_prompts)
+        assert not any(s["name"] == "codex-memory" for s in selected)
+        assert any(s["name"] == "codex" for s in selected)
 
-        # With memories_v2/memory_summary.md, init prompt defaults to y (Enter = y) and includes it.
-        (codex / "memories_v2").mkdir()
-        (codex / "memories_v2" / "memory_summary.md").write_text("hi\n")
-        assert core._source_path_is_detected(src) is True
-
-        seen_prompts.clear()
-        selected_present = initflow._prompt_sources()
-        cm_prompt_present = [p for p in seen_prompts if "'codex-memory'" in p[0]]
-        assert cm_prompt_present and cm_prompt_present[0][1] is True
-        assert any(s["name"] == "codex-memory" for s in selected_present)
-
-    def test_enable_disable_preserves_copies_and_lists_in_sources_and_status(
+    def test_codex_enable_disable_preserves_copies_and_merges_sources_row(
         self, tmp_path, monkeypatch
     ):
         env = _MultiDeviceCodexMemoryEnv(
@@ -955,49 +1028,42 @@ class TestCodexMemoryInitAndSourceCommands:
         dev_a = env.devices[DEV_A]
         dev_b = env.devices[DEV_B]
 
-        # Start A with explicit claude source only, then enable codex-memory.
+        # Keep claude alongside codex on A so disabling codex still publishes a new manifest.
         claude_dir = dev_a.home / ".claude"
         claude_dir.mkdir(parents=True)
-        dev_a.cfg["sync"]["sources"] = [
-            {"name": "claude", "path": str(claude_dir), "type": "claude"}
-        ]
+        dev_a.cfg["sync"]["sources"].insert(
+            0, {"name": "claude", "path": str(claude_dir), "type": "claude"}
+        )
         config.save_config(dev_a.cfg, dev_a.cfg_path)
 
-        env.activate(DEV_A)
-        sourceflow.enable_source("codex-memory")
-        reloaded = config.load_config(dev_a.cfg_path)
-        names = [s["name"] for s in reloaded["sync"]["sources"]]
-        assert "claude" in names
-        assert "codex-memory" in names
-        dev_a.cfg = reloaded
-
-        # Populate A's Codex memory, push, pull on B.
+        # Populate A's Codex memory and a Codex skill file, push, pull on B.
+        (dev_a.codex / "skills" / "demo").mkdir(parents=True)
+        (dev_a.codex / "skills" / "demo" / "SKILL.md").write_text("# skill\n")
         (dev_a.codex / "memories_v2").mkdir(parents=True)
         (dev_a.codex / "memories_v2" / "MEMORY.md").write_text("keep me\n")
         env.push(DEV_A)
         env.pull(DEV_B)
         assert (dev_b.copies_dir / DEV_A / "MEMORY.md").read_text() == "keep me\n"
 
-        # mm sources and mm status list codex-memory.
+        # mm sources shows codex with merged file count and no codex-memory row.
         env.activate(DEV_A)
-        res_sources = runner.invoke(cli.app, ["sources"])
+        res_sources = runner.invoke(cli.app, ["sources"], env={"COLUMNS": "180"})
         assert res_sources.exit_code == 0, res_sources.output
-        assert "codex-memory" in res_sources.stdout
+        assert "codex-memory" not in res_sources.stdout
+        assert "codex" in res_sources.stdout
 
-        monkeypatch.setattr(statusflow, "_syncthing_status_lines", lambda *a, **k: [])
-        res_status = runner.invoke(cli.app, ["status"])
-        assert res_status.exit_code == 0, res_status.output
-        assert "codex-memory" in res_status.stdout
-
-        # Disable on A and push: no codex-memory files or new tombstones, B keeps copies.
-        sourceflow.disable_source("codex-memory")
+        # Disable codex on A and push: neither codex nor codex-memory files or new tombstones,
+        # and B keeps its existing copies after pull.
+        sourceflow.disable_source("codex")
         reloaded_after = config.load_config(dev_a.cfg_path)
-        assert "codex-memory" in reloaded_after["sync"]["disabled_sources"]
+        assert "codex" in reloaded_after["sync"]["disabled_sources"]
         dev_a.cfg = reloaded_after
 
         env.push(DEV_A)
         raw_a = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert "codex" not in raw_a.get("sources", {})
         assert "codex-memory" not in raw_a.get("sources", {})
+        assert not any(k.startswith("codex:") for k in raw_a.get("tombstones", {}))
         assert not any(k.startswith("codex-memory:") for k in raw_a.get("tombstones", {}))
 
         env.pull(DEV_B)
