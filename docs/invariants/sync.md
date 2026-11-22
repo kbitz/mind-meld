@@ -2382,6 +2382,8 @@ This derived `codex-memory` source publishes this machine's Codex memory summari
   `core._prove_omitted_paths_absent` adds the omitted prior memory paths to
   `still_present` for the mint guard. The old root's paths leave the snapshot
   without deletion records, and the prior manifest's path is never opened.
+  A push from the new root refreshes the manifest even when the files stay
+  identical. A later push can then recognize a deletion at that root.
   If the new root is absent, push can omit an independently published older
   memory root from the prior comparison before checking for missing roots.
   A prior snapshot with both sources at the same root still requires that

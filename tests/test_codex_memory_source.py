@@ -1043,6 +1043,35 @@ class TestCodexMemoryInitAndSourceCommands:
             env.push(DEV_A)
         assert _decrypt_raw_manifest(env.backend, DEV_A) == before
 
+    def test_same_bytes_move_refreshes_the_root_for_later_deletions(self, tmp_path, monkeypatch):
+        env = _MultiDeviceCodexMemoryEnv(
+            tmp_path, monkeypatch, ((DEV_A, "Mac A"), (DEV_B, "Linux B"))
+        )
+        dev = env.devices[DEV_A]
+        memories = dev.codex / "memories_v2"
+        memories.mkdir()
+        (memories / "MEMORY.md").write_text("removed after the move\n")
+        (memories / "memory_summary.md").write_text("kept after the move\n")
+        env.push(DEV_A)
+        env.pull(DEV_B)
+
+        moved_home = dev.root / "moved-codex"
+        dev.codex.rename(moved_home)
+        dev.cfg["sync"]["sources"][0]["path"] = str(moved_home)
+        env.push(DEV_A)
+        moved = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert moved["sources"]["codex-memory"]["base_path"] == str(moved_home.resolve())
+        assert not any(name.startswith("codex-memory:") for name in moved["tombstones"])
+
+        (moved_home / "memories_v2" / "MEMORY.md").unlink()
+        env.push(DEV_A)
+        after_delete = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert f"codex-memory:{DEV_A}/MEMORY.md" in after_delete["tombstones"]
+        env.pull(DEV_B)
+        copies = env.devices[DEV_B].copies_dir / DEV_A
+        assert not (copies / "MEMORY.md").exists()
+        assert (copies / "memory_summary.md").read_text() == "kept after the move\n"
+
     @pytest.mark.parametrize("prepare_new_memory", [False, True])
     def test_old_memory_root_stops_publishing_without_deleting_copies(
         self, tmp_path, monkeypatch, prepare_new_memory

@@ -1036,6 +1036,12 @@ def _require_published_source_root(src_name: str, base: Path) -> None:
         ) from e
 
 
+def _codex_memory_root_changed(prior_source: dict, scanned_source: dict) -> bool:
+    prior_root = prior_source.get("base_path")
+    scanned_root = scanned_source.get("base_path")
+    return bool(prior_root and scanned_root and prior_root != scanned_root)
+
+
 def _prove_omitted_paths_absent(
     local_manifest: dict,
     prior_manifest: dict | None,
@@ -1069,17 +1075,16 @@ def _prove_omitted_paths_absent(
             continue
         local_src = local_sources.get(src_name, {})
         local_files = local_src.get("files", {})
-        if src_name == manifest.CODEX_MEMORY_SOURCE_NAME:
-            prior_root = remote_src.get("base_path")
-            scanned_root = local_src.get("base_path")
-            if prior_root and scanned_root and prior_root != scanned_root:
-                # The new scan cannot prove absence under the old root. Compare
-                # manifest metadata only; never open the prior root as a path.
-                if still_present is not None:
-                    still_present.update(
-                        (src_name, rel) for rel in remote_src["files"] if rel not in local_files
-                    )
-                continue
+        if src_name == manifest.CODEX_MEMORY_SOURCE_NAME and _codex_memory_root_changed(
+            remote_src, local_src
+        ):
+            # The new scan cannot prove absence under the old root. Compare
+            # manifest metadata only; never open the prior root as a path.
+            if still_present is not None:
+                still_present.update(
+                    (src_name, rel) for rel in remote_src["files"] if rel not in local_files
+                )
+            continue
         base = Path(src_cfg["path"]).expanduser()
         _require_published_source_root(src_name, base)
         if (
