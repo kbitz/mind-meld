@@ -732,17 +732,42 @@ def _isolate_mm_events_path(request, monkeypatch, tmp_path) -> None:
 
 
 def pytest_configure(config) -> None:
-    """Register custom markers so pytest doesn't warn about unknown markers."""
+    """Register the `no_mm_events_isolation` marker so pytest doesn't
+    warn about unknown markers."""
     config.addinivalue_line(
         "markers",
         "no_mm_events_isolation: opt out of the autouse "
         "_isolate_mm_events_path fixture (for tests that assert on "
         "DEFAULT_SOURCES['mm-events'].path canonical value)",
     )
-    config.addinivalue_line(
-        "markers",
-        "xdist_group(name): run marked tests on one pytest-xdist worker under --dist loadgroup",
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addini(
+        "mm_group_check_tests",
+        "Keep check-runner tests together in the default parallel run",
+        type="bool",
+        default=False,
     )
+
+
+@pytest.hookimpl(tryfirst=True, optionalhook=True)
+def pytest_xdist_make_scheduler(config: pytest.Config, log):
+    if config.getoption("dist") != "load" or not config.getini("mm_group_check_tests"):
+        return None
+
+    from xdist.scheduler import LoadScopeScheduling
+
+    class CheckRunnerScheduling(LoadScopeScheduling):
+        def _split_scope(self, nodeid: str) -> str:
+            # The controller groups this file without changing node IDs that
+            # the affected selector stores and matches across runs.
+            path, _, _ = nodeid.partition("::")
+            if path == "tests/test_bin_check.py":
+                return path
+            return nodeid
+
+    return CheckRunnerScheduling(config, log)
 
 
 @pytest.fixture

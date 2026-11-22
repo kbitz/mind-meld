@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -87,26 +88,17 @@ class TestArgv:
         assert mod.xdist_args(py, serial=False, extra=["--pdb"]) == []
         assert mod.xdist_args(py, serial=False, extra=["-x"]) == []
         assert mod.xdist_args(py, serial=False, extra=["-n", "2"]) == []
-        got = mod.xdist_args(py, serial=False, extra=[])
-        if got:
-            assert got == ["-n", "4", "--dist", "loadgroup"]
-            assert mod.xdist_args(py, serial=False, extra=["--dist", "loadfile"]) == ["-n", "4"]
-            assert mod.xdist_args(py, serial=False, extra=["--dist=loadscope"]) == ["-n", "4"]
-
-    def test_nested_pytest_tests_share_one_xdist_group(self) -> None:
-        targets = (
-            test_clean_clone_end_to_end,
-            TestAffectedSelection,
-            TestOwnedGroup,
-            TestInterruptCleanup,
+        monkeypatch.setattr(
+            mod.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0)
         )
-        groups = set()
-        for target in targets:
-            marks = [m for m in getattr(target, "pytestmark", []) if m.name == "xdist_group"]
-            assert len(marks) == 1, f"{target.__name__} must declare one xdist_group mark"
-            assert len(marks[0].args) == 1 and isinstance(marks[0].args[0], str)
-            groups.add(marks[0].args[0])
-        assert len(groups) == 1
+        assert mod.xdist_args(py, serial=False, extra=[]) == [
+            "-n",
+            "4",
+            "-o",
+            "mm_group_check_tests=true",
+        ]
+        assert mod.xdist_args(py, serial=False, extra=["--dist", "loadfile"]) == ["-n", "4"]
+        assert mod.xdist_args(py, serial=False, extra=["--dist=loadscope"]) == ["-n", "4"]
 
     def test_lint_and_tests_together_is_an_error(self, capsys) -> None:
         mod = load_check()
@@ -597,7 +589,6 @@ def test_absolute_invocation_from_another_cwd(tmp_path: Path) -> None:
     assert "usage: ./bin/check" in proc.stdout
 
 
-@pytest.mark.xdist_group("bin_check_nested")
 def test_clean_clone_end_to_end(tmp_path: Path) -> None:
     """Temporary checkout, isolated HOME and pip cache, cheap test scope.
 
@@ -690,7 +681,7 @@ def git(root: Path, *args: str) -> None:
         shutil.rmtree(cache, ignore_errors=True)
 
 
-def check(root: Path, *args: str, env: dict | None = None, timeout: float = 180):
+def _check_env(root: Path) -> dict[str, str]:
     full = {
         k: v
         for k, v in os.environ.items()
@@ -706,7 +697,13 @@ def check(root: Path, *args: str, env: dict | None = None, timeout: float = 180)
             "MM_SELECT_CONFIG",
         )
     }
-    full.update(MM_CHECK_ROOT=str(root), MM_PYTHON=sys.executable, RAN_LOG=str(ran_log(root)))
+    full.update(MM_CHECK_ROOT=str(root), MM_PYTHON=sys.executable)
+    return full
+
+
+def check(root: Path, *args: str, env: dict | None = None, timeout: float = 180):
+    full = _check_env(root)
+    full["RAN_LOG"] = str(ran_log(root))
     full.update(env or {})
     return subprocess.run(
         [sys.executable, str(ROOT / "bin" / "_check.py"), "--no-bootstrap", "--tests", *args],
@@ -716,6 +713,32 @@ def check(root: Path, *args: str, env: dict | None = None, timeout: float = 180)
         env=full,
         timeout=timeout,
     )
+
+
+def test_default_parallel_run_keeps_runner_tests_on_one_worker(tmp_path: Path) -> None:
+    grouped = {
+        "tests/test_bin_check.py::TestArgv::test_default_scope_is_tests",
+        "tests/test_bin_check.py::TestAffectedArgv::test_flags_parse",
+        "tests/test_bin_check.py::test_absolute_invocation_from_another_cwd",
+    }
+    independent = "tests/test_docs_routing.py::test_bin_check_exists_and_is_executable"
+    nodes = sorted(grouped | {independent})
+    proc = check(
+        ROOT,
+        *nodes,
+        "--",
+        "-v",
+        "-o",
+        f"cache_dir={tmp_path / 'cache'}",
+        env={"MM_PYTEST_WORKERS": "2"},
+    )
+    assert proc.returncode == 0, both(proc)
+    assignments = {
+        node: worker for worker, node in re.findall(r"(?m)^\[(gw\d+)\].* PASSED (\S+)", proc.stdout)
+    }
+    assert assignments.keys() == set(nodes), both(proc)
+    assert len({assignments[node] for node in grouped}) == 1, both(proc)
+    assert assignments[independent] not in {assignments[node] for node in grouped}, both(proc)
 
 
 def ran_log(root: Path) -> Path:
@@ -826,7 +849,6 @@ class TestAffectedArgv:
             assert needle in out
 
 
-@pytest.mark.xdist_group("bin_check_nested")
 class TestAffectedSelection:
     def test_leaf_edit_runs_only_the_tests_that_reach_it_and_is_not_last_run_based(
         self, proj: Path
@@ -1224,42 +1246,42 @@ class TestAffectedSelection:
             f"    open({str(ready)!r}, 'w').write('1')\n"
             "    time.sleep(60)\n"
         )
-        driver = subprocess.Popen(
-            [
-                sys.executable,
-                str(ROOT / "bin" / "_check.py"),
-                "--no-bootstrap",
-                "--tests",
-                "--affected",
-                "--refresh",
-                "--serial",
-            ],
-            cwd=proj,
-            env={
-                **{
-                    k: v
-                    for k, v in os.environ.items()
-                    if k not in ("VIRTUAL_ENV", "MM_VENV", "PYTEST_ADDOPTS", "MM_PYTEST_WORKERS")
-                },
-                "MM_CHECK_ROOT": str(proj),
-                "MM_PYTHON": sys.executable,
-            },
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        stdout = proj.parent / "cancel-stdout.txt"
+        stderr = proj.parent / "cancel-stderr.txt"
+
+        def output() -> str:
+            return stdout.read_text() + stderr.read_text()
+
+        with stdout.open("w") as out, stderr.open("w") as err:
+            driver = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(ROOT / "bin" / "_check.py"),
+                    "--no-bootstrap",
+                    "--tests",
+                    "--affected",
+                    "--refresh",
+                    "--serial",
+                ],
+                cwd=proj,
+                env=_check_env(proj),
+                stdout=out,
+                stderr=err,
+                text=True,
+            )
         try:
             deadline = time.monotonic() + 30
             while not ready.exists() and time.monotonic() < deadline:
                 # gstack-timing-ok: poll ready sentinel file with bounded deadline
                 time.sleep(0.05)
-            assert ready.exists()
+            assert ready.exists(), output()
             os.kill(driver.pid, signal.SIGINT)
-            assert driver.wait(timeout=30) == 130
+            assert driver.wait(timeout=30) == 130, output()
         finally:
             if driver.poll() is None:
                 driver.kill()
                 driver.wait()
-        assert record.read_bytes() == before
+        assert record.read_bytes() == before, output()
         git(proj, "checkout", "--", "tests/test_other.py")
         ready.unlink(missing_ok=True)
         edit(proj, "src/mind_meld/leaf.py", "return 1", "return int(1)")
@@ -1637,7 +1659,6 @@ LEADER = (
 )
 
 
-@pytest.mark.xdist_group("bin_check_nested")
 class TestOwnedGroup:
     def _leader(self, tmp_path: Path, code: int) -> tuple[list[str], Path]:
         script = tmp_path / "leader.py"
@@ -1807,22 +1828,8 @@ def _hang_project(tmp_path: Path, copies: int = 1) -> tuple[Path, Path]:
 
 
 def _start_driver(root: Path, ready: Path, *args: str, env: dict | None = None):
-    full = {
-        k: v
-        for k, v in os.environ.items()
-        if k
-        not in (
-            "VIRTUAL_ENV",
-            "MM_VENV",
-            "PYTEST_ADDOPTS",
-            "MM_PYTEST_WORKERS",
-            "PYTEST_XDIST_WORKER",
-            "PYTEST_XDIST_WORKER_COUNT",
-            "PYTEST_CURRENT_TEST",
-            "MM_SELECT_CONFIG",
-        )
-    }
-    full.update(MM_CHECK_ROOT=str(root), MM_PYTHON=sys.executable, READY=str(ready))
+    full = _check_env(root)
+    full["READY"] = str(ready)
     full.update(env or {})
     return subprocess.Popen(
         [sys.executable, str(ROOT / "bin" / "_check.py"), "--no-bootstrap", "--tests", *args],
@@ -1858,7 +1865,6 @@ def _cleanup_driver(driver: subprocess.Popen, ready: Path, pids: list[int]) -> N
             pass
 
 
-@pytest.mark.xdist_group("bin_check_nested")
 class TestInterruptCleanup:
     @pytest.mark.parametrize(
         ("sig", "status"),
