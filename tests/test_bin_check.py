@@ -89,7 +89,24 @@ class TestArgv:
         assert mod.xdist_args(py, serial=False, extra=["-n", "2"]) == []
         got = mod.xdist_args(py, serial=False, extra=[])
         if got:
-            assert got == ["-n", "4"]
+            assert got == ["-n", "4", "--dist", "loadgroup"]
+            assert mod.xdist_args(py, serial=False, extra=["--dist", "loadfile"]) == ["-n", "4"]
+            assert mod.xdist_args(py, serial=False, extra=["--dist=loadscope"]) == ["-n", "4"]
+
+    def test_nested_pytest_tests_share_one_xdist_group(self) -> None:
+        targets = (
+            test_clean_clone_end_to_end,
+            TestAffectedSelection,
+            TestOwnedGroup,
+            TestInterruptCleanup,
+        )
+        groups = set()
+        for target in targets:
+            marks = [m for m in getattr(target, "pytestmark", []) if m.name == "xdist_group"]
+            assert len(marks) == 1, f"{target.__name__} must declare one xdist_group mark"
+            assert len(marks[0].args) == 1 and isinstance(marks[0].args[0], str)
+            groups.add(marks[0].args[0])
+        assert len(groups) == 1
 
     def test_lint_and_tests_together_is_an_error(self, capsys) -> None:
         mod = load_check()
@@ -580,6 +597,7 @@ def test_absolute_invocation_from_another_cwd(tmp_path: Path) -> None:
     assert "usage: ./bin/check" in proc.stdout
 
 
+@pytest.mark.xdist_group("bin_check_nested")
 def test_clean_clone_end_to_end(tmp_path: Path) -> None:
     """Temporary checkout, isolated HOME and pip cache, cheap test scope.
 
@@ -676,7 +694,17 @@ def check(root: Path, *args: str, env: dict | None = None, timeout: float = 180)
     full = {
         k: v
         for k, v in os.environ.items()
-        if k not in ("VIRTUAL_ENV", "MM_VENV", "PYTEST_ADDOPTS", "MM_PYTEST_WORKERS")
+        if k
+        not in (
+            "VIRTUAL_ENV",
+            "MM_VENV",
+            "PYTEST_ADDOPTS",
+            "MM_PYTEST_WORKERS",
+            "PYTEST_XDIST_WORKER",
+            "PYTEST_XDIST_WORKER_COUNT",
+            "PYTEST_CURRENT_TEST",
+            "MM_SELECT_CONFIG",
+        )
     }
     full.update(MM_CHECK_ROOT=str(root), MM_PYTHON=sys.executable, RAN_LOG=str(ran_log(root)))
     full.update(env or {})
@@ -719,8 +747,8 @@ def seeded(tmp_path_factory) -> Path:
     root = make_project(base / "proj")
     proc = check(root, "--affected", "--serial")
     assert proc.returncode == 0, both(proc)
-    assert "recorded coverage for 4 tests" in proc.stderr
-    assert ran(root) == ALL_TESTS
+    assert "recorded coverage for 4 tests" in proc.stderr, both(proc)
+    assert ran(root) == ALL_TESTS, both(proc)
     return root
 
 
@@ -798,6 +826,7 @@ class TestAffectedArgv:
             assert needle in out
 
 
+@pytest.mark.xdist_group("bin_check_nested")
 class TestAffectedSelection:
     def test_leaf_edit_runs_only_the_tests_that_reach_it_and_is_not_last_run_based(
         self, proj: Path
@@ -806,13 +835,14 @@ class TestAffectedSelection:
         for _ in range(2):
             proc = affected(proj)
             assert proc.returncode == 0, both(proc)
-            assert "ran 3 of 4 collected tests" in both(proc)
-            assert ran(proj) == LEAF_TESTS
+            assert "ran 3 of 4 collected tests" in both(proc), both(proc)
+            assert ran(proj) == LEAF_TESTS, both(proc)
 
     def test_shared_edit_reaches_its_callers_only(self, proj: Path) -> None:
         edit(proj, "src/mind_meld/shared.py", "+ 1", "+ int(1)")
-        assert affected(proj).returncode == 0
-        assert ran(proj) == {"tests/test_shared.py::test_shared"}
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert ran(proj) == {"tests/test_shared.py::test_shared"}, both(proc)
 
     def test_committed_staged_unstaged_and_untracked_changes_all_count(self, proj: Path) -> None:
         git(proj, "checkout", "-q", "-b", "work")
@@ -823,25 +853,26 @@ class TestAffectedSelection:
         (proj / "tests" / "test_new.py").write_text("def test_new():\n    assert True\n")
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert ran(proj) == ALL_TESTS | {"tests/test_new.py::test_new"}
+        assert ran(proj) == ALL_TESTS | {"tests/test_new.py::test_new"}, both(proc)
 
     def test_deleted_test_is_a_proven_empty_selection(self, proj: Path) -> None:
         git(proj, "rm", "-q", "tests/test_other.py")
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert "ran 0 of 4" in both(proc)
-        assert ran(proj) == set()
+        assert "ran 0 of 4" in both(proc), both(proc)
+        assert ran(proj) == set(), both(proc)
 
     def test_renamed_test_runs_under_its_new_name(self, proj: Path) -> None:
         git(proj, "mv", "tests/test_other.py", "tests/test_renamed.py")
-        assert affected(proj).returncode == 0
-        assert ran(proj) == {"tests/test_renamed.py::test_other"}
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert ran(proj) == {"tests/test_renamed.py::test_other"}, both(proc)
 
     def test_unchanged_tree_runs_nothing_and_succeeds(self, proj: Path) -> None:
         proc = affected(proj)
-        assert proc.returncode == 0
-        assert "ran 0 of 4" in both(proc)
-        assert ran(proj) == set()
+        assert proc.returncode == 0, both(proc)
+        assert "ran 0 of 4" in both(proc), both(proc)
+        assert ran(proj) == set(), both(proc)
 
     @pytest.mark.parametrize(
         ("name", "text", "why"),
@@ -868,8 +899,8 @@ class TestAffectedSelection:
         path.write_text((path.read_text() if path.exists() else "") + text)
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert why in proc.stderr and "running the full suite" in proc.stderr
-        assert ran(proj) == ALL_TESTS
+        assert why in proc.stderr and "running the full suite" in proc.stderr, both(proc)
+        assert ran(proj) == ALL_TESTS, both(proc)
 
     def test_tests_that_read_source_or_spawn_python_are_never_excluded(
         self, tmp_path: Path
@@ -886,7 +917,8 @@ class TestAffectedSelection:
         root = make_project(
             tmp_path / "proj", {"tests/test_reader.py": reader, "tests/test_child.py": child}
         )
-        assert affected(root).returncode == 0
+        seed = affected(root)
+        assert seed.returncode == 0, both(seed)
         ran(root)
         edit(root, "src/mind_meld/leaf.py", "return 1", "return int(1)")
         proc = affected(root)
@@ -894,56 +926,59 @@ class TestAffectedSelection:
         assert ran(root) == LEAF_TESTS | {
             "tests/test_reader.py::test_reader",
             "tests/test_child.py::test_child",
-        }
+        }, both(proc)
 
     def test_config_that_differs_from_the_merge_base_is_never_narrowed(
         self, tmp_path: Path
     ) -> None:
         root = make_project(tmp_path / "proj")
         edit(root, "tests/conftest.py", "import os", "import os  # edited")
-        assert affected(root).returncode == 0
+        seed = affected(root)
+        assert seed.returncode == 0, both(seed)
         ran(root)
         proc = affected(root)
-        assert "conftest changed: tests/conftest.py" in proc.stderr
-        assert ran(root) == ALL_TESTS
+        assert "conftest changed: tests/conftest.py" in proc.stderr, both(proc)
+        assert ran(root) == ALL_TESTS, both(proc)
 
     def test_failures_are_reselected_until_they_pass(self, proj: Path) -> None:
         edit(proj, "src/mind_meld/leaf.py", "return 1", "return 2")
-        assert affected(proj).returncode != 0
+        fail_proc = affected(proj)
+        assert fail_proc.returncode != 0, both(fail_proc)
         ran(proj)
         git(proj, "checkout", "--", "src/mind_meld/leaf.py")
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert ran(proj) == LEAF_TESTS
-        assert "ran 0 of 4" in both(affected(proj))
+        assert ran(proj) == LEAF_TESTS, both(proc)
+        clean = affected(proj)
+        assert "ran 0 of 4" in both(clean), both(clean)
 
     def test_collection_failure_is_not_converted_to_success(self, proj: Path) -> None:
         (proj / "tests" / "test_broken.py").write_text("def test_x(:\n")
         proc = affected(proj)
-        assert proc.returncode != 0
-        assert (proj / ".mm-test-selection" / "record.json").is_file()
+        assert proc.returncode != 0, both(proc)
+        assert (proj / ".mm-test-selection" / "record.json").is_file(), both(proc)
 
     def test_xdist_record_and_selection(self, tmp_path: Path) -> None:
         root = make_project(tmp_path / "proj")
         env = {"MM_PYTEST_WORKERS": "2"}
         proc = check(root, "--affected", env=env)
         assert proc.returncode == 0, both(proc)
-        assert ran(root) == ALL_TESTS
+        assert ran(root) == ALL_TESTS, both(proc)
         record = json.loads((root / ".mm-test-selection" / "record.json").read_text())
-        assert len(record["nodes"]) == 4
+        assert len(record["nodes"]) == 4, both(proc)
         edit(root, "src/mind_meld/leaf.py", "return 1", "return int(1)")
         proc = check(root, "--affected", env=env)
         assert proc.returncode == 0, both(proc)
-        assert "ran 3 of 4 collected tests" in both(proc)
-        assert ran(root) == LEAF_TESTS
+        assert "ran 3 of 4 collected tests" in both(proc), both(proc)
+        assert ran(root) == LEAF_TESTS, both(proc)
 
     def test_refresh_rerecords_the_whole_suite(self, proj: Path) -> None:
         (proj / "tests" / "test_new.py").write_text("def test_new():\n    assert True\n")
         proc = affected(proj, "--refresh")
         assert proc.returncode == 0, both(proc)
-        assert "refresh requested" in proc.stderr
+        assert "refresh requested" in proc.stderr, both(proc)
         record = json.loads((proj / ".mm-test-selection" / "record.json").read_text())
-        assert len(record["nodes"]) == 5
+        assert len(record["nodes"]) == 5, both(proc)
 
     @pytest.mark.parametrize(
         ("mutate", "why"),
@@ -968,28 +1003,30 @@ class TestAffectedSelection:
         mutate(json.loads(path.read_text()), path)
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert why in proc.stderr
-        assert ran(proj) == ALL_TESTS
-        assert len(json.loads(path.read_text())["nodes"]) == 4
+        assert why in proc.stderr, both(proc)
+        assert ran(proj) == ALL_TESTS, both(proc)
+        assert len(json.loads(path.read_text())["nodes"]) == 4, both(proc)
 
     def test_moved_merge_base_reseeds(self, proj: Path) -> None:
         git(proj, "commit", "-q", "--allow-empty", "-m", "moved")
         git(proj, "update-ref", "refs/remotes/origin/main", "HEAD")
         proc = affected(proj)
-        assert "merge base moved" in proc.stderr
-        assert ran(proj) == ALL_TESTS
+        assert proc.returncode == 0, both(proc)
+        assert "merge base moved" in proc.stderr, both(proc)
+        assert ran(proj) == ALL_TESTS, both(proc)
 
     def test_filtered_run_never_becomes_the_baseline(self, tmp_path: Path) -> None:
         root = make_project(tmp_path / "proj")
         record = root / ".mm-test-selection" / "record.json"
         proc = affected(root, env={"PYTEST_ADDOPTS": "-k test_other"})
         assert proc.returncode == 0, both(proc)
-        assert "record not updated" in proc.stderr and "keyword" in proc.stderr
-        assert not record.exists()
+        assert "record not updated" in proc.stderr and "keyword" in proc.stderr, both(proc)
+        assert not record.exists(), both(proc)
         ran(root)
-        assert affected(root).returncode == 0
-        assert ran(root) == ALL_TESTS
-        assert record.is_file()
+        proc = affected(root)
+        assert proc.returncode == 0, both(proc)
+        assert ran(root) == ALL_TESTS, both(proc)
+        assert record.is_file(), both(proc)
 
     def test_inputs_changing_during_the_run_block_promotion(self, tmp_path: Path) -> None:
         touch = (
@@ -1000,8 +1037,8 @@ class TestAffectedSelection:
         root = make_project(tmp_path / "proj", {"tests/test_other.py": touch})
         proc = affected(root, env={"PROJ": str(root)})
         assert proc.returncode == 0, both(proc)
-        assert "files changed while the suite ran" in proc.stderr
-        assert not (root / ".mm-test-selection" / "record.json").exists()
+        assert "files changed while the suite ran" in proc.stderr, both(proc)
+        assert not (root / ".mm-test-selection" / "record.json").exists(), both(proc)
 
     def test_a_second_recorder_is_refused_without_touching_the_baseline(self, proj: Path) -> None:
         import fcntl
@@ -1014,46 +1051,50 @@ class TestAffectedSelection:
             proc = affected(proj, "--refresh")
         finally:
             os.close(fd)
-        assert proc.returncode != 0
-        assert "another --affected run is recording" in proc.stderr
-        assert ran(proj) == set()
-        assert record.read_bytes() == before
+        assert proc.returncode != 0, both(proc)
+        assert "another --affected run is recording" in proc.stderr, both(proc)
+        assert ran(proj) == set(), both(proc)
+        assert record.read_bytes() == before, both(proc)
 
     def test_a_red_refresh_keeps_the_prior_record(self, proj: Path) -> None:
         record = proj / ".mm-test-selection" / "record.json"
         before = record.read_bytes()
         edit(proj, "tests/test_other.py", "assert True", "assert False")
         proc = affected(proj, "--refresh")
-        assert proc.returncode != 0
-        assert record.read_bytes() == before
+        assert proc.returncode != 0, both(proc)
+        assert record.read_bytes() == before, both(proc)
         # Red refresh also records the failing node so reverting the edit reselects it.
         ran(proj)
         git(proj, "checkout", "--", "tests/test_other.py")
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert ran(proj) == {"tests/test_other.py::test_other"}
+        assert ran(proj) == {"tests/test_other.py::test_other"}, both(proc)
 
     def test_prior_failures_survive_collection_error_and_green_fallback_clears_them(
         self, proj: Path
     ) -> None:
         edit(proj, "src/mind_meld/leaf.py", "return 1", "return 2")
-        assert affected(proj).returncode != 0
+        fail_proc = affected(proj)
+        assert fail_proc.returncode != 0, both(fail_proc)
         ran(proj)
         git(proj, "checkout", "--", "src/mind_meld/leaf.py")
         broken = proj / "tests" / "test_broken.py"
         broken.write_text("def test_x(:\n")
-        assert affected(proj).returncode != 0
+        broken_proc = affected(proj)
+        assert broken_proc.returncode != 0, both(broken_proc)
         broken.unlink()
         ran(proj)
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert ran(proj) == LEAF_TESTS
+        assert ran(proj) == LEAF_TESTS, both(proc)
         # A green fallback full run also clears failed.json.
         edit(proj, "src/mind_meld/leaf.py", "return 1", "return 2")
-        assert affected(proj).returncode != 0
+        fail_proc2 = affected(proj)
+        assert fail_proc2.returncode != 0, both(fail_proc2)
         git(proj, "checkout", "--", "src/mind_meld/leaf.py")
-        assert affected(proj, "--base", "nosuch").returncode == 0
-        assert not (proj / ".mm-test-selection" / "failed.json").exists()
+        fallback_proc = affected(proj, "--base", "nosuch")
+        assert fallback_proc.returncode == 0, both(fallback_proc)
+        assert not (proj / ".mm-test-selection" / "failed.json").exists(), both(fallback_proc)
 
     def test_reverting_added_failing_test_or_emptying_test_file_does_not_fail_exit_5(
         self, proj: Path
@@ -1061,7 +1102,8 @@ class TestAffectedSelection:
         other = proj / "tests" / "test_other.py"
         orig = other.read_text()
         other.write_text(orig + "\ndef test_temp_fail():\n    assert False\n")
-        assert affected(proj).returncode != 0
+        fail_proc = affected(proj)
+        assert fail_proc.returncode != 0, both(fail_proc)
         other.write_text(orig)
         ran(proj)
         proc = affected(proj)
@@ -1070,7 +1112,7 @@ class TestAffectedSelection:
         other.write_text("HELPER = 1\n")
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert "ran 0 of 3 collected tests" in both(proc)
+        assert "ran 0 of 3 collected tests" in both(proc), both(proc)
 
     def test_empty_suite_preserves_pytest_exit_5(self, tmp_path: Path) -> None:
         root = make_project(
@@ -1082,8 +1124,8 @@ class TestAffectedSelection:
             },
         )
         proc = affected(root)
-        assert proc.returncode == 5
-        assert not (root / ".mm-test-selection" / "record.json").exists()
+        assert proc.returncode == 5, both(proc)
+        assert not (root / ".mm-test-selection" / "record.json").exists(), both(proc)
 
     def test_whitespace_test_path_and_cross_test_imports_are_selected(self, proj: Path) -> None:
         spaced = proj / "tests" / "test_with space.py"
@@ -1093,7 +1135,7 @@ class TestAffectedSelection:
         )
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert ran(proj) == {"tests/test_with space.py::test_spaced"}
+        assert ran(proj) == {"tests/test_with space.py::test_spaced"}, both(proc)
         # Editing test_other.py now also selects its importer (test_with space.py).
         edit(proj, "tests/test_other.py", "assert True", "assert 1 == 1")
         proc = affected(proj)
@@ -1101,7 +1143,7 @@ class TestAffectedSelection:
         assert ran(proj) == {
             "tests/test_other.py::test_other",
             "tests/test_with space.py::test_spaced",
-        }
+        }, both(proc)
 
     def test_fixture_setup_and_teardown_only_coverage_is_attributed(self, tmp_path: Path) -> None:
         fixture_test = (
@@ -1110,29 +1152,31 @@ class TestAffectedSelection:
             "def test_via_fixture(_touch_leaf):\n    assert True\n"
         )
         root = make_project(tmp_path / "proj", {"tests/test_fixture_only.py": fixture_test})
-        assert affected(root).returncode == 0
+        seed = affected(root)
+        assert seed.returncode == 0, both(seed)
         ran(root)
         edit(root, "src/mind_meld/leaf.py", "return 1", "return int(1)")
         proc = affected(root)
         assert proc.returncode == 0, both(proc)
-        assert "tests/test_fixture_only.py::test_via_fixture" in ran(root)
+        assert "tests/test_fixture_only.py::test_via_fixture" in ran(root), both(proc)
 
     def test_reverting_dirty_non_python_file_seeded_during_refresh_triggers_full_run(
         self, proj: Path
     ) -> None:
         doc = proj / "README.md"
         doc.write_text("dirty at refresh\n")
-        _assert_refresh_recorded(affected(proj, "--refresh"))
+        refresh = affected(proj, "--refresh")
+        _assert_refresh_recorded(refresh)
         assert (
             "README.md"
             in json.loads((proj / ".mm-test-selection" / "record.json").read_text())["files"]
-        )
+        ), both(refresh)
         ran(proj)
         doc.unlink()
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert "non-Python file changed: README.md" in proc.stderr
-        assert ran(proj) == ALL_TESTS
+        assert "non-Python file changed: README.md" in proc.stderr, both(proc)
+        assert ran(proj) == ALL_TESTS, both(proc)
 
     def test_select_mode_rejects_pytest_addopts_filter_without_clearing_failed(
         self, proj: Path
@@ -1141,9 +1185,11 @@ class TestAffectedSelection:
         failed_file.write_text(json.dumps(["tests/test_leaf.py::test_leaf[1]"]))
         edit(proj, "src/mind_meld/leaf.py", "return 1", "return int(1)")
         proc = affected(proj, env={"PYTEST_ADDOPTS": "-k test_other"})
-        assert proc.returncode != 0
-        assert "--affected cannot run with pytest filters" in both(proc)
-        assert json.loads(failed_file.read_text()) == ["tests/test_leaf.py::test_leaf[1]"]
+        assert proc.returncode != 0, both(proc)
+        assert "--affected cannot run with pytest filters" in both(proc), both(proc)
+        assert json.loads(failed_file.read_text()) == ["tests/test_leaf.py::test_leaf[1]"], both(
+            proc
+        )
 
     def test_fallback_full_run_records_failed_tests_for_subsequent_affected_run(
         self, proj: Path
@@ -1160,14 +1206,14 @@ class TestAffectedSelection:
         doc = proj / "README.md"
         doc.write_text("trigger fallback\n")
         fail_run = affected(proj, env={"FAIL_OTHER": "1"})
-        assert fail_run.returncode != 0
-        assert "non-Python file changed: README.md" in fail_run.stderr
+        assert fail_run.returncode != 0, both(fail_run)
+        assert "non-Python file changed: README.md" in fail_run.stderr, both(fail_run)
         ran(proj)
 
         doc.unlink()
         rerun = affected(proj)
         assert rerun.returncode == 0, both(rerun)
-        assert ran(proj) == {"tests/test_other.py::test_other"}
+        assert ran(proj) == {"tests/test_other.py::test_other"}, both(rerun)
 
     def test_cancelled_refresh_writer_leaves_prior_record_readable(self, proj: Path) -> None:
         record = proj / ".mm-test-selection" / "record.json"
@@ -1219,7 +1265,7 @@ class TestAffectedSelection:
         edit(proj, "src/mind_meld/leaf.py", "return 1", "return int(1)")
         proc = affected(proj)
         assert proc.returncode == 0, both(proc)
-        assert ran(proj) == LEAF_TESTS
+        assert ran(proj) == LEAF_TESTS, both(proc)
 
     def test_git_scrubs_inherited_git_env_vars(self, proj: Path, monkeypatch) -> None:
         mod = load_check()
@@ -1232,11 +1278,11 @@ class TestAffectedSelection:
 
     def test_unresolved_base_runs_everything_and_explains(self, proj: Path) -> None:
         proc = affected(proj, "--base", "nosuch")
-        assert proc.returncode == 0, proc.stderr
+        assert proc.returncode == 0, both(proc)
         for needle in ("resolve base", "code=git-failed", "base=nosuch", "--base REF"):
-            assert needle in proc.stderr
-        assert "running the full suite instead" in proc.stderr
-        assert ran(proj) == ALL_TESTS
+            assert needle in proc.stderr, both(proc)
+        assert "running the full suite instead" in proc.stderr, both(proc)
+        assert ran(proj) == ALL_TESTS, both(proc)
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
     def test_unwritable_cache_falls_back_with_the_cause(self, tmp_path: Path) -> None:
@@ -1247,8 +1293,8 @@ class TestAffectedSelection:
         finally:
             root.chmod(0o700)
         assert proc.returncode == 0, both(proc)
-        assert "code=cache-unwritable" in proc.stderr
-        assert ran(root) == ALL_TESTS
+        assert "code=cache-unwritable" in proc.stderr, both(proc)
+        assert ran(root) == ALL_TESTS, both(proc)
 
     def test_missing_coverage_package_is_reported_and_falls_back(
         self, tmp_path: Path, monkeypatch, capsys
@@ -1312,15 +1358,15 @@ class TestAffectedSelection:
         ):
             _assert_refresh_recorded(refresh)
         record_path = proj / ".mm-test-selection" / "record.json"
-        assert not record_path.exists()
+        assert not record_path.exists(), both(refresh)
         ran(proj)
 
         doc.unlink()
         followup = affected(proj)
         assert followup.returncode == 0, both(followup)
-        assert "ran 0 of 4" not in both(followup)
-        assert ran(proj) == ALL_TESTS
-        assert record_path.is_file()
+        assert "ran 0 of 4" not in both(followup), both(followup)
+        assert ran(proj) == ALL_TESTS, both(followup)
+        assert record_path.is_file(), both(followup)
 
     def test_post_suite_selection_error_does_not_run_pytest_twice(
         self, proj: Path, monkeypatch, capsys
@@ -1591,6 +1637,7 @@ LEADER = (
 )
 
 
+@pytest.mark.xdist_group("bin_check_nested")
 class TestOwnedGroup:
     def _leader(self, tmp_path: Path, code: int) -> tuple[list[str], Path]:
         script = tmp_path / "leader.py"
@@ -1763,7 +1810,17 @@ def _start_driver(root: Path, ready: Path, *args: str, env: dict | None = None):
     full = {
         k: v
         for k, v in os.environ.items()
-        if k not in ("VIRTUAL_ENV", "MM_VENV", "PYTEST_ADDOPTS", "MM_PYTEST_WORKERS")
+        if k
+        not in (
+            "VIRTUAL_ENV",
+            "MM_VENV",
+            "PYTEST_ADDOPTS",
+            "MM_PYTEST_WORKERS",
+            "PYTEST_XDIST_WORKER",
+            "PYTEST_XDIST_WORKER_COUNT",
+            "PYTEST_CURRENT_TEST",
+            "MM_SELECT_CONFIG",
+        )
     }
     full.update(MM_CHECK_ROOT=str(root), MM_PYTHON=sys.executable, READY=str(ready))
     full.update(env or {})
@@ -1801,6 +1858,7 @@ def _cleanup_driver(driver: subprocess.Popen, ready: Path, pids: list[int]) -> N
             pass
 
 
+@pytest.mark.xdist_group("bin_check_nested")
 class TestInterruptCleanup:
     @pytest.mark.parametrize(
         ("sig", "status"),

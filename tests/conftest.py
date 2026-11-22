@@ -732,13 +732,16 @@ def _isolate_mm_events_path(request, monkeypatch, tmp_path) -> None:
 
 
 def pytest_configure(config) -> None:
-    """Register the `no_mm_events_isolation` marker so pytest doesn't
-    warn about unknown markers."""
+    """Register custom markers so pytest doesn't warn about unknown markers."""
     config.addinivalue_line(
         "markers",
         "no_mm_events_isolation: opt out of the autouse "
         "_isolate_mm_events_path fixture (for tests that assert on "
         "DEFAULT_SOURCES['mm-events'].path canonical value)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "xdist_group(name): run marked tests on one pytest-xdist worker under --dist loadgroup",
     )
 
 

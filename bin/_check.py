@@ -505,7 +505,9 @@ def xdist_args(python: Path, serial: bool, extra: list[str]) -> list[str]:
     if proc.returncode != 0:
         return []
     workers = os.environ.get("MM_PYTEST_WORKERS", "auto")
-    return ["-n", workers]
+    if any(a == "--dist" or a.startswith("--dist=") for a in extra):
+        return ["-n", workers]
+    return ["-n", workers, "--dist", "loadgroup"]
 
 
 def _child_leads_its_group(pid: int) -> bool | None:
