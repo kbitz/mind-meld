@@ -24,6 +24,28 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Codex memory folded into `codex` (Track 161A).** Codex memory copies now
+sync with the `codex` source. Run `mm migrate-config` on each machine with
+an old `codex-memory` source entry or name in `disabled_sources` to remove it.
+The `codex` source controls selection as soon as you upgrade. If you had
+disabled only `codex-memory`, the machine resumes publishing memory while
+`codex` is enabled. If you had selected only `codex-memory`, run
+`mm enable-source codex` to resume exchanging copies. This also enables Codex
+customization sync and usage capture.
+
+`mm enable-source codex-memory` and `mm disable-source codex-memory` print
+a notice with `mm enable-source codex` or `mm disable-source codex`,
+respectively, and leave your configuration intact.
+
+Memory now uses the `codex` source's path. If the resolved root changes,
+peers keep their copies of files found only at the previous root. A push
+from the new root records it in the manifest even when the files are identical.
+Legacy memory file exclusions apply immediately after upgrade.
+`mm migrate-config` and `mm reconfigure-sources` preserve them in
+`sync.codex_memory_exclude_patterns`, a list of globs relative to the Codex
+source path.
+Peers on 1.12.76–1.12.79 with `codex-memory` enabled keep exchanging copies.
+
 **Automatic Syncthing pairing (Track 152A).** The first `mm push` after upgrading
 publishes this machine's encrypted Syncthing record when Syncthing is running.
 Run `mm update` and then `mm push` on each existing Syncthing fleet machine.
@@ -908,18 +930,17 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 Mind Meld treats Codex as a first-class peer of Claude Code. Grok Build, Muse and Antigravity are also usage-reader hosts (see [Grok Build](#grok-build), [Muse](#muse) and [Antigravity](#antigravity-agy)).
 
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`, except Codex's own installed plugin versions (`plugins/cache/*` and `plugins/.remote-plugin-install-staging/*`): Codex installs and removes those itself, and a removal there would otherwise delete the same files on your other Macs.
-- Enable `codex-memory` with `mm enable-source codex-memory` or select it during `mm init`. On `mm push` it publishes `memory_summary.md`, `MEMORY.md`, and direct `rollout_summaries/*.md` files from `~/.codex/memories_v2/`, with `~/.codex/memories/` as the fallback. This source leaves the Codex home untouched. Git metadata, SQLite stores, and files outside the copy set stay local. Each publisher's copies land in `~/.local/share/mind-meld/codex-memory/<peer device id>/` on machines that enable the source, including machines without their own Codex memory folder. Treat the copies as read-only. To correct a memory, fix it on the machine that wrote it, then push from that machine and pull on its peers.
+- With `codex` enabled, `mm push` publishes `memory_summary.md`, `MEMORY.md`, and direct `rollout_summaries/*.md` files from `~/.codex/memories_v2/`, with `~/.codex/memories/` as the fallback. The native memory folders, Git metadata, and SQLite stores stay untouched by memory sync. Each publisher's copies land in `~/.local/share/mind-meld/codex-memory/<peer device id>/` on machines with `codex` enabled, including machines without their own Codex memory folder. Treat the copies as read-only. To correct a memory, fix it on the machine that wrote it, then push from that machine and pull on its peers.
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
 - Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source agy` is the corresponding verb: it adds a scoped Antigravity source (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`) and opts this Mac into reading step token totals from local conversation databases. Session databases, settings, and chat history stay on the Mac.
 - The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`.
 
 Symlinks inside any sync source are local routing, not portable content: Mind Meld does not upload them and leaves existing local links untouched on pull, including dangling links and linked directories. A source root itself may be a symlink.
 
-Fresh installs are asked about the `codex` source during `mm init`. That choice also decides whether mm maintains a `retro-fleet` skill link in that agent's skills directory. Existing installations remain opt-in:
+During `mm init`, the `codex` choice covers both customization and memory sync. That choice also decides whether mm maintains a `retro-fleet` skill link in that agent's skills directory. Enable a source on an existing installation with the corresponding command.
 
 ```bash
 mm enable-source codex
-mm enable-source codex-memory
 mm enable-source grok
 mm enable-source agy
 mm enable-source muse
@@ -1110,7 +1131,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm sources` | List configured sync sources |
 | `mm memory-index [on\|off]` | Show or toggle this machine's local qmd memory index (`on` verifies qmd 2.8.3+, enables `[memory_index]` in local `config.toml`, and refreshes; `off` disables and removes only `mm-` collections; bare form is read-only) |
 | `mm log` | Query local `~/.config/mind-meld/state.db` history (legacy JSONL before import). Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed\|deleted}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
-| `mm migrate-config` | Append any missing recommended `exclude_patterns`, and set `include_patterns` to the current default when that key is absent or still a previous default list. That update also adds `analytics/stage-runs` to an old-default `gstack-extend` entry's `include_dirs` ([details](#syncing-gstack-extend)). An edited list, even an empty one, stays. Idempotent; `--dry-run` to preview, `--yes` to skip the prompt |
+| `mm migrate-config` | Clean up [legacy Codex memory settings](#upgrading), append any missing recommended `exclude_patterns`, and set `include_patterns` to the current default when that key is absent or still a previous default list. That update also adds `analytics/stage-runs` to an old-default `gstack-extend` entry's `include_dirs` ([details](#syncing-gstack-extend)). An edited list, even an empty one, stays. Idempotent; `--dry-run` to preview, `--yes` to skip the prompt |
 | `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Runs repository discovery to completion first (30 s budget), so it reads every discovered repository's local email. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff); needs a terminal. Run it on each conflict copy that exists when you upgrade; they do not clear by themselves. A conflict copy that is the same file as its original (a symlink or hard link between them) is refused before the prompt, with the manual repair named; nothing is deleted. Exits 1 if any per-conflict read, rename, link, unlink or merged write fails, or a promote or same-file pair is refused, so CI / scripts can detect partial failure (the walk still continues through every conflict); a conflict copy that cannot be removed after a successful merge only warns. |
@@ -1390,7 +1411,7 @@ only because of an empty `.git` directory resumes syncing on the next `mm push`.
 that point inside a checkout. The source root's own `.git` keeps its existing
 behavior. Ordinary directories still sync; there is no opt-out setting.
 
-The [`codex-memory` source](#codex-integration) reads its fixed file set from Codex's Git-tracked memory directory. Its Git metadata stays local.
+[Codex memory sync](#codex-integration) reads a fixed file set from Codex's Git-tracked memory directory. Its Git metadata stays local.
 
 Attended `mm push --verbose` and the `--dry-run` preview report each skipped root once:
 `skipped: nested git repository <source>:<relative-root>`. `mm status` shows
@@ -2072,7 +2093,7 @@ command above), then check `mm status`. See [Upgrading](#upgrading).
 
 Run `mm devices retire <name|id>` from any remaining fleet machine to retire a decommissioned machine or an old registration left behind after re-running `mm init`. Retirement writes an encrypted retirement record (`retired/<id>.enc`), removes `syncthing/<id>.enc` and `devices/<id>.json` under the mm lock, drops the machine's `mm status` and `retro-fleet` rows, and lets each fleet machine where `mm` manages Syncthing automatically remove the retired Syncthing device on its next `mm push`, `mm pull`, `mm autopush`, or `mm autopull` once the retired machine stops connecting.
 
-Once a machine receives the retirement record, its next pull with `codex-memory` enabled moves the retired device's copies into the [30-day recovery folder](#recovering-a-deleted-file).
+Once a machine receives the retirement record, its next pull with `codex` enabled moves the retired device's copies into the [30-day recovery folder](#recovering-a-deleted-file).
 
 1. Update any machine at 1.7.1 or older first (`mm update`): its GC deletes an unregistered machine's blobs, including the only copy of a file only that machine had.
 2. On a machine with the **same home folder** as the dead one, run `mm pull` first so its project memory is on disk.
@@ -2789,7 +2810,7 @@ See [Previews](#previews) for every command’s write allowance, omitted work an
 | File or directory could not be read | Restore read access, then `mm push`. `mm disable-source <name>` is a coarse escape hatch if that source should stop syncing. |
 | File changed, vanished or grew while being read, and a hold is not possible (the push is recovering a corrupt, conflict-copy-only or vanished manifest) | Wait for the editor/writer to finish, then `mm push`. With an accepted manifest the file is held instead: see above. |
 | Directory vanished while being listed, or `.extend-root` or `Local State` marker discovery lost an entry | Wait for the writer to finish, then `mm push`. |
-| Previously published file is still present but over `max_file_size` | Raise `sync.max_file_size` in `config.toml`, or add a precise `exclude_patterns` glob **under that source**. Creating a new `[[sync.sources]]` list replaces default auto-detection — keep your other sources. |
+| Previously published file is still present but over `max_file_size` | Raise `sync.max_file_size` in `config.toml` or add a precise glob to the source's `exclude_patterns`. For a Codex memory file, use `sync.codex_memory_exclude_patterns` instead. Creating a new `[[sync.sources]]` list replaces default auto-detection — keep your other sources. |
 | Default mm-events root, `events/`, or event files are missing | Missing files mean deletion: `mm push --dry-run` previews it and `mm push` publishes it (apart from the new activity row omitted by preview). To keep the previously published files, run `mm pull --from <this Mac's device id> --source mm-events` **before the next push**, then verify the files. Other Macs keep existing copies. |
 | Custom mm-events folder is missing | Push warns, skips mm-events for that push without new tombstones, and publishes the other sources; autopush records a degraded breadcrumb. Plug in the drive, create the folder, or run `mm disable-source mm-events`. The next push includes it again when it returns. |
 | Source folder is missing after it was previously published | Restore the folder, or `mm disable-source <name>` if it should stop syncing. |

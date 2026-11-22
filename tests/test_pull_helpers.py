@@ -1761,9 +1761,9 @@ class TestPromptSources:
         assert DEFAULT_SOURCES[0]["path"] == "~/.claude"
 
     def test_mm_init_does_not_prompt_for_opencode(self, monkeypatch) -> None:
-        """DEFAULT_SOURCES no longer ships opencode, so init asks for the
-        eight user-facing names (claude, gstack, gstack-extend, codex,
-        codex-memory, grok, muse, agy). mm-events auto-includes."""
+        """DEFAULT_SOURCES no longer ships opencode or codex-memory, so init asks
+        for the seven user-facing names (claude, gstack, gstack-extend, codex,
+        grok, muse, agy). mm-events auto-includes."""
         prompted: list[str] = []
 
         def capture(prompt, default):
@@ -1773,19 +1773,20 @@ class TestPromptSources:
         monkeypatch.setattr(core, "ask_yes_no", capture)
         _prompt_sources()
         user_facing = [s["name"] for s in DEFAULT_SOURCES if s["name"] != "mm-events"]
-        assert len(user_facing) == 8
+        assert len(user_facing) == 7
         assert "opencode" not in user_facing
-        assert "codex-memory" in user_facing
+        assert "codex-memory" not in user_facing
         assert "grok" in user_facing
         assert "agy" in user_facing
-        assert len(prompted) == 8
+        assert len(prompted) == 7
         assert all("opencode" not in p for p in prompted)
+        assert all("codex-memory" not in p for p in prompted)
 
     def test_claude_only(self, monkeypatch) -> None:
         """User answers Y for claude and n for the other agent sources. mm-events is
         mm-internal infrastructure and auto-includes without prompting,
         so it appears in the result list alongside claude."""
-        responses = iter([True, False, False, False, False, False, False, False])
+        responses = iter([True, False, False, False, False, False, False])
         monkeypatch.setattr(core, "ask_yes_no", lambda *a, **kw: next(responses))
         result = _prompt_sources()
         assert [s["name"] for s in result] == ["claude", "mm-events"]

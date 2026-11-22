@@ -407,13 +407,14 @@ def _refuse_unavailable_selected_sources(
         prior_files = prior_sources.get(name, {}).get("files") or {}
         if not prior_files:
             continue
+        fix_name = "codex" if name == manifest.CODEX_MEMORY_SOURCE_NAME else name
         raise SnapshotError(
             snapshot_refusal(
                 source=name,
                 problem="is missing after it was previously published",
                 next_action=(
                     "Restore the source folder, or run "
-                    f"'mm disable-source {name}' if it should stop syncing."
+                    f"'mm disable-source {fix_name}' if it should stop syncing."
                 ),
             )
         )
@@ -2104,6 +2105,7 @@ def _push_core(
     )
     intended_names = {src["name"] for src in resolution.selected}
     intended_names.update(src["name"] for src in sources)
+    remote_manifest = core._filter_unavailable_repointed_codex_memory(remote_manifest, resolution)
     _refuse_unavailable_selected_sources(resolution, remote_manifest, sources)
     if not sources and not skipped_internal:
         core._warning("no sync sources found. Run: mm init")
@@ -2330,16 +2332,21 @@ def _push_core(
         # content already fleet-wide) counts as new.
         _warn_push_growth(source_diffs)
     has_substantive = bool(source_diffs)
-    # mtime-only republish leg (v0.12.6): sha256-equal files with drifted
-    # mtime must still trigger a manifest upload so peers see authoritative-
-    # local claims from `mm resolve` (l)ocal. See `_has_mtime_only_changes_vs_remote`.
-    has_mtime_only = (not has_substantive) and core._has_mtime_only_changes_vs_remote(
-        local_manifest, remote_sources
+    # Republish when mtime changes carry a local resolution or when Codex
+    # memory moves with identical files. Later omissions need the new root
+    # as their deletion baseline.
+    memory_source = manifest.CODEX_MEMORY_SOURCE_NAME
+    has_metadata_only = not has_substantive and (
+        core._codex_memory_root_changed(
+            remote_sources.get(memory_source, {}),
+            local_manifest["sources"].get(memory_source, {}),
+        )
+        or core._has_mtime_only_changes_vs_remote(local_manifest, remote_sources)
     )
     has_selection_change = set(local_manifest["sources"]) != advertised_prior_sources
     # Three independent facts: byte diffs, forward-only mtime drift, and
     # selection in BOTH directions. Host rows make has_substantive true even
-    # during a user-file mtime republish, so do not gate this on has_mtime_only.
+    # during a user-file mtime republish, so do not gate this on has_metadata_only.
     content_diffs = [d for d in source_diffs if d[0] not in MM_INTERNAL_SOURCE_NAMES]
     content_changed = bool(content_diffs) or bool(
         (set(local_manifest["sources"]) ^ advertised_prior_sources) - MM_INTERNAL_SOURCE_NAMES
@@ -2355,7 +2362,7 @@ def _push_core(
     content_files = sum(len(d.new) + len(d.modified) + len(d.deleted) for *_, d in content_diffs)
     if (
         not has_substantive
-        and not has_mtime_only
+        and not has_metadata_only
         and not recovering_from_corrupt
         and not has_selection_change
         and not retro_catchup_pending
@@ -2607,14 +2614,7 @@ def _push_core(
                 console.print(f"\n[yellow]{safe_str(clause)}[/yellow]")
             if has_selection_change and not (total_new or total_modified or total_deleted):
                 console.print("\n[bold]Would refresh manifest[/bold] (source selection changed).")
-            elif has_mtime_only and not (total_new or total_modified or total_deleted):
-                # Symmetric with the status command's metadata-only branch (v0.12.6).
-                # Without this, dry-run would print "Dry run complete" with zero
-                # per-source output and the user would miss that `mm push` would
-                # republish the manifest to propagate bumped mtimes. NOTE: dry-run
-                # counters stay zero (the per-source loop `continue`s before
-                # incrementing), so we can't honestly promise "no blobs" -- the
-                # events tail may still emit an mm-events row on the actual push.
+            elif has_metadata_only and not (total_new or total_modified or total_deleted):
                 console.print(
                     "\n[bold]Would refresh manifest[/bold] (metadata-only changes pending)."
                 )
@@ -2654,7 +2654,7 @@ def _push_core(
             console.print("\n[bold]Rewriting manifest to heal remote corruption...[/bold]")
         elif has_selection_change and not (total_new or total_modified or total_deleted):
             console.print("\n[bold]Refreshing manifest (source selection changed)...[/bold]")
-        elif has_mtime_only and not (total_new or total_modified or total_deleted):
+        elif has_metadata_only and not (total_new or total_modified or total_deleted):
             console.print("\n[bold]Refreshing manifest (metadata-only changes)...[/bold]")
         elif form.switch_held and not (total_new or total_modified or total_deleted):
             console.print(

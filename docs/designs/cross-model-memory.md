@@ -87,37 +87,33 @@ providers.
 
 ### 2. Codex memory roams as per-machine copies
 
-Each machine regenerates its own Codex memory, so syncing those files as
-shared files would conflict on every pull. Instead, a new `codex-memory`
-source works like this:
+Each machine regenerates its own Codex memory. Mind Meld publishes per-machine
+copies using the `codex-memory` manifest key. Since Track 161A, the copies
+follow the `codex` source.
 
 - At push, mm reads this machine's active Codex memory directory without
   changing it, and publishes the files under this machine's device ID. Q3
   kept the default file set of `memory_summary.md`, `MEMORY.md` and
   `rollout_summaries/*.md` ([qualification](#qualification)). Codex's `.git`,
   its SQLite files and anything else outside that set stay local.
-- Track 157A resolves the active directory for the installed Codex version,
-  including when both `memories/` and `memories_v2/` exist. Q3 observed only
-  `memories_v2/` on a fresh 0.171.0 home. It did not exercise an upgrade
-  with both directories. Source detection, publishing and the local qmd
-  collection use the same resolved directory. The 157A and 159A roadmap
-  cards still name the legacy root. Their planning must reconcile those
-  references with Q3 so 159A uses the directory 157A resolves.
+- Publishing and the local qmd collection use `memories_v2/` when it is
+  a real directory and fall back to `memories/`. Q3 on a fresh 0.171.0
+  home observed `memories_v2/` alone.
 - At pull, mm places each peer's files under
   `~/.local/share/mind-meld/codex-memory/<device id>/`. That folder is mm's,
   outside every native store.
-- Each file has one writer, its source machine, so copies never conflict.
+- Each copy has one publisher. An edit on a receiving machine can still
+  conflict with a publisher update.
 - Forgetting follows the source machine. When its Codex drops a memory, the
   next push publishes the smaller set, and truth-based manifests remove it
   from every peer.
-- Copies from a machine that leaves the fleet (`mm devices retire`) leave
-  every peer.
-- mm never writes into `CODEX_HOME`.
-- `mm init` offers the source when the resolved directory exists, with Enter
-  = yes, as for other detected sources. `mm enable-source codex-memory`
-  enables it later.
-- A machine with Codex memories off publishes nothing. Its agents still find
-  every other machine's memories through the index.
+- A pull with `codex` enabled moves a retired machine's copies into
+  30-day local recovery.
+- Copy sync leaves the native Codex memory directory untouched.
+- `mm init` offers the `codex` source. `mm enable-source codex` enables
+  customization sync and per-machine memory copies on an existing setup.
+- With `codex` enabled, a machine can receive and index peer copies even
+  when it has no native Codex memory directory.
 
 ### 3. One local index per machine
 

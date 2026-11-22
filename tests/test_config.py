@@ -27,6 +27,7 @@ from mind_meld.config import (
     _validate,
     _validate_exclude_patterns,
     _validate_sources,
+    get_default_source,
     get_sources,
     grok_customization_dirs_exist,
     grok_usage_consented,
@@ -847,7 +848,7 @@ class TestDefaultSources:
         monkeypatch.setenv("HOME", str(tmp_path))
         for src in DEFAULT_SOURCES:
             Path(src["path"].replace("~", str(tmp_path), 1)).mkdir(parents=True, exist_ok=True)
-        assert OPT_IN_SOURCE_NAMES == frozenset({"grok", "muse", "agy", "codex-memory"})
+        assert OPT_IN_SOURCE_NAMES == frozenset({"grok", "muse", "agy"})
         cfg = {
             "device": {"id": "abc123", "name": "review"},
             "storage": {"path": str(tmp_path / "store")},
@@ -3498,3 +3499,232 @@ class TestJoinRecord151A:
             config_module.delete_join_record()
         assert calls == []
         assert not root.exists()
+
+
+class TestCodexMemoryFoldResolutionAndMigration:
+    """Track 161A: codex-memory derives from codex and folds in migrate-config."""
+
+    def test_derived_entry_follows_custom_codex_path_and_ignores_stale_entries(self, tmp_path):
+        custom_codex = tmp_path / "custom-codex"
+        custom_codex.mkdir()
+        stale_other = tmp_path / "stale-codex"
+        stale_other.mkdir()
+        codex_src = get_default_source("codex")
+        assert codex_src is not None
+        codex_src["path"] = str(custom_codex)
+
+        cfg = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "storage": {"path": str(tmp_path / "store")},
+            "sync": {
+                "sources": [
+                    codex_src,
+                    {"name": "codex-memory", "path": str(stale_other), "type": "codex-memory"},
+                ],
+                "disabled_sources": ["codex-memory"],
+            },
+        }
+        res = resolve_sources(cfg)
+        cm_entries = [s for s in res.selected if s["name"] == "codex-memory"]
+        assert cm_entries == [
+            {"name": "codex-memory", "path": str(custom_codex.resolve()), "type": "codex-memory"}
+        ]
+        assert any(s["name"] == "codex-memory" for s in res.available)
+
+    def test_no_derived_entry_without_codex_or_when_codex_disabled(self, tmp_path):
+        claude_dir = tmp_path / "claude"
+        claude_dir.mkdir()
+        codex_dir = tmp_path / "codex"
+        codex_dir.mkdir()
+        codex_src = get_default_source("codex")
+        assert codex_src is not None
+        codex_src["path"] = str(codex_dir)
+
+        cfg_no_codex = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "storage": {"path": str(tmp_path / "store")},
+            "sync": {
+                "sources": [
+                    {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                    {"name": "codex-memory", "path": str(codex_dir), "type": "codex-memory"},
+                ],
+            },
+        }
+        assert not any(s["name"] == "codex-memory" for s in resolve_sources(cfg_no_codex).selected)
+
+        cfg_codex_disabled = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "storage": {"path": str(tmp_path / "store")},
+            "sync": {
+                "sources": [
+                    {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                    codex_src,
+                ],
+                "disabled_sources": ["codex"],
+            },
+        }
+        selected_names = [s["name"] for s in resolve_sources(cfg_codex_disabled).selected]
+        assert "codex" not in selected_names
+        assert "codex-memory" not in selected_names
+
+    def test_saved_join_record_with_legacy_codex_memory_still_loads(self, tmp_path, monkeypatch):
+        from mind_meld import config as config_module
+
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "config.toml")
+        join_path = config_module.join_record_path()
+        join_path.write_text(
+            '[join]\nstorage_path = "~/Sync/mind-meld"\ndevice_name = "Mac B"\n'
+            'sources = ["claude", "codex", "codex-memory"]\n'
+        )
+        loaded = config_module.load_join_record()
+        assert loaded is not None
+        assert loaded.sources == ("claude", "codex", "codex-memory")
+
+    def test_migrate_config_folds_entry_and_disabled_name_preview_and_apply(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mind_meld import config as config_module
+        from mind_meld import core, sidecar
+
+        cfg_path = tmp_path / "config.toml"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_path)
+        monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(config_module, "LOCK_PATH", tmp_path / "mm.lock")
+        monkeypatch.setattr(sidecar, "SIDECAR_DIR", tmp_path / "sidecar")
+
+        codex_src = get_default_source("codex")
+        assert codex_src is not None
+        codex_src["path"] = str(tmp_path / "custom-codex")
+        cfg = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "storage": {"path": str(tmp_path / "store")},
+            "sync": {
+                "sources": [
+                    {"name": "claude", "path": str(tmp_path / "claude"), "type": "claude"},
+                    codex_src,
+                    {
+                        "name": "codex-memory",
+                        "path": str(tmp_path / "old-codex"),
+                        "type": "codex-memory",
+                    },
+                ],
+                "disabled_sources": ["codex-memory", "muse"],
+            },
+        }
+        save_config(cfg, cfg_path)
+        before_bytes = cfg_path.read_bytes()
+
+        # Preview lists both removals and writes nothing.
+        assert core._migrate_config_core(yes=False, dry_run=True) is False
+        preview_out = capsys.readouterr().out
+        assert "codex-memory" in preview_out
+        assert "[[sync.sources]]" in preview_out
+        assert "disabled_sources" in preview_out
+        assert cfg_path.read_bytes() == before_bytes
+
+        # Apply removes both while preserving other entries, customizations and disabled names.
+        assert core._migrate_config_core(yes=True, dry_run=False) is False
+        reloaded = load_config(cfg_path)
+        names = [s["name"] for s in reloaded["sync"]["sources"]]
+        assert names == ["claude", "codex"]
+        assert reloaded["sync"]["sources"][1]["path"] == str(tmp_path / "custom-codex")
+        assert reloaded["sync"]["disabled_sources"] == ["muse"]
+
+        # Second run reports already up to date.
+        capsys.readouterr()
+        assert core._migrate_config_core(yes=True, dry_run=False) is False
+        assert "already up to date" in capsys.readouterr().out
+
+    def test_migrate_config_keeps_a_toggle_applied_during_confirmation(self, tmp_path, monkeypatch):
+        from mind_meld import config as config_module
+        from mind_meld import core
+
+        cfg_path = tmp_path / "config.toml"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_path)
+        monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(config_module, "LOCK_PATH", tmp_path / "mm.lock")
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "Mac A"},
+                "storage": {"path": str(tmp_path / "store")},
+                "sync": {"disabled_sources": ["codex-memory"]},
+            },
+            cfg_path,
+        )
+
+        def disable_codex_while_prompt_is_open(*args, **kwargs):
+            config_module.patch_config_on_disk(
+                {"sync": {"disabled_sources": ["codex", "codex-memory"]}}, path=cfg_path
+            )
+            return True
+
+        monkeypatch.setattr(core, "ask_yes_no", disable_codex_while_prompt_is_open)
+        assert core._migrate_config_core(yes=False, dry_run=False) is False
+        assert load_config(cfg_path)["sync"]["disabled_sources"] == ["codex"]
+
+    def test_migrate_config_folds_disabled_name_only_and_entry_only_and_combined_retired(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mind_meld import config as config_module
+        from mind_meld import core, sidecar
+
+        cfg_path = tmp_path / "config.toml"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_path)
+        monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(config_module, "LOCK_PATH", tmp_path / "mm.lock")
+        monkeypatch.setattr(sidecar, "SIDECAR_DIR", tmp_path / "sidecar")
+
+        # 1. Disabled-name-only on a legacy config (no explicit sources).
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "Mac A"},
+                "storage": {"path": str(tmp_path / "store")},
+                "sync": {"disabled_sources": ["codex-memory", "gstack"]},
+            },
+            cfg_path,
+        )
+        assert core._migrate_config_core(yes=True, dry_run=False) is False
+        reloaded = load_config(cfg_path)
+        assert "sources" not in reloaded["sync"]
+        assert reloaded["sync"]["disabled_sources"] == ["gstack"]
+
+        # 2. Entry-only fold.
+        codex_src = get_default_source("codex")
+        assert codex_src is not None
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "Mac A"},
+                "storage": {"path": str(tmp_path / "store")},
+                "sync": {
+                    "sources": [
+                        codex_src,
+                        {"name": "codex-memory", "path": "~/.codex", "type": "codex-memory"},
+                    ],
+                },
+            },
+            cfg_path,
+        )
+        assert core._migrate_config_core(yes=True, dry_run=False) is False
+        reloaded = load_config(cfg_path)
+        assert [s["name"] for s in reloaded["sync"]["sources"]] == ["codex"]
+
+        # 3. Combined retired (opencode) + folded (codex-memory) in one patch.
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "Mac A"},
+                "storage": {"path": str(tmp_path / "store")},
+                "sync": {
+                    "sources": [
+                        codex_src,
+                        {"name": "opencode", "path": "~/.config/opencode", "type": "generic"},
+                        {"name": "codex-memory", "path": "~/.codex", "type": "codex-memory"},
+                    ],
+                    "disabled_sources": ["codex-memory"],
+                },
+            },
+            cfg_path,
+        )
+        assert core._migrate_config_core(yes=True, dry_run=False) is False
+        reloaded = load_config(cfg_path)
+        assert [s["name"] for s in reloaded["sync"]["sources"]] == ["codex"]
+        assert reloaded["sync"]["disabled_sources"] == ["opencode"]

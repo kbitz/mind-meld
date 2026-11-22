@@ -2328,10 +2328,20 @@ described above.
 
 ## Codex memory copies (Track 157A)
 
-The opt-in `codex-memory` source (`OPT_IN_SOURCE_NAMES`) publishes this
-machine's Codex memory summaries without ever writing into `~/.codex`, and
-places peers' copies under `config.CODEX_MEMORY_COPIES_DIR`
-(`~/.local/share/mind-meld/codex-memory/<peer device id>/`).
+**Track 161A fold.** When `codex` survives disabled-source filtering,
+`config.resolve_sources` derives an internal `codex-memory` entry at the
+`codex` path. It uses legacy memory `exclude_patterns` and
+`sync.codex_memory_exclude_patterns` on the derived entry. The old block's
+path and the old `disabled_sources` name have no effect on selection.
+`mm migrate-config` and `mm reconfigure-sources` remove both and save any
+memory file exclusions in `sync.codex_memory_exclude_patterns`. The legacy
+toggle commands print a one-line notice pointing to `codex` and write
+nothing. `mm sources` includes the derived entry's kept files in the
+`codex` row, including a receive-only configuration with a missing Codex
+home. The wire name and manifest keys stay the same. Consumers gate on the
+resolved sources.
+
+This derived `codex-memory` source publishes this machine's Codex memory summaries without ever writing into `~/.codex`, and places peers' copies under `config.CODEX_MEMORY_COPIES_DIR` (`~/.local/share/mind-meld/codex-memory/<peer device id>/`).
 
 - **Hardcoded folder and copy set.** `manifest.codex_memory_dir_name(base)`
   returns `memories_v2` when it is a real directory, else `memories` when that
@@ -2366,8 +2376,20 @@ places peers' copies under `config.CODEX_MEMORY_COPIES_DIR`
   mints absent paths as if their root were unchanged while retaining every
   other guard (`still_present`, `prior_accepted`, readable ledger,
   `newest_stamp`, and held-digest resolution). If an already-published memory
-  folder disappears, the omission proof refuses the push. An empty real
-  memory folder still proves that individual files are absent.
+  folder disappears under the same published source root, the omission proof
+  refuses the push. An empty real memory folder still proves that individual
+  files are absent. When the prior and scanned Codex source paths differ,
+  `core._prove_omitted_paths_absent` adds the omitted prior memory paths to
+  `still_present` for the mint guard. The old root's paths leave the snapshot
+  without deletion records, and the prior manifest's path is never opened.
+  A push from the new root refreshes the manifest even when the files stay
+  identical. A later push can then recognize a deletion at that root.
+  If the new root is absent, push can omit an independently published older
+  memory root from the prior comparison before checking for missing roots.
+  A prior snapshot with both sources at the same root still requires that
+  root, including when its symlink disappears or a legacy config retains it
+  as a previously published default. The ordinary guard still checks any
+  separately published Codex customizations.
 - **One-writer confinement of files and deletion records.** On pull (when
   building `filtered_cache`, before downloads, `all_tombstones`, and
   `deletion_manifests`) and in peer-fallback collection
@@ -2406,8 +2428,10 @@ places peers' copies under `config.CODEX_MEMORY_COPIES_DIR`
   and reports one pull-summary clause
   (`retired_copies_clause` / `retired_copies_detail`). Unreadable or vanished
   records remove nothing, and previews write nothing.
-- **Disable deletes nothing.** Disabling `codex-memory` on one machine drops
-  its prior entries through `_filter_unselected_sources` without minting
+- **Disable deletes nothing.** Disabling `codex` on one machine drops
+  both `codex` and derived `codex-memory` prior entries through
+  `_filter_unselected_sources` (and strips both from peer manifests in
+  `_filter_disabled_sources` while preserving tombstones) without minting
   deletion records, so peers keep existing copies.
 
 Tests: `tests/test_codex_memory_source.py`.
