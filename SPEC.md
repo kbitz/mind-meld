@@ -551,7 +551,7 @@ The command body and own-device blob collection (`gc`, `_do_gc`) live in `gcflow
 ### `mm sources`
 
 1. Load `config.toml` read-only (`core._get_config(read_only=True)`).
-2. Resolve configured sources and include disabled rows (`core._resolve_all_configured_sources` calls `config.resolve_sources` with `disabled_sources` cleared). List available paths, including the default `mm-events` root before bootstrap when `_preview_mm_events_bootstrap` reports `would_create`. The derived `codex-memory` source is walked and its kept file count is merged into the `codex` row with no separate `codex-memory` row.
+2. Resolve configured sources and include disabled rows (`core._resolve_all_configured_sources` calls `config.resolve_sources` with `disabled_sources` cleared). List available paths, including the default `mm-events` root before bootstrap when `_preview_mm_events_bootstrap` reports `would_create`. The `codex` row also covers a configured Codex home that is absent. Its file count includes the kept files of the derived `codex-memory` source.
 3. Print one `Configured Sources` table with columns `Name`, `Path`, `Type`, `Enabled` (`N` and row dimmed when the name is in `disabled_sources`, `Y` otherwise), `Files` (files kept after the source's `exclude_patterns` and `include_patterns`), and `Excluded` (how many files those per-source patterns removed after global junk exclusions, or `—` when the source has neither `exclude_patterns` nor `include_patterns`). It does not print `include_dirs`, `include_files`, or a path-exists column.
 
 ---
