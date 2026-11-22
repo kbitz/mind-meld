@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Everything carded through Track 155A (the deepsec fixes) shipped by v1.12.74 (independent receipts in shipped history). The plan below carries three bugs the owner hit on 2026-11-20 (Track 156A), `mm pull` reporting nothing while Syncthing still delivers a peer's push (Track 158A), and cross-model memory, which the developer moved before 2.0 and made a condition of 2.0.0 on 2026-11-21 ([docs/SPEC.md](SPEC.md) O9, [design](designs/cross-model-memory.md)): a qualification in isolated homes (Track 156B), then per-machine Codex memory copies (157A), one local qmd index over every provider's memory (159A), and qmd setup with the recommended pointer line (160A). The owner will decide the path to 2.0 after using the Syncthing fleet for a while.
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Everything carded through Track 160A (cross-model memory's qualification, Codex memory copies, the local qmd index and its setup, and the four bugs carded with them) shipped by v1.12.79 (independent receipts in shipped history). The plan below folds Codex memory into the `codex` source on the developer's decision of 2026-11-22 (Track 161A) and makes the affected-selection tests deterministic under load (Track 161B). The owner will decide the path to 2.0 after using the Syncthing fleet for a while.
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -22,180 +22,63 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 
 ## In Progress
 
-None declared (2026-11-21). Track 155A, declared in progress earlier in this PR, merged as v1.12.74 (PR #364) and is recorded in shipped history; no branch, session or open pull request is active for any remaining Track.
+None declared (2026-11-21). Tracks 156A to 160A, the previous plan, merged as v1.12.75 to v1.12.79 (PRs #366 to #371) and are recorded in shipped history; no branch, session or open pull request is active for either new Track.
 
 ## Current Plan
 
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155_
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160_
 
-The plan carries two kinds of work. The first is bugs the owner hit: the reinstall command that fails on pipx's uv backend, a stale removal-wait line in `mm status` and `mm init`'s non-actionable notices (Track 156A, placed on the developer's word: "2 a"), and `mm pull` printing nothing to apply while Syncthing still delivers a peer's push (Track 158A).
+The plan carries two Tracks. Track 161A folds Codex memory into the `codex` source on the developer's decision, so a machine that syncs Codex syncs its memory copies with no separate source or `mm init` question. Track 161B makes the nested-pytest selection tests in tests/test_bin_check.py deterministic after they failed a transport verify and a release suite under load on 2026-11-21.
 
-The second is cross-model memory (docs/SPEC.md O9), which the developer moved before 2.0 and made a condition of 2.0.0 ("1 c", then "3 yes, gate"). Its qualification (Track 156B) gates the three implementation Tracks, which run in a chain: per-machine Codex memory copies (157A), one local qmd index over every provider's memory (159A), and qmd setup with the recommended pointer line (160A). Keyword search is the baseline and embeddings are opt-in ("3 a").
-
-### Group 156: Observed sync and setup bugs ∥ cross-model memory qualification
+### Group 161: Codex memory with the codex source ∥ deterministic selection tests
 
 _Depends on: none_
 
-**This group delivers:** mm's printed reinstall command and the automatic pinned reinstall work on pipx's uv backend; `mm status` drops a removal-wait line once the removal is done; `mm init` stops printing capture notices the owner cannot act on. Separately, the owner learns whether fresh Codex and Claude Code sessions find each other's memory through qmd with only the recommended line, before any O9 code is written.
+**This group delivers:** Codex memory copies travel with the `codex` source on every machine, with existing configs and peers on 1.12.76 to 1.12.79 carrying on unchanged; and a full `./bin/check` at the host's default worker count stops failing on the affected-selection tests, which print the nested run's output when they do fail.
 
-#### Track 156A: Reinstall through pipx's uv backend, clear resolved removal waits from `mm status`, and keep init's capture notices out of its output
-_5 tasks . ~260 LOC . low risk . 14 files_
-**Outcome:** the owner can copy and run any reinstall command mm prints, and a pinned install reinstalls itself, when pipx runs on its uv backend; `mm status` stops saying "Syncthing device removals wait for <machine>" once the removal has happened; and `mm init` ends with its outcome, with capture notices the owner cannot act on recorded for `mm status` and `mm diag` instead.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O8.1 (nothing is printed unless the owner must act; routine detail stays in `mm status` and `mm diag`), O8.4 (status shows only the latest run of each kind) and the auto-update constraint (pinned installs). The developer observed all three on 2026-11-20 and placed them on the Current Plan (verbatim, 2026-11-21: "2 a"), under the standing rule on reproducible bugs. Items 2 and 3 are also in PR #362's review backlog.
-**Done when:** tests pin the printed reinstall command and the automatic pinned reinstall's argument list and environment for pipx's uv and venv backends; a later push, pull, autopush or autopull that finds no removal waiting clears the removal-wait line from `mm status`; `mm init`'s events backfill prints none of the no-action capture notices, and `mm status` and `mm diag` show them.
+#### Track 161A: Sync Codex memory as part of the `codex` source, with no separate source or init question
+_3 tasks . ~400 LOC . medium risk . 14 files_
+**Outcome:** on every machine with the `codex` source enabled, push publishes this machine's Codex memory copies and pull places peers' copies, with no `codex-memory` source to enable and no extra `mm init` question. Existing configs and fleet peers still on 1.12.76 to 1.12.79 carry on without losing or duplicating a copy.
+**Supports:** docs/SPEC.md O9.1 (Codex memories roam as per-machine copies) and the host table's Codex row. The developer (verbatim, 2026-11-22): "I don't want to enable a separate source for codex memory, if you have codex enabled, then memory should be covered automatically". The developer approved amending the host table's Codex row, the README and the invariant docs in this Track's PR.
+**Done when:** tests show a config that lists only `codex` publishing and placing Codex memory copies under the existing wire keys; a config that lists `codex-memory` folded by `mm migrate-config` with no deletion records; `mm init` asking no Codex memory question; `mm enable-source codex-memory` and `mm disable-source codex-memory` pointing at `codex`; the memory index still building its `mm-codex-…` collections from a `codex`-only config; and a manifest published by 1.12.79's `codex-memory` source applying unchanged.
 **Acceptance:**
-1. Every reinstall command mm prints (`upgrade.INSTALL_CMD`, `upgrade.reinstall_cmd`) and the automatic reinstall of a pinned install (`upgrade.update_argv` for `install.kind == "pinned"`) succeed when pipx uses its uv backend with an existing venv, and still succeed on pipx's default venv backend. Each printed command stays one copyable line for bash and zsh.
-2. Tests stub the subprocess and pin the printed text and the automatic reinstall's argument list and environment for both backends.
-3. While a retired device's removal still waits, `mm status` keeps the "Syncthing device removals wait for <machine>" line, refreshed by the latest push, pull, autopush or autopull, not only the last attended push. Once a later run finds nothing waiting, the line is gone from `mm status`. The auto commands stay silent.
-4. During `mm init`, `events_tail._run_events_backfill` prints none of the capture notices that need no action from the owner: "git repository discovery hit its time budget", "events backfill budget exceeded", and a "host-usage snapshot skipped" notice that was skipped for a deadline or budget. A notice carrying a fix the owner must run keeps printing in the shared notice form (O8.1). The no-action notices are recorded, and `mm status` and `mm diag` show them until the next attended push replaces them.
-5. The two Future test gaps placed below are closed: init keeps the default `mm update` advice when reading the cached upgrade view raises, and mesh breadcrumbs with several omitted details keep their priority and their display in `mm status`.
-6. docs/invariants/auto-upgrade.md (the reinstall command), docs/invariants/events-retro.md (init backfill notices) and README's install and Upgrading text match the new behavior.
-_blocked-by: Track 155A_
-_touches: src/mind_meld/upgrade.py, src/mind_meld/meshflow.py, src/mind_meld/attemptlog.py, src/mind_meld/statusflow.py, src/mind_meld/events_tail.py, src/mind_meld/initflow.py, tests/test_upgrade.py, tests/test_self_update.py, tests/test_mesh.py, tests/test_statusflow.py, tests/test_init_events_backfill.py, docs/invariants/auto-upgrade.md, docs/invariants/events-retro.md, README.md_
-_read-first: docs/SPEC.md O8 and the auto-update constraint, docs/invariants/auto-upgrade.md, docs/invariants/events-retro.md (init backfill), src/mind_meld/upgrade.py (`INSTALL_CMD`, `update_argv`, `reinstall_cmd`), src/mind_meld/meshflow.py (the "Syncthing device removals wait for" degradations), src/mind_meld/attemptlog.py (the sanitized degradation pattern), src/mind_meld/events_tail.py `_run_events_backfill`_
+1. When the `codex` source is selected, source resolution (`config.resolve_sources` and `_configured_sources`) adds the internal Codex memory source with the `codex` source's path, so push publishes this machine's Codex memory files and pull places peers' copies. The file set (`memory_summary.md`, `MEMORY.md`, `rollout_summaries/*.md`), the folder resolution (`memories_v2/`, then `memories/`) and the rule that nothing is written into any `CODEX_HOME` stay as Track 157A shipped them. When `codex` is not selected, neither happens.
+2. The wire layout stays as it is: manifests keep the `codex-memory` source key with `<device id>/<path>` entries and `codex-memory:` deletion records, and storage keeps the `codex-memory/` objects. A machine that had `codex-memory` enabled publishes byte-identical manifest entries after upgrading, so peers see no deletion and no conflict copy. Peers on 1.12.76 to 1.12.79 with `codex-memory` enabled keep exchanging copies with upgraded peers, and peers without it ignore the source as they do today (pull reads only selected sources). No storage-format gate changes, and no machine has to upgrade first.
+3. Existing configs fold through `mm migrate-config`, following the `RETIRED_SOURCE_NAMES` precedent. Until it runs, a `[[sync.sources]]` entry named `codex-memory` is ignored at resolution (memory follows `codex`) and a `codex-memory` name in `disabled_sources` has no effect. `mm migrate-config` removes the entry and the name, and its preview lists both. No deletion record is minted, so peers keep their copies.
+4. `codex-memory` leaves `OPT_IN_SOURCE_NAMES`, and `mm init` no longer asks about it (`initflow._prompt_sources`). `mm enable-source codex-memory` and `mm disable-source codex-memory` change nothing and print one line in the shared style saying Codex memory follows the `codex` source, with `mm enable-source codex` or `mm disable-source codex` as the fix. `mm disable-source codex` stops publishing Codex memory without deletion records, as disabling `codex-memory` does today. `mm sources` shows Codex memory as part of `codex`, not as its own row.
+5. The memory index keeps finding the copies: `memoryindex` selects the resolved internal source by name or type, so a config that lists only `codex` still yields `mm-codex-<this machine>` and one `mm-codex-<peer>` per copies folder, pinned by a test in tests/test_memory_index.py. `mm conflicts` and `mm resolve` keep scanning the copies root.
+6. docs/SPEC.md's host-table Codex row drops "when enabled (`mm enable-source codex-memory`)" and says the copies come with the `codex` source. Root SPEC.md (the `codex-memory` type and the source list), README's Codex section and an Upgrading note (the fold and `mm migrate-config`), and docs/invariants/sync.md ("Codex memory copies") describe the fold.
+_release: patch (SPEC release policy: ordinary releases are PATCH; no storage-format change and no machine must upgrade first)_
+_touches: src/mind_meld/config.py, src/mind_meld/core.py, src/mind_meld/initflow.py, src/mind_meld/sourceflow.py, tests/test_config.py, tests/test_codex_memory_source.py, tests/test_initflow.py, tests/test_source_toggle.py, tests/test_sourceflow.py, tests/test_memory_index.py, docs/invariants/sync.md, docs/SPEC.md, SPEC.md, README.md_
+_read-first: docs/SPEC.md O9.1 and the host table, docs/invariants/README.md rows for the touched modules, docs/invariants/sync.md ("Codex memory copies (Track 157A)" and "Memory index refresh (Track 159A)"), src/mind_meld/config.py (`OPT_IN_SOURCE_NAMES`, `DEFAULT_SOURCES`, `RETIRED_SOURCE_NAMES`, `_configured_sources`), src/mind_meld/core.py (`_migrate_config_core`), src/mind_meld/manifest.py (`codex_memory_to_wire`), src/mind_meld/memoryindex.py (the `codex-memory` branch)_
 
-_Source: the developer's observations of 2026-11-20, relayed by the Factory Manager on 2026-11-20 and placed on the Current Plan on 2026-11-21 ("2 a"), and PR #362's review backlog (merged 2026-11-21) for items 2 and 3. The developer observed that `pipx install --force` fails when pipx runs on its uv backend: an existing venv is refused unless `UV_VENV_CLEAR=1` is set. Verified at `cf5edc0`: `upgrade.INSTALL_CMD` is `pipx install --force <spec>`, and `update_argv` and `reinstall_cmd` build `install --force` argument lists. `meshflow.py` composes the "Syncthing device removals wait for ..." degradations, and `attemptlog.py` admits them to the run record. `_run_events_backfill` prints "mm: notice: git repository discovery hit its time budget: ..." and "mm: notice: events backfill budget exceeded" through `token_usage._diagnostic`, and composes "host-usage snapshot skipped (...)". Its own comment says "Init has no `mm-push` row and no autorun breadcrumb, so the notice is the only surface available"._
+_Source: the developer's decision of 2026-11-22, relayed by the Factory Manager's brief, which asked the card to decide migration, the index and the wire layout against HEAD. Verified at `91fa6bf` (v1.12.79): `config.OPT_IN_SOURCE_NAMES` holds `codex-memory`; `DEFAULT_SOURCES` carries a `codex-memory` entry (type `codex-memory`, path `~/.codex`) that `initflow._prompt_sources` asks about with every default; `manifest.codex_memory_to_wire` maps local keys to `<device id>/<path>` under `sources["codex-memory"]`; `pullflow`, `resolveflow` and `memoryindex` pick the source by name or type `codex-memory` from `resolve_sources`, so an entry derived there reaches all three; `core._migrate_config_core` already drops `RETIRED_SOURCE_NAMES` blocks, the precedent for the fold. Decisions: fold through `mm migrate-config` rather than keep a permanent alias, because the name stays meaningful only on the wire; leave the index code alone, because it reads the resolved source; keep the wire layout so mixed-version peers interoperate during the upgrade. A machine whose `disabled_sources` lists `codex-memory` starts publishing its Codex memory once `codex` is enabled, as the developer's decision implies._
 
-- **Reinstall on both pipx backends** -- in `upgrade.update_argv`, run the pinned reinstall with `UV_VENV_CLEAR=1` in its environment. Make `INSTALL_CMD` and `reinstall_cmd` print a form that works on both backends, `UV_VENV_CLEAR=1 pipx install --force ...` unless the plan finds a form pipx accepts on both. Pin both backends in tests/test_upgrade.py and tests/test_self_update.py, and update docs/invariants/auto-upgrade.md and README. _upgrade.py, tests/test_upgrade.py, tests/test_self_update.py, docs/invariants/auto-upgrade.md, README.md, ~70 lines._ (S)
-- **Let the latest mesh run replace the removal-wait line** -- record the mesh pass's removal outcome from every push, pull, autopush and autopull so `mm status` shows the latest one, and drop the line when nothing waits. Test the waiting, cleared and auto-command cases in tests/test_mesh.py and tests/test_statusflow.py. _meshflow.py, attemptlog.py, statusflow.py, tests/test_mesh.py, tests/test_statusflow.py, ~80 lines._ (S)
-- **Record init's no-action capture notices for `mm status` and `mm diag`** -- in `events_tail._run_events_backfill`, record the budget and deadline notices instead of printing them during init, keep actionable notices printed, and show the record in `statusflow` until the next attended push. Test in tests/test_init_events_backfill.py and tests/test_statusflow.py, and update docs/invariants/events-retro.md. _events_tail.py, initflow.py, statusflow.py, tests/test_init_events_backfill.py, tests/test_statusflow.py, docs/invariants/events-retro.md, ~90 lines._ (S)
-- **Test gap: init's no-release notice when reading the cached upgrade view fails** -- add a case beside `test_incomplete_scan_uses_no_release_notice_when_upgrade_cache_is_current` that makes `upgrade.cached_upgrade_view` raise, and assert init succeeds and its advice keeps `mm update`. _Source: Future entry of the same title (`[review:files=src/mind_meld/events_tail.py|tests/test_init_events_backfill.py]`, Track 135A)._ _tests/test_init_events_backfill.py, ~25 lines._ (S)
-- **Test gap: Mesh breadcrumbs with several omitted details** -- add several complete diagnostic clauses and long device names to the `meshflow.compose_hook_breadcrumb` fixtures, and check the detail priority and how status displays the omissions. _Source: Future entry of the same title (`[review:files=src/mind_meld/meshflow.py|tests/test_mesh.py]`, Track 152A)._ _tests/test_mesh.py, ~30 lines._ (S)
+- **Derive Codex memory from the `codex` source** -- in `config` resolution, add the internal entry when `codex` is selected; drop `codex-memory` from `OPT_IN_SOURCE_NAMES` and from init's prompt list; ignore a listed `codex-memory` entry and disabled name. Test publish and place from a `codex`-only config, and a byte-identical manifest against a 1.12.79-shaped one. _config.py, initflow.py, tests/test_config.py, tests/test_codex_memory_source.py, tests/test_initflow.py, ~170 lines._ (M)
+- **Fold existing configs and redirect the source commands** -- make `core._migrate_config_core` remove `codex-memory` entries and disabled names with its preview, and make `sourceflow`'s enable, disable and `mm sources` output point at `codex`. _core.py, sourceflow.py, tests/test_config.py, tests/test_source_toggle.py, tests/test_sourceflow.py, ~140 lines._ (M)
+- **Pin the index and document the fold** -- the `codex`-only index test and the docs listed in criterion 6. _tests/test_memory_index.py, docs/invariants/sync.md, docs/SPEC.md, SPEC.md, README.md, ~90 lines._ (S)
 
-#### Track 156B: Qualify cross-model memory through qmd in isolated homes
-_1 task . ~150 LOC . low risk . 1 file_
-**Outcome:** before any O9 code is written, the owner knows whether fresh Codex and Claude Code sessions, given only the recommended pointer line, find another agent's memory through `qmd search` and surface a contradiction instead of hiding it, and which Codex memory files the per-machine copies should carry.
-**Supports:** docs/SPEC.md O9.6 (qualification before implementation), planned before 2.0 on the developer's word (2026-11-21: "1 c"). It replaces the Future card for the 2026-10-29 design's qualification (formerly Track 96A), which was retired with that design.
-**Done when:** docs/designs/cross-model-memory.md records Q1, Q2 and Q3, run in temporary `HOME`, `CODEX_HOME` and XDG folders, with the observed codex-cli, Claude Code and qmd versions, the commands the agents ran and the final pointer line. A failed Q1 or Q2 is written up for the owner, and no product code changes.
+#### Track 161B: Make the `--affected` selection tests deterministic under machine load
+_3 tasks . ~150 LOC . low risk . 3 files_
+**Outcome:** a full `./bin/check` at the host's default worker count (16 on `linux-a`) no longer fails a transport verify or a release suite on the nested-pytest selection tests in tests/test_bin_check.py, and a real failure there prints the nested run's output.
+**Supports:** the release discipline (`./bin/check` gates each release script and transport verify; docs/invariants/auto-upgrade.md) and AGENTS.md Testing; a flaky test costs every Track that meets it a rerun. Admitted under the standing rule on reproducible bugs encountered: the Factory Manager observed these failures on 2026-11-21 in a transport verify and a release-commit suite.
+**Done when:** the PR records the cause found, with the failing assertion and the nested output or the injection that reproduces it; the fix removes that cause without weakening an assertion; and `MM_PYTEST_WORKERS=16 ./bin/check` passes three consecutive runs on a 16-CPU Linux machine with each run's load average recorded.
 **Acceptance:**
-1. Every check runs with a temporary `HOME`, `CODEX_HOME` and XDG folders. Nothing reads or writes the owner's real Claude, Codex, Grok or Muse stores, qmd index or credential files. Sessions authenticate through an API key in the environment or a fresh login inside the temporary home.
-2. Q1: a fresh Codex session, with only the pointer line in its `AGENTS.md`, answers a question that only a seeded Claude-origin memory answers, by running `qmd search`. A fresh Claude Code session, with only the line in its `CLAUDE.md`, finds a seeded Codex-origin memory the same way. The result is recorded either way, with the commands each session ran.
-3. Q2: with two contradicting memories seeded from different providers, each session reports both, with their paths, and asks the owner instead of choosing one.
-4. Q3: in an isolated `CODEX_HOME` with Codex's `memories` feature on, the design records the files Codex writes and which it regenerates wholesale, and chooses the copy set. If Codex writes no memory within the session budget, the default set (`memory_summary.md`, `MEMORY.md`, `rollout_summaries/*.md`) is kept and the reason recorded.
-5. docs/designs/cross-model-memory.md records the results and versions and the final pointer line. A failed Q1 or Q2 sends the design back to the owner, and Tracks 157A, 159A and 160A stay blocked. No product code changes.
-_touches: docs/designs/cross-model-memory.md_
-_out: 157A_
-_read-first: docs/designs/cross-model-memory.md (Qualification, Design 5 and 6), docs/SPEC.md O9_
+1. The cause is found and recorded in the PR. Reproduce `TestAffectedSelection::test_moved_merge_base_reseeds` and `TestAffectedSelection::test_deleted_test_is_a_proven_empty_selection` failing under load (the full suite at 16 workers, or the class under a recorded CPU load), capture the failing assertion with the nested run's stdout and stderr, and name the load-sensitive step. Candidates at HEAD: the nested `bin/_check.py`'s wall-clock bounds (`SELECT_SUBPROCESS_TIMEOUT_S` = 60 s for `_git` and the environment probe, 8 s in `python_version`, 30 s in `venv_healthy`, 15 s for the xdist probe) and the tests' 180 s `check()` timeout, any of which can change the selection route or its message under load.
+2. The two worker deaths are explained in the PR: whether the xdist worker crash and the nested pytest's exit 137 (SIGKILL) came from the kernel's OOM killer (kernel log), from `bin/check`'s own process-group teardown, or from a timeout.
+3. The fix makes the selection tests deterministic for the cause found: a bound they depend on is replaced by a completion signal or a deterministic injection, or nested-pytest tests stop multiplying with the outer worker count (for example, grouped onto one worker). What `./bin/check --affected` does for the owner does not change.
+4. No assertion is weakened: each test keeps its selected node set, its reason string and its exit-code check, and no test is skipped, marked flaky or retried.
+5. Every assertion on a nested run in `TestAffectedSelection` and the `seeded` fixture includes the nested run's output (`both(proc)`), and `test_moved_merge_base_reseeds` also checks the nested exit code.
+6. `MM_PYTEST_WORKERS=16 ./bin/check` passes three consecutive runs on a 16-CPU Linux machine, each run's load average recorded in the PR, and `./bin/check --tests --serial tests/test_bin_check.py` passes.
+_release: patch (SPEC release policy: ordinary releases are PATCH)_
+_touches: tests/test_bin_check.py, bin/_check.py, tests/conftest.py_
+_read-first: AGENTS.md Testing, tests/test_bin_check.py (`check`, `seeded`, `proj`, `TestAffectedSelection`), bin/_check.py (`SELECT_SUBPROCESS_TIMEOUT_S`, `_git`, `probe_env`, `xdist_args`, the process-group teardown), docs/roadmap-shipped.md Track 150A (the previous determinism fix in these files)_
 
-_Source: the developer's decisions of 2026-11-20 and 2026-11-21 quoted in docs/SPEC.md's 2026-11-21 amendment, and the Factory Manager's brief: "fresh Codex and Claude sessions in isolated homes (temporary HOME and CODEX_HOME, never the owner's real stores) find another agent's memory through qmd with only the recommended pointer line". Verified 2026-11-20 on `linux-a`: qmd 2.8.3 is installed (`qmd --version`); `qmd search` returned two contradicting memories from two collections in a temporary `HOME`; codex-cli 0.171.0 lists `memories stable false`._
+_Source: the Factory Manager's report of 2026-11-21: `test_moved_merge_base_reseeds` failed a transport verify, `test_deleted_test_is_a_proven_empty_selection` failed a release-commit suite (a retry passed), and two full-suite runs at 16 workers died with an xdist worker crash and a nested pytest exit 137 with no test failure (they passed at 6 workers and on a third run). The failing assertions' messages were not captured. Verified at `91fa6bf`: both tests exist; `check()` drops `MM_PYTEST_WORKERS` and these tests pass `--serial`, so each nested run is serial and the load comes from the outer workers (`xdist_args` defaults to `-n auto`, 16 on `linux-a`); `test_moved_merge_base_reseeds` asserts its reason string without the nested output or exit code._
 
-- **Run Q1 to Q3 and record them** -- seed the memories, build the planned `mm-` collections in the temporary home's qmd index, run the fresh sessions, and write the results into the design's Qualification section. Session: fresh, effort medium; verify `./bin/check tests/test_docs_routing.py`. _docs/designs/cross-model-memory.md, ~150 lines._ (M)
-
-### Group 157: Per-machine Codex memory copies
-
-_Depends on: Group 156_
-
-**This group delivers:** each machine's Codex memory reaches every other machine as a read-only, per-machine copy in mm's own folder, which forgets what the source machine's Codex forgets and never touches any machine's Codex store.
-
-#### Track 157A: Publish each machine's Codex memory as per-machine copies
-_3 tasks . ~420 LOC . medium risk . 12 files_
-**Outcome:** what Codex remembers on one of the owner's machines is on disk on every other machine, in mm's own folder, ready for the memory index, without conflicts and without mm writing into any Codex store.
-**Supports:** docs/SPEC.md O9.1 (Codex memories roam as per-machine copies, one writer per file, outside every native store). The developer, 2026-11-20: "o9 - why just codex?". The other providers already sync.
-**Done when:** tests show a push publishing only this machine's Codex memory files under its device ID, a pull placing each peer's files in that peer's copies folder, a source-side deletion or rewrite propagating with no conflict copy, a forged path refused, a retired machine's copies removed, and nothing written under any `CODEX_HOME`.
-**Acceptance:**
-1. A new `codex-memory` source reads this machine's Codex memory files (the set Track 156B chose) from `CODEX_HOME/memories/` without writing there, and publishes them under this machine's device ID. Codex's `.git`, its SQLite files and files outside the set never sync.
-2. At pull, each peer's files land under `~/.local/share/mind-meld/codex-memory/<peer device id>/`. A file in a peer's manifest whose path does not start with that peer's own device ID is refused, so each file has one writer. Nothing is written into any `CODEX_HOME`.
-3. When the source machine's Codex drops or rewrites a memory, the next push and pull remove or replace that copy on every peer with no conflict copy. Regenerating identical content publishes nothing.
-4. The copies of a machine retired with `mm devices retire` are removed from every peer at its next pull.
-5. `mm init` offers the source when `CODEX_HOME/memories/` exists (Enter = yes, as for other detected sources). `mm enable-source codex-memory` and `mm disable-source codex-memory` work, and disabling it on one machine deletes nothing fleet-wide.
-6. `mm sources` and `mm status` list the source. docs/SPEC.md's table (the Codex row and the intentional-gaps line), root SPEC.md, README's Codex section and docs/invariants/sync.md describe it.
-_touches: src/mind_meld/config.py, src/mind_meld/manifest.py, src/mind_meld/pullflow.py, src/mind_meld/initflow.py, src/mind_meld/sourceflow.py, tests/test_codex_memory_source.py (new), tests/test_initflow.py, tests/test_sourceflow.py, docs/invariants/sync.md, docs/SPEC.md, SPEC.md, README.md_
-_blocked-by: Track 156B_
-_out: 159A_
-_read-first: docs/designs/cross-model-memory.md (Design 2), docs/SPEC.md O1.1 and O9, docs/invariants/README.md rows for the touched modules, docs/invariants/sync.md (truth-based manifests, tombstone suppression), src/mind_meld/manifest.py (`MUSE_SYNCED_SUBDIRS`, `GROK_MEMORY_ROOT` and the source walkers), src/mind_meld/config.py (`DEFAULT_CODEX_DIR`, `DEFAULT_SOURCES`)_
-
-_Source: the developer's decisions of 2026-11-20 and 2026-11-21 (docs/SPEC.md O9) and the brief: "Codex memories, which each machine regenerates, roam as per-machine copies (one writer per file) in an mm-owned directory outside every native store". Codex observations: 2026-10-29 with codex-cli 0.164.0 on `mac-a` (archived design) and 2026-11-20 with codex-cli 0.171.0 on `linux-a` (`memories stable false`). `~/.local/share/mind-meld/` is mm's existing data folder (`retention.DEFAULT_RETROS_DIR`, the retro-fleet skill target)._
-
-- **Publish this machine's Codex memory under its device ID** -- add the `codex-memory` source: a walker that reads the chosen set from `CODEX_HOME/memories/` and publishes relative paths prefixed with this device's ID, never walking the copies folder, and its config entry. _config.py, manifest.py, tests/test_codex_memory_source.py, ~180 lines._ (M)
-- **Place peers' copies in mm's folder, one writer per file** -- for this source, apply peer files under `~/.local/share/mind-meld/codex-memory/<peer id>/`, refuse a path outside the peer's own prefix, remove a retired machine's copies, and test deletion and rewrite propagation with no conflict copy. _pullflow.py, tests/test_codex_memory_source.py, ~180 lines._ (M)
-- **Offer it in `mm init` and the source commands, and document it** -- detection in `initflow._prompt_sources` and `sourceflow`, plus the docs listed above. _initflow.py, sourceflow.py, tests/test_initflow.py, tests/test_sourceflow.py, docs/invariants/sync.md, docs/SPEC.md, SPEC.md, README.md, ~60 lines._ (S)
-
-### Group 158: Pull waits for Syncthing delivery
-
-_Depends on: Group 156_
-
-**This group delivers:** after a peer pushes, one `mm pull` waits briefly for Syncthing to deliver the files and applies them, or says Syncthing is still delivering and to run it again, instead of printing nothing to apply.
-
-#### Track 158A: Tell the owner when Syncthing is still delivering a peer's push instead of reporting nothing to pull
-_4 tasks . ~280 LOC . medium risk . 9 files_
-**Outcome:** the owner runs `mm pull` once after a peer pushes. While Syncthing is still delivering, pull waits a few seconds and applies what arrives, or ends by saying Syncthing is still delivering N files and to run `mm pull` again. It never reports nothing to apply while files are still on their way.
-**Supports:** MVP-1 on Syncthing; docs/SPEC.md O3.1 ("Pull applies what has arrived and says what it is still waiting for") and O8.1. The developer (verbatim, 2026-11-20): "I have never had mm pull fail or say waiting, it just says 0 files pulled, and then you have to run it several times in succession until they show up". Admitted under the standing rule on reproducible bugs the owner hit.
-**Done when:** tests against the Syncthing API stand-in show an attended pull waiting while the fleet folder still needs files and then applying them; a wait that ends with files still needed printing the delivering line with `mm pull` and exiting 0; a pull without a terminal and `mm autopull` never waiting; and an unreachable API or an iCloud Drive storage path leaving today's output unchanged.
-**Acceptance:**
-1. Before reading peer manifests, an attended `mm pull` on a terminal reads the fleet folder's Syncthing state through `syncthing.read_state` (folder state and `needFiles`). It does this whether mm or the owner manages Syncthing, using read-only API calls.
-2. When Syncthing reports files still needed (a need count above zero, or the folder syncing or preparing to sync), pull shows a transient progress line, "waiting for Syncthing to deliver N files". It waits until the count reaches zero, up to a short bound (a setting, default 15 s), and then pulls.
-3. When the bound ends with files still needed, pull applies what has arrived. Its outcome adds one line saying Syncthing is still delivering N files, ending with `Run: mm pull`, and it exits 0, because waiting is not an error (O3.1). Pull never prints only "nothing to apply" while Syncthing reports files still needed.
-4. A pull without a terminal does not wait, and reports the delivering line as in criterion 3. `mm autopull` never waits and prints nothing for this: it records the pending delivery, and `mm status` shows it until a later pull or the folder catches up.
-5. When Syncthing's API is unreachable, unauthorized or not configured, or the storage path is not a Syncthing folder (a Mac still on iCloud Drive), pull behaves as today and adds no output. `mm diag` keeps reporting the API state.
-6. The two Future test gaps placed below are closed: summary counts across peers and deletion-only pulls, and plural held counts with mixed source outcomes.
-7. docs/invariants/sync.md (Syncthing-tolerant reads and waiting) and README's pull text describe the wait and the delivering line.
-_touches: src/mind_meld/pullflow.py, src/mind_meld/syncthing.py, src/mind_meld/cli.py, src/mind_meld/statusflow.py, src/mind_meld/config.py, tests/test_pullflow.py, tests/test_statusflow.py, docs/invariants/sync.md, README.md_
-_read-first: docs/SPEC.md O3 and O8, docs/invariants/sync.md "Syncthing-tolerant reads and waiting (Track 87A)", src/mind_meld/syncthing.py `read_state` (`files_to_fetch`, `folder_state`), src/mind_meld/pullflow.py `_pull_core`, `WaitingPeer`, `waiting_clause` and `_print_pull_summary`_
-
-_Source: the developer's report of 2026-11-20, relayed by the Factory Manager the same day. Verified at `cf5edc0`: pull's waiting clause counts only blobs named by peer manifests that have already arrived (Track 87A `WaitingPeer`). A push whose manifest Syncthing has not delivered yet therefore leaves nothing to apply and no wait, and `_print_pull_summary` prints "nothing to apply". `syncthing.read_state` already reads `needFiles`, `needBytes` and the folder state from `/rest/db/status`. Pull calls it only after applying, for the pending-join notice on managed machines (`pullflow.notice_pending_syncthing_join`); otherwise only `mm status`, `mm diag` and the mesh step call it._
-
-- **Wait for Syncthing's delivery before pulling, and say when it is still delivering** -- in `_pull_core` (through a parameter the `cli.pull` shell passes when attended on a terminal), read `syncthing.read_state`, wait with the bounded progress line, and add the delivering line to the outcome. Add the bound to config, and test it against the API stand-in in tests/test_pullflow.py. _pullflow.py, syncthing.py, cli.py, config.py, tests/test_pullflow.py, ~170 lines._ (M)
-- **Record a pending delivery from autopull for `mm status`** -- record the need count without waiting, and show it in the `mm status` verdict until it clears. Update docs/invariants/sync.md and README. _pullflow.py, cli.py, statusflow.py, tests/test_statusflow.py, docs/invariants/sync.md, README.md, ~60 lines._ (S)
-- **Test gap: summary counts across peers and deletion-only pulls** -- extend the two-peer and deletion fixtures to pin count-bearing labels, and check that a deletion-only result produces no source header. _Source: Future entry of the same title (`[review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py]`, Track 151B)._ _tests/test_pullflow.py, ~25 lines._ (S)
-- **Test gap: plural held counts and mixed source outcomes** -- exercise one peer and source with several held files, and check the plural count and when `Up to date with` appears beside other outcomes. _Source: Future entry of the same title (`[review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py]`, Track 151B)._ _tests/test_pullflow.py, ~25 lines._ (S)
-
-### Group 159: Local memory index
-
-_Depends on: Group 157_
-
-**This group delivers:** every machine where the owner turns it on keeps one qmd index over every provider's memory and the Codex copies, refreshed after each sync, so any agent can search everything any agent learned on any machine.
-
-#### Track 159A: Keep one local qmd index over every provider's memory, refreshed after each sync
-_2 tasks . ~480 LOC . medium risk . 11 files_
-**Outcome:** on a machine with the index on, `qmd search` finds Claude, Grok, Muse and Codex memories from every machine, and a memory synced in or removed on the last push or pull is found or gone, without the owner rebuilding anything.
-**Supports:** docs/SPEC.md O9.2 (one local index, derived, never synced, refreshed after each `mm push` and `mm pull`) and O9.3 (each hit names its provider and, for Codex, its machine). The developer, 2026-11-20: "as we sync memories across machines, they will get incorporated into local store naturally, or removed".
-**Done when:** tests with a stub `qmd` on `PATH` show mm creating, reconciling and removing only its `mm-` collections, attended push and pull refreshing after the lock is released, the auto commands starting the refresh detached without waiting, a missing or failing qmd leaving the sync's outcome and exit code unchanged with one `mm status` line and its fix, and `mm memory-index` showing the state and turning the index on and off.
-**Acceptance:**
-1. With the index on, mm keeps these qmd collections through qmd's own CLI, only for enabled sources whose folder exists: `mm-claude` (`~/.claude/projects`, mask `*/memory/**/*.md`), `mm-grok` (`~/.grok/memory-v2`, mask `**/topics/**/*.md`), `mm-muse` (the Muse root's `memory/`), `mm-codex-<this machine>` (`CODEX_HOME/memories`, the chosen set) and one `mm-codex-<peer>` per peer copies folder. Machine names pass through `safety` and are reduced to `[a-z0-9-]`. mm adds, changes or removes only collections named `mm-…`, and never edits qmd's files directly.
-2. Attended `mm push` and `mm pull` reconcile the collections and run `qmd update` after releasing the sync lock, printing nothing on success. With embeddings on, they then start `qmd embed` in the background.
-3. `mm autopush` and `mm autopull` start the same refresh detached, never wait for it and print nothing (O8.2, O8.3).
-4. After a peer's memory file is added, changed or deleted and pulled, a `qmd search` for it reflects the change. A peer's collection appears with its copies folder and leaves with it.
-5. A missing qmd or a failed or timed-out refresh never changes a sync's outcome or exit code. `mm status` shows one line with its fix, and `mm diag` shows the qmd version, mm's collections and the last refresh's time and result.
-6. `mm memory-index` shows the index state. `mm memory-index on` and `mm memory-index off` turn it on and off, and off removes only `mm-` collections. The choice and the embeddings choice live in this machine's `config.toml` and never sync. The command is added to AGENTS.md's command list and to the integration tests' `COMMAND_INTENTS62`.
-7. The new `memoryindex.py` module is listed in the docs/invariants/README.md module map and passes tests/test_module_boundaries.py. The `cli` shells call it module-qualified, beside `_sync_update`. docs/invariants/sync.md states the refresh rule, and README documents the index and the optional `claude mcp add qmd -- qmd mcp` and `codex mcp add qmd -- qmd mcp` commands, which mm never runs.
-_touches: src/mind_meld/memoryindex.py (new), src/mind_meld/cli.py, src/mind_meld/config.py, src/mind_meld/statusflow.py, tests/test_memory_index.py (new), tests/test_integration.py, tests/test_module_boundaries.py, docs/invariants/README.md, docs/invariants/sync.md, AGENTS.md, README.md_
-_blocked-by: Track 157A_
-_out: 160A_
-_read-first: docs/designs/cross-model-memory.md (Design 3, 4, 5 and 8), docs/SPEC.md O8 and O9, docs/invariants/README.md (module map and boundaries), src/mind_meld/cli.py `_sync_update` and the `push`, `pull`, `autopush` and `autopull` shells, tests/test_module_boundaries.py_
-
-_Source: the developer's decisions of 2026-11-20 and 2026-11-21 (docs/SPEC.md O9), the brief ("the index is derived, never synced, and refreshed after mm pull"), and measurements of qmd 2.8.3 in a temporary `HOME` on `linux-a` on 2026-11-20. Adding a 400-file collection took 0.5 s, `qmd update` took 0.2 s, `qmd search` took 0.16 s and a bare start took 0.14 s. `--mask` selected memory files only, a missing folder was refused, and `qmd update` dropped a deleted file. The refresh after push is added to the developer's after-pull rule so that a memory written on this machine reaches its other agents at the session-end hook._
-
-- **Add `memoryindex.py`: collections, refresh and `mm memory-index`** -- reconcile the `mm-` collections from the enabled sources and fleet machines, run `qmd update` inline on attended runs and detached from the hooks, start `qmd embed` in the background when embeddings are on, and add the command and its config. Test with a stub `qmd` in tests/test_memory_index.py, and add the command to tests/test_integration.py and AGENTS.md. _memoryindex.py, cli.py, config.py, tests/test_memory_index.py, tests/test_integration.py, tests/test_module_boundaries.py, AGENTS.md, ~400 lines._ (L)
-- **Report the index in `mm status` and `mm diag`, and document it** -- one status line with its fix on a failed refresh, the diag detail, and the module-map, invariant and README text. _statusflow.py, docs/invariants/README.md, docs/invariants/sync.md, README.md, ~80 lines._ (S)
-
-### Group 160: qmd setup and the pointer line
-
-_Depends on: Group 159_
-
-**This group delivers:** a fresh install sets qmd up the way it sets Syncthing up, `mm init` offers the memory index and, separately, semantic search, and setup recommends the one instruction line that sends every agent to search memory before assuming.
-
-#### Track 160A: Set up qmd and the memory index from bootstrap and `mm init`, and recommend the pointer line
-_3 tasks . ~320 LOC . medium risk . 7 files_
-**Outcome:** on a new or rejoining machine, the bootstrap script installs qmd if it is missing. `mm init` offers the memory index and semantic search, and offers to add the pointer line to the owner's global `CLAUDE.md` and `AGENTS.md`, or prints it for a file that lives in the owner's config repository. Agents on that machine then search memory before assuming.
-**Supports:** docs/SPEC.md O9.3 (the recommended line, added only with the owner's approval) and O9.4 (setup). The developer, 2026-11-20: "we would want to facilitate installed qmd just like we do syncthing on setup" and "reaching for the search tool -- we would want to recommend a line in agents.md as part of setup". Embeddings are opt-in ("3 a").
-**Done when:** tests show the bootstrap installing qmd through Bun, through npm with a per-user prefix, and through Node from pacman or Homebrew when neither runtime exists, leaving an existing qmd alone and continuing past a failure. They also show `mm init` asking the index, embeddings and pointer-line questions with the listed Enter defaults, keeping them in saved join answers, appending the line once to a regular file and only printing it for a symlinked one.
-**Acceptance:**
-1. After Syncthing, `bin/bootstrap` installs qmd when `qmd --version` does not run: with `bun install -g @tobilu/qmd` when Bun exists, otherwise with npm into a per-user prefix. When neither Node 22+ nor Bun exists, it installs Node with pacman on Arch or Homebrew on macOS. It never downloads qmd's models and never uses sudo for qmd itself. It leaves an existing qmd alone. A failure prints the manual command and the rest of the install continues.
-2. When qmd runs, `mm init` asks `Index agent memories for search with qmd? [y/n]`, and Enter = yes. Yes sets up the collections and runs the first refresh through Track 159A's code. When qmd does not run, init prints the install command and skips the question.
-3. After a yes, init asks `Also download qmd's embedding model (334 MB) for semantic search? [y/n]`, and Enter = no. Yes records the choice and starts `qmd embed` in the background.
-4. Init shows the pointer line and its target files (`~/.claude/CLAUDE.md` and `CODEX_HOME/AGENTS.md`) and asks `Add this line? [y/n]`, with Enter = no, because it writes to files mm does not own. Yes appends the line once to each regular file inside the home folder, and a rerun adds no second copy. For a symlink, or a file that resolves outside the home folder, init prints the line and the resolved path and changes nothing.
-5. A join asks these questions with the others before it waits and keeps the answers in the saved join answers (O2.5). A resumed join reuses them.
-6. The Future test gap placed below is closed: the bootstrap's Arch install paths.
-7. README's install and setup sections and docs/invariants/init-devices.md (the init questions) describe the new steps.
-_touches: bin/bootstrap, src/mind_meld/initflow.py, src/mind_meld/memoryindex.py, tests/test_bootstrap.py, tests/test_initflow.py, docs/invariants/init-devices.md, README.md_
-_blocked-by: Track 159A_
-_read-first: docs/designs/cross-model-memory.md (Design 5 and 7), docs/SPEC.md O2.5 and O9, docs/invariants/init-devices.md (the join's saved answers, the `[y/n]` helper), bin/bootstrap (`ensure_syncthing_at_login` and the install steps), src/mind_meld/initflow.py (`init`, `_prompt_sources`)_
-
-_Source: the developer's decisions of 2026-11-20 and 2026-11-21 (docs/SPEC.md O9) and the brief: "Setup facilitates installing qmd the way bin/bootstrap and mm init facilitate Syncthing (check qmd 2.8.3 runs on this Arch box ... note its Bun/Node and embedding-model needs)". Verified 2026-11-20 on `linux-a`. qmd 2.8.3 is the npm package `@tobilu/qmd` (engines `node >=22.0.0`), installed with Bun's global install and linked from `~/.local/bin/qmd`. Node 26 and Bun 1.4 are present. No qmd model had been downloaded. The default models are 334 MB (embedding), 639 MB (reranker) and 1.28 GB (query expansion), sizes read from Hugging Face. Both global instruction files on `linux-a` are symlinks into the owner's config repository. [challenge] The pointer-line question defaults to no although the line was recommended, because it writes to files mm does not own; the developer can overrule this in review._
-
-- **Install qmd from the bootstrap script** -- add the qmd step after Syncthing, with the Bun, npm and Node branches and the failure path. Test each branch in tests/test_bootstrap.py and document it in README. _bin/bootstrap, tests/test_bootstrap.py, README.md, ~120 lines._ (M)
-- **Ask the index, embeddings and pointer-line questions in `mm init`** -- add the three questions with their defaults, the saved-answer handling, the idempotent append and the symlink print-only path. Test in tests/test_initflow.py and update docs/invariants/init-devices.md. _initflow.py, memoryindex.py, tests/test_initflow.py, docs/invariants/init-devices.md, ~180 lines._ (M)
-- **Test gap: bootstrap Arch install paths** -- assert that a non-root Arch run sends pacman through sudo, then cover a root run, a failed pacman install, the pacman-missing stop and a rerun on Arch. _Source: Future entry of the same title (docs/TODOS.md `[review]` test gap, Track 98A)._ _tests/test_bootstrap.py, ~40 lines._ (S)
+- **Reproduce under load and fix the cause** -- capture the failing assertions with nested output, name the load-sensitive step, and make it deterministic. _tests/test_bin_check.py, bin/_check.py, ~90 lines._ (M)
+- **Explain the worker deaths and bound nested concurrency if needed** -- read the kernel log for OOM kills around a 16-worker run, and group the nested-pytest tests onto one worker if they are resource kills. _tests/conftest.py, bin/_check.py, ~30 lines._ (S)
+- **Print the nested output on every selection assertion** -- add `both(proc)` to each nested-run assertion and the exit-code check to `test_moved_merge_base_reseeds`. _tests/test_bin_check.py, ~30 lines._ (S)
 
 ### Execution Map
 
@@ -203,41 +86,26 @@ A Group may launch when every Group in its ← set has landed, regardless of doc
 
 Adjacency list (from the packer / GROUP_DEPS — not document order):
 ```
-- Group 156 ← {}
-- Group 157 ← {156}
-- Group 158 ← {156}
-- Group 159 ← {157}
-- Group 160 ← {159}
+- Group 161 ← {}
 ```
 
 Track detail per group:
 ```
-Group 156: Observed sync and setup bugs ∥ cross-model memory qualification
-  +-- Track 156A ........... ~L . 5 tasks
-  +-- Track 156B ........... ~M . 1 task
-
-Group 157: Per-machine Codex memory copies
-  +-- Track 157A ........... ~L . 3 tasks
-
-Group 158: Pull waits for Syncthing delivery
-  +-- Track 158A ........... ~L . 4 tasks
-
-Group 159: Local memory index
-  +-- Track 159A ........... ~L . 2 tasks
-
-Group 160: qmd setup and the pointer line
-  +-- Track 160A ........... ~L . 3 tasks
+Group 161: Codex memory with the codex source ∥ deterministic selection tests
+  +-- Track 161A ........... ~L . 3 tasks
+  +-- Track 161B ........... ~M . 3 tasks
 ```
 
-**Total: 5 groups . 6 tracks remaining.**
+**Total: 1 group . 2 tracks remaining.**
 
-Tracks 135A to 155A shipped in v1.12.51 to v1.12.74, and Track 135B (Track 124B's real-machine automatic-update observation) merged as a documentation-only change between them (independent receipts in shipped history). IDs 95A and 96A stay unused because Future entries and old records cite them; the qualification formerly carded as 96A returns as Track 155B.
+Tracks 135A to 160A shipped in v1.12.51 to v1.12.79, and Tracks 135B and 156B merged as documentation-only changes between them (independent receipts in shipped history). IDs 95A and 96A stay unused because Future entries and old records cite them.
+
 
 ---
 
 ## Future
 
-Deferred: docs/roadmap-future.md (115 items)
+Deferred: docs/roadmap-future.md (116 items)
 
 ## Shipped
 
