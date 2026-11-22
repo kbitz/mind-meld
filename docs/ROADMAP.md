@@ -22,64 +22,50 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 
 ## In Progress
 
-None declared as of 2026-11-22. Both Tracks in the previous plan shipped and have independent receipts in [shipped history](roadmap-shipped.md).
+None declared.
 
 ## Current Plan
 
 _tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161_
 
-### Group 162: Actionable qmd upgrade output ∥ load-stable capture tests
+### Group 163: Mind Meld's own qmd index and agent setup
 
 _Depends on: none_
 
-**This group delivers:** a copyable qmd upgrade command when memory-index enablement refuses an old version, and two capture tests whose results do not depend on CI worker scheduling.
+**This group delivers:** agent memory search that leaves the owner's other qmd collections alone and gives agents a clear trigger and setup instructions.
 
-#### Track 162A: Print the qmd upgrade command when memory-index enablement refuses an old version
-_3 tasks . ~100 LOC . low risk . 2 files_
-**Outcome:** an owner whose qmd is too old can copy the last command printed by `mm memory-index on` to install a supported version, then retry enablement.
-**Supports:** [SPEC](SPEC.md) O8.1 and O8.6 (shared output and a fix command last), and O9.4 (the owner can enable the index after setup). The owner hit the old-qmd refusal on macOS on 2026-11-22.
-**Done when:** the real command path reports the installed version and minimum, exits 1 without enabling the index, and ends stderr with the copyable command selected by `memoryindex.install_hint()`.
+#### Track 163A: Give Mind Meld its own qmd index and qualify agent recall
+_4 tasks . ~210 LOC . medium risk . 7 files_
+**Outcome:** The owner can keep a notes vault in qmd and use Mind Meld to search agent memories independently. Agents know when to search and how to surface conflicting memories.
+**Supports:** [SPEC](SPEC.md) O8.6 and O9.2–6. The default qmd index is shared today, and incomplete agent setup can prevent the recall and contradiction checks that O9 requires.
+**Done when:** enabling or refreshing moves legacy Mind Meld collections, regular operations and agent searches use the dedicated index, and the setup instructions and isolated Q1/Q2 results agree with the shipped commands.
 **Acceptance:**
-1. A stub reporting qmd 2.8.2 yields the shared error form with the detected version and minimum; the final line is `Run: <command>`, with the existing Bun or npm install command for that environment. The failed preflight leaves index settings and collections intact.
-2. Retain the existing optional setup behavior and test for `mm init`: `initflow._ask_memory_setup` already prints the install command in the old-version branch and skips only the optional index prompt. Preserve working qmd enablement and read-only inspection.
-3. With malformed successful qmd collection output, refresh records failure before collection edits or update. With an active refresh that releases the lock within the disable retry window, `mm memory-index off` persists the disabled setting and removes the managed collections.
-_release: patch (ordinary release under SPEC)_
-_touches: src/mind_meld/memoryindex.py, tests/test_memory_index.py_
-_read-first: docs/SPEC.md O8 and O9.4, docs/invariants/README.md (shared output and memory-index routing), docs/invariants/sync.md (Memory index refresh), src/mind_meld/memoryindex.py (`_enable_index`, `install_hint`)_
+1. Select `--index mind-meld` for every routine index operation, including collection listing, inspection, reconciliation, removal, update and optional embed. Only the one-time cleanup uses the default `index`: the next successful `mm memory-index on` or enabled refresh creates and refreshes the desired collections in the named index, then removes only legacy `mm-` collections from the default index. Never update or embed the default or a project index. Keep cleanup retryable after a partial failure. A fresh installation and subsequent routine runs leave the default index alone. Leave every other collection and its search results intact. An isolated fixture with a notes collection in the default index and a project-local index verifies migration, search isolation, refresh, embed, read-only inspection and disable.
+2. Use one recommended pointer line for setup and docs: “If the owner mentions something they discussed with an agent before and you can't find it in your own memory, search every agent's memory with `qmd --index mind-meld search "<key words>" -n 10` (`qmd --index mind-meld get <docid>` reads a hit). If memories disagree, show the owner each one with its path and ask which is right.” Update O9.3 in [SPEC](SPEC.md) and the [cross-model memory design](designs/cross-model-memory.md). The developer approves the SPEC wording at the implementation PR's merge gate.
+3. After successful `mm memory-index on`, use shared O8 output to print the agent setup or link directly to the README's Agent setup subsection. Keep pointer edits by hand available for symlinked instruction files.
+4. Add Agent setup under the README's Searching agent memory (qmd) section. Include the pointer line, the two Claude Code allow rules (`Bash(qmd --index mind-meld search:*)` and `Bash(qmd --index mind-meld get:*)`), and the Codex writable-root setting for the named index's actual cache folder only if criterion 5 demonstrates it is needed. Point existing users to replace the old pointer line, and use the named index in optional MCP examples.
+5. Before documenting a Codex writable-root setting, try both named-index `search` and `get` under the normal Codex sandbox in an isolated home without the extra grant. If either fails because of filesystem permissions, verify the minimal cache-directory grant and record the evidence. If both work without it, omit that step from the README and CLI guidance.
+6. Rerun Q1 and Q2 from the cross-model memory design with fresh Codex and Claude Code sessions, the revised line and the named index, in the isolated homes it prescribes. The owner prompts must mention a previous discussion with an agent and leave the answer in the seeded foreign memory. Verify cross-agent recall in both directions and that each agent surfaces both sides of the seeded contradiction with paths and asks which is right. Record commands, tool versions, sandbox settings, final pointer and results in that design. This covers O9.6's isolated evidence. The owner's Mac and Linux fleet acceptance remains separate.
+7. At enablement, an installed qmd that exits nonzero, prints an unparseable version or times out still exits 1 with the failure detail and the copyable install command last. Assert that the failed preflight leaves config, index state and collections untouched.
+
+_touches: src/mind_meld/memoryindex.py, tests/test_memory_index.py, tests/test_initflow.py, README.md, docs/SPEC.md, docs/designs/cross-model-memory.md, docs/invariants/sync.md_
+_read-first: docs/SPEC.md (O8 and O9), docs/invariants/README.md, docs/invariants/sync.md (Memory index refresh), docs/invariants/init-devices.md (memory setup), docs/designs/cross-model-memory.md (Qualification)_
 _verify: ./bin/check tests/test_memory_index.py tests/test_initflow.py_
 
-_Source: owner report relayed on 2026-11-22. At `301a420`, `_enable_index` passes prose to `core._error(fix=...)`; the bare status view formats the parenthetical version requirement. The optional `mm init` branch already calls `install_hint()`, with coverage in tests/test_initflow.py. The two coverage tasks come from Track 159A's review and coverage audit in docs/TODOS.md._
+_Source: developer decisions relayed on 2026-11-22. The existing `_GLOBAL_INDEX` in `memoryindex.py` selects the default index, and the README documents that sync refreshes other collections there. The design's Q1/Q2 results used the earlier trigger and show Codex with a cache grant. The version-probe test gap came from Track 162A's coverage audit._
 
-- Use the existing runtime-specific remedy on the old-version refusal and assert the exact final line and preserved state with the qmd stub. _memoryindex.py, tests/test_memory_index.py, ~45 lines._ (S)
-- Pin refresh refusal using a qmd stub that exits zero with malformed list or show output. _tests/test_memory_index.py, ~30 lines._ (S)
-- Pin successful disable after refresh releases the lock during the retry budget. _tests/test_memory_index.py, ~25 lines._ (S)
-
-#### Track 162B: Make the attended-capture and usage-merge tests stable under CI load
-_2 tasks . ~120 LOC . low risk . 2 files_
-**Outcome:** the release checks still catch a broken attended capture boundary or usage-merge regression and avoid false failures caused by an overscheduled runner.
-**Supports:** [SPEC](SPEC.md) O7.2 and O8.2 (attended cap and capture budget behavior), and AGENTS.md Testing (portable checks gate merges). Both timing tests were reported on 2026-11-22; the attended-capture test failed twice on macOS CI and passed on rerun.
-**Done when:** the two named tests pass repeat runs under normal CI concurrency and controlled contention, with both sides of the capture boundary and a meaningful usage-merge regression check retained.
-**Acceptance:**
-1. `TestAttendedCaptureCap124A::test_attended_push_finishes_over_capture_budget_under_cap_and_aborts_when_equal` advances a controlled clock at the existing fixture seams. At equal cap and budget it still verifies warm-read and git deadline outcomes and the budget notice. At the larger cap it still verifies host rows, completed session and repository walks, absence of the notice, and cursor advancement.
-2. `TestMergeUsageBucketPerf::test_merge_usage_bucket_under_2us_per_call` stops measuring scheduler pauses as merge cost. Preserve a guard against major regressions, for example by budgeting CPU time for the single-threaded loop, and make the test name, rationale and threshold agree. HEAD asserts 10 microseconds per call despite the name.
-3. Record targeted and repeated parallel runs for both nodes, including the macOS CI result for the attended test. Keep production behavior and test coverage of the outcomes intact.
-_release: patch (ordinary release under SPEC)_
-_touches: tests/test_events_budget_scope.py, tests/test_token_usage.py_
-_read-first: AGENTS.md Testing, docs/invariants/events-retro.md (attended budgets and usage buckets), tests/test_events_budget_scope.py (`TestAttendedCaptureCap124A`), tests/test_token_usage.py (`TestMergeUsageBucketPerf`)_
-_verify: ./bin/check tests/test_events_budget_scope.py tests/test_token_usage.py_
-
-_Source: 2026-11-22 flake report. At `301a420`, the cap fixture uses actual sleeps inside short simulated scans, and the merge microbenchmark times a wall-clock loop. No unfinished Track already covers either file._
-
-- Replace the cap fixture's wall-clock waits with deterministic budget consumption at the test seams. _tests/test_events_budget_scope.py, ~80 lines._ (M)
-- Remove scheduler noise from the usage-merge performance guard and align its name with the budget. _tests/test_token_usage.py, ~40 lines._ (S)
+- **Isolate qmd operations and move legacy collections.** Exercise the named index, bounded cleanup and retry with separate index fixtures. _memoryindex.py, tests/test_memory_index.py, tests/test_initflow.py, ~85 lines._ (M)
+- **Revise the pointer and show the setup.** Update the canonical string, CLI success guidance, setup tests, README, SPEC and sync invariant. _memoryindex.py, tests/test_memory_index.py, tests/test_initflow.py, README.md, docs/SPEC.md, docs/invariants/sync.md, ~65 lines._ (S)
+- **Check the Codex grant and rerun Q1/Q2.** Record whether the grant is needed and how both agents recalled and reported the seeds. _docs/designs/cross-model-memory.md, ~35 lines._ (S)
+- **Pin failed qmd version probes.** Exercise nonzero exit, malformed version and timeout in the isolated preflight fixture. _tests/test_memory_index.py, ~25 lines._ (S)
 
 ### Execution Map
 
 ```
-- Group 162 ← {}
+- Group 163 ← {}
 ```
 
-**Total: 1 group, 2 Tracks remaining.**
+**Total: 1 group, 1 Track remaining.**
 
 ---
 
