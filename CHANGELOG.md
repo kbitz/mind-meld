@@ -2,6 +2,29 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.80] - 2026-11-22
+
+Codex memory copies now sync automatically with the `codex` source, with one setup question and no separate memory source to enable.
+
+### Added
+
+- Codex memory copies now sync automatically with the `codex` source, with no separate source to enable and no extra setup question.
+
+### Changed
+
+- The `codex` source now includes Codex memory copies, and `mm init` asks one question for both Codex customizations and memory.
+- Legacy `codex-memory` toggle commands point to the corresponding `codex` command.
+- `mm migrate-config` and `mm reconfigure-sources` remove leftover `codex-memory` selections and preserve existing memory file exclusions.
+- `mm sources` includes memory files in the `codex` file count.
+
+### Fixed
+
+- Moving the Codex memory root preserves copies already sent to peers and refreshes the baseline for tracking later deletions.
+
+### Upgrade notes
+
+- Run `mm migrate-config` once on each machine to remove the leftover `codex-memory` config entry; until then it is ignored and memory follows `codex`.
+
 ## [1.12.79] - 2026-11-21
 
 Setup can install qmd and turn on memory search, including the recommended search line for agent instruction files.
