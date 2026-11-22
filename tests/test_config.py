@@ -3635,6 +3635,33 @@ class TestCodexMemoryFoldResolutionAndMigration:
         assert core._migrate_config_core(yes=True, dry_run=False) is False
         assert "already up to date" in capsys.readouterr().out
 
+    def test_migrate_config_keeps_a_toggle_applied_during_confirmation(self, tmp_path, monkeypatch):
+        from mind_meld import config as config_module
+        from mind_meld import core
+
+        cfg_path = tmp_path / "config.toml"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_path)
+        monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(config_module, "LOCK_PATH", tmp_path / "mm.lock")
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "Mac A"},
+                "storage": {"path": str(tmp_path / "store")},
+                "sync": {"disabled_sources": ["codex-memory"]},
+            },
+            cfg_path,
+        )
+
+        def disable_codex_while_prompt_is_open(*args, **kwargs):
+            config_module.patch_config_on_disk(
+                {"sync": {"disabled_sources": ["codex", "codex-memory"]}}, path=cfg_path
+            )
+            return True
+
+        monkeypatch.setattr(core, "ask_yes_no", disable_codex_while_prompt_is_open)
+        assert core._migrate_config_core(yes=False, dry_run=False) is False
+        assert load_config(cfg_path)["sync"]["disabled_sources"] == ["codex"]
+
     def test_migrate_config_folds_disabled_name_only_and_entry_only_and_combined_retired(
         self, tmp_path, monkeypatch, capsys
     ):

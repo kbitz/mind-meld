@@ -971,6 +971,80 @@ class TestCodexMemoryPullAndConfinement:
 
 
 class TestCodexMemoryInitAndSourceCommands:
+    @pytest.mark.parametrize("prepare_new_memory", [False, True])
+    def test_old_memory_root_stops_publishing_without_deleting_copies(
+        self, tmp_path, monkeypatch, prepare_new_memory
+    ):
+        env = _MultiDeviceCodexMemoryEnv(
+            tmp_path, monkeypatch, ((DEV_A, "Mac A"), (DEV_B, "Linux B"))
+        )
+        dev = env.devices[DEV_A]
+        old_home = dev.root / "old-codex"
+        (old_home / "memories_v2").mkdir(parents=True)
+        (old_home / "memories_v2" / "MEMORY.md").write_text("old memory\n")
+        dev.cfg["sync"]["sources"][0]["path"] = str(old_home)
+        env.push(DEV_A)
+        env.pull(DEV_B)
+
+        dev.cfg["sync"]["sources"][0]["path"] = str(dev.codex)
+        dev.cfg["sync"]["sources"].append(
+            {"name": "codex-memory", "path": str(old_home), "type": "codex-memory"}
+        )
+        if prepare_new_memory:
+            (dev.codex / "memories_v2").mkdir()
+            (dev.codex / "memories_v2" / "memory_summary.md").write_text("new memory\n")
+        else:
+            # Cleanup can precede the first push from the new root.
+            env.activate(DEV_A)
+            config.save_config(dev.cfg, dev.cfg_path)
+            core._migrate_config_core(yes=True, dry_run=False)
+            dev.cfg = config.load_config(dev.cfg_path)
+
+        env.push(DEV_A)
+        raw = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert f"codex-memory:{DEV_A}/MEMORY.md" not in raw["tombstones"]
+        files = raw["sources"]["codex-memory"]["files"]
+        assert set(files) == ({f"{DEV_A}/memory_summary.md"} if prepare_new_memory else set())
+        env.pull(DEV_B)
+        assert (env.devices[DEV_B].copies_dir / DEV_A / "MEMORY.md").read_text() == "old memory\n"
+
+    @pytest.mark.parametrize("cleanup", ["migrate-config", "reconfigure-sources"])
+    def test_legacy_memory_exclusions_survive_the_fold(self, tmp_path, monkeypatch, cleanup):
+        env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch, ((DEV_A, "Mac A"),))
+        dev = env.devices[DEV_A]
+        dev.cfg["sync"]["sources"].append(
+            {
+                "name": "codex-memory",
+                "path": str(dev.codex),
+                "type": "codex-memory",
+                "exclude_patterns": ["*/MEMORY.md"],
+            }
+        )
+        mem = dev.codex / "memories_v2"
+        mem.mkdir()
+        (mem / "MEMORY.md").write_text("keep this on the machine\n")
+        summary = mem / "memory_summary.md"
+        summary.write_text("publish this instead\n")
+        config.save_config(dev.cfg, dev.cfg_path)
+
+        env.push(DEV_A)
+        raw = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert set(raw["sources"]["codex-memory"]["files"]) == {f"{DEV_A}/memory_summary.md"}
+
+        result = runner.invoke(
+            cli.app, [cleanup], input="y\n" if cleanup == "migrate-config" else "\n" * 8
+        )
+        assert result.exit_code == 0, result.output
+        dev.cfg = config.load_config(dev.cfg_path)
+        names = {src["name"] for src in dev.cfg["sync"]["sources"]}
+        assert "codex" in names
+        assert "codex-memory" not in names
+        assert dev.cfg["sync"]["codex_memory_exclude_patterns"] == ["*/MEMORY.md"]
+        summary.write_text("publish an update\n")
+        env.push(DEV_A)
+        raw = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert set(raw["sources"]["codex-memory"]["files"]) == {f"{DEV_A}/memory_summary.md"}
+
     @pytest.mark.parametrize("detected", [False, True])
     def test_init_never_persists_separate_codex_memory_source(
         self, tmp_path, monkeypatch, detected

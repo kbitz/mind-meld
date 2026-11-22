@@ -2328,7 +2328,18 @@ described above.
 
 ## Codex memory copies (Track 157A)
 
-**Track 161A fold:** `codex-memory` is no longer a separate opt-in source or `DEFAULT_SOURCES` entry. When `codex` survives disabled-source filtering in `config.resolve_sources`, resolution derives one internal `{"name": "codex-memory", "path": <codex path>, "type": "codex-memory"}` entry; explicit `codex-memory` config entries and stale `"codex-memory"` names in `disabled_sources` are ignored at resolution (`config._configured_sources`, `core._filter_disabled_sources`) and removed by `mm migrate-config` (or silently dropped by `mm reconfigure-sources`). `mm enable-source codex-memory` / `mm disable-source codex-memory` redirect with one shared-style notice line and write nothing; `mm sources` folds the derived entry's kept file count into the `codex` row. The wire name (`codex-memory`), manifest keys, and consumer boundaries (which gate on the resolved selected sources) are unchanged.
+**Track 161A fold.** When `codex` survives disabled-source filtering,
+`config.resolve_sources` derives an internal `codex-memory` entry at the
+`codex` path. It uses legacy memory `exclude_patterns` and
+`sync.codex_memory_exclude_patterns` on the derived entry. The old block's
+path and the old `disabled_sources` name have no effect on selection.
+`mm migrate-config` and `mm reconfigure-sources` remove both and save any
+memory file exclusions in `sync.codex_memory_exclude_patterns`. The legacy
+toggle commands print a one-line notice pointing to `codex` and write
+nothing. `mm sources` includes the derived entry's kept files in the
+`codex` row, including a receive-only configuration with a missing Codex
+home. The wire name and manifest keys stay the same. Consumers gate on the
+resolved sources.
 
 This derived `codex-memory` source publishes this machine's Codex memory summaries without ever writing into `~/.codex`, and places peers' copies under `config.CODEX_MEMORY_COPIES_DIR` (`~/.local/share/mind-meld/codex-memory/<peer device id>/`).
 
@@ -2365,8 +2376,12 @@ This derived `codex-memory` source publishes this machine's Codex memory summari
   mints absent paths as if their root were unchanged while retaining every
   other guard (`still_present`, `prior_accepted`, readable ledger,
   `newest_stamp`, and held-digest resolution). If an already-published memory
-  folder disappears, the omission proof refuses the push. An empty real
-  memory folder still proves that individual files are absent.
+  folder disappears under the same published source root, the omission proof
+  refuses the push. An empty real memory folder still proves that individual
+  files are absent. When the prior and scanned Codex source paths differ,
+  `core._prove_omitted_paths_absent` adds the omitted prior memory paths to
+  `still_present` for the mint guard. The old root's paths leave the snapshot
+  without deletion records, and the prior manifest's path is never opened.
 - **One-writer confinement of files and deletion records.** On pull (when
   building `filtered_cache`, before downloads, `all_tombstones`, and
   `deletion_manifests`) and in peer-fallback collection

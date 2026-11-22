@@ -587,6 +587,10 @@ def _validate(config: dict[str, Any]) -> None:
             _validate_sources(sync["sources"])
         if "disabled_sources" in sync:
             _validate_disabled_sources(sync["disabled_sources"])
+        if "codex_memory_exclude_patterns" in sync:
+            _validate_str_list(
+                sync["codex_memory_exclude_patterns"], "sync.codex_memory_exclude_patterns"
+            )
         if "pull_syncthing_wait_ms" in sync:
             value = sync["pull_syncthing_wait_ms"]
             if type(value) is not int or not (0 <= value <= PULL_SYNCTHING_WAIT_MAX_MS):
@@ -1196,6 +1200,16 @@ def _configured_sources(
     return sources, explicit_sources
 
 
+def _codex_memory_exclude_patterns(sync: dict[str, Any]) -> list[str]:
+    """Keep explicit memory exclusions across the source fold."""
+    legacy = next((src for src in sync.get("sources", []) if src["name"] == "codex-memory"), {})
+    return list(
+        dict.fromkeys(
+            [*sync.get("codex_memory_exclude_patterns", []), *legacy.get("exclude_patterns", [])]
+        )
+    )
+
+
 def resolve_sources(
     config: dict[str, Any], *, strict: bool = False, bootstrap: bool = False
 ) -> SourceResolution:
@@ -1224,17 +1238,18 @@ def resolve_sources(
 
     # Track 161A: Codex memory follows the selected `codex` source. Derive
     # the internal `codex-memory` source with `codex`'s resolved path verbatim
-    # after disabled-source filtering so stale `codex-memory` entries or
-    # disabled names never affect selection.
+    # after disabled-source filtering. Only the legacy entry's exclusions
+    # carry forward, so the fold cannot publish a file kept local before.
     codex_source = next((s for s in sources if s["name"] == "codex"), None)
     if codex_source is not None:
-        sources.append(
-            {
-                "name": "codex-memory",
-                "path": codex_source["path"],
-                "type": "codex-memory",
-            }
-        )
+        memory_source: dict[str, Any] = {
+            "name": "codex-memory",
+            "path": codex_source["path"],
+            "type": "codex-memory",
+        }
+        if patterns := _codex_memory_exclude_patterns(config.get("sync", {})):
+            memory_source["exclude_patterns"] = patterns
+        sources.append(memory_source)
 
     # Only explicit writers bootstrap. Missing default roots remain empty
     # walks for inspection and previews; custom roots are never created.

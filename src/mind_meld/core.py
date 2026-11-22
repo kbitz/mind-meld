@@ -1046,9 +1046,9 @@ def _prove_omitted_paths_absent(
 ) -> None:
     """Refuse if an omitted prior path is still present or its root is unreadable.
 
-    ``still_present`` collects ``(source, path)`` pairs that a pattern omitted from
-    the snapshot but that still exist as regular files: they are not deleted, so
-    they must not mint a tombstone.
+    ``still_present`` collects ``(source, path)`` pairs omitted by a pattern
+    while still on disk, or omitted because the Codex memory source moved.
+    Neither omission establishes a deletion.
 
     ``generate_tombstones`` stays a pure comparison. This bounded probe uses
     the trusted local source map only — never a recovered ``base_path``.
@@ -1067,9 +1067,21 @@ def _prove_omitted_paths_absent(
         src_cfg = source_map.get(src_name)
         if src_cfg is None or not src_cfg.get("path"):
             continue
+        local_src = local_sources.get(src_name, {})
+        local_files = local_src.get("files", {})
+        if src_name == manifest.CODEX_MEMORY_SOURCE_NAME:
+            prior_root = remote_src.get("base_path")
+            scanned_root = local_src.get("base_path")
+            if prior_root and scanned_root and prior_root != scanned_root:
+                # The new scan cannot prove absence under the old root. Compare
+                # manifest metadata only; never open the prior root as a path.
+                if still_present is not None:
+                    still_present.update(
+                        (src_name, rel) for rel in remote_src["files"] if rel not in local_files
+                    )
+                continue
         base = Path(src_cfg["path"]).expanduser()
         _require_published_source_root(src_name, base)
-        local_files = local_sources.get(src_name, {}).get("files", {})
         if (
             src_name == manifest.CODEX_MEMORY_SOURCE_NAME
             and remote_src["files"].keys() - local_files.keys()
@@ -2099,7 +2111,8 @@ def _resolve_all_configured_sources(config: dict) -> list[dict[str, Any]]:
     return [
         src
         for src in resolution.selected
-        if src in resolution.available or src["name"] == manifest.CODEX_MEMORY_SOURCE_NAME
+        if src in resolution.available
+        or src["name"] in ("codex", manifest.CODEX_MEMORY_SOURCE_NAME)
     ]
 
 
@@ -3106,6 +3119,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
     )
     has_folded_disabled = manifest.CODEX_MEMORY_SOURCE_NAME in disabled_sources
     has_codex_memory_fold = has_folded_entry or has_folded_disabled
+    memory_exclusions = _config_module._codex_memory_exclude_patterns(sync)
 
     if not sources and not has_codex_memory_fold:
         console.print(
@@ -3217,6 +3231,12 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
                 f"  [bold]codex-memory[/bold] — now follows the 'codex' source; remove the "
                 f"leftover {safe_str('[[sync.sources]]')} entry. Local files are preserved."
             )
+            if memory_exclusions:
+                console.print(
+                    "    Keep memory file exclusions in sync.codex_memory_exclude_patterns."
+                )
+            if "codex" not in source_by_name or "codex" in disabled_sources:
+                _notice("Codex memory sync is off.", fix="mm enable-source codex")
         if has_folded_disabled:
             console.print(
                 "  [bold]codex-memory[/bold] — now follows the 'codex' source; remove "
@@ -3237,10 +3257,18 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         _error(str(e))
 
     try:
+        if has_codex_memory_fold:
+            current_sync = _get_config(read_only=True)["sync"]
+            if current_sync.get("sources") != sources or current_sync.get(
+                "codex_memory_exclude_patterns"
+            ) != sync.get("codex_memory_exclude_patterns"):
+                _error("source configuration changed during migration.", fix="mm migrate-config")
+            # Keep toggles completed while the migration prompt was open.
+            disabled_sources = list(current_sync.get("disabled_sources", []) or [])
         diff_map = {name: missing for name, missing, _current in diffs}
         include_map_new = {name: patterns for name, patterns, _replaced in include_diffs}
         sync_updates: dict[str, Any] = {}
-        if sources:
+        if sources and (diffs or include_diffs or retired or has_folded_entry):
             new_sources: list[dict] = []
             for src in sources:
                 if (
@@ -3272,6 +3300,8 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
                 if rname not in disabled:
                     disabled.append(rname)
             sync_updates["disabled_sources"] = sorted(disabled)
+        if has_folded_entry and memory_exclusions:
+            sync_updates["codex_memory_exclude_patterns"] = memory_exclusions
         patch_config_on_disk({"sync": sync_updates})
         # Clear any prior migration breadcrumb — config now matches.
         breadcrumb = _migration_state_path()

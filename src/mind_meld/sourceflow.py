@@ -38,8 +38,8 @@ from mind_meld.config import (
 )
 from mind_meld.consoles import console
 from mind_meld.errors import ConfigError
+from mind_meld.manifest import CODEX_MEMORY_SOURCE_NAME, walk_source
 from mind_meld.manifest import _is_excluded as _manifest_is_excluded
-from mind_meld.manifest import walk_source
 from mind_meld.safety import safe_str, safe_terminal_str
 
 
@@ -59,28 +59,14 @@ def sources() -> None:
     table.add_column("Files")
     table.add_column("Excluded")
 
+    codex_memory = next((src for src in src_list if src["name"] == CODEX_MEMORY_SOURCE_NAME), None)
     codex_memory_kept = 0
-    for src in src_list:
-        if src["name"] != "codex-memory":
-            continue
-        src_no_excludes = {
-            k: v for k, v in src.items() if k not in ("exclude_patterns", "include_patterns")
-        }
-        _, all_files = walk_source(src_no_excludes, max_file_size)
-        patterns = src.get("exclude_patterns") or []
-        includes = src.get("include_patterns") or []
-        if patterns or includes:
-            excluded_count = sum(
-                1
-                for rel in all_files
-                if _manifest_is_excluded(rel, patterns, None, includes or None)
-            )
-            codex_memory_kept += len(all_files) - excluded_count
-        else:
-            codex_memory_kept += len(all_files)
+    if codex_memory is not None:
+        _, memory_files = walk_source(codex_memory, max_file_size)
+        codex_memory_kept = len(memory_files)
 
     for src in src_list:
-        if src["name"] == "codex-memory":
+        if src["name"] == CODEX_MEMORY_SOURCE_NAME:
             continue
         # Walk WITHOUT exclude_patterns so we count what the per-source
         # globs would have stripped. `all_files` is already post-EXCLUDED
@@ -135,7 +121,8 @@ def _known_source_names(config: dict) -> list[str]:
     explicit = [
         s["name"]
         for s in config.get("sync", {}).get("sources", []) or []
-        if s.get("name") not in _config_module.RETIRED_SOURCE_NAMES
+        if s["name"] != CODEX_MEMORY_SOURCE_NAME
+        and s["name"] not in _config_module.RETIRED_SOURCE_NAMES
     ]
     defaults = [s["name"] for s in DEFAULT_SOURCES]
     return sorted(set(explicit) | set(defaults))
@@ -187,8 +174,8 @@ def _record_seen(names: list[str]) -> None:
 
 def disable_source(name: str, *, force: bool = False) -> None:
     """Disable a sync source on this device only."""
-    config = core._get_config(read_only=False)
-    if name == "codex-memory":
+    config = core._get_config(read_only=name == CODEX_MEMORY_SOURCE_NAME)
+    if name == CODEX_MEMORY_SOURCE_NAME:
         core._notice(
             "Codex memory follows the 'codex' source.",
             fix="mm disable-source codex",
@@ -242,8 +229,8 @@ def _print_grok_enable_notes() -> None:
 
 def enable_source(name: str, *, force: bool = False) -> None:
     """Enable a sync source on this device."""
-    config = core._get_config(read_only=False)
-    if name == "codex-memory":
+    config = core._get_config(read_only=name == CODEX_MEMORY_SOURCE_NAME)
+    if name == CODEX_MEMORY_SOURCE_NAME:
         core._notice(
             "Codex memory follows the 'codex' source.",
             fix="mm enable-source codex",
@@ -274,10 +261,20 @@ def enable_source(name: str, *, force: bool = False) -> None:
     # claude_dir/default fallback; writing only the new host here would make the
     # existing sources disappear and eventually produce their deletion
     # tombstones.
-    if name in _config_module.OPT_IN_SOURCE_NAMES and not has_explicit_sources:
-        explicit_sources = get_sources(config)
-        explicit_names = [s["name"] for s in explicit_sources]
-        updates["sources"] = explicit_sources
+    if not has_explicit_sources and (name == "codex" or name in _config_module.OPT_IN_SOURCE_NAMES):
+        resolution = _config_module.resolve_sources(config)
+        codex = next((src for src in resolution.selected if src["name"] == "codex"), None)
+        if name != "codex" or codex is None:
+            explicit_sources = [
+                src for src in resolution.available if src["name"] != CODEX_MEMORY_SOURCE_NAME
+            ]
+            # An explicitly selected Codex source can receive copies even
+            # before a local Codex root exists.
+            if codex is not None and codex not in explicit_sources:
+                explicit_sources.append(codex)
+            explicit_names = [src["name"] for src in explicit_sources]
+            has_explicit_sources = True
+            updates["sources"] = explicit_sources
 
     # If the user has explicit sources and this name isn't among them,
     # but it IS in DEFAULT_SOURCES, append the default so enable actually
@@ -374,7 +371,10 @@ def reconfigure_sources() -> None:
         existing = next((s for s in explicit_sources if s["name"] == d["name"]), None)
         ordered.append(existing if existing is not None else d)
     for s in explicit_sources:
-        if s["name"] in _config_module.RETIRED_SOURCE_NAMES or s["name"] == "codex-memory":
+        if (
+            s["name"] in _config_module.RETIRED_SOURCE_NAMES
+            or s["name"] == CODEX_MEMORY_SOURCE_NAME
+        ):
             continue
         if s["name"] not in seen_names:
             seen_names.add(s["name"])
@@ -436,6 +436,8 @@ def reconfigure_sources() -> None:
         "disabled_sources": sorted(new_disabled),
         "sources": new_explicit_sources,
     }
+    if memory_exclusions := _config_module._codex_memory_exclude_patterns(sync):
+        updates["codex_memory_exclude_patterns"] = memory_exclusions
 
     patch_config_on_disk({"sync": updates})
 
