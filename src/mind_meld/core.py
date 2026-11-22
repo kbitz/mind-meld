@@ -1212,11 +1212,35 @@ def _retain_prior_default_sources(
         extra = True
     if not extra:
         return resolution
+    if "codex" in selected_names and manifest.CODEX_MEMORY_SOURCE_NAME not in selected_names:
+        # Treat a retained Codex home as still selected for both source keys.
+        # A temporary outage must not discard its published memory snapshot.
+        codex = next(src for src in selected if src["name"] == "codex")
+        selected.append(_config_module._derive_codex_memory_source(codex, config.get("sync", {})))
     return replace(
         resolution,
         selected=selected,
         available=list(resolution.available),
     )
+
+
+def _filter_unavailable_repointed_codex_memory(
+    prior: dict | None, resolution: SourceResolution
+) -> dict | None:
+    """Leave memory from a different root out of the comparison if the new root is absent."""
+    if prior is None:
+        return prior
+    name = manifest.CODEX_MEMORY_SOURCE_NAME
+    sources = prior.get("sources", {})
+    old_root = sources.get(name, {}).get("base_path")
+    if not old_root:
+        return prior
+    memory = next((src for src in resolution.selected if src["name"] == name), None)
+    if memory is None or memory in resolution.available:
+        return prior
+    if old_root == os.path.realpath(memory["path"]):
+        return prior
+    return {**prior, "sources": {key: value for key, value in sources.items() if key != name}}
 
 
 def _manifest_content_hash(manifest: dict) -> str:

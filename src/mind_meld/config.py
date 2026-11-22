@@ -1210,6 +1210,17 @@ def _codex_memory_exclude_patterns(sync: dict[str, Any]) -> list[str]:
     )
 
 
+def _derive_codex_memory_source(codex: dict[str, Any], sync: dict[str, Any]) -> dict[str, Any]:
+    source: dict[str, Any] = {
+        "name": "codex-memory",
+        "path": codex["path"],
+        "type": "codex-memory",
+    }
+    if patterns := _codex_memory_exclude_patterns(sync):
+        source["exclude_patterns"] = patterns
+    return source
+
+
 def resolve_sources(
     config: dict[str, Any], *, strict: bool = False, bootstrap: bool = False
 ) -> SourceResolution:
@@ -1242,14 +1253,7 @@ def resolve_sources(
     # carry forward, so the fold cannot publish a file kept local before.
     codex_source = next((s for s in sources if s["name"] == "codex"), None)
     if codex_source is not None:
-        memory_source: dict[str, Any] = {
-            "name": "codex-memory",
-            "path": codex_source["path"],
-            "type": "codex-memory",
-        }
-        if patterns := _codex_memory_exclude_patterns(config.get("sync", {})):
-            memory_source["exclude_patterns"] = patterns
-        sources.append(memory_source)
+        sources.append(_derive_codex_memory_source(codex_source, config.get("sync", {})))
 
     # Only explicit writers bootstrap. Missing default roots remain empty
     # walks for inspection and previews; custom roots are never created.

@@ -407,13 +407,14 @@ def _refuse_unavailable_selected_sources(
         prior_files = prior_sources.get(name, {}).get("files") or {}
         if not prior_files:
             continue
+        fix_name = "codex" if name == manifest.CODEX_MEMORY_SOURCE_NAME else name
         raise SnapshotError(
             snapshot_refusal(
                 source=name,
                 problem="is missing after it was previously published",
                 next_action=(
                     "Restore the source folder, or run "
-                    f"'mm disable-source {name}' if it should stop syncing."
+                    f"'mm disable-source {fix_name}' if it should stop syncing."
                 ),
             )
         )
@@ -2104,6 +2105,7 @@ def _push_core(
     )
     intended_names = {src["name"] for src in resolution.selected}
     intended_names.update(src["name"] for src in sources)
+    remote_manifest = core._filter_unavailable_repointed_codex_memory(remote_manifest, resolution)
     _refuse_unavailable_selected_sources(resolution, remote_manifest, sources)
     if not sources and not skipped_internal:
         core._warning("no sync sources found. Run: mm init")

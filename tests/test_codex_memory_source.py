@@ -971,6 +971,59 @@ class TestCodexMemoryPullAndConfinement:
 
 
 class TestCodexMemoryInitAndSourceCommands:
+    def test_repoint_to_absent_codex_home_does_not_block_other_sources(self, tmp_path, monkeypatch):
+        env = _MultiDeviceCodexMemoryEnv(
+            tmp_path, monkeypatch, ((DEV_A, "Mac A"), (DEV_B, "Linux B"))
+        )
+        dev = env.devices[DEV_A]
+        old_home = dev.root / "old-codex"
+        (old_home / "memories_v2").mkdir(parents=True)
+        (old_home / "memories_v2" / "MEMORY.md").write_text("old memory\n")
+        other = dev.root / "other"
+        other.mkdir()
+        note = other / "note.md"
+        note.write_text("initial note\n")
+        dev.cfg["sync"]["sources"].append(
+            {"name": "other", "path": str(other), "type": "generic", "include_files": ["note.md"]}
+        )
+        dev.cfg["sync"]["sources"][0]["path"] = str(old_home)
+        env.push(DEV_A)
+        env.pull(DEV_B)
+
+        dev.cfg["sync"]["sources"][0]["path"] = str(dev.codex)
+        dev.codex.rmdir()
+        note.write_text("updated note\n")
+        env.push(DEV_A)
+        raw = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert "codex-memory" not in raw["sources"]
+        assert not any(key.startswith("codex-memory:") for key in raw["tombstones"])
+        assert (
+            raw["sources"]["other"]["files"]["note.md"]["sha256"]
+            == hashlib.sha256(note.read_bytes()).hexdigest()
+        )
+        env.pull(DEV_B)
+        assert (env.devices[DEV_B].copies_dir / DEV_A / "MEMORY.md").read_text() == "old memory\n"
+
+    def test_legacy_missing_previously_published_codex_home_refuses_push(
+        self, tmp_path, monkeypatch
+    ):
+        env = _MultiDeviceCodexMemoryEnv(tmp_path, monkeypatch, ((DEV_A, "Mac A"),))
+        dev = env.devices[DEV_A]
+        dev.cfg["sync"].pop("sources")
+        claude = dev.home / ".claude"
+        claude.mkdir()
+        dev.cfg["sync"]["claude_dir"] = str(claude)
+        (dev.codex / "memories_v2").mkdir()
+        (dev.codex / "memories_v2" / "MEMORY.md").write_text("old memory\n")
+        env.push(DEV_A)
+        before = _decrypt_raw_manifest(env.backend, DEV_A)
+        assert before["sources"]["codex-memory"]["files"]
+
+        dev.codex.rename(dev.root / "offline-codex")
+        with pytest.raises(SnapshotError, match=r"source codex-memory .*mm disable-source codex'"):
+            env.push(DEV_A)
+        assert _decrypt_raw_manifest(env.backend, DEV_A) == before
+
     @pytest.mark.parametrize("prepare_new_memory", [False, True])
     def test_old_memory_root_stops_publishing_without_deleting_copies(
         self, tmp_path, monkeypatch, prepare_new_memory

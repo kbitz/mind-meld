@@ -2382,6 +2382,10 @@ This derived `codex-memory` source publishes this machine's Codex memory summari
   `core._prove_omitted_paths_absent` adds the omitted prior memory paths to
   `still_present` for the mint guard. The old root's paths leave the snapshot
   without deletion records, and the prior manifest's path is never opened.
+  If the configured root changed and the new root is absent, push drops the
+  prior memory entry from the comparison before the missing-root check.
+  The same-root refusal still applies to an unavailable previously published
+  Codex home, including a default source retained on a legacy config.
 - **One-writer confinement of files and deletion records.** On pull (when
   building `filtered_cache`, before downloads, `all_tombstones`, and
   `deletion_manifests`) and in peer-fallback collection
