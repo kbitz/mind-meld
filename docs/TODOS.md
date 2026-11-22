@@ -143,6 +143,30 @@ here by hand, use the H3 form.
 - **Context:** Revisit when a track next changes these paths.
 - **Effort:** ?
 
+### [review:files=bin/_check.py|tests/conftest.py|tests/test_bin_check.py] Test gap: Preserve explicit default distribution
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The argument tests cover forwarding `--dist`. They do not assert which scheduler the runner uses with an explicit `--dist load`.
+- **Hypothesis (untested):** Run a small fixture through `bin/check` with that flag and verify that pytest uses its load scheduler.
+- **Evidence:** Track 161B coverage audit. The isolated probe kept the alternate `loadfile` scheduler selected through `PYTEST_ADDOPTS`.
+- **Revisit:** When a Track next changes these scheduler paths.
+
+### [review:files=bin/_check.py|tests/conftest.py|tests/test_bin_check.py] Test gap: Reuse grouped records in serial selection
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The assignment test checks canonical node IDs. The selector fixture records coverage without the project's scheduler hook.
+- **Hypothesis (untested):** Seed a record with controller grouping, edit a covered function, and verify that a serial selection runs exactly its recorded callers.
+- **Evidence:** A disposable Track 161B probe recorded 16 nodes in parallel and selected the expected 10 in serial.
+- **Revisit:** When a Track changes the scheduler or coverage record identity.
+
+### [review:files=tests/test_bin_check.py] Test gap: Remove inherited pytest state in nested runs
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The nested fixtures run under outer xdist during the full suite. The tests do not directly assert which worker and selector variables the child receives.
+- **Hypothesis (untested):** Set sentinel values for parent-only pytest and selector variables and have an isolated child report which values reached it.
+- **Evidence:** Track 161B coverage audit. The serial and three 16-worker suites passed.
+- **Revisit:** When a Track next changes the nested check environment.
+
 ## Drain records
 
 ### Roadmap card run — 2026-11-21 (Codex memory folded into the `codex` source; affected-selection tests carded; Tracks 156A to 160A recorded)
