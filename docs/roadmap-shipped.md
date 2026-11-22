@@ -1178,3 +1178,18 @@ Recorded by the 2026-11-21 card run at `91fa6bf` (Codex memory folded into the `
 ### Track 160A: Set up qmd and the memory index from bootstrap and `mm init`, and recommend the pointer line ✓ Shipped (v1.12.79)
 - 2026-11-22: merged [PR #371](https://github.com/kbitz/mind-meld/pull/371) (commit `91fa6bf5195530190bbbc66fe265164022e3b39e`); verified land-time Track 160A, original Group 160, factory branch `mmm/799450fa`.
 - Approved-scope evidence: the merged PR's review/prep and ship receipts (release head `f680cd7`, `./bin/check` passed there; full suite 9,825 passed; Greptile's one finding fixed in `2c95032`): bootstrap installs qmd when missing, `mm init` offers the index, the embeddings download and the pointer line, and a resumed join reuses the answers, with README, docs/invariants/init-devices.md and the v1.12.79 release row. Its review backlog (installer and init coverage, root SPEC.md's older init sequence) is in the PR body.
+
+## Individual Track history
+
+_tombstone: 161_
+
+Tracks 161A and 161B were introduced in Group 161 by [PR #372](https://github.com/kbitz/mind-meld/pull/372) (`7c95e07`, 2026-11-22). No ID moves or active pins were declared.
+
+### Track 161A: Sync Codex memory as part of the `codex` source, with no separate source or init question ✓ Shipped (v1.12.80)
+- 2026-11-22: merged [PR #374](https://github.com/kbitz/mind-meld/pull/374) (`b74b3afe2c5a34c996615880885a8c2d47041f00`), land-time Track 161A, Group 161, branch `mmm/463d14ed`.
+- Approved-scope evidence: the merged config, migration, source-command, init and two-device tests cover automatic publication and receipt, the existing wire keys and legacy peer data, migration without deletion records, and the single Codex source choice. The merged index test covers a Codex-only selection. The published README, SPEC and sync invariant explain the fold. The [review receipt](https://github.com/kbitz/mind-meld/pull/374#issuecomment-7075094071) records 9,852 portable passes; the ship receipt records a passing `./bin/check` at release head `274c25c27101`.
+
+### Track 161B: Make the `--affected` selection tests deterministic under machine load ✓ Shipped (v1.12.81)
+- 2026-11-22: merged [PR #373](https://github.com/kbitz/mind-meld/pull/373) (`301a4207d9a16f638bca03f420558eb5048f7dbc`), land-time Track 161B, Group 161, branch `mmm/47eeb539`.
+- Approved-scope evidence: the merged runner and tests group nested checks on one worker by default, retain caller scheduling controls, strengthen the selection assertions with nested output and exit status, and cover worker crash reporting. The [review receipt](https://github.com/kbitz/mind-meld/pull/373#issuecomment-7080433720) records three 16-worker passes (9,858 passed and 30 skipped per run) with load averages and a passing serial runner check. The ship receipt records a passing `./bin/check` at release head `51a7514d9d6a`.
+- The developer explicitly deferred the historical attribution in acceptance criteria 1 and 2 on 2026-11-22. The review injected a merge-base timeout and reproduced the assertion failures. The original logs leave the SIGKILL sender, worker disconnects and timeout attribution unresolved. The recurrence trigger is recorded in Future.

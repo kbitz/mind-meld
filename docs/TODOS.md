@@ -44,188 +44,48 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/memoryindex.py] Avoid overlapping qmd embedding processes if they interfere with sync
-
-- **Description:** With embeddings enabled, a completed refresh can start an embed while an earlier embed is still running. Track 159A leaves background embedding to qmd and keeps keyword search as the default.
-- **Evidence:** Greptile found the overlap possible on Track 159A. The review did not observe a failed refresh or search.
-- **Revisit:** If concurrent embeddings slow an owner's machine, repeat model downloads, or cause a refresh to fail. Measure the overlap before adding an embedding-specific guard.
-
-### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Reject changed qmd collection output
-
-- **Test gap:** No demonstrated defect.
-- **Description:** The qmd stub exercises nonzero list and show exits. It does not cover a successful exit with an invalid collection header or missing collection details.
-- **Hypothesis (untested):** Return malformed output with exit zero and verify that refresh records a failure before issuing collection mutations or an update.
-- **Evidence:** Track 159A coverage audit, path 09.
-- **Revisit:** When a qmd release changes either collection output format or the parsing code next changes.
-
-### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Finish disabling the index after an active refresh
-
-- **Test gap:** No demonstrated defect.
-- **Description:** Tests cover disabling with a free lock and with a lock that stays busy. They do not cover the lock becoming available during the retry budget.
-- **Hypothesis (untested):** Release a held refresh flock during the retry and verify that `mm memory-index off` saves the disabled setting and removes the managed collections.
-- **Evidence:** Track 159A adversarial delta review and coverage audit, path 27.
-- **Revisit:** When the refresh locking code next changes or an owner reports a disable retry after a refresh completes.
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_codex_memory_source.py] Test gap: Refuse an unusable Codex copies destination
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The tests cover creation of the private copies root and separate publishers. They do not exercise a refused destination or an existing publisher directory with another spelling.
-- **Hypothesis (untested):** Check that a refused destination leaves copies intact and the pull reports the affected source.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `pullflow._check_codex_memory_peer_dir` and `pullflow._pull_one_source`.
-- **Evidence:** Track 157A coverage audit found no test for these refusal branches.
-- **Context:** Filed by /review-and-prep on PR #368 at `eeeda4e` (2026-11-21).
-- **Effort:** ?
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_codex_memory_source.py] Test gap: Preserve copies when retirement evidence is unavailable
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The copies integration tests start with a readable retirement record. They do not assert preservation when the record cannot be read.
-- **Hypothesis (untested):** Pull after a retirement record becomes unavailable and confirm the peer's files stay in place.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `pullflow._remove_retired_codex_memory_copies`.
-- **Evidence:** Track 157A coverage audit traced the existing retirement reader and found no copies-specific test for this branch.
-- **Context:** Filed by /review-and-prep on PR #368 at `eeeda4e` (2026-11-21).
-- **Effort:** ?
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_codex_memory_source.py] Test gap: Keep hard-link metadata during Codex copy recovery
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The recovery tests use singly linked files.
-- **Hypothesis (untested):** Verify that recovery leaves the mode and bytes of another link to a retired or deleted copy intact.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `pullflow._run_deletions` and `pullflow._remove_retired_codex_memory_copies`.
-- **Evidence:** Track 157A coverage audit found no direct assertion for the guarded copy-and-unlink path.
-- **Context:** Filed by /review-and-prep on PR #368 at `eeeda4e` (2026-11-21).
-- **Effort:** ?
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_pullflow.py] Test gap: Pin the delivery notice for a syncing folder with zero needed files
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The stand-in tests cover a positive count on an idle folder and a zero count while Syncthing prepares to sync.
-- **Hypothesis (untested):** Extend the zero-count case to cover the syncing state and check the same uncounted notice.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `syncthing.delivery_pending`.
-- **Evidence:** Track 158A coverage audit at `ccb3565`.
-- **Context:** Revisit when a track next changes these paths.
-- **Effort:** ?
-
-### [review:files=src/mind_meld/syncthing.py|src/mind_meld/statusflow.py|tests/test_statusflow.py] Test gap: Preserve adjacent details when rendering past Syncthing delivery
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The catch-up test records a delivery detail on its own.
-- **Hypothesis (untested):** Include another hook detail in the fixture and verify that it survives the past-tense delivery rendering.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `syncthing.historical_delivery_detail`.
-- **Evidence:** Track 158A coverage audit at `ccb3565`.
-- **Context:** Revisit when a track next changes these paths.
-- **Effort:** ?
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Pin a changed pending count between Syncthing rechecks
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The deadline tests cover catch-up, clipped timeouts and unavailable results. They leave a sequence of positive counts untested.
-- **Hypothesis (untested):** Use the existing fake clock with a count that drops before the deadline. Verify that pull keeps polling and reports the latest count.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `pullflow._wait_for_syncthing_delivery`.
-- **Evidence:** Track 158A coverage audit at `ccb3565`.
-- **Context:** Revisit when a track next changes these paths.
-- **Effort:** ?
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Pin cursor and history records when a pending pull applies a file
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Existing tests cover ordinary cursor updates and the absence of a history row for a pending no-op.
-- **Hypothesis (untested):** Extend the expiry case to assert the normal history row and applied cursor when one peer has delivered every file its manifest needs.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `pullflow._record_peer_cursors`.
-- **Evidence:** Track 158A coverage audit at `ccb3565`.
-- **Context:** Revisit when a track next changes these paths.
-- **Effort:** ?
-
-### [review:files=src/mind_meld/config.py|tests/test_codex_memory_source.py] Test gap: Combine old and migrated Codex memory exclusions
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Current fixtures exercise the old and migrated exclusion settings in sequence.
-- **Hypothesis (untested):** Seed both settings with distinct patterns and an overlap. Confirm a push leaves every excluded file local through cleanup.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `config._codex_memory_exclude_patterns`.
-- **Evidence:** Track 161A coverage audit. The same-path old-to-new publication probe passed with an old exclusion.
-- **Revisit:** When Codex memory exclusion migration next changes.
-
-### [review:files=src/mind_meld/config.py|tests/test_config.py] Test gap: Reject malformed Codex memory exclusion settings
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The new exclusion setting shares the list validator, with no fixture using invalid values at that setting.
-- **Hypothesis (untested):** Pass a scalar and an array containing a non-string to config loading. Verify both fail with the setting name.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `config._validate`.
-- **Evidence:** Track 161A coverage audit traced the shared validator.
-- **Revisit:** When config validation or the migration field next changes.
-
-### [review:files=src/mind_meld/core.py|tests/test_config.py] Test gap: Preserve edits made during Codex migration confirmation
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The prompt-time test changes source toggles. The refusal on edits to source entries or saved exclusions has no direct test.
-- **Hypothesis (untested):** Change an entry or exclusion list while the prompt is open. Verify migration refuses and the edit survives.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `core._migrate_config_core`.
-- **Evidence:** Track 161A coverage audit. Replaying a toggle during confirmation passed.
-- **Revisit:** When a Track changes migration confirmation or config patching.
-
-### [review:files=src/mind_meld/config.py|src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Resume a join with an old Codex memory choice
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Tests cover old join-record parsing and normal resumed init separately.
-- **Hypothesis (untested):** Resume a saved join containing the old name and another source. Check that the current selection survives and the picker stays reachable when the old name was the sole choice.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `config._valid_join_source_names` and `initflow._sources_from_names`.
-- **Evidence:** Track 161A coverage audit. Legacy parsing and the updated init prompt cases passed.
-- **Revisit:** When join resume or source selection next changes.
-
-### [review:files=src/mind_meld/core.py|src/mind_meld/pullflow.py|tests/test_codex_memory_source.py] Test gap: Pull with stale Codex memory selections
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Tests cover the source-selection and peer-manifest filters separately from the two-device pull.
-- **Hypothesis (untested):** Reuse the two-device fixture to verify that declining Codex blocks incoming copies and the old disabled name alone permits them.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `core._filter_disabled_sources` and `pullflow._pull_core`.
-- **Evidence:** Track 161A coverage audit. The individual filters and the Codex-only receive path passed.
-- **Revisit:** When Codex pull selection or source toggles next change.
-
-### [review:files=bin/_check.py|tests/conftest.py|tests/test_bin_check.py] Test gap: Preserve explicit default distribution
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The argument tests cover forwarding `--dist`. They do not assert which scheduler the runner uses with an explicit `--dist load`.
-- **Hypothesis (untested):** Run a small fixture through `bin/check` with that flag and verify that pytest uses its load scheduler.
-- **Evidence:** Track 161B coverage audit. The isolated probe kept the alternate `loadfile` scheduler selected through `PYTEST_ADDOPTS`.
-- **Revisit:** When a Track next changes these scheduler paths.
-
-### [review:files=bin/_check.py|tests/conftest.py|tests/test_bin_check.py] Test gap: Reuse grouped records in serial selection
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The assignment test checks canonical node IDs. The selector fixture records coverage without the project's scheduler hook.
-- **Hypothesis (untested):** Seed a record with controller grouping, edit a covered function, and verify that a serial selection runs exactly its recorded callers.
-- **Evidence:** A disposable Track 161B probe recorded 16 nodes in parallel and selected the expected 10 in serial.
-- **Revisit:** When a Track changes the scheduler or coverage record identity.
-
-### [review:files=tests/test_bin_check.py] Test gap: Remove inherited pytest state in nested runs
-
-- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The nested fixtures run under outer xdist during the full suite. The tests do not directly assert which worker and selector variables the child receives.
-- **Hypothesis (untested):** Set sentinel values for parent-only pytest and selector variables and have an isolated child report which values reached it.
-- **Evidence:** Track 161B coverage audit. The serial and three 16-worker suites passed.
-- **Revisit:** When a Track next changes the nested check environment.
-
-### [review:files=bin/_check.py|tests/test_bin_check.py] Revisit original Track 161B failure attribution
-
-- **Reproduced:** Injecting a timeout into `git merge-base` reproduced both assertion failures. The fallback suite exited successfully and printed neither `merge base moved` nor `ran 0 of 4`.
-- **Observed:** The archived logs show three xdist worker crashes across two runs and a nested pytest exit 137, which indicates SIGKILL. The available kernel and systemd-oomd logs contain no matching OOM kill.
-- **Open:** The two original assertion failures lacked nested stdout and stderr. It remains unclear whether a Git timeout caused those failures, who sent SIGKILL, or why the workers disconnected.
-- **Revisit:** If either failure recurs during 16-worker verification or the original logs surface, capture load averages, nested stdout and stderr, runner and worker exits, and kernel and supervisor logs before retrying.
-- **Context:** The developer deferred the original-cause attribution for AC1 and AC2 on 2026-11-22. [Track 161B review](https://github.com/kbitz/mind-meld/pull/373)
-
 ## Drain records
+
+### Full roadmap regeneration — 2026-11-22
+
+Verified against `301a420` (v1.12.81). Selected target remains the owner's MVP-1 Syncthing fleet on macOS and Arch Linux. The repository is public; the owner is the only supported user. The iCloud MVP-1 stage is achieved; Syncthing stage and checkpoint evidence stays in PROGRESS.md. No active pins declared. Group 161 retires with two independent receipts. Group 162 contains the two admitted Tracks and has no dependencies.
+
+| Item | Disposition | Evidence or revisit trigger |
+|---|---|---|
+| Older qmd remedy in `mm memory-index on` | place in 162A | Owner report on 2026-11-22; active path formats advice as prose. |
+| Older qmd remedy in `mm init` | discharged | `_ask_memory_setup` already uses `install_hint()`; the version-too-old fixture checks the printed command at HEAD. |
+| Attended-capture timing failure | place in 162B | Two macOS CI failures and a pass on rerun; test depends on real sleeps. |
+| Usage-merge timing failure | place in 162B | Reported on 2026-11-22; wall-clock loop asserts 10 µs/call. |
+| Base issue: Local Git origins can disclose directory names | defer in place | Record the relayed identity choice; local-origin publication remains unobserved on the fleet. |
+| Tracks 161A and 161B | shipped | Independent receipts for #374 and #373. The seven previous closures already have receipts. |
+| mm resolve's replace choices overwrite the original from a read taken before the prompt | discharged | Track 155A compares the prompt-time file identities before replace and merge; tests/test_conflict_copy.py exercises edits made while the prompt waits (`ee5741a`). |
+| Check the key header's Argon2 cost before deriving the key | kill | Unobserved and reversible resource use on the owner’s shared folder; reopen if it manifests. |
+| Bound decompression, merge and manifest nesting from an authenticated peer | kill | Unobserved availability issue requiring a hostile fleet writer; reopen if it manifests. |
+| Treat `RecursionError` as malformed in token capture | kill | Unobserved local malformed-input failure; reopen if it manifests. |
+| Bound message-ID tail tracking in the Claude walker | kill | Unmeasured and reversible performance concern; reopen if it manifests. |
+| Tell an existing device record from other link failures in `register_device` | kill | Unobserved filesystem case outside the owner’s supported paths; reopen if it manifests. |
+| A single-line safe form for peer device names and paths in Rich output | kill | Unobserved display issue with owner-managed peers; reopen if it manifests. |
+| Avoid overlapping qmd embedding processes if they interfere with sync | kill | Unobserved machine load or refresh interference. Embeddings are opt-in; reopen if it manifests. |
+| Test gap: Reject changed qmd collection output | place in 162A | Track 159A coverage audit, path 09. |
+| Test gap: Finish disabling the index after an active refresh | place in 162A | Track 159A adversarial delta review and coverage audit, path 27. |
+| Test gap: Refuse an unusable Codex copies destination | defer | a Track touches src/mind_meld/pullflow.py, tests/test_codex_memory_source.py. |
+| Test gap: Preserve copies when retirement evidence is unavailable | defer | a Track touches src/mind_meld/pullflow.py, tests/test_codex_memory_source.py. |
+| Test gap: Keep hard-link metadata during Codex copy recovery | defer | a Track touches src/mind_meld/pullflow.py, tests/test_codex_memory_source.py. |
+| Test gap: Pin the delivery notice for a syncing folder with zero needed files | defer | a Track touches src/mind_meld/syncthing.py, tests/test_pullflow.py. |
+| Test gap: Preserve adjacent details when rendering past Syncthing delivery | defer | a Track touches src/mind_meld/syncthing.py, src/mind_meld/statusflow.py, tests/test_statusflow.py. |
+| Test gap: Pin a changed pending count between Syncthing rechecks | defer | a Track touches src/mind_meld/pullflow.py, tests/test_pullflow.py. |
+| Test gap: Pin cursor and history records when a pending pull applies a file | defer | a Track touches src/mind_meld/pullflow.py, tests/test_pullflow.py. |
+| Test gap: Combine old and migrated Codex memory exclusions | defer | a Track touches src/mind_meld/config.py, tests/test_codex_memory_source.py. |
+| Test gap: Reject malformed Codex memory exclusion settings | defer | a Track touches src/mind_meld/config.py, tests/test_config.py. |
+| Test gap: Preserve edits made during Codex migration confirmation | defer | a Track touches src/mind_meld/core.py, tests/test_config.py. |
+| Test gap: Resume a join with an old Codex memory choice | defer | a Track touches src/mind_meld/config.py, src/mind_meld/initflow.py, tests/test_initflow.py. |
+| Test gap: Pull with stale Codex memory selections | defer | a Track touches src/mind_meld/core.py, src/mind_meld/pullflow.py, tests/test_codex_memory_source.py. |
+| Test gap: Preserve explicit default distribution | defer | a Track touches bin/_check.py, tests/conftest.py, tests/test_bin_check.py. |
+| Test gap: Reuse grouped records in serial selection | defer | a Track touches bin/_check.py, tests/conftest.py, tests/test_bin_check.py. |
+| Test gap: Remove inherited pytest state in nested runs | defer | a Track touches tests/test_bin_check.py. |
+| Revisit original Track 161B failure attribution | defer | If either failure recurs during 16-worker verification or the original logs surface, capture load averages, nested stdout and stderr, runner and worker exits, and kernel and supervisor logs before retrying. |
+
+Drained 19 inbox entries (2 folded into Track 162A, 16 deferred and 1 killed). Future now has 125 entries. No release bump under the SPEC documentation-only policy.
 
 ### Roadmap card run — 2026-11-21 (Codex memory folded into the `codex` source; affected-selection tests carded; Tracks 156A to 160A recorded)
 
