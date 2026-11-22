@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.79] - 2026-11-21
+
+Setup can install qmd and turn on memory search, including the recommended search line for agent instruction files.
+
+### Added
+
+- A fresh install can now install `qmd` during bootstrap, and `mm init` can turn on memory search and offer the recommended search line for your agent instruction files.
+- Bootstrap can install qmd on macOS and Arch Linux when qmd is missing.
+- `mm init` offers memory indexing, optional embeddings, and a global search instruction line, and remembers setup choices when a join resumes.
+
+### Upgrade notes
+
+- The next `mm init` run asks up to three more questions, and answering yes to semantic search starts a background download of about 334 MB.
+
 ## [1.12.78] - 2026-11-21
 
 An opt-in local qmd index lets one search cover memories from every synced agent and machine, and a successful sync refreshes it.
