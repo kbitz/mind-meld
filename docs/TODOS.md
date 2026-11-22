@@ -44,6 +44,16 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Verify enable refusal when an installed qmd cannot report its version
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The CLI tests pin the old and missing cases. They do not check the final stderr command and preserved state when an installed qmd returns a nonzero exit, reports an unparseable version, or times out.
+- **Hypothesis (untested):** Extend the isolated qmd preflight fixture and assert exit 1, the failure detail, the existing install command and no state writes. Recheck when a track next touches the tagged paths.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/memoryindex.py` in `_qmd_version` and `_enable_index`.
+- **Evidence:** Track 162A coverage audit at `912f6fe`. The affected run passed 1,350 tests and showed no product failure.
+- **Effort:** ? (owner triages in `/roadmap`)
+
 ## Drain records
 
 ### Full roadmap regeneration — 2026-11-22
