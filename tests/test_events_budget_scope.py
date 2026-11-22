@@ -866,13 +866,81 @@ class TestAttendedCaptureCap124A:
         finishes host warm retry, git walk, and session walk in one attended push;
         setting attended_capture_cap_ms == capture_budget_ms reproduces the aborts
         and deadline stop."""
+        from concurrent.futures import Future
+        from types import SimpleNamespace
+
         import mind_meld.host_registry as _mm_host_registry
         import mind_meld.host_usage as _mm_host_usage
 
-        events_root = tmp_path / "events_root"
+        class _Clock:
+            def __init__(self, start: float = 1000.0):
+                self._now = start
+
+            def now(self) -> float:
+                return self._now
+
+            def advance(self, seconds: float) -> None:
+                self._now += seconds
+
+        clock = _Clock(start=1000.0)
+        clock_time = SimpleNamespace(monotonic=clock.now)
+        monkeypatch.setattr(events_tail, "time", clock_time)
+        monkeypatch.setattr(_mm_events, "time", clock_time)
+
+        orig_capture_host_usage = events_tail._capture_host_usage
+
+        def controlled_capture_host_usage(readers, *, deadline, now=None, reserve_s=0.0):
+            return orig_capture_host_usage(
+                readers,
+                deadline=deadline,
+                now=clock.now if now is None else now,
+                reserve_s=reserve_s,
+            )
+
+        monkeypatch.setattr(events_tail, "_capture_host_usage", controlled_capture_host_usage)
+
+        REPO_WALK_COST_S = 0.35
+        pending_tasks: dict[Future, tuple] = {}
+
+        class ControlledExecutor:
+            def __init__(self, **_kwargs):
+                pass
+
+            def submit(self, fn, *args):
+                future: Future = Future()
+                pending_tasks[future] = (fn, args)
+                return future
+
+            def shutdown(self, **_kwargs):
+                for future in list(pending_tasks):
+                    future.cancel()
+                pending_tasks.clear()
+
+        def controlled_as_completed(futures_map, *, timeout=None):
+            ordered = list(futures_map)
+            if timeout is not None and timeout < REPO_WALK_COST_S:
+                clock.advance(max(0.0, timeout))
+                raise _mm_events.FuturesTimeoutError()
+            clock.advance(REPO_WALK_COST_S)
+            for future in ordered:
+                task = pending_tasks.pop(future, None)
+                if task is not None:
+                    fn, args = task
+                    try:
+                        future.set_result(fn(*args))
+                    except Exception as exc:
+                        future.set_exception(exc)
+                yield future
+
+        monkeypatch.setattr(_mm_events, "ThreadPoolExecutor", ControlledExecutor)
+        monkeypatch.setattr(_mm_events, "as_completed", controlled_as_completed)
+
+        eq_events_root = tmp_path / "eq_events_root"
+        cap_events_root = tmp_path / "cap_events_root"
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir(parents=True)
-        sources = _make_sources(events_root, claude_dir)
+        eq_sources = _make_sources(eq_events_root, claude_dir)
+        cap_sources = _make_sources(cap_events_root, claude_dir)
         repo_a = _cursor_repo(tmp_path, "repo-a")
         repo_b = _cursor_repo(tmp_path, "repo-b")
 
@@ -899,9 +967,9 @@ class TestAttendedCaptureCap124A:
             lambda *, allow_refresh=True, root_discovery=None, **kw: ["user@example.com"],
         )
 
-        # Each repo walk takes 350 ms (> 250 ms equality tail budget, <= 2500 ms cap).
+        # Each repo walk takes 350 ms on the controlled clock (> 250 ms equality
+        # tail budget, <= 2500 ms cap).
         def slow_repo_walk(root, since_iso, timeout_ms, author_emails=None):
-            time.sleep(0.35)
             if timeout_ms < 350:
                 return None, _mm_events.WALK_SKIP_TIMEOUT
             return (
@@ -917,20 +985,27 @@ class TestAttendedCaptureCap124A:
 
         monkeypatch.setattr(_mm_events, "_walk_one_repo", slow_repo_walk)
 
-        # Session walk takes 120 ms (combined tail > 250 ms capture_budget_ms, <= 2500 ms cap).
+        # Session walk takes 120 ms on the controlled clock (combined tail > 250 ms
+        # capture_budget_ms, <= 2500 ms cap).
         def slow_session_walk(c_dir, **kwargs):
-            time.sleep(0.12)
+            clock.advance(0.12)
             yield {"projects": [{"project": "p", "sessions": 1}]}
 
         monkeypatch.setattr(_mm_events, "walk_session_metadata", slow_session_walk)
 
         # Cold Codex reader: initial sweep hits deadline; warm retry needs >= 0.3 s budget_s.
+        warm_calls: list[tuple[str, float]] = []
+
         def cold_codex(*, deadline):
+            clock.advance(0.05)
             return _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
 
         def warm_codex(*, reader="codex", budget_s=0.0):
+            warm_calls.append((reader, budget_s))
             if budget_s < 0.3:
+                clock.advance(0.05)
                 return _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
+            clock.advance(0.30)
             return _mm_host_usage.HostUsageResult(
                 {"codex": {"2026-11-10": _mm_host_usage.zero_model_bucket()}},
                 complete=True,
@@ -942,19 +1017,21 @@ class TestAttendedCaptureCap124A:
         # 1. Equality config (cap == capture == 250 ms): host warm stops on deadline,
         # git walk aborts on budget, and session walk trips budget notice.
         eq_cfg = {
-            "sync": {"sources": sources},
+            "sync": {"sources": eq_sources},
             "retro": {"capture_budget_ms": 250, "attended_capture_cap_ms": 250},
         }
         eq_host_ms, _ = events_tail.resolve_host_read_budget(eq_cfg, interactive=True)
         eq_host_cap, _ = events_tail._capture_host_snapshot(
             "dev-a", readers, host_budget_ms=eq_host_ms, warm_host_cache=lambda _n: None
         )
+        assert len(warm_calls) == 1
+        assert warm_calls[0][0] == "codex" and warm_calls[0][1] < 0.3
         assert eq_host_cap.dropped == (("codex", "deadline"),)
         assert eq_host_cap.hosts is None
 
         eq_deg = events_tail._run_events_tail(
             eq_cfg,
-            sources,
+            eq_sources,
             "dev-a",
             dry_run=False,
             quiet=False,
@@ -963,26 +1040,35 @@ class TestAttendedCaptureCap124A:
         eq_err = capsys.readouterr().err
         assert any("git capture catching up (2 left)" in d for d in eq_deg), eq_deg
         assert "events tail budget exceeded" in eq_err
+        eq_scan = _mm_events.latest_event_rows(eq_events_root / "events", "dev-a", {"git-snapshot"})
+        eq_git_row = eq_scan.rows["git-snapshot"]
+        assert eq_git_row["git_capture"]["walk_budget_aborts"] == 2
+        assert len(eq_git_row["skipped"]) == 2
+        assert all(
+            entry["reason"] == _mm_events.WALK_SKIP_BUDGET_ABORT for entry in eq_git_row["skipped"]
+        )
 
         # 2. Cap > capture (capture_budget_ms=250, attended_capture_cap_ms=2500):
         # warm retry completes Codex, git walk finishes both repos without abort,
         # session walk does not trip notice, and both repo cursors advance.
         _write_git_cursor_cache({})
         cap_cfg = {
-            "sync": {"sources": sources},
+            "sync": {"sources": cap_sources},
             "retro": {"capture_budget_ms": 250, "attended_capture_cap_ms": 2500},
         }
         cap_host_ms, _ = events_tail.resolve_host_read_budget(cap_cfg, interactive=True)
         cap_host_cap, cap_host_rows = events_tail._capture_host_snapshot(
             "dev-a", readers, host_budget_ms=cap_host_ms, warm_host_cache=lambda _n: None
         )
+        assert len(warm_calls) == 2
+        assert warm_calls[1][0] == "codex" and warm_calls[1][1] >= 0.3
         assert cap_host_cap.dropped == ()
         assert cap_host_cap.hosts is not None and "codex" in cap_host_cap.hosts
         assert len(cap_host_rows) == 1
 
         cap_deg = events_tail._run_events_tail(
             cap_cfg,
-            sources,
+            cap_sources,
             "dev-a",
             dry_run=False,
             quiet=False,
@@ -997,9 +1083,18 @@ class TestAttendedCaptureCap124A:
             str(repo_a.resolve()),
             str(repo_b.resolve()),
         }
-        push_row = _mm_events.latest_mm_push_row(events_root / "events", "dev-a")
+        push_row = _mm_events.latest_mm_push_row(cap_events_root / "events", "dev-a")
         assert push_row is not None
         assert set(cache["repo_cursors"].values()) == {push_row["ts"]}
+        cap_scan = _mm_events.latest_event_rows(
+            cap_events_root / "events", "dev-a", {"git-snapshot", "sessions-snapshot"}
+        )
+        cap_git_row = cap_scan.rows["git-snapshot"]
+        assert cap_git_row["skipped"] == []
+        assert cap_git_row["git_capture"]["walk_budget_aborts"] == 0
+        assert {p["project"] for p in cap_git_row["projects"]} == {"repo-a", "repo-b"}
+        cap_sess_row = cap_scan.rows["sessions-snapshot"]
+        assert cap_sess_row["projects"] == [{"project": "p", "sessions": 1}]
 
     def test_fixture_exceeding_attended_cap_stops_reports_and_resumes_from_cursors(
         self, tmp_path, monkeypatch
