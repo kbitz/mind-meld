@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.81] - 2026-11-22
+
+The check runner now keeps the pytest-xdist queue and scheduling controls the caller set.
+
+### Fixed
+
+- The check runner keeps the pytest-xdist queue and scheduling controls supplied by the caller.
+
 ## [1.12.80] - 2026-11-22
 
 Codex memory copies now sync automatically with the `codex` source, with one setup question and no separate memory source to enable.

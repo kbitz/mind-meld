@@ -742,6 +742,63 @@ def pytest_configure(config) -> None:
     )
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addini(
+        "mm_group_check_tests",
+        "Keep check-runner tests together in the default parallel run",
+        type="bool",
+        default=False,
+    )
+
+
+@pytest.hookimpl(tryfirst=True, optionalhook=True)
+def pytest_xdist_make_scheduler(config: pytest.Config, log):
+    if (
+        config.getoption("dist") != "load"
+        or config.getoption("maxschedchunk", default=None) is not None
+        or not config.getini("mm_group_check_tests")
+    ):
+        return None
+
+    import os
+    import shlex
+
+    configured_args = config.getini("addopts")
+    environment_args = shlex.split(os.environ.get("PYTEST_ADDOPTS", ""))
+    if any(
+        arg in ("-d", "--dist") or arg.startswith("--dist=")
+        for arg in (*configured_args, *environment_args)
+    ):
+        return None
+
+    from xdist.scheduler import LoadScheduling
+
+    class CheckRunnerScheduling(LoadScheduling):
+        def _send_tests(self, node, num: int) -> None:
+            batch = self.pending[:num]
+            if not batch:
+                return
+            collection = self.collection
+            assert collection is not None
+            prefix = "tests/test_bin_check.py::"
+            grouped_in_batch = sum(collection[index].startswith(prefix) for index in batch)
+            if grouped_in_batch:
+                # Keep the runner tests together using collection indices.
+                # LoadScheduling still owns dispatch and worker recovery.
+                runner_tests = []
+                other_tests = []
+                for index in self.pending:
+                    if collection[index].startswith(prefix):
+                        runner_tests.append(index)
+                    else:
+                        other_tests.append(index)
+                self.pending[:] = runner_tests + other_tests
+                num = len(runner_tests) + len(batch) - grouped_in_batch
+            super()._send_tests(node, num)
+
+    return CheckRunnerScheduling(config, log)
+
+
 @pytest.fixture
 def test_root_salt() -> bytes:
     """Exported for tests that need the fixture's root_salt explicitly."""

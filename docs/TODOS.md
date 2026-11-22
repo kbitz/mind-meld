@@ -193,6 +193,38 @@ here by hand, use the H3 form.
 - **Evidence:** Track 161A coverage audit. The individual filters and the Codex-only receive path passed.
 - **Revisit:** When Codex pull selection or source toggles next change.
 
+### [review:files=bin/_check.py|tests/conftest.py|tests/test_bin_check.py] Test gap: Preserve explicit default distribution
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The argument tests cover forwarding `--dist`. They do not assert which scheduler the runner uses with an explicit `--dist load`.
+- **Hypothesis (untested):** Run a small fixture through `bin/check` with that flag and verify that pytest uses its load scheduler.
+- **Evidence:** Track 161B coverage audit. The isolated probe kept the alternate `loadfile` scheduler selected through `PYTEST_ADDOPTS`.
+- **Revisit:** When a Track next changes these scheduler paths.
+
+### [review:files=bin/_check.py|tests/conftest.py|tests/test_bin_check.py] Test gap: Reuse grouped records in serial selection
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The assignment test checks canonical node IDs. The selector fixture records coverage without the project's scheduler hook.
+- **Hypothesis (untested):** Seed a record with controller grouping, edit a covered function, and verify that a serial selection runs exactly its recorded callers.
+- **Evidence:** A disposable Track 161B probe recorded 16 nodes in parallel and selected the expected 10 in serial.
+- **Revisit:** When a Track changes the scheduler or coverage record identity.
+
+### [review:files=tests/test_bin_check.py] Test gap: Remove inherited pytest state in nested runs
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The nested fixtures run under outer xdist during the full suite. The tests do not directly assert which worker and selector variables the child receives.
+- **Hypothesis (untested):** Set sentinel values for parent-only pytest and selector variables and have an isolated child report which values reached it.
+- **Evidence:** Track 161B coverage audit. The serial and three 16-worker suites passed.
+- **Revisit:** When a Track next changes the nested check environment.
+
+### [review:files=bin/_check.py|tests/test_bin_check.py] Revisit original Track 161B failure attribution
+
+- **Reproduced:** Injecting a timeout into `git merge-base` reproduced both assertion failures. The fallback suite exited successfully and printed neither `merge base moved` nor `ran 0 of 4`.
+- **Observed:** The archived logs show three xdist worker crashes across two runs and a nested pytest exit 137, which indicates SIGKILL. The available kernel and systemd-oomd logs contain no matching OOM kill.
+- **Open:** The two original assertion failures lacked nested stdout and stderr. It remains unclear whether a Git timeout caused those failures, who sent SIGKILL, or why the workers disconnected.
+- **Revisit:** If either failure recurs during 16-worker verification or the original logs surface, capture load averages, nested stdout and stderr, runner and worker exits, and kernel and supervisor logs before retrying.
+- **Context:** The developer deferred the original-cause attribution for AC1 and AC2 on 2026-11-22. [Track 161B review](https://github.com/kbitz/mind-meld/pull/373)
+
 ## Drain records
 
 ### Roadmap card run — 2026-11-21 (Codex memory folded into the `codex` source; affected-selection tests carded; Tracks 156A to 160A recorded)
