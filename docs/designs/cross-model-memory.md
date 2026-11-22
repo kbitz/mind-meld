@@ -96,13 +96,9 @@ follow the `codex` source.
   kept the default file set of `memory_summary.md`, `MEMORY.md` and
   `rollout_summaries/*.md` ([qualification](#qualification)). Codex's `.git`,
   its SQLite files and anything else outside that set stay local.
-- Track 157A resolves the active directory for the installed Codex version,
-  including when both `memories/` and `memories_v2/` exist. Q3 observed only
-  `memories_v2/` on a fresh 0.171.0 home. It did not exercise an upgrade
-  with both directories. Source detection, publishing and the local qmd
-  collection use the same resolved directory. The 157A and 159A roadmap
-  cards still name the legacy root. Their planning must reconcile those
-  references with Q3 so 159A uses the directory 157A resolves.
+- Publishing and the local qmd collection use `memories_v2/` when it is
+  a real directory and fall back to `memories/`. Q3 on a fresh 0.171.0
+  home observed `memories_v2/` alone.
 - At pull, mm places each peer's files under
   `~/.local/share/mind-meld/codex-memory/<device id>/`. That folder is mm's,
   outside every native store.
@@ -111,13 +107,13 @@ follow the `codex` source.
 - Forgetting follows the source machine. When its Codex drops a memory, the
   next push publishes the smaller set, and truth-based manifests remove it
   from every peer.
-- Copies from a machine that leaves the fleet (`mm devices retire`) leave
-  every peer.
+- A pull with `codex` enabled moves a retired machine's copies into
+  30-day local recovery.
 - Copy sync leaves the native Codex memory directory untouched.
 - `mm init` offers the `codex` source. `mm enable-source codex` enables
   customization sync and per-machine memory copies on an existing setup.
-- A machine with Codex memories off publishes nothing. Its agents still find
-  every other machine's memories through the index.
+- With `codex` enabled, a machine can receive and index peer copies even
+  when it has no native Codex memory directory.
 
 ### 3. One local index per machine
 
