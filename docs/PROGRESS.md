@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.83 | 2026-11-22 | Enabling the memory index now prints a copyable command to install or upgrade qmd when it is missing or older than 2.8.3. |
 | 1.12.82 | 2026-11-22 | This release does not change anything people see or do in mind-meld. |
 | 1.12.81 | 2026-11-22 | The check runner now keeps the pytest-xdist queue and scheduling controls the caller set. |
 | 1.12.80 | 2026-11-22 | Codex memory copies now sync automatically with the `codex` source, with one setup question and no separate memory source to enable. |

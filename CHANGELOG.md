@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.83] - 2026-11-22
+
+Enabling the memory index now prints a copyable command to install or upgrade qmd when it is missing or older than 2.8.3.
+
+### Fixed
+
+- Running `mm memory-index on` when `qmd` is missing or older than 2.8.3 now ends stderr with a copyable `Run:` command to install or upgrade `qmd` via Bun or npm.
+- Running `mm memory-index on` when qmd is missing or older than 2.8.3 now prints a copyable Bun or npm install command.
+
+### Upgrade notes
+
+- No upgrade steps are required.
+
 ## [1.12.82] - 2026-11-22
 
 This release does not change anything people see or do in mind-meld.
