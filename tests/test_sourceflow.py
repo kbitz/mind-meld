@@ -407,20 +407,29 @@ def test_codex_memory_toggle_redirects_without_writing(cfg, verb, force, monkeyp
     assert transitions == []
 
 
-@pytest.mark.parametrize("verb", ["muse", "codex"])
-def test_legacy_enable_materializes_codex_without_the_derived_entry(cfg, verb):
+@pytest.mark.parametrize("name", ["muse", "codex"])
+@pytest.mark.parametrize("claude_disabled", [False, True])
+def test_legacy_enable_materializes_codex_without_the_derived_entry(
+    cfg, tmp_path, name, claude_disabled
+):
     on_disk = _on_disk(cfg)
-    claude = on_disk["sync"].pop("sources")[0]
-    on_disk["sync"]["claude_dir"] = claude["path"]
+    on_disk["sync"].pop("sources")
+    claude = tmp_path / "temporarily-absent-claude"
+    on_disk["sync"]["claude_dir"] = str(claude)
+    if claude_disabled:
+        on_disk["sync"]["disabled_sources"] = ["claude"]
     config.save_config(on_disk, cfg)
-    if verb == "muse":
+    if name == "muse":
         (Path.home() / ".codex").mkdir()
 
-    result = runner.invoke(app, ["enable-source", verb])
+    result = runner.invoke(app, ["enable-source", name])
     assert result.exit_code == 0, result.output
-    names = {src["name"] for src in _on_disk(cfg)["sync"]["sources"]}
-    assert {"claude", "codex", verb} <= names
-    assert "codex-memory" not in names
+    sync = _on_disk(cfg)["sync"]
+    sources = {src["name"]: src for src in sync["sources"]}
+    assert {"claude", "codex", name} <= sources.keys()
+    assert sources["claude"]["path"] == str(claude)
+    assert ("claude" in sync.get("disabled_sources", [])) is claude_disabled
+    assert "codex-memory" not in sources
 
 
 def test_sources_shows_receive_only_codex(cfg, tmp_path):

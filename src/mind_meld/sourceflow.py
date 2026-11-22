@@ -256,22 +256,21 @@ def enable_source(name: str, *, force: bool = False) -> None:
 
     # Grok, Muse and Antigravity must be materialized even when their
     # allowlisted trees are not present yet: explicit enable is consent.  In a
-    # legacy config, first preserve the resolved source set before writing
+    # legacy config, first preserve the selected source set before writing
     # sync.sources.  An explicit list takes priority over legacy
     # claude_dir/default fallback; writing only the new host here would make the
     # existing sources disappear and eventually produce their deletion
     # tombstones.
     if not has_explicit_sources and (name == "codex" or name in _config_module.OPT_IN_SOURCE_NAMES):
-        resolution = _config_module.resolve_sources(config)
-        codex = next((src for src in resolution.selected if src["name"] == "codex"), None)
-        if name != "codex" or codex is None:
+        # Keep disabled entries and unavailable roots when materializing.
+        # The disabled list still controls which entries can sync afterwards.
+        legacy = _config_module.resolve_sources(
+            {**config, "sync": {**sync, "disabled_sources": []}}
+        )
+        if name != "codex" or not any(src["name"] == "codex" for src in legacy.selected):
             explicit_sources = [
-                src for src in resolution.available if src["name"] != CODEX_MEMORY_SOURCE_NAME
+                src for src in legacy.selected if src["name"] != CODEX_MEMORY_SOURCE_NAME
             ]
-            # An explicitly selected Codex source can receive copies even
-            # before a local Codex root exists.
-            if codex is not None and codex not in explicit_sources:
-                explicit_sources.append(codex)
             explicit_names = [src["name"] for src in explicit_sources]
             has_explicit_sources = True
             updates["sources"] = explicit_sources
