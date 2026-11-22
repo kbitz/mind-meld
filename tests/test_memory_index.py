@@ -454,6 +454,9 @@ def test_desired_collections_matrix_and_collision_disambiguation(
     (copies_root / "cccc3333").mkdir(parents=True)
     (copies_root / "dddd4444").mkdir(parents=True)  # not in registry -> fallback to device id
 
+    codex_source = config.get_default_source("codex")
+    assert codex_source is not None
+    codex_source["path"] = str(codex_dir)
     cfg = {
         **env.cfg,
         "sync": {
@@ -462,7 +465,7 @@ def test_desired_collections_matrix_and_collision_disambiguation(
                 {"name": "claude", "path": str(claude_dir), "type": "claude"},
                 {"name": "grok", "path": str(grok_dir), "type": "grok"},
                 {"name": "muse", "path": str(muse_dir), "type": "muse"},
-                {"name": "codex-memory", "path": str(codex_dir), "type": "codex-memory"},
+                codex_source,
             ],
         },
     }
@@ -862,14 +865,15 @@ def _init_two_machine_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
         state_dir = home / ".local" / "share" / "mind-meld"
         state_dir.mkdir(parents=True)
         copies_dir = state_dir / "codex-memory"
+        codex_source = config.get_default_source("codex")
+        assert codex_source is not None
+        codex_source["path"] = str(codex_dir)
         cfg = {
             "device": {"id": did, "name": dname},
             "storage": {"path": str(storage_dir)},
             "sync": {
                 "max_file_size": 52_428_800,
-                "sources": [
-                    {"name": "codex-memory", "path": str(codex_dir), "type": "codex-memory"}
-                ],
+                "sources": [codex_source],
             },
             "crypto": {"argon2_memory_kb": MEMORY_KB},
             "upgrade": {"auto_check": False, "auto_install": False},

@@ -328,9 +328,10 @@ def test_reconfigure_abort_exits_1_and_writes_nothing(cfg, monkeypatch):
 
 
 def test_reconfigure_accepting_defaults_updates_the_configuration(cfg):
-    result = runner.invoke(app, ["reconfigure-sources"], input="\n" * 9)
+    result = runner.invoke(app, ["reconfigure-sources"], input="\n" * 8)
     assert "Sync 'claude' source" in result.stdout
     assert "Sync 'codex' source at ~/.codex? (not detected) [y/n] (Enter = n)" in result.stdout
+    assert "codex-memory" not in result.stdout
     assert result.exit_code == 0, result.output
     assert _lines(result.stdout)[0] == "Reconfigure sources for this device."
     assert _lines(result.stdout)[-1] == "Reconfigure: source configuration updated."
@@ -384,3 +385,114 @@ def test_sourceflow_contract_import_does_not_register_cli():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("verb", ["enable-source", "disable-source"])
+@pytest.mark.parametrize("force", [False, True])
+def test_codex_memory_toggle_redirects_without_writing(cfg, verb, force, monkeypatch):
+    before_bytes = cfg.read_bytes()
+    seen_before = seen_sources.seen_path().exists()
+    transitions = []
+    monkeypatch.setattr(core.upgrade, "run_transition_hook", transitions.append)
+    args = [verb, "codex-memory", *(["--force"] if force else [])]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    err_lines = _lines(result.stderr)
+    assert len(err_lines) == 1
+    assert err_lines[0].startswith("mm: notice:")
+    assert f"Run: mm {verb} codex" in err_lines[0]
+    assert cfg.read_bytes() == before_bytes
+    assert seen_sources.seen_path().exists() is seen_before
+    assert transitions == []
+
+
+@pytest.mark.parametrize("name", ["muse", "codex"])
+@pytest.mark.parametrize("claude_disabled", [False, True])
+def test_legacy_enable_materializes_codex_without_the_derived_entry(
+    cfg, tmp_path, name, claude_disabled
+):
+    on_disk = _on_disk(cfg)
+    on_disk["sync"].pop("sources")
+    claude = tmp_path / "temporarily-absent-claude"
+    on_disk["sync"]["claude_dir"] = str(claude)
+    if claude_disabled:
+        on_disk["sync"]["disabled_sources"] = ["claude"]
+    config.save_config(on_disk, cfg)
+    if name == "muse":
+        (Path.home() / ".codex").mkdir()
+
+    result = runner.invoke(app, ["enable-source", name])
+    assert result.exit_code == 0, result.output
+    sync = _on_disk(cfg)["sync"]
+    sources = {src["name"]: src for src in sync["sources"]}
+    assert {"claude", "codex", name} <= sources.keys()
+    assert sources["claude"]["path"] == str(claude)
+    assert ("claude" in sync.get("disabled_sources", [])) is claude_disabled
+    assert "codex-memory" not in sources
+
+
+def test_sources_shows_receive_only_codex(cfg, tmp_path):
+    on_disk = _on_disk(cfg)
+    codex_src = config.get_default_source("codex")
+    assert codex_src is not None
+    codex_src["path"] = str(tmp_path / "absent-codex")
+    on_disk["sync"]["sources"].append(codex_src)
+    config.save_config(on_disk, cfg)
+    result = runner.invoke(app, ["sources"], env={"COLUMNS": "180"})
+    assert result.exit_code == 0, result.output
+    rows = [line.split("│") for line in result.stdout.splitlines() if "│ codex " in line]
+    assert len(rows) == 1
+    assert [cell.strip() for cell in rows[0][4:6]] == ["Y", "0"]
+    assert "codex-memory" not in result.stdout
+
+
+def test_sources_merges_codex_memory_count_into_codex_row(cfg, tmp_path):
+    codex_dir = tmp_path / "codex-home"
+    (codex_dir / "skills" / "my-skill").mkdir(parents=True)
+    (codex_dir / "skills" / "my-skill" / "SKILL.md").write_text("# skill\n")
+    (codex_dir / "memories_v2").mkdir(parents=True)
+    (codex_dir / "memories_v2" / "MEMORY.md").write_text("# mem\n")
+    (codex_dir / "memories_v2" / "memory_summary.md").write_text("# summary\n")
+
+    codex_src = config.get_default_source("codex")
+    assert codex_src is not None
+    codex_src["path"] = str(codex_dir)
+    on_disk = _on_disk(cfg)
+    on_disk["sync"]["sources"].append(codex_src)
+    config.save_config(on_disk, cfg)
+
+    enabled_res = runner.invoke(app, ["sources"], env={"COLUMNS": "180"})
+    assert enabled_res.exit_code == 0, enabled_res.output
+    assert "codex-memory" not in enabled_res.stdout
+    codex_lines = [line for line in enabled_res.stdout.splitlines() if "│ codex " in line]
+    assert len(codex_lines) == 1
+    # 1 skill file + 2 codex memory files = 3
+    assert [cell.strip() for cell in codex_lines[0].split("│")[4:6]] == ["Y", "3"]
+
+    on_disk["sync"]["disabled_sources"] = ["codex"]
+    config.save_config(on_disk, cfg)
+    disabled_res = runner.invoke(app, ["sources"], env={"COLUMNS": "180"})
+    assert disabled_res.exit_code == 0, disabled_res.output
+    assert "codex-memory" not in disabled_res.stdout
+    codex_disabled_lines = [line for line in disabled_res.stdout.splitlines() if "│ codex " in line]
+    assert len(codex_disabled_lines) == 1
+    assert [cell.strip() for cell in codex_disabled_lines[0].split("│")[4:6]] == ["N", "3"]
+
+
+def test_reconfigure_drops_stale_codex_memory_entry_and_disabled_name(cfg, tmp_path):
+    on_disk = _on_disk(cfg)
+    on_disk["sync"]["sources"].append(
+        {"name": "codex-memory", "path": str(tmp_path / "old-codex"), "type": "codex-memory"}
+    )
+    on_disk["sync"]["disabled_sources"] = ["codex-memory", "gstack"]
+    config.save_config(on_disk, cfg)
+
+    result = runner.invoke(app, ["reconfigure-sources"], input="\n" * 8)
+    assert result.exit_code == 0, result.output
+    assert "codex-memory" not in result.stdout
+
+    after = _on_disk(cfg)
+    assert not any(s["name"] == "codex-memory" for s in after["sync"]["sources"])
+    assert "codex-memory" not in after["sync"]["disabled_sources"]
+    assert "gstack" in after["sync"]["disabled_sources"]

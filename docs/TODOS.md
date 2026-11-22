@@ -143,6 +143,56 @@ here by hand, use the H3 form.
 - **Context:** Revisit when a track next changes these paths.
 - **Effort:** ?
 
+### [review:files=src/mind_meld/config.py|tests/test_codex_memory_source.py] Test gap: Combine old and migrated Codex memory exclusions
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Current fixtures exercise the old and migrated exclusion settings in sequence.
+- **Hypothesis (untested):** Seed both settings with distinct patterns and an overlap. Confirm a push leaves every excluded file local through cleanup.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `config._codex_memory_exclude_patterns`.
+- **Evidence:** Track 161A coverage audit. The same-path old-to-new publication probe passed with an old exclusion.
+- **Revisit:** When Codex memory exclusion migration next changes.
+
+### [review:files=src/mind_meld/config.py|tests/test_config.py] Test gap: Reject malformed Codex memory exclusion settings
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The new exclusion setting shares the list validator, with no fixture using invalid values at that setting.
+- **Hypothesis (untested):** Pass a scalar and an array containing a non-string to config loading. Verify both fail with the setting name.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `config._validate`.
+- **Evidence:** Track 161A coverage audit traced the shared validator.
+- **Revisit:** When config validation or the migration field next changes.
+
+### [review:files=src/mind_meld/core.py|tests/test_config.py] Test gap: Preserve edits made during Codex migration confirmation
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The prompt-time test changes source toggles. The refusal on edits to source entries or saved exclusions has no direct test.
+- **Hypothesis (untested):** Change an entry or exclusion list while the prompt is open. Verify migration refuses and the edit survives.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `core._migrate_config_core`.
+- **Evidence:** Track 161A coverage audit. Replaying a toggle during confirmation passed.
+- **Revisit:** When a Track changes migration confirmation or config patching.
+
+### [review:files=src/mind_meld/config.py|src/mind_meld/initflow.py|tests/test_initflow.py] Test gap: Resume a join with an old Codex memory choice
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Tests cover old join-record parsing and normal resumed init separately.
+- **Hypothesis (untested):** Resume a saved join containing the old name and another source. Check that the current selection survives and the picker stays reachable when the old name was the sole choice.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `config._valid_join_source_names` and `initflow._sources_from_names`.
+- **Evidence:** Track 161A coverage audit. Legacy parsing and the updated init prompt cases passed.
+- **Revisit:** When join resume or source selection next changes.
+
+### [review:files=src/mind_meld/core.py|src/mind_meld/pullflow.py|tests/test_codex_memory_source.py] Test gap: Pull with stale Codex memory selections
+
+- **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Tests cover the source-selection and peer-manifest filters separately from the two-device pull.
+- **Hypothesis (untested):** Reuse the two-device fixture to verify that declining Codex blocks incoming copies and the old disabled name alone permits them.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `core._filter_disabled_sources` and `pullflow._pull_core`.
+- **Evidence:** Track 161A coverage audit. The individual filters and the Codex-only receive path passed.
+- **Revisit:** When Codex pull selection or source toggles next change.
+
 ### [review:files=bin/_check.py|tests/conftest.py|tests/test_bin_check.py] Test gap: Preserve explicit default distribution
 
 - **Test gap:** No demonstrated defect. Filed under `test-gaps=record`.

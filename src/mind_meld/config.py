@@ -47,7 +47,7 @@ RETIRED_SOURCE_NAMES: frozenset[str] = frozenset({"opencode"})
 
 # Only `mm enable-source`, or explicit inclusion at `mm init` or
 # `mm reconfigure-sources`, activates these sources.
-OPT_IN_SOURCE_NAMES: frozenset[str] = frozenset({"grok", "muse", "agy", "codex-memory"})
+OPT_IN_SOURCE_NAMES: frozenset[str] = frozenset({"grok", "muse", "agy"})
 
 UsageCaptureReadiness = Literal["ready", "disabled", "unavailable", "no-reader", "unknown"]
 
@@ -478,17 +478,6 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
     },
     {
         # Same Claude-shaped entry: name/path/type only. The walker
-        # hardcodes the active memory folder (memories_v2/ or memories/)
-        # and file set — not user-editable include_dirs — so a config edit
-        # cannot widen the walk onto sessions/, .git/, or SQLite stores.
-        # Pull places peers' copies under CODEX_MEMORY_COPIES_DIR/<peer id>/
-        # and never writes into ~/.codex.
-        "name": "codex-memory",
-        "path": DEFAULT_CODEX_DIR,
-        "type": "codex-memory",
-    },
-    {
-        # Same Claude-shaped entry: name/path/type only. The walker
         # hardcodes skills/, commands/, and rules/ — not user-editable
         # include_dirs — so a config edit cannot widen the walk onto
         # sessions/, memory-v2/, config.toml, auth.json, or plugins/.
@@ -598,6 +587,10 @@ def _validate(config: dict[str, Any]) -> None:
             _validate_sources(sync["sources"])
         if "disabled_sources" in sync:
             _validate_disabled_sources(sync["disabled_sources"])
+        if "codex_memory_exclude_patterns" in sync:
+            _validate_str_list(
+                sync["codex_memory_exclude_patterns"], "sync.codex_memory_exclude_patterns"
+            )
         if "pull_syncthing_wait_ms" in sync:
             value = sync["pull_syncthing_wait_ms"]
             if type(value) is not int or not (0 <= value <= PULL_SYNCTHING_WAIT_MAX_MS):
@@ -1103,7 +1096,11 @@ def _configured_sources(
     if explicit_sources:
         sources = []
         for src in sync["sources"]:
-            if src.get("name") in RETIRED_SOURCE_NAMES or src.get("name") in disabled:
+            if (
+                src.get("name") in RETIRED_SOURCE_NAMES
+                or src.get("name") == "codex-memory"
+                or src.get("name") in disabled
+            ):
                 continue
             try:
                 path = _resolve_source_path(src["path"], label=f"source {src['name']!r}")
@@ -1203,6 +1200,27 @@ def _configured_sources(
     return sources, explicit_sources
 
 
+def _codex_memory_exclude_patterns(sync: dict[str, Any]) -> list[str]:
+    """Keep explicit memory exclusions across the source fold."""
+    legacy = next((src for src in sync.get("sources", []) if src["name"] == "codex-memory"), {})
+    return list(
+        dict.fromkeys(
+            [*sync.get("codex_memory_exclude_patterns", []), *legacy.get("exclude_patterns", [])]
+        )
+    )
+
+
+def _derive_codex_memory_source(codex: dict[str, Any], sync: dict[str, Any]) -> dict[str, Any]:
+    source: dict[str, Any] = {
+        "name": "codex-memory",
+        "path": codex["path"],
+        "type": "codex-memory",
+    }
+    if patterns := _codex_memory_exclude_patterns(sync):
+        source["exclude_patterns"] = patterns
+    return source
+
+
 def resolve_sources(
     config: dict[str, Any], *, strict: bool = False, bootstrap: bool = False
 ) -> SourceResolution:
@@ -1228,6 +1246,14 @@ def resolve_sources(
     disabled = config.get("sync", {}).get("disabled_sources", []) or []
     if disabled:
         sources = [s for s in sources if s["name"] not in disabled]
+
+    # Track 161A: Codex memory follows the selected `codex` source. Derive
+    # the internal `codex-memory` source with `codex`'s resolved path verbatim
+    # after disabled-source filtering. Only the legacy entry's exclusions
+    # carry forward, so the fold cannot publish a file kept local before.
+    codex_source = next((s for s in sources if s["name"] == "codex"), None)
+    if codex_source is not None:
+        sources.append(_derive_codex_memory_source(codex_source, config.get("sync", {})))
 
     # Only explicit writers bootstrap. Missing default roots remain empty
     # walks for inspection and previews; custom roots are never created.
@@ -1534,7 +1560,7 @@ def join_record_path() -> Path:
 def _valid_join_source_names() -> frozenset[str]:
     return frozenset(
         s["name"] for s in DEFAULT_SOURCES if s["name"] not in MM_INTERNAL_SOURCE_NAMES
-    )
+    ) | frozenset({"codex-memory"})
 
 
 def save_join_record(record: JoinRecord) -> None:

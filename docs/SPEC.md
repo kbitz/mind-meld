@@ -162,7 +162,7 @@ first install sets Syncthing up so it just works.
 | Agent | Synced between machines | Usage in `retro-fleet` |
 |---|---|---|
 | Claude Code | Project memory and `todos/` under `~/.claude` (CLAUDE.md, agents and commands stay in git) | Tokens, cost, sessions and skills from local session logs |
-| Codex | `skills/`, `plugins/`, `AGENTS.md`; when enabled (`mm enable-source codex-memory`), each machine's Codex memory summaries reach the other machines as read-only per-machine copies in `~/.local/share/mind-meld/codex-memory/<machine>/` | Tokens and cost from session rollouts, archived ones included |
+| Codex | `skills/`, `plugins/`, `AGENTS.md`, and each machine's Codex memory summaries as read-only per-machine copies in `~/.local/share/mind-meld/codex-memory/<machine>/` (all with the `codex` source) | Tokens and cost from session rollouts, archived ones included |
 | Grok Build | `skills/`, `commands/` and `rules/` under `~/.grok`, and its memory topics (each scope's `topics/` Markdown, global and per repository). `mm init` offers Grok Build and defaults to yes when it detects customizations. To enable it later, run `mm enable-source grok`. Pending observations stay on the machine that captured them | Tokens and cost from local session records, runs through Paseo (ACP) included, in the Grok row |
 | Muse | `memory/`. `mm init` offers Muse and defaults to yes when it finds an eligible memory file. To enable it later, run `mm enable-source muse` | Tokens and cost, as its own `muse` family |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config` | Tokens and cost from conversation steps, as its own `agy` family |
