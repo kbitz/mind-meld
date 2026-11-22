@@ -1193,3 +1193,17 @@ Tracks 161A and 161B were introduced in Group 161 by [PR #372](https://github.co
 - 2026-11-22: merged [PR #373](https://github.com/kbitz/mind-meld/pull/373) (`301a4207d9a16f638bca03f420558eb5048f7dbc`), land-time Track 161B, Group 161, branch `mmm/47eeb539`.
 - Approved-scope evidence: the merged runner and tests group nested checks on one worker by default, retain caller scheduling controls, strengthen the selection assertions with nested output and exit status, and cover worker crash reporting. The [review receipt](https://github.com/kbitz/mind-meld/pull/373#issuecomment-7080433720) records three 16-worker passes (9,858 passed and 30 skipped per run) with load averages and a passing serial runner check. The ship receipt records a passing `./bin/check` at release head `51a7514d9d6a`.
 - The developer explicitly deferred the historical attribution in acceptance criteria 1 and 2 on 2026-11-22. The review injected a merge-base timeout and reproduced the assertion failures. The original logs leave the SIGKILL sender, worker disconnects and timeout attribution unresolved. The recurrence trigger is recorded in Future.
+
+## Individual Track history
+
+_tombstone: 162_
+
+Tracks 162A and 162B were introduced in Group 162 by [PR #375](https://github.com/kbitz/mind-meld/pull/375) (`5d2a063`, 2026-11-22). No ID moves or active pins were declared.
+
+### Track 162A: Print the qmd upgrade command when memory-index enablement refuses an old version ✓ Shipped (v1.12.83)
+- 2026-11-22: merged [PR #377](https://github.com/kbitz/mind-meld/pull/377) (`9050040`), land-time Track 162A, Group 162.
+- The merged CLI uses the existing runtime-specific install hint on refusal. Tests cover the exact command and preserved state, working enablement and init, malformed collection output, and disable after lock release. The PR's review receipt and hosted checks passed. The version-probe test gap was filed separately.
+
+### Track 162B: Make the attended-capture and usage-merge tests stable under CI load ✓ Shipped (v1.12.82)
+- 2026-11-22: merged [PR #376](https://github.com/kbitz/mind-meld/pull/376) (`01d0d40`), land-time Track 162B, Group 162.
+- The merged tests use controlled time for both capture budgets and per-thread CPU time for the 10 µs usage-merge guard. Hosted macOS CI passed. At `9050040`, both targeted nodes passed with 16 workers and passed again twice with the same worker count confined to two CPUs.
