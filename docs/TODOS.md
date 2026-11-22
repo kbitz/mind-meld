@@ -220,8 +220,8 @@ here by hand, use the H3 form.
 ### [review:files=bin/_check.py|tests/test_bin_check.py] Revisit original Track 161B failure attribution
 
 - **Reproduced:** Injecting a timeout into `git merge-base` reproduced both assertion failures. The fallback suite exited successfully and printed neither `merge base moved` nor `ran 0 of 4`.
-- **Observed:** The original logs show two xdist worker disconnects and a nested pytest exit 137, which indicates SIGKILL. The available kernel and systemd-oomd logs contain no matching OOM kill.
-- **Open:** The original nested output was missing. It remains unclear whether a Git timeout caused the original assertions, who sent SIGKILL, or why the workers disconnected.
+- **Observed:** The archived logs show three xdist worker crashes across two runs and a nested pytest exit 137, which indicates SIGKILL. The available kernel and systemd-oomd logs contain no matching OOM kill.
+- **Open:** The two original assertion failures lacked nested stdout and stderr. It remains unclear whether a Git timeout caused those failures, who sent SIGKILL, or why the workers disconnected.
 - **Revisit:** If either failure recurs during 16-worker verification or the original logs surface, capture load averages, nested stdout and stderr, runner and worker exits, and kernel and supervisor logs before retrying.
 - **Context:** The developer deferred the original-cause attribution for AC1 and AC2 on 2026-11-22. [Track 161B review](https://github.com/kbitz/mind-meld/pull/373)
 
