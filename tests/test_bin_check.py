@@ -728,11 +728,15 @@ def test_default_parallel_run_keeps_runner_tests_on_one_worker(tmp_path: Path) -
         *nodes,
         "--",
         "-v",
+        "--color=no",
         "-o",
         f"cache_dir={tmp_path / 'cache'}",
-        env={"MM_PYTEST_WORKERS": "2"},
+        env={"MM_PYTEST_WORKERS": "2", "RAN_LOG": str(tmp_path / "ran")},
     )
     assert proc.returncode == 0, both(proc)
+    if importlib.util.find_spec("xdist") is None:
+        assert f"{len(nodes)} passed" in proc.stdout, both(proc)
+        return
     assignments = {
         node: worker for worker, node in re.findall(r"(?m)^\[(gw\d+)\].* PASSED (\S+)", proc.stdout)
     }
