@@ -160,13 +160,15 @@ machine.
 
 ### 5. Agents search, guided by one recommended line
 
-The final pointer line, settled by Q1 and Q2 on 2026-11-21 without revision:
+The pointer line uses the wording qualified in Q1 and Q2 on 2026-11-21,
+with `--index index` added to keep searches and reads on the machine index
+from directories that have a project index:
 
 > Before assuming a fact about this project or the owner's preferences,
-> search agent memory with `qmd search "<key words>" -n 10` (every agent,
-> every machine; `qmd get <docid>` reads a hit). If memories disagree, show
-> the owner each one with its path and ask which is right; never pick one
-> silently.
+> search agent memory with `qmd --index index search "<key words>" -n 10`
+> (every agent, every machine; `qmd --index index get <docid>` reads a hit).
+> If memories disagree, show the owner each one with its path and ask which
+> is right; never pick one silently.
 
 - Setup shows the line and the global instruction files it belongs in:
   `~/.claude/CLAUDE.md` and `CODEX_HOME/AGENTS.md`. On the owner's yes, it
@@ -175,9 +177,10 @@ The final pointer line, settled by Q1 and Q2 on 2026-11-21 without revision:
   mm prints the line and the resolved path and changes nothing. On the
   owner's machines both files link into a config repository: the owner adds
   the line there once, and that repository carries it to every machine.
-- mm never edits an agent's MCP configuration. Setup prints
-  `claude mcp add qmd -- qmd mcp` and `codex mcp add qmd -- qmd mcp` for
-  owners who want MCP. The line works through the CLI alone.
+- mm never edits an agent's MCP configuration. O9.3 calls for setup to print
+  the optional MCP commands. In Track 160A, the commands for adding MCP by
+  hand are in the [README](../../README.md#searching-agent-memory-qmd). The
+  pointer line works through the CLI alone.
 
 ### 6. Contradictions show up in one result list
 
@@ -436,7 +439,7 @@ and static `extensions/ad_hoc/instructions.md` stay local.
 
 #### Final pointer line and outcome
 
-Final pointer line (settled without revision):
+Pointer line used in Q1 and Q2 (settled without revision during qualification):
 
 > Before assuming a fact about this project or the owner's preferences,
 > search agent memory with `qmd search "<key words>" -n 10` (every agent,

@@ -2697,6 +2697,12 @@ def test_new_fleet_saves_relative_storage_path_as_absolute(env, tmp_path, monkey
 class TestInitMemorySetup160A:
     """Track 160A: qmd memory index, embeddings, and pointer line in mm init."""
 
+    def test_pointer_search_and_get_select_the_machine_index(self):
+        from mind_meld import memoryindex
+
+        assert '`qmd --index index search "<key words>" -n 10`' in memoryindex.POINTER_LINE
+        assert "`qmd --index index get <docid>`" in memoryindex.POINTER_LINE
+
     def _iso_home(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir(exist_ok=True)

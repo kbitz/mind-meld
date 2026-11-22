@@ -47,8 +47,9 @@ _GLOBAL_INDEX = ("--index", "index")
 
 POINTER_LINE = (
     "Before assuming a fact about this project or the owner's preferences, "
-    'search agent memory with `qmd search "<key words>" -n 10` (every agent, '
-    "every machine; `qmd get <docid>` reads a hit). If memories disagree, show "
+    'search agent memory with `qmd --index index search "<key words>" -n 10` '
+    "(every agent, every machine; `qmd --index index get <docid>` reads a hit). "
+    "If memories disagree, show "
     "the owner each one with its path and ask which is right; never pick one "
     "silently."
 )
