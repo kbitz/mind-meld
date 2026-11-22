@@ -17,7 +17,7 @@ import time
 import traceback
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -646,8 +646,10 @@ def init(
     each other machine.
 
     Joining asks for the storage path, a fleet machine's Syncthing device ID (on
-    a default Syncthing configuration), the device name and the sources first,
-    and saves those answers locally (never the passphrase). On a default
+    a default Syncthing configuration), the device name, the sources, and the
+    optional qmd memory index, semantic-search embeddings, and agent
+    instruction pointer line first, and saves those answers locally (never the
+    passphrase). On a default
     Syncthing configuration it adds the fleet device as introducer, prints this
     machine's device ID and short ID with both 'mm devices approve' commands
     to run on the fleet machine, waits up to 10 minutes for approval, accepts the 'mind-meld'
@@ -656,21 +658,16 @@ def init(
     stopped with Ctrl-C, it prints a waiting outcome ending 'Run: mm init',
     stops and writes nothing to the Mind Meld store; it never creates a key
     header). Once the header arrives and your passphrase verifies, it writes
-    .stignore, registers this device, saves config and pulls.
+    .stignore, registers this device, saves config, and pulls. After the pull,
+    it refreshes the memory index and adds the pointer line if chosen.
 
     Running init again on a configured machine asks before it replaces this
     device's entry.
     """
     if sys.stdin is None or getattr(sys.stdin, "closed", False):
         _init_needs_terminal()
-    try:
-        passphrase = initflow.init(new_fleet=new_fleet)
-    except typer.Abort:
-        if core._stdin_is_terminal():
-            raise
-        _init_needs_terminal()
-        return
-    if passphrase is not None:
+
+    def pull_join(passphrase: str, finish_memory_setup: Callable[[bool], None]) -> None:
         _attended_pull(
             from_device=None,
             source=None,
@@ -679,7 +676,15 @@ def init(
             conflict_mode="keep-both",
             passphrase=passphrase,
             join=True,
+            finish_memory_setup=finish_memory_setup,
         )
+
+    try:
+        initflow.init(new_fleet=new_fleet, pull_join=pull_join)
+    except typer.Abort:
+        if core._stdin_is_terminal():
+            raise
+        _init_needs_terminal()
 
 
 def _capture_notice(message: str) -> None:
@@ -2898,6 +2903,7 @@ def _attended_pull(
     conflict_mode: pullflow.ConflictMode,
     passphrase: str | None = None,
     join: bool = False,
+    finish_memory_setup: Callable[[bool], None] | None = None,
 ) -> None:
     """The body of `mm pull`, shared with `mm init`'s join (``join=True``).
 
@@ -2905,7 +2911,13 @@ def _attended_pull(
     it (or holds a stale entry) must not fail the join's own pull. It is passed
     as an argument, never through the environment.
     """
-    with _sync_outcome("pull", verbose=verbose, dry_run=dry_run):
+    with _sync_outcome("pull", verbose=verbose, dry_run=dry_run), ExitStack() as join_setup:
+        # Init has registered before this call. Finish independent local setup
+        # even if pull stops early, but defer the synced instruction file until
+        # delivery is confirmed. The callback runs before the pull outcome.
+        if finish_memory_setup is not None:
+            incomplete_delivery = True
+            join_setup.callback(lambda: finish_memory_setup(incomplete_delivery))
         with (
             _attended_sync_run(
                 "pull",
@@ -2969,6 +2981,15 @@ def _attended_pull(
                     syncthing_delivery=delivery_mode,
                 )
                 run["result"] = pulled
+                if finish_memory_setup is not None:
+                    incomplete_delivery = bool(
+                        pulled.no_peers
+                        or pulled.missing_peer_manifests
+                        or pulled.total_failed
+                        or pulled.total_waiting
+                        or pulled.waiting
+                        or pulled.corrupt_peer_count
+                    )
                 if not dry_run:
                     mesh_res = meshflow.run(
                         config,
@@ -3018,7 +3039,8 @@ def _attended_pull(
                                 mesh_res.superseded_registrations if mesh_res is not None else ()
                             ),
                         )
-                if not pulled.total_failed:
+                join_setup.close()
+                if finish_memory_setup is None and not pulled.total_failed:
                     _sync_memory_index(config)
                 _sync_update(config, verbose=verbose)
 

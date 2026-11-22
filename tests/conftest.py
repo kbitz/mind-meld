@@ -362,6 +362,22 @@ def _default_init_syncthing(request, monkeypatch) -> None:
     )
 
 
+@pytest.fixture
+def real_memory_setup_gate() -> None:
+    """Opt a test into running ``initflow._ask_memory_setup`` instead of the default stub."""
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _default_init_memory_setup(request, monkeypatch) -> None:
+    """Default ``initflow._ask_memory_setup`` to all-None answers unless opted in."""
+    if "real_memory_setup_gate" in request.fixturenames:
+        return
+    from mind_meld import initflow
+
+    monkeypatch.setattr(initflow, "_ask_memory_setup", lambda saved=None: (None, None, None))
+
+
 @pytest.fixture(autouse=True)
 def _isolate_identity_cache(monkeypatch, tmp_path) -> None:
     """Redirect ``mind_meld.identity.CACHE_PATH`` to a per-test path.

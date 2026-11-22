@@ -1844,6 +1844,11 @@ with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
 
 ## Syncthing-tolerant reads and waiting (Track 87A)
 
+A registered peer can have no visible manifest yet. `PullResult.missing_peer_manifests`
+holds that fact for the initial `mm init` pull. Init uses it to postpone writing
+synced Codex instructions until the fleet files arrive. A missing manifest still
+uses the existing pull outcome and waiting rules.
+
 Syncthing delivers files late and out of order, replaces them with a rename and
 leaves temporary and conflict files beside them. Storage reads tolerate that
 without treating it as corruption or failure. Tests use one shared folder,

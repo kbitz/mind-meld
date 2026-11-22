@@ -1521,6 +1521,9 @@ class JoinRecord:
     fleet_device_id: str | None
     device_name: str
     sources: tuple[str, ...]
+    memory_index: bool | None = None
+    embeddings: bool | None = None
+    pointer_line: bool | None = None
 
 
 def join_record_path() -> Path:
@@ -1554,11 +1557,24 @@ def save_join_record(record: JoinRecord) -> None:
             )
         if src not in valid_sources:
             raise ConfigError(f"config: unknown source '{safe_terminal_str(src)}' in join.sources.")
+    for key, val in (
+        ("memory_index", record.memory_index),
+        ("embeddings", record.embeddings),
+        ("pointer_line", record.pointer_line),
+    ):
+        if val is not None and not isinstance(val, bool):
+            raise ConfigError(f"config: join.{key} must be a boolean.")
     join_table: dict[str, Any] = {"storage_path": record.storage_path}
     if record.fleet_device_id is not None:
         join_table["fleet_device_id"] = record.fleet_device_id
     join_table["device_name"] = record.device_name
     join_table["sources"] = list(record.sources)
+    if record.memory_index is not None:
+        join_table["memory_index"] = record.memory_index
+    if record.embeddings is not None:
+        join_table["embeddings"] = record.embeddings
+    if record.pointer_line is not None:
+        join_table["pointer_line"] = record.pointer_line
     save_config({"join": join_table}, join_record_path())
 
 
@@ -1645,11 +1661,23 @@ def load_join_record() -> JoinRecord | None:
                 f"(unknown source '{safe_terminal_str(item)}' in join.sources)."
             )
         sources.append(item)
+    memory_answers: dict[str, bool | None] = {}
+    for key in ("memory_index", "embeddings", "pointer_line"):
+        val = join_table.get(key)
+        if val is not None and not isinstance(val, bool):
+            raise ConfigError(
+                f"config: {safe_terminal_str(record_path)} is not a valid join record "
+                f"(join.{key} must be a boolean)."
+            )
+        memory_answers[key] = val
     return JoinRecord(
         storage_path=storage_path,
         fleet_device_id=fleet_device_id,
         device_name=device_name,
         sources=tuple(sources),
+        memory_index=memory_answers["memory_index"],
+        embeddings=memory_answers["embeddings"],
+        pointer_line=memory_answers["pointer_line"],
     )
 
 
