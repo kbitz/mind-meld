@@ -24,6 +24,17 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Dedicated `mind-meld` qmd index (Track 163A).** Mind Meld now keeps its
+`mm-` collections in a dedicated `mind-meld` qmd index (`--index mind-meld`)
+instead of qmd's default index. After upgrading, run `mm memory-index on` or
+let an enabled sync refresh succeed on each machine that uses the index.
+This builds the dedicated index. On machines with a legacy refresh record,
+it also removes the old `mm-` collections from the default index. Then use
+[Agent setup](#agent-setup) to replace the old pointer line. Complete the
+refreshes before editing shared instruction files. Turning the index off
+before migration can clear the record and leave legacy collections in the
+default index.
+
 **Codex memory folded into `codex` (Track 161A).** Codex memory copies now
 sync with the `codex` source. Run `mm migrate-config` on each machine with
 an old `codex-memory` source entry or name in `disabled_sources` to remove it.
@@ -722,7 +733,7 @@ mm pull --dry-run   # preview: changes nothing except the lock file
 mm pull    # download from another device, any time
 ```
 
-Plain `mm init` asks whether to start a new fleet or join an existing one (`mm init --new-fleet` skips that question). Joining requires the fleet's existing key header. It asks for the storage path, a fleet machine's Syncthing device ID if mm needs to pair, the device name (on macOS, the Mac's local hostname when available, otherwise the machine's hostname), and the sources. When `qmd` 2.8.3+ runs, it asks whether to index agent memories (`Enter = y`) and, if you enable indexing, whether to download qmd's 334 MB embedding model for semantic search (`Enter = n`). It offers to add the recommended [memory-search pointer line](#searching-agent-memory-qmd) (`Enter = n`) even when qmd is unavailable. It saves those answers in `~/.config/mind-meld/join.toml` and asks for the passphrase only after the header arrives. After registration and the initial pull, a yes to the index runs the first refresh and starts `qmd embed` in the background if chosen. A yes to the pointer line updates regular instruction files once. If Codex's synced instructions could still be in transit, init prints the line for you to add after the files arrive. During mm-managed Syncthing setup for a new fleet or a join that needs pairing, `mm init` sets the local Syncthing device name to the name you enter. On a join, this happens before adding the fleet machine so it first sees that name.
+Plain `mm init` asks whether to start a new fleet or join an existing one (`mm init --new-fleet` skips that question). Joining requires the fleet's existing key header. It asks for the storage path, a fleet machine's Syncthing device ID if mm needs to pair, the device name (on macOS, the Mac's local hostname when available, otherwise the machine's hostname), and the sources. When `qmd` 2.8.3+ runs, it asks whether to index agent memories (`Enter = y`) and, if you enable indexing, whether to download qmd's 334 MB embedding model for semantic search (`Enter = n`). It offers to add the recommended [memory-search pointer line](#agent-setup) (`Enter = n`) even when qmd is unavailable. It saves those answers in `~/.config/mind-meld/join.toml` and asks for the passphrase only after the header arrives. After registration and the initial pull, a yes to the index refreshes the `mind-meld` index and starts `qmd --index mind-meld embed` in the background if chosen. A yes to the pointer line updates regular instruction files once. If Codex's synced instructions could still be in transit, init prints the line for you to add after the files arrive. During mm-managed Syncthing setup for a new fleet or a join that needs pairing, `mm init` sets the local Syncthing device name to the name you enter. On a join, this happens before adding the fleet machine so it first sees that name.
 
 When managed Syncthing needs pairing, `mm init` prints this machine's Syncthing device ID (with its 7-character short ID) and the `mm devices approve <short-id>` (plus full-ID `mm devices approve <device-id>`) command to run on the fleet machine and waits about 10 minutes for approval, plus time for local Syncthing requests. After accepting the folder offer, or when the folder already shares with a peer, it waits about two minutes if the key header is still missing. It then verifies the passphrase and joins once the header is present.
 
@@ -974,19 +985,40 @@ Mind Meld can maintain one local [qmd](https://github.com/tobi/qmd) search index
 - **Pointer line:** `mm init` shows the recommended agent-instruction search line and asks whether to add it (`Enter = n`) to `~/.claude/CLAUDE.md` and `CODEX_HOME/AGENTS.md`. On yes, regular files inside your home folder have the line appended once (reruns add no duplicate). For a symlinked file or containing folder, or a path that resolves outside your home folder, init prints the line and resolved path for you to add by hand. The line is never removed automatically.
 - **Commands:**
   - `mm memory-index` — show whether the index and embeddings are enabled, the qmd version, the `mm-` collections verified from the last refresh record, and the last refresh result (read-only).
-  - `mm memory-index on` — verify qmd 2.8.3+, enable `[memory_index]` in `~/.config/mind-meld/config.toml`, reconcile collections, and run an initial refresh.
-  - `mm memory-index off` — disable the index and remove only `mm-` collections from qmd.
-- **Automatic refresh:** attended `mm push` and `mm pull` reconcile `mm-` collections and run `qmd update` after releasing the sync lock (printing nothing on success). `mm autopush` and `mm autopull` run the same refresh detached in the background and never wait or print. Previews (`--dry-run`) never refresh.
-- **Machine index:** The pointer line uses `qmd --index index search` and `qmd --index index get` so both commands use Mind Meld’s machine-wide index, even from a directory with a project index.
-- **Other qmd collections:** Mind Meld adds or removes only `mm-`-prefixed collections and never edits qmd's files directly. Because `qmd update` reindexes all configured qmd collections, any non-`mm-` collections you keep in qmd are reindexed too, but never added or removed by Mind Meld.
-- **Embeddings (optional):** keyword search (`qmd search`) is the baseline and downloads no models. Answer yes to the embeddings question during `mm init` (or set `embeddings = true` under `[memory_index]` in `~/.config/mind-meld/config.toml`) to run `qmd embed` in the background after each refresh (downloads qmd's ~334 MB embedding model on first run).
+  - `mm memory-index on` — verify qmd 2.8.3+ before enabling `[memory_index]` in `~/.config/mind-meld/config.toml`. Reconcile collections, refresh the index, and print the [Agent setup](#agent-setup) link on success. A failed version check exits with code 1 and prints the install command.
+  - `mm memory-index off` — disable refresh and remove the `mm-` collections from the dedicated `mind-meld` index.
+- **Automatic refresh:** attended `mm push` and `mm pull` reconcile `mm-` collections in `--index mind-meld` and run `qmd --index mind-meld update` after releasing the sync lock (printing nothing on success). `mm autopush` and `mm autopull` run the same refresh detached in the background and never wait or print. Previews (`--dry-run`) never refresh.
+- **Dedicated `mind-meld` index:** Routine operations that open an index select `--index mind-meld` (by default, `~/.cache/qmd/mind-meld.sqlite` and `~/.config/qmd/mind-meld.yml`). If a valid refresh record identifies a legacy installation, cleanup follows the first successful refresh of the dedicated index. It removes the legacy `mm-` collections from the default index. Each enabled refresh retries any incomplete cleanup.
+- **Other qmd collections:** Mind Meld adds and removes only collections with the `mm-` prefix through qmd's CLI. Update and embed apply to every collection in the dedicated index. Keep your own collections in the default or a project index to leave them outside those operations.
+- **Embeddings (optional):** keyword search (`qmd --index mind-meld search`) is the baseline and downloads no models. Answer yes to the embeddings question during `mm init` (or set `embeddings = true` under `[memory_index]` in `~/.config/mind-meld/config.toml`) to run `qmd --index mind-meld embed` in the background after each successful refresh (downloads qmd's ~334 MB embedding model on first run).
 - **Failures and diagnostics:** a missing qmd or a failed/timed-out refresh never changes a sync's outcome or exit code. `mm status` shows one line with its fix when the index is enabled and unhealthy; `mm diag` shows the qmd version, `mm-` collections, and last refresh result.
-- **Optional MCP setup (manual):** Mind Meld never edits agent MCP configs. If you want Claude Code or Codex to query qmd over MCP, run these yourself:
 
-```bash
-claude mcp add qmd -- qmd mcp
-codex mcp add qmd -- qmd mcp
-```
+#### Agent setup
+
+1. **Add the pointer line** to your global agent instruction files (`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, or `AGENTS.md` in your custom `CODEX_HOME`). Edit the target by hand for symlinked files. After the per-machine refresh in [Upgrading](#upgrading), replace any old `--index index` pointer with this line:
+
+   > If the owner mentions something they discussed with an agent before and you can't find it in your own memory, search every agent's memory with `qmd --index mind-meld search "<key words>" -n 10` (`qmd --index mind-meld get <docid>` reads a hit). If memories disagree, show the owner each one with its path and ask which is right.
+
+2. **Claude Code allow rules:** add these two rules to `~/.claude/settings.json` under `permissions.allow` so Claude Code can search and read Mind Meld's index without prompting:
+
+   ```json
+   "Bash(qmd --index mind-meld search:*)",
+   "Bash(qmd --index mind-meld get:*)"
+   ```
+
+3. **Codex sandbox writable root.** qmd 2.8.3 opens `mind-meld.sqlite` in WAL mode for `search` and `get`. With `workspace-write`, add the absolute path of the folder that contains this database to `sandbox_workspace_write.writable_roots` in your Codex `config.toml`. The folder is `~/.cache/qmd` by default, or `$XDG_CACHE_HOME/qmd` when that variable is set for qmd. Append the directory to the existing list if you have one.
+
+   ```toml
+   [sandbox_workspace_write]
+   writable_roots = ["/home/user/.cache/qmd"]
+   ```
+
+4. **Optional MCP setup (manual):** Mind Meld never edits agent MCP configs. If you want Claude Code or Codex to query Mind Meld's index over MCP instead of (or alongside) the CLI, run these yourself:
+
+   ```bash
+   claude mcp add mind-meld -- qmd --index mind-meld mcp
+   codex mcp add mind-meld -- qmd --index mind-meld mcp
+   ```
 
 ### Grok Build
 
@@ -1129,7 +1161,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm gc --dry-run` | Preview this device's orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
 | `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or is the same file as the sidecar (a symlink or hard link between them), or cannot be hashed, is preserved |
 | `mm sources` | List configured sync sources |
-| `mm memory-index [on\|off]` | Show or toggle this machine's local qmd memory index (`on` verifies qmd 2.8.3+, enables `[memory_index]` in local `config.toml`, and refreshes; `off` disables and removes only `mm-` collections; bare form is read-only) |
+| `mm memory-index [on\|off]` | Show or toggle the dedicated `mind-meld` qmd index. `on` verifies qmd 2.8.3+, enables `[memory_index]` in local `config.toml`, and refreshes. `off` disables refresh and removes the dedicated index's `mm-` collections. The bare form is read-only. |
 | `mm log` | Query local `~/.config/mind-meld/state.db` history (legacy JSONL before import). Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed\|deleted}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
 | `mm migrate-config` | Clean up [legacy Codex memory settings](#upgrading), append any missing recommended `exclude_patterns`, and set `include_patterns` to the current default when that key is absent or still a previous default list. That update also adds `analytics/stage-runs` to an old-default `gstack-extend` entry's `include_dirs` ([details](#syncing-gstack-extend)). An edited list, even an empty one, stays. Idempotent; `--dry-run` to preview, `--yes` to skip the prompt |
 | `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Runs repository discovery to completion first (30 s budget), so it reads every discovered repository's local email. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |

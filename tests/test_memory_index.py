@@ -56,21 +56,53 @@ _QMD_STUB_SOURCE = textwrap.dedent(
     SLEEP_S = float(os.environ.get("QMD_STUB_SLEEP", "0") or "0")
 
 
-    def log_call(argv):
+    def log_call(selected_index, raw_argv, cmd_argv):
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "index": selected_index,
+            "argv": raw_argv,
+            "cmd": cmd_argv,
+            "cwd": os.getcwd(),
+        }
         with LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(argv) + "\\n")
+            fh.write(json.dumps(entry) + "\\n")
 
 
     def load_state():
         if not STATE_PATH.exists():
-            return {"collections": {}, "docs": {}}
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            return {"indexes": {}}
+        raw = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        if "indexes" not in raw:
+            return {"indexes": {"mind-meld": raw}}
+        return raw
+
+
+    def index_bucket(state, index_name):
+        return state["indexes"].setdefault(index_name, {"collections": {}, "docs": {}})
 
 
     def save_state(state):
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         STATE_PATH.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+
+    def find_project_index():
+        cur = Path.cwd().resolve()
+        for parent in (cur, *cur.parents):
+            candidate = parent / ".qmd" / "index.yml"
+            if candidate.is_file():
+                return f"project:{candidate}"
+        return "index"
+
+
+    def should_fail(selected_index, *keys):
+        if not FAIL_CMD:
+            return False
+        rules = [r.strip() for r in FAIL_CMD.split(",") if r.strip()]
+        for key in keys:
+            if key in rules or f"{selected_index}:{key}" in rules:
+                return True
+        return False
 
 
     def expand_braces(pattern):
@@ -125,17 +157,23 @@ _QMD_STUB_SOURCE = textwrap.dedent(
 
 
     def main():
-        argv = sys.argv[1:]
-        if argv[:2] == ["--index", "index"]:
+        raw_argv = list(sys.argv[1:])
+        argv = list(raw_argv)
+        selected_index = None
+        if len(argv) >= 2 and argv[0] == "--index":
+            selected_index = argv[1]
             argv = argv[2:]
-        log_call(argv)
+        if not argv:
+            log_call(selected_index, raw_argv, argv)
+            sys.exit(1)
+        if argv[0] != "--version" and selected_index is None:
+            selected_index = find_project_index()
+        log_call(selected_index, raw_argv, argv)
         if SLEEP_S > 0:
             time.sleep(SLEEP_S)
-        if not argv:
-            sys.exit(1)
 
         if argv[0] == "--version":
-            if FAIL_CMD == "version":
+            if should_fail(selected_index, "version"):
                 sys.exit(1)
             print(VERSION)
             return
@@ -144,11 +182,16 @@ _QMD_STUB_SOURCE = textwrap.dedent(
             if len(argv) < 2:
                 sys.exit(1)
             sub = argv[1]
-            if FAIL_CMD == f"collection {sub}" or FAIL_CMD == sub:
+            target_name = argv[2] if len(argv) >= 3 else ""
+            fail_keys = [f"collection {sub}", sub]
+            if target_name:
+                fail_keys.append(f"collection {sub}:{target_name}")
+            if should_fail(selected_index, *fail_keys):
                 sys.exit(1)
             state = load_state()
-            cols = state["collections"]
-            docs = state["docs"]
+            bucket = index_bucket(state, selected_index)
+            cols = bucket["collections"]
+            docs = bucket["docs"]
 
             if sub == "list":
                 if "QMD_STUB_LIST_STDOUT" in os.environ:
@@ -212,21 +255,22 @@ _QMD_STUB_SOURCE = textwrap.dedent(
             sys.exit(1)
 
         if argv[0] == "update":
-            if FAIL_CMD == "update":
+            if should_fail(selected_index, "update"):
                 sys.exit(1)
             state = load_state()
-            for name, info in state["collections"].items():
-                state["docs"][name] = scan_collection(info["path"], info["mask"])
+            bucket = index_bucket(state, selected_index)
+            for name, info in bucket["collections"].items():
+                bucket["docs"][name] = scan_collection(info["path"], info["mask"])
             save_state(state)
             return
 
         if argv[0] == "embed":
-            if FAIL_CMD == "embed":
+            if should_fail(selected_index, "embed"):
                 sys.exit(1)
             return
 
         if argv[0] == "search":
-            if FAIL_CMD == "search":
+            if should_fail(selected_index, "search"):
                 sys.exit(1)
             query = argv[1] if len(argv) > 1 else ""
             limit = 10
@@ -235,9 +279,10 @@ _QMD_STUB_SOURCE = textwrap.dedent(
                 if idx + 1 < len(argv):
                     limit = int(argv[idx + 1])
             state = load_state()
+            bucket = index_bucket(state, selected_index)
             hits = []
-            for name in sorted(state["docs"]):
-                for rel, body in sorted(state["docs"][name].items()):
+            for name in sorted(bucket["docs"]):
+                for rel, body in sorted(bucket["docs"][name].items()):
                     if query.lower() in body.lower():
                         hits.append(f"qmd://{name}/{rel}")
             if not hits:
@@ -278,7 +323,7 @@ def _make_qmd_stub(
     monkeypatch.setenv("QMD_STUB_FAIL", fail)
     monkeypatch.setenv("QMD_STUB_SLEEP", str(sleep_s) if sleep_s else "")
 
-    def calls() -> list[list[str]]:
+    def indexed_calls() -> list[dict]:
         if not log_path.exists():
             return []
         return [
@@ -287,25 +332,54 @@ def _make_qmd_stub(
             if line.strip()
         ]
 
-    def state() -> dict:
-        if not state_path.exists():
-            return {"collections": {}, "docs": {}}
-        return json.loads(state_path.read_text(encoding="utf-8"))
+    def calls() -> list[list[str]]:
+        return [entry["cmd"] for entry in indexed_calls()]
 
-    def search(query: str, n: int = 10) -> str:
+    def _load_full_state() -> dict:
+        if not state_path.exists():
+            return {"indexes": {}}
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+        if "indexes" not in raw:
+            return {"indexes": {"mind-meld": raw}}
+        return raw
+
+    def state(index: str = "mind-meld") -> dict:
+        full = _load_full_state()
+        return full["indexes"].get(index, {"collections": {}, "docs": {}})
+
+    def search(
+        query: str,
+        n: int = 10,
+        *,
+        index: str | None = "mind-meld",
+        cwd: Path | None = None,
+    ) -> str:
+        cmd = [str(script)]
+        if index is not None:
+            cmd.extend(["--index", index])
+        cmd.extend(["search", query, "-n", str(n)])
         proc = subprocess.run(
-            [str(script), "search", query, "-n", str(n)],
+            cmd,
+            cwd=str(cwd) if cwd is not None else None,
             capture_output=True,
             text=True,
             check=True,
         )
         return proc.stdout
 
-    def seed_collection(name: str, path: Path, mask: str = "**/*.md") -> None:
-        st = state()
-        st["collections"][name] = {"path": str(path), "mask": mask}
-        st["docs"][name] = {}
-        state_path.write_text(json.dumps(st, sort_keys=True), encoding="utf-8")
+    def seed_collection(
+        name: str,
+        path: Path,
+        mask: str = "**/*.md",
+        *,
+        index: str = "mind-meld",
+        docs: dict[str, str] | None = None,
+    ) -> None:
+        full = _load_full_state()
+        bucket = full["indexes"].setdefault(index, {"collections": {}, "docs": {}})
+        bucket["collections"][name] = {"path": str(path), "mask": mask}
+        bucket["docs"][name] = dict(docs) if docs is not None else {}
+        state_path.write_text(json.dumps(full, sort_keys=True), encoding="utf-8")
 
     return SimpleNamespace(
         bin_dir=bin_dir,
@@ -313,6 +387,7 @@ def _make_qmd_stub(
         state_path=state_path,
         log_path=log_path,
         calls=calls,
+        indexed_calls=indexed_calls,
         state=state,
         search=search,
         seed_collection=seed_collection,
@@ -577,6 +652,7 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
     stored = json.loads(memoryindex.state_path().read_text(encoding="utf-8"))
     assert stored == {
         "version": 1,
+        "index": "mind-meld",
         "result": "ok",
         "at": res_ok.at,
         "qmd_version": "2.8.3",
@@ -632,7 +708,7 @@ def test_refresh_outcomes_reconcile_embeddings_timeout_and_contention(
     monkeypatch.setenv("INDEX_PATH", str(tmp_path / "separate.sqlite"))
     res_emb = memoryindex.refresh(env.cfg)
     assert res_emb.status == "ok"
-    embed_calls = [c for c in popen_calls if c[0][1:] == ["--index", "index", "embed"]]
+    embed_calls = [c for c in popen_calls if c[0][1:] == ["--index", "mind-meld", "embed"]]
     assert len(embed_calls) == 1
     assert embed_calls[0][1]["start_new_session"] is True
     assert embed_calls[0][1]["stdin"] is subprocess.DEVNULL
@@ -792,10 +868,11 @@ def test_memory_index_command_bare_on_off(tmp_path: Path, monkeypatch: pytest.Mo
     assert config.load_config(env.cfg_path)["memory_index"] == {"enabled": True, "embeddings": True}
     assert memoryindex.read_state()["result"] == "failed"
 
-    # `on` succeeds, preserves embeddings=True, prints outcome + off fix.
+    # `on` succeeds, preserves embeddings=True, prints outcome with setup link + off fix.
     r_on = runner.invoke(cli.app, ["memory-index", "on"])
     assert r_on.exit_code == 0, r_on.output
     assert "Memory-Index:" in r_on.output
+    assert memoryindex.AGENT_SETUP_URL in r_on.output
     assert "Run: mm memory-index off" in r_on.output
     reloaded = config.load_config(env.cfg_path)
     assert reloaded["memory_index"] == {"enabled": True, "embeddings": True}
@@ -821,7 +898,7 @@ def test_memory_index_command_bare_on_off(tmp_path: Path, monkeypatch: pytest.Mo
     assert "keep-me" not in r_bare.output
     assert bare_calls == [
         [str(stub.script), "--version"],
-        [str(stub.script), "--index", "index", "collection", "show", "mm-claude"],
+        [str(stub.script), "--index", "mind-meld", "collection", "show", "mm-claude"],
     ]
     assert [path.read_bytes() for path in observed_files] == before_bare
 
@@ -1483,10 +1560,16 @@ def test_diag_memory_index_json_off_on_and_sanitization(
 def test_mcp_add_commands_documented_only_never_in_src() -> None:
     root = Path(__file__).resolve().parent.parent
     readme = (root / "README.md").read_text(encoding="utf-8")
-    for cmd in ("claude mcp add qmd -- qmd mcp", "codex mcp add qmd -- qmd mcp"):
+    for cmd in (
+        "claude mcp add mind-meld -- qmd --index mind-meld mcp",
+        "codex mcp add mind-meld -- qmd --index mind-meld mcp",
+    ):
         assert cmd in readme
         for py in (root / "src").rglob("*.py"):
-            assert cmd not in py.read_text(encoding="utf-8"), f"{py} must not contain {cmd!r}"
+            content = py.read_text(encoding="utf-8")
+            assert cmd not in content, f"{py} must not contain {cmd!r}"
+            assert "claude mcp add" not in content, f"{py} must not contain 'claude mcp add'"
+            assert "codex mcp add" not in content, f"{py} must not contain 'codex mcp add'"
 
 
 # ── Track 162A: Old/missing qmd hint, malformed qmd output, off lock retry ───
@@ -1715,3 +1798,386 @@ def test_memory_index_off_waits_for_active_refresh_and_removes_collections(
     assert "mm-claude" not in stub.state()["collections"]
     assert "keep-me" in stub.state()["collections"]
     assert memoryindex.read_state()["state"] == "missing"
+
+
+# ── Track 163A: Dedicated mind-meld index, migration, preflight, setup link ──
+
+
+def test_named_index_migration_isolation_retry_and_fresh_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _make_qmd_stub(tmp_path, monkeypatch)
+
+    # Create a project directory with its own .qmd/index.yml and chdir into it.
+    project_dir = tmp_path / "project-repo"
+    (project_dir / ".qmd").mkdir(parents=True)
+    proj_yml = project_dir / ".qmd" / "index.yml"
+    proj_yml.write_text("collections: {}\n", encoding="utf-8")
+    proj_index_key = f"project:{proj_yml.resolve()}"
+    proj_notes_dir = project_dir / "docs"
+    proj_notes_dir.mkdir()
+    (proj_notes_dir / "spec.md").write_text("project-only-fact-163a\n", encoding="utf-8")
+    stub.seed_collection(
+        "proj-notes",
+        proj_notes_dir,
+        index=proj_index_key,
+        docs={"spec.md": "project-only-fact-163a\n"},
+    )
+
+    # Seed default `index` with a user `notes` collection plus legacy `mm-` collections.
+    notes_dir = tmp_path / "default-notes"
+    notes_dir.mkdir()
+    (notes_dir / "journal.md").write_text("default-index-notes-fact\n", encoding="utf-8")
+    stub.seed_collection(
+        "notes",
+        notes_dir,
+        index="index",
+        docs={"journal.md": "default-index-notes-fact\n"},
+    )
+
+    claude_dir = tmp_path / "claude"
+    (claude_dir / "projects" / "p" / "memory").mkdir(parents=True)
+    (claude_dir / "projects" / "p" / "memory" / "note.md").write_text(
+        "mind-meld-claude-fact-163a\n", encoding="utf-8"
+    )
+    grok_dir = tmp_path / "grok"
+    (grok_dir / "memory-v2" / "global" / "topics").mkdir(parents=True)
+    (grok_dir / "memory-v2" / "global" / "topics" / "t.md").write_text(
+        "mind-meld-grok-fact-163a\n", encoding="utf-8"
+    )
+
+    stub.seed_collection("mm-claude", claude_dir / "projects", "*/memory/**/*.md", index="index")
+    stub.seed_collection("mm-grok", grok_dir / "memory-v2", "**/topics/**/*.md", index="index")
+
+    env = _setup_device_env(
+        tmp_path,
+        monkeypatch,
+        device_id="mig163a1",
+        enabled=False,
+        embeddings=True,
+        sources=[
+            {"name": "claude", "path": str(claude_dir), "type": "claude"},
+            {"name": "grok", "path": str(grok_dir), "type": "grok"},
+        ],
+    )
+    monkeypatch.chdir(project_dir)
+
+    # Write a legacy v1 memory-index.json (no "index" field).
+    legacy_record = {
+        "version": 1,
+        "result": "ok",
+        "at": "2026-11-21T12:00:00+00:00",
+        "qmd_version": "2.8.3",
+        "collections": ["mm-claude", "mm-grok"],
+    }
+    memoryindex.state_path().write_text(json.dumps(legacy_record), encoding="utf-8")
+    assert memoryindex.read_state()["index"] == "index"
+
+    # Invalid "index" values validate as malformed.
+    for bad_index in ("other", 123, None, ""):
+        assert memoryindex._validate_state_record({**legacy_record, "index": bad_index}) is None
+
+    # Migration on `mm memory-index on`: creates/updates mind-meld, removes only legacy mm-
+    # collections from default `index`, never updates/embeds default or project index.
+    popen_calls: list[list[str]] = []
+    spawned_embeds: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def spy_popen(cmd, **kwargs):
+        cmd_list = list(cmd)
+        popen_calls.append(cmd_list)
+        proc = real_popen(cmd, **kwargs)
+        if cmd_list[-1:] == ["embed"]:
+            spawned_embeds.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", spy_popen)
+    r_on = runner.invoke(cli.app, ["memory-index", "on"])
+    monkeypatch.setattr(subprocess, "Popen", real_popen)
+    for proc in spawned_embeds:
+        proc.wait(timeout=5.0)
+    spawned_embeds.clear()
+
+    assert r_on.exit_code == 0, r_on.output
+    assert set(stub.state("mind-meld")["collections"]) == {"mm-claude", "mm-grok"}
+    assert set(stub.state("index")["collections"]) == {"notes"}
+    assert set(stub.state(proj_index_key)["collections"]) == {"proj-notes"}
+
+    # Zero update/embed calls on default or project index; embed ran on mind-meld.
+    assert [c for c in popen_calls if c[1:] == ["--index", "mind-meld", "embed"]]
+    for entry in stub.indexed_calls():
+        if entry["cmd"] and entry["cmd"][0] in ("update", "embed"):
+            assert entry["index"] == "mind-meld"
+        assert entry["index"] != proj_index_key
+
+    stored = json.loads(memoryindex.state_path().read_text(encoding="utf-8"))
+    assert stored["index"] == "mind-meld"
+    assert stored["result"] == "ok"
+    assert stored["collections"] == ["mm-claude", "mm-grok"]
+
+    # Search isolation across mind-meld, default index, and project-local index.
+    assert "qmd://mm-claude/p/memory/note.md" in stub.search(
+        "mind-meld-claude-fact-163a", index="mind-meld", cwd=project_dir
+    )
+    assert "No results found." in stub.search(
+        "default-index-notes-fact", index="mind-meld", cwd=project_dir
+    )
+    assert "qmd://notes/journal.md" in stub.search(
+        "default-index-notes-fact", index="index", cwd=project_dir
+    )
+    assert "No results found." in stub.search(
+        "mind-meld-claude-fact-163a", index="index", cwd=project_dir
+    )
+    assert "qmd://proj-notes/spec.md" in stub.search(
+        "project-only-fact-163a", index=None, cwd=project_dir
+    )
+    assert "No results found." in stub.search(
+        "mind-meld-claude-fact-163a", index=None, cwd=project_dir
+    )
+
+    # Routine refresh after migration makes zero calls to default or project index.
+    enabled_cfg = config.load_config(env.cfg_path)
+    before_routine = len(stub.indexed_calls())
+    with monkeypatch.context() as mp:
+        mp.setattr(subprocess, "Popen", spy_popen)
+        assert memoryindex.refresh(enabled_cfg).status == "ok"
+    for proc in spawned_embeds:
+        proc.wait(timeout=5.0)
+    spawned_embeds.clear()
+    routine_calls = stub.indexed_calls()[before_routine:]
+    assert all(e["index"] in (None, "mind-meld") for e in routine_calls)
+
+    # Write-free bare `mm memory-index` and `mm diag --json` inspect only `--index mind-meld`.
+    observed_files = (env.cfg_path, memoryindex.state_path(), stub.state_path)
+    before_inspect = [p.read_bytes() for p in observed_files]
+    before_inspect_calls = len(stub.indexed_calls())
+    r_bare = runner.invoke(cli.app, ["memory-index"])
+    assert r_bare.exit_code == 0, r_bare.output
+    assert "mm-claude" in r_bare.output
+    assert "notes" not in r_bare.output
+    r_diag = runner.invoke(cli.app, ["diag", "--json"])
+    assert r_diag.exit_code == 0, r_diag.output
+    diag_view = json.loads(r_diag.output)["memory_index"]
+    assert set(diag_view["last_refresh"]) == {"state", "result", "at"}
+    assert diag_view["collections"] == ["mm-claude", "mm-grok"]
+    assert [p.read_bytes() for p in observed_files] == before_inspect
+    inspect_calls = stub.indexed_calls()[before_inspect_calls:]
+    assert all(e["index"] in (None, "mind-meld") for e in inspect_calls)
+    assert all(e["cmd"][0] in ("--version", "collection") for e in inspect_calls)
+
+    # Partial cleanup failure during enabled refresh keeps index="index", defers embed,
+    # retains reconciled mind-meld collections, and retries cleanly on next refresh.
+    stub.seed_collection("mm-claude", claude_dir / "projects", "*/memory/**/*.md", index="index")
+    stub.seed_collection("mm-grok", grok_dir / "memory-v2", "**/topics/**/*.md", index="index")
+    memoryindex.state_path().write_text(json.dumps(legacy_record), encoding="utf-8")
+
+    popen_partial: list[list[str]] = []
+
+    def spy_partial(cmd, **kwargs):
+        popen_partial.append(list(cmd))
+        return real_popen(cmd, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setenv("QMD_STUB_FAIL", "index:collection remove:mm-grok")
+        mp.setattr(subprocess, "Popen", spy_partial)
+        res_partial = memoryindex.refresh(enabled_cfg)
+    assert res_partial.status == "failed"
+    assert not any(c[1:] == ["--index", "mind-meld", "embed"] for c in popen_partial)
+    partial_stored = json.loads(memoryindex.state_path().read_text(encoding="utf-8"))
+    assert partial_stored["index"] == "index"
+    assert partial_stored["result"] == "failed"
+    assert partial_stored["collections"] == ["mm-claude", "mm-grok"]
+    assert set(stub.state("index")["collections"]) == {"notes", "mm-grok"}
+
+    popen_retry: list[list[str]] = []
+
+    def spy_retry(cmd, **kwargs):
+        popen_retry.append(list(cmd))
+        return real_popen(cmd, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(subprocess, "Popen", spy_retry)
+        res_retry = memoryindex.refresh(enabled_cfg)
+    assert res_retry.status == "ok"
+    assert any(c[1:] == ["--index", "mind-meld", "embed"] for c in popen_retry)
+    retry_stored = json.loads(memoryindex.state_path().read_text(encoding="utf-8"))
+    assert retry_stored["index"] == "mind-meld"
+    assert retry_stored["result"] == "ok"
+    assert set(stub.state("index")["collections"]) == {"notes"}
+
+    # `mm memory-index off` removes only mm- collections from mind-meld;
+    # default and project indexes stay intact.
+    r_off = runner.invoke(cli.app, ["memory-index", "off"])
+    assert r_off.exit_code == 0, r_off.output
+    assert stub.state("mind-meld")["collections"] == {}
+    assert set(stub.state("index")["collections"]) == {"notes"}
+    assert set(stub.state(proj_index_key)["collections"]) == {"proj-notes"}
+
+    # Fresh installation (no prior memory-index.json) makes zero calls to default or project index.
+    memoryindex.state_path().unlink(missing_ok=True)
+    before_fresh = len(stub.indexed_calls())
+    r_fresh = runner.invoke(cli.app, ["memory-index", "on"])
+    assert r_fresh.exit_code == 0, r_fresh.output
+    fresh_calls = stub.indexed_calls()[before_fresh:]
+    assert all(e["index"] in (None, "mind-meld") for e in fresh_calls)
+    assert set(stub.state("index")["collections"]) == {"notes"}
+    assert set(stub.state(proj_index_key)["collections"]) == {"proj-notes"}
+
+
+def test_memory_index_on_installed_qmd_preflight_failures_preserve_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _make_qmd_stub(tmp_path, monkeypatch)
+    claude_dir = tmp_path / "claude"
+    (claude_dir / "projects" / "p" / "memory").mkdir(parents=True)
+    user_dir = tmp_path / "user-docs"
+    user_dir.mkdir()
+    stub.seed_collection("keep-me", user_dir, index="mind-meld")
+    stub.seed_collection("notes", user_dir, index="index")
+
+    env = _setup_device_env(
+        tmp_path,
+        monkeypatch,
+        device_id="pre163a1",
+        enabled=False,
+        embeddings=True,
+        sources=[{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+    )
+
+    prior_record_bytes = json.dumps(
+        {
+            "version": 1,
+            "result": "ok",
+            "at": "2026-11-21T12:00:00+00:00",
+            "qmd_version": "2.8.3",
+            "collections": ["mm-claude"],
+        }
+    ).encode("utf-8")
+
+    cfg_before = env.cfg_path.read_bytes()
+    stub_before = stub.state_path.read_bytes()
+    expected_hint = memoryindex.install_hint()
+
+    for with_existing_state in (False, True):
+        if with_existing_state:
+            memoryindex.state_path().write_bytes(prior_record_bytes)
+        else:
+            memoryindex.state_path().unlink(missing_ok=True)
+
+        # (a) Nonzero exit on --version
+        before = len(stub.calls())
+        with monkeypatch.context() as mp:
+            mp.setenv("QMD_STUB_FAIL", "version")
+            res = runner.invoke(cli.app, ["memory-index", "on"])
+        assert res.exit_code == 1
+        assert res.stdout == ""
+        assert res.stderr.splitlines()[0] == "mm: error: could not verify qmd 2.8.3+ (failed)."
+        assert res.stderr.splitlines()[-1] == f"Run: {expected_hint}"
+        assert env.cfg_path.read_bytes() == cfg_before
+        assert stub.state_path.read_bytes() == stub_before
+        assert stub.calls()[before:] == [["--version"]]
+        if with_existing_state:
+            assert memoryindex.state_path().read_bytes() == prior_record_bytes
+        else:
+            assert not memoryindex.state_path().exists()
+
+        # (b) Exit 0 with unparseable stdout
+        for bad_stdout in (
+            "qmd dev-snapshot",
+            "qmd dev-snapshot (Node 26.13.1)",
+            "qmd 2.8.3broken",
+            "",
+        ):
+            before = len(stub.calls())
+            with monkeypatch.context() as mp:
+                mp.setenv("QMD_STUB_VERSION", bad_stdout)
+                res = runner.invoke(cli.app, ["memory-index", "on"])
+            assert res.exit_code == 1
+            assert res.stdout == ""
+            assert res.stderr.splitlines()[0] == "mm: error: could not verify qmd 2.8.3+ (failed)."
+            assert res.stderr.splitlines()[-1] == f"Run: {expected_hint}"
+            assert env.cfg_path.read_bytes() == cfg_before
+            assert stub.state_path.read_bytes() == stub_before
+            assert stub.calls()[before:] == [["--version"]]
+            if with_existing_state:
+                assert memoryindex.state_path().read_bytes() == prior_record_bytes
+            else:
+                assert not memoryindex.state_path().exists()
+
+        # (c) Timeout on --version (deterministic Popen stub + SIGKILL assertion)
+        attempted_argvs: list[list[str]] = []
+        killed: list[tuple[object, int]] = []
+        sentinel_pid = object()
+
+        def timeout_popen(argv, **_kwargs):
+            attempted_argvs.append(list(argv))
+
+            def communicate(*, timeout):
+                raise subprocess.TimeoutExpired(argv, timeout)
+
+            return nullcontext(
+                SimpleNamespace(pid=sentinel_pid, communicate=communicate, returncode=None)
+            )
+
+        def record_killpg(pgid, sig):
+            killed.append((pgid, sig))
+
+        with monkeypatch.context() as mp:
+            mp.setattr(subprocess, "Popen", timeout_popen)
+            mp.setattr(os, "killpg", record_killpg)
+            res = runner.invoke(cli.app, ["memory-index", "on"])
+        assert res.exit_code == 1
+        assert res.stdout == ""
+        assert res.stderr.splitlines()[0] == "mm: error: could not verify qmd 2.8.3+ (timed-out)."
+        assert res.stderr.splitlines()[-1] == f"Run: {expected_hint}"
+        assert attempted_argvs == [[str(stub.script), "--version"]]
+        assert killed == [(sentinel_pid, signal.SIGKILL)]
+        assert env.cfg_path.read_bytes() == cfg_before
+        assert stub.state_path.read_bytes() == stub_before
+        if with_existing_state:
+            assert memoryindex.state_path().read_bytes() == prior_record_bytes
+        else:
+            assert not memoryindex.state_path().exists()
+
+
+def test_memory_index_on_emits_agent_setup_link_and_preserves_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_qmd_stub(tmp_path, monkeypatch)
+    claude_dir = tmp_path / "claude"
+    (claude_dir / "projects" / "p" / "memory").mkdir(parents=True)
+
+    env = _setup_device_env(
+        tmp_path,
+        monkeypatch,
+        device_id="lnk163a1",
+        enabled=False,
+        embeddings=False,
+        sources=[{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+    )
+
+    config_repo = tmp_path / "dotfiles"
+    config_repo.mkdir()
+    claude_target = config_repo / "CLAUDE.md"
+    codex_target = config_repo / "AGENTS.md"
+    claude_target.write_text("# Claude instructions\n", encoding="utf-8")
+    codex_target.write_text("# Codex instructions\n", encoding="utf-8")
+    (env.home / ".claude").mkdir(exist_ok=True)
+    (env.home / ".codex").mkdir(exist_ok=True)
+    claude_link = env.home / ".claude" / "CLAUDE.md"
+    codex_link = env.home / ".codex" / "AGENTS.md"
+    claude_link.symlink_to(claude_target)
+    codex_link.symlink_to(codex_target)
+
+    r_on = runner.invoke(cli.app, ["memory-index", "on"])
+    assert r_on.exit_code == 0, r_on.output
+    assert "Memory-Index:" in r_on.output
+    assert memoryindex.AGENT_SETUP_URL in r_on.output
+    assert "Run: mm memory-index off" in r_on.output
+    assert claude_link.is_symlink()
+    assert codex_link.is_symlink()
+    assert claude_target.read_text(encoding="utf-8") == "# Claude instructions\n"
+    assert codex_target.read_text(encoding="utf-8") == "# Codex instructions\n"
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+    assert "\n#### Agent setup\n" in readme

@@ -2700,8 +2700,13 @@ class TestInitMemorySetup160A:
     def test_pointer_search_and_get_select_the_machine_index(self):
         from mind_meld import memoryindex
 
-        assert '`qmd --index index search "<key words>" -n 10`' in memoryindex.POINTER_LINE
-        assert "`qmd --index index get <docid>`" in memoryindex.POINTER_LINE
+        assert memoryindex.POINTER_LINE == (
+            "If the owner mentions something they discussed with an agent before and you "
+            "can't find it in your own memory, search every agent's memory with "
+            '`qmd --index mind-meld search "<key words>" -n 10` '
+            "(`qmd --index mind-meld get <docid>` reads a hit). "
+            "If memories disagree, show the owner each one with its path and ask which is right."
+        )
 
     def _iso_home(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
@@ -3165,7 +3170,7 @@ exit 0
             original_popen = subprocess.Popen
 
             def fail_embed_start(argv, *args, **kwargs):
-                if argv == [str(qmd_script), "--index", "index", "embed"]:
+                if argv == [str(qmd_script), "--index", "mind-meld", "embed"]:
                     raise OSError(errno.EAGAIN, "Could not start qmd embed")
                 return original_popen(argv, *args, **kwargs)
 

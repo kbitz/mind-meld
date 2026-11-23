@@ -435,14 +435,17 @@ index. mm never copies a memory into another agent's store. Design:
    background and never wait; a failed refresh never changes a sync's outcome
    and `mm status` reports it with its fix. mm manages only its own qmd
    collections.
-3. **Search and the pointer line.** Agents search with `qmd search` (keyword,
-   no models) or qmd's MCP server, and every hit names its provider and, for
-   Codex, its machine. With the owner's approval, setup adds one recommended
-   line to the owner's global `CLAUDE.md` and `AGENTS.md`: search memory with
-   qmd before assuming, and show the owner both memories when they disagree.
-   For an instruction file that is a symlink (such as one in the owner's
-   config repository), setup prints the line and changes nothing. mm never
-   edits an agent's MCP configuration; setup prints the commands.
+3. **Search and the pointer line.** Agents search with `qmd --index mind-meld search`
+   (keyword, no models) or qmd's MCP server on the `mind-meld` index, and every
+   hit names its provider and, for Codex, its machine. With the owner's approval,
+   setup adds one recommended line to the owner's global `CLAUDE.md` and
+   `AGENTS.md`: when the owner mentions something they discussed with an agent
+   before and it is not in the agent's own memory, search every agent's memory
+   with `qmd --index mind-meld search`, and show the owner each memory with its
+   path and ask which is right when they disagree. For an instruction file that
+   is a symlink (such as one in the owner's config repository), setup prints the
+   line and changes nothing. mm never edits an agent's MCP configuration. The
+   optional commands are in [Agent setup](../README.md#agent-setup).
 4. **Setup.** The bootstrap script installs qmd as it installs Syncthing.
    `mm init` offers the index (Enter = yes when qmd runs) and, separately,
    qmd's embedding model for semantic search (Enter = no; it downloads about

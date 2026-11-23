@@ -2446,19 +2446,38 @@ markdown files remain the source of truth.
 - **Collection boundary.** `memoryindex.py` adds or removes only
   `mm-`-prefixed collections (`mm-claude`, `mm-grok`, `mm-muse`,
   `mm-codex-<slug>`) through qmd's own CLI (argv-only, never a shell) and never
-  reads or edits qmd's files directly. It selects the machine-wide qmd index
-  explicitly, even when a sync starts inside a project with its own qmd index.
-  `qmd update` refreshes all collections in that machine index.
+  reads or edits qmd's files directly. Routine operations that open an index
+  select Mind Meld's dedicated index (`--index mind-meld`), even when a sync
+  starts inside a project with its own qmd index, so default and project
+  indexes are never updated, embedded, or touched on fresh installs or routine
+  runs. Only the one-time migration cleanup touches the default `index`: when
+  a valid `memory-index.json` record has `"index": "index"` (including a
+  legacy v1 record that omits `"index"`), the next successful
+  `mm memory-index on` or enabled refresh creates/updates the desired
+  collections in `--index mind-meld` and then removes only legacy `mm-`
+  collections from `--index index` (never running `update` or `embed` there).
+  Cleanup failure preserves the `"index"` marker and the reconciled
+  `mind-meld` collections list in the record. The next `mm memory-index on`
+  or enabled refresh retries the remaining legacy `mm-` collections.
+  Embedding waits until the full refresh succeeds.
   Own Codex uses `manifest.codex_memory_dir_name`
   with the brace mask `{MEMORY.md,memory_summary.md,rollout_summaries/*.md}`;
   peer Codex collections are driven by real subdirectories on disk under
   `CODEX_MEMORY_COPIES_DIR`, named from the plaintext device registry with
   device-id fallback and deterministic collision suffixes.
+- **Pointer line and enablement output.** `memoryindex.POINTER_LINE` carries
+  the canonical `--index mind-meld` search/get pointer line consumed by
+  `initflow` (keeping symlinked instruction files print-only). Successful
+  `mm memory-index on` emits the shared O8 `Memory-Index:` outcome line linking
+  to `memoryindex.AGENT_SETUP_URL` (`#agent-setup` in `README.md`) followed by
+  `Run: mm memory-index off`, without editing instruction files or printing
+  MCP commands from `src/`.
 - **Post-lock sync tails.** Attended `mm push` and `mm pull` call
   `cli._sync_memory_index(config)` (module-qualified `memoryindex.refresh`)
   after `core._release_sync_lock()`, only on a completed non-preview sync, and
-  print nothing on success or failure; with `embeddings = true`, a successful
-  `qmd update` spawns `qmd embed` detached with all streams set to `DEVNULL`.
+  print nothing on success or failure. With `embeddings = true`, a successful
+  `qmd --index mind-meld update` and any required legacy cleanup are followed
+  by a detached `qmd --index mind-meld embed` with all streams set to `DEVNULL`.
   `mm autopush` and `mm autopull` spawn `memoryindex.start_detached_refresh`
   (`sys.executable -P -m mind_meld.memoryindex`, all streams `DEVNULL`,
   `start_new_session=True`) after `_auto_command_scope` exits and releases the
@@ -2469,18 +2488,23 @@ markdown files remain the source of truth.
   code. `refresh` holds a single-flight `lockedjson.locked_json_rmw` flock on
   `memory-index.json` bounded by one 30-second deadline (contended runs skip
   silently without writing) and persists a closed-vocabulary record
-  (`version`, `result`, `at`, `qmd_version`, `collections`).
+  (`version`, `index`, `result`, `at`, `qmd_version`, `collections`, where
+  `index` is `"mind-meld"` or `"index"` and an absent `index` on a legacy v1
+  record validates as `"index"`).
   The on/off commands take the same flock. Off waits up to the refresh budget
   for an active refresh to finish. A busy lock at the deadline produces a
-  retry message.
+  retry message. Successful off removes the dedicated index's `mm-`
+  collections and clears the refresh record. If cleanup is still pending,
+  clearing that record also loses the marker used to resume it.
   Refresh rechecks the saved toggle under that lock so a completed off command
   also stops refreshes launched with older sync config.
 - **Write-free previews and inspection.** Previews (`--dry-run`) never refresh,
   `mm status` never runs qmd (reads `memory-index.json` via non-blocking
   `locked_json_snapshot` only when enabled), and `mm diag` probes qmd only when
   enabled. The bare command and enabled diag verify recorded collection names
-  with `qmd collection show`. The list command initializes the qmd index, so
-  it runs only on refresh and cleanup. Config toggles use
+  with `qmd --index mind-meld collection show` and `INDEX_PATH=:memory:`.
+  The standalone `qmd --version` probe opens no index. The list command
+  initializes the qmd index, so it runs only on refresh and cleanup. Config toggles use
   `config.patch_config_on_disk` and state writes use `lockedjson`. Both have
   the pytest write guard. Detached refresh and embed send output to `DEVNULL`.
 
