@@ -130,13 +130,14 @@ When the memory index is on, mm keeps qmd collections in a dedicated
 | `mm-codex-<peer name>` | `~/.local/share/mind-meld/codex-memory/<peer id>` | `**/*.md` |
 
 - A collection exists only for an enabled source whose folder exists.
-- Every routine qmd operation passes `--index mind-meld`, so qmd's default
-  index and any project-local `.qmd/index.yml` are never updated, embedded,
+- Every routine operation that opens a qmd index passes `--index mind-meld`,
+  so qmd's default index and any project-local `.qmd/index.yml` are never updated, embedded,
   or touched on fresh installs or routine runs. Only the one-time upgrade
   cleanup removes legacy `mm-` collections from `--index index` after the
   dedicated index refreshes cleanly.
-- mm adds, updates and removes only collections whose names start with
-  `mm-`. The owner's own qmd collections are never touched.
+- mm adds and removes only collections whose names start with `mm-`.
+  Update and embed cover every collection in `mind-meld`. The owner's own
+  collections belong in the default or a project index.
 - Names come from mm device names through `safety`, reduced to
   `[a-z0-9-]`.
 - The markdown is the truth. The index is derived, stays on the machine and
@@ -146,7 +147,8 @@ When the memory index is on, mm keeps qmd collections in a dedicated
 
 - Attended `mm push` and `mm pull` run `qmd --index mind-meld update` after
   the sync lock is released (about 0.2 s here). When embeddings are on, they
-  then start `qmd --index mind-meld embed` in the background.
+  start `qmd --index mind-meld embed` in the background after a successful
+  refresh, including any legacy cleanup.
 - `mm autopush` and `mm autopull` start the same refresh detached and never
   wait (O8.2, O8.3).
 - Before refreshing, mm reconciles its collections with the enabled sources
@@ -216,16 +218,20 @@ rank or merge contradictions itself.
   on Arch or Homebrew on macOS. It never downloads models and never needs
   sudo for qmd itself. A failure prints the manual command and does not stop
   the mm install.
-- **`mm init`.** When qmd runs, init asks
+- **`mm init`.** When qmd 2.8.3 or later passes the version check, init asks
   `Index agent memories for search with qmd? [y/n]` with Enter = yes, then
-  creates the collections and runs the first `qmd update`. When qmd is
-  missing, init prints the install command and skips the index.
+  creates the collections and runs the first `qmd --index mind-meld update`.
+  If the version check fails, init prints the install command and skips the
+  index.
 - **Embeddings.** A separate question,
   `Also download qmd's embedding model (334 MB) for semantic search? [y/n]`,
-  takes Enter = no. Yes runs `qmd embed` in the background.
+  takes Enter = no. Yes runs `qmd --index mind-meld embed` in the background
+  after a successful refresh.
 - **Pointer line.** Init offers the line as in section 5.
-- **Later.** `mm memory-index` turns the index on or off and shows its
-  state. Off removes only `mm-` collections.
+- **Later.** `mm memory-index` shows index state. `mm memory-index on`
+  verifies qmd before enabling the index and running a refresh.
+  `mm memory-index off` disables refresh and removes only the dedicated
+  index's `mm-` collections.
 - **Configuration.** The index and embedding choices live in this machine's
   `config.toml` and never sync.
 

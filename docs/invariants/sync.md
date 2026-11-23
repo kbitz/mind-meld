@@ -2446,8 +2446,8 @@ markdown files remain the source of truth.
 - **Collection boundary.** `memoryindex.py` adds or removes only
   `mm-`-prefixed collections (`mm-claude`, `mm-grok`, `mm-muse`,
   `mm-codex-<slug>`) through qmd's own CLI (argv-only, never a shell) and never
-  reads or edits qmd's files directly. Every routine qmd operation selects
-  Mind Meld's dedicated named index (`--index mind-meld`), even when a sync
+  reads or edits qmd's files directly. Routine operations that open an index
+  select Mind Meld's dedicated index (`--index mind-meld`), even when a sync
   starts inside a project with its own qmd index, so default and project
   indexes are never updated, embedded, or touched on fresh installs or routine
   runs. Only the one-time migration cleanup touches the default `index`: when
@@ -2456,10 +2456,10 @@ markdown files remain the source of truth.
   `mm memory-index on` or enabled refresh creates/updates the desired
   collections in `--index mind-meld` and then removes only legacy `mm-`
   collections from `--index index` (never running `update` or `embed` there).
-  If that cleanup fails or times out, `"index"` stays `"index"` so the next
-  `mm memory-index on` or enabled refresh retries remaining legacy `mm-`
-  collections, while retaining the reconciled `mind-meld` collections list and
-  deferring `embed` until the full refresh succeeds.
+  Cleanup failure preserves the `"index"` marker and the reconciled
+  `mind-meld` collections list in the record. The next `mm memory-index on`
+  or enabled refresh retries the remaining legacy `mm-` collections.
+  Embedding waits until the full refresh succeeds.
   Own Codex uses `manifest.codex_memory_dir_name`
   with the brace mask `{MEMORY.md,memory_summary.md,rollout_summaries/*.md}`;
   peer Codex collections are driven by real subdirectories on disk under
@@ -2475,8 +2475,9 @@ markdown files remain the source of truth.
 - **Post-lock sync tails.** Attended `mm push` and `mm pull` call
   `cli._sync_memory_index(config)` (module-qualified `memoryindex.refresh`)
   after `core._release_sync_lock()`, only on a completed non-preview sync, and
-  print nothing on success or failure; with `embeddings = true`, a successful
-  `qmd update` spawns `qmd embed` detached with all streams set to `DEVNULL`.
+  print nothing on success or failure. With `embeddings = true`, a successful
+  `qmd --index mind-meld update` and any required legacy cleanup are followed
+  by a detached `qmd --index mind-meld embed` with all streams set to `DEVNULL`.
   `mm autopush` and `mm autopull` spawn `memoryindex.start_detached_refresh`
   (`sys.executable -P -m mind_meld.memoryindex`, all streams `DEVNULL`,
   `start_new_session=True`) after `_auto_command_scope` exits and releases the
@@ -2492,15 +2493,18 @@ markdown files remain the source of truth.
   record validates as `"index"`).
   The on/off commands take the same flock. Off waits up to the refresh budget
   for an active refresh to finish. A busy lock at the deadline produces a
-  retry message.
+  retry message. Successful off removes the dedicated index's `mm-`
+  collections and clears the refresh record. If cleanup is still pending,
+  clearing that record also loses the marker used to resume it.
   Refresh rechecks the saved toggle under that lock so a completed off command
   also stops refreshes launched with older sync config.
 - **Write-free previews and inspection.** Previews (`--dry-run`) never refresh,
   `mm status` never runs qmd (reads `memory-index.json` via non-blocking
   `locked_json_snapshot` only when enabled), and `mm diag` probes qmd only when
   enabled. The bare command and enabled diag verify recorded collection names
-  with `qmd collection show`. The list command initializes the qmd index, so
-  it runs only on refresh and cleanup. Config toggles use
+  with `qmd --index mind-meld collection show` and `INDEX_PATH=:memory:`.
+  The standalone `qmd --version` probe opens no index. The list command
+  initializes the qmd index, so it runs only on refresh and cleanup. Config toggles use
   `config.patch_config_on_disk` and state writes use `lockedjson`. Both have
   the pytest write guard. Detached refresh and embed send output to `DEVNULL`.
 
