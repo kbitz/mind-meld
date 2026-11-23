@@ -43,15 +43,17 @@ from mind_meld.storage.local import LocalBackend
 MIN_QMD_VERSION = Version("2.8.3")
 REFRESH_DEADLINE_S = 30.0
 MM_COLLECTION_PREFIX = "mm-"
-_GLOBAL_INDEX = ("--index", "index")
+INDEX_NAME = "mind-meld"
+LEGACY_DEFAULT_INDEX = "index"
+_VALID_INDEXES: frozenset[str] = frozenset({INDEX_NAME, LEGACY_DEFAULT_INDEX})
+AGENT_SETUP_URL = "https://github.com/kbitz/mind-meld#agent-setup"
 
 POINTER_LINE = (
-    "Before assuming a fact about this project or the owner's preferences, "
-    'search agent memory with `qmd --index index search "<key words>" -n 10` '
-    "(every agent, every machine; `qmd --index index get <docid>` reads a hit). "
-    "If memories disagree, show "
-    "the owner each one with its path and ask which is right; never pick one "
-    "silently."
+    "If the owner mentions something they discussed with an agent before and you "
+    "can't find it in your own memory, search every agent's memory with "
+    '`qmd --index mind-meld search "<key words>" -n 10` '
+    "(`qmd --index mind-meld get <docid>` reads a hit). "
+    "If memories disagree, show the owner each one with its path and ask which is right."
 )
 
 CLAUDE_MASK = "*/memory/**/*.md"
@@ -272,6 +274,7 @@ def _run_qmd(
     deadline: float,
     *,
     inspect: bool = False,
+    index: str = INDEX_NAME,
 ) -> tuple[
     Literal["ok", "qmd-missing", "failed", "timed-out"],
     subprocess.CompletedProcess[str] | None,
@@ -281,7 +284,7 @@ def _run_qmd(
         return ("timed-out", None)
     # An explicit index bypasses QMD's project-local index discovery. Its
     # --version path opens no index, even without the flag.
-    command = [qmd, *args] if args == ["--version"] else [qmd, *_GLOBAL_INDEX, *args]
+    command = [qmd, *args] if list(args) == ["--version"] else [qmd, "--index", index, *args]
     try:
         with subprocess.Popen(
             command,
@@ -340,8 +343,13 @@ def _qmd_version(
 def _list_mm_collection_names(
     qmd: str,
     deadline: float,
+    *,
+    index: str | None = None,
 ) -> tuple[Literal["ok", "qmd-missing", "failed", "timed-out"], list[str]]:
-    status, proc = _run_qmd(qmd, ["collection", "list"], deadline)
+    if index is None:
+        status, proc = _run_qmd(qmd, ["collection", "list"], deadline)
+    else:
+        status, proc = _run_qmd(qmd, ["collection", "list"], deadline, index=index)
     if status != "ok" or proc is None:
         return (status, [])
     if proc.returncode != 0:
@@ -439,6 +447,13 @@ def state_path() -> Path:
 def _validate_state_record(data: dict[str, Any]) -> dict[str, Any] | None:
     if data.get("version") != 1:
         return None
+    if "index" in data:
+        raw_index = data.get("index")
+        if not isinstance(raw_index, str) or raw_index not in _VALID_INDEXES:
+            return None
+        index_name = raw_index
+    else:
+        index_name = LEGACY_DEFAULT_INDEX
     result = data.get("result")
     if not isinstance(result, str) or result not in VALID_RESULTS:
         return None
@@ -463,6 +478,7 @@ def _validate_state_record(data: dict[str, Any]) -> dict[str, Any] | None:
         collections.append(item)
     return {
         "version": 1,
+        "index": index_name,
         "result": result,
         "at": at,
         "qmd_version": qmd_version,
@@ -537,6 +553,8 @@ def _refresh_locked(
     status: Literal["ok", "qmd-missing", "failed", "timed-out"] = "failed"
     qmd_version = None
     previous = _validate_state_record(cache.data)
+    needs_legacy_cleanup = previous is not None and previous["index"] != INDEX_NAME
+    index_state = LEGACY_DEFAULT_INDEX if needs_legacy_cleanup else INDEX_NAME
     collections = list(previous["collections"]) if previous else []
     try:
         qmd = _find_qmd()
@@ -554,9 +572,15 @@ def _refresh_locked(
                 status, proc = _run_qmd(qmd, ["update"], deadline)
                 if proc is not None and proc.returncode != 0:
                     status = "failed"
+            if status == "ok" and needs_legacy_cleanup:
+                cleanup = _remove_mm_collections_in(qmd, deadline, index=LEGACY_DEFAULT_INDEX)
+                if cleanup.status == "ok":
+                    index_state = INDEX_NAME
+                else:
+                    status = cleanup.status
             if status == "ok" and config.memory_index_embeddings(cfg):
                 subprocess.Popen(
-                    [qmd, *_GLOBAL_INDEX, "embed"],
+                    [qmd, "--index", INDEX_NAME, "embed"],
                     cwd="/",
                     env=_qmd_env(),
                     stdin=subprocess.DEVNULL,
@@ -570,6 +594,7 @@ def _refresh_locked(
     at = _now_utc()
     cache.data = {
         "version": 1,
+        "index": index_state,
         "result": status,
         "at": at,
         "qmd_version": qmd_version,
@@ -642,14 +667,13 @@ def install_hint() -> str:
     return f"npm install -g --prefix {shlex.quote(str(prefix))} @tobilu/qmd"
 
 
-def remove_mm_collections() -> RemoveResult:
-    """Remove every ``mm-`` collection from qmd, leaving user collections untouched."""
-    deadline = time.monotonic() + REFRESH_DEADLINE_S
-    qmd = _find_qmd()
-    if qmd is None:
-        return RemoveResult(status="qmd-missing")
-
-    status, names = _list_mm_collection_names(qmd, deadline)
+def _remove_mm_collections_in(
+    qmd: str,
+    deadline: float,
+    *,
+    index: str | None = None,
+) -> RemoveResult:
+    status, names = _list_mm_collection_names(qmd, deadline, index=index)
     if status != "ok":
         return RemoveResult(status=status)
 
@@ -657,13 +681,25 @@ def remove_mm_collections() -> RemoveResult:
     for name in names:
         if not name.startswith(MM_COLLECTION_PREFIX):
             continue
-        rm_status, proc = _run_qmd(qmd, ["collection", "remove", name], deadline)
+        if index is None:
+            rm_status, proc = _run_qmd(qmd, ["collection", "remove", name], deadline)
+        else:
+            rm_status, proc = _run_qmd(qmd, ["collection", "remove", name], deadline, index=index)
         if rm_status != "ok" or proc is None:
             return RemoveResult(status=rm_status, removed=tuple(removed))
         if proc.returncode != 0:
             return RemoveResult(status="failed", removed=tuple(removed))
         removed.append(name)
     return RemoveResult(status="ok", removed=tuple(removed))
+
+
+def remove_mm_collections() -> RemoveResult:
+    """Remove every ``mm-`` collection from qmd, leaving user collections untouched."""
+    deadline = time.monotonic() + REFRESH_DEADLINE_S
+    qmd = _find_qmd()
+    if qmd is None:
+        return RemoveResult(status="qmd-missing")
+    return _remove_mm_collections_in(qmd, deadline)
 
 
 def start_detached_refresh(cfg: dict[str, Any] | None) -> bool:
@@ -818,7 +854,9 @@ def _enable_index() -> None:
     noun = "collection" if count == 1 else "collections"
     core._print_outcome(
         outputstyle._outcome_line(
-            "memory-index", f"enabled on this device ({count} {noun} indexed)"
+            "memory-index",
+            f"enabled on this device ({count} {noun} indexed); "
+            f"for agent setup, see {AGENT_SETUP_URL}",
         )
     )
     consoles.console.print(

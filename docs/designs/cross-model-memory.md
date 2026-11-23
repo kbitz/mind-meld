@@ -117,7 +117,9 @@ follow the `codex` source.
 
 ### 3. One local index per machine
 
-When the memory index is on, mm keeps qmd collections in qmd's default index:
+When the memory index is on, mm keeps qmd collections in a dedicated
+`mind-meld` qmd index (`--index mind-meld`, stored at
+`~/.cache/qmd/mind-meld.sqlite` and `~/.config/qmd/mind-meld.yml`):
 
 | Collection | Folder | Mask |
 |---|---|---|
@@ -128,6 +130,11 @@ When the memory index is on, mm keeps qmd collections in qmd's default index:
 | `mm-codex-<peer name>` | `~/.local/share/mind-meld/codex-memory/<peer id>` | `**/*.md` |
 
 - A collection exists only for an enabled source whose folder exists.
+- Every routine qmd operation passes `--index mind-meld`, so qmd's default
+  index and any project-local `.qmd/index.yml` are never updated, embedded,
+  or touched on fresh installs or routine runs. Only the one-time upgrade
+  cleanup removes legacy `mm-` collections from `--index index` after the
+  dedicated index refreshes cleanly.
 - mm adds, updates and removes only collections whose names start with
   `mm-`. The owner's own qmd collections are never touched.
 - Names come from mm device names through `safety`, reduced to
@@ -137,9 +144,9 @@ When the memory index is on, mm keeps qmd collections in qmd's default index:
 
 ### 4. Refresh after every sync
 
-- Attended `mm push` and `mm pull` run `qmd update` after the sync lock is
-  released (about 0.2 s here). When embeddings are on, they then start
-  `qmd embed` in the background.
+- Attended `mm push` and `mm pull` run `qmd --index mind-meld update` after
+  the sync lock is released (about 0.2 s here). When embeddings are on, they
+  then start `qmd --index mind-meld embed` in the background.
 - `mm autopush` and `mm autopull` start the same refresh detached and never
   wait (O8.2, O8.3).
 - Before refreshing, mm reconciles its collections with the enabled sources
@@ -156,15 +163,14 @@ machine.
 
 ### 5. Agents search, guided by one recommended line
 
-The pointer line uses the wording qualified in Q1 and Q2 on 2026-11-21,
-with `--index index` added to keep searches and reads on the machine index
-from directories that have a project index:
+The canonical pointer line uses `--index mind-meld` and narrows the trigger
+to when the owner mentions something previously discussed with an agent:
 
-> Before assuming a fact about this project or the owner's preferences,
-> search agent memory with `qmd --index index search "<key words>" -n 10`
-> (every agent, every machine; `qmd --index index get <docid>` reads a hit).
-> If memories disagree, show the owner each one with its path and ask which
-> is right; never pick one silently.
+> If the owner mentions something they discussed with an agent before and you
+> can't find it in your own memory, search every agent's memory with
+> `qmd --index mind-meld search "<key words>" -n 10`
+> (`qmd --index mind-meld get <docid>` reads a hit). If memories disagree,
+> show the owner each one with its path and ask which is right.
 
 - Setup shows the line and the global instruction files it belongs in:
   `~/.claude/CLAUDE.md` and `CODEX_HOME/AGENTS.md`. On the owner's yes, it
@@ -173,9 +179,11 @@ from directories that have a project index:
   mm prints the line and the resolved path and changes nothing. On the
   owner's machines both files link into a config repository: the owner adds
   the line there once, and that repository carries it to every machine.
-- mm never edits an agent's MCP configuration. O9.3 calls for setup to print
-  the optional MCP commands. In Track 160A, the commands for adding MCP by
-  hand are in the [README](../../README.md#searching-agent-memory-qmd). The
+- After successful `mm memory-index on`, mm prints the shared O8 outcome line
+  linking directly to the README's [Agent setup](../../README.md#agent-setup)
+  subsection.
+- mm never edits an agent's MCP configuration. Optional MCP commands for the
+  `mind-meld` index live in [Agent setup](../../README.md#agent-setup). The
   pointer line works through the CLI alone.
 
 ### 6. Contradictions show up in one result list
@@ -186,7 +194,8 @@ machine.
 
 Example from a temporary `HOME`: `mm-claude` held "Use PostgreSQL 16 for the
 ledger" and `mm-codex-mac-a` held "The ledger uses SQLite, not Postgres".
-`qmd search ledger` listed both hits, `qmd://mm-codex-mac-a/MEMORY.md` and
+`qmd --index mind-meld search ledger` listed both hits,
+`qmd://mm-codex-mac-a/MEMORY.md` and
 `qmd://mm-claude/<project>/memory/db.md`. The pointer line tells the agent to
 show both and ask.
 
@@ -451,3 +460,63 @@ in the provider account settings.
 
 **Outcome:** Q1 and Q2 passed and Q3 kept the default copy set. The
 qualification prerequisite for Tracks 157A, 159A and 160A is met.
+
+### Results, 2026-11-22 (Track 163A)
+
+Observed inside an isolated temporary root (`/var/tmp/mm-163a.XXXXXX`, mode
+`0700`, `env -i` allowlist matching the 2026-11-21 protocol, `$ROOT/bin`
+symlinks bypassing `mise` shims) on `linux-a`: `codex-cli 0.171.0`,
+`2.1.330 (Claude Code)`, `qmd 2.8.3`, and `node v26.13.1`.
+
+- **Named-index isolation:** `qmd --index mind-meld collection add` and
+  `qmd --index mind-meld update` created only
+  `$ROOT/home/.cache/qmd/mind-meld.sqlite` and
+  `$ROOT/home/.config/qmd/mind-meld.yml`; no default `index.sqlite` or
+  `index.yml` was created. Owner `stat` on `/home/user/.cache/qmd/index.sqlite`
+  (`size=1945600`, `mtime=1795400030`) and `/home/user/.config/qmd/index.yml`
+  (`size=427`, `mtime=1795314017`) matched identically before and after the
+  runs and `$ROOT` deletion.
+- **Codex sandbox probe (Criterion 5):** Under `codex sandbox -C "$ROOT/work"`
+  with read access to `/` and write access limited to `$ROOT/work` (no grant
+  to `$ROOT/home/.cache/qmd`):
+  - `qmd --index mind-meld search "ledger nightly export" -n 10` exited `1`
+    with `SqliteError: unable to open database file` (`SQLITE_CANTOPEN`) in
+    `enableWal` (`@tobilu/qmd/dist/db.js:77`).
+  - `qmd --index mind-meld get "#be9616"` exited `1` with the same
+    `SQLITE_CANTOPEN` error in `enableWal`.
+  - Adding write access solely to `$ROOT/home/.cache/qmd` (`~/.cache/qmd`)
+    allowed both `qmd --index mind-meld search` (exit `0`) and
+    `qmd --index mind-meld get "#be9616"` (exit `0`) to succeed.
+- **Authentication and sandbox settings (Criterion 6):** Fresh subscription
+  logins inside the temporary home (`codex login --device-auth` in
+  `$ROOT/home/.codex`; `claude auth login --claudeai` in `$ROOT/home`); no
+  owner credential files were read or copied.
+  - Codex sessions ran via
+    `codex exec --skip-git-repo-check -C "$ROOT/work" --json -o <file> -s workspace-write`
+    with `[sandbox_workspace_write]` `writable_roots = ["$ROOT/home/.cache/qmd"]`
+    in `$ROOT/home/.codex/config.toml`.
+  - Claude Code sessions ran in `$ROOT/work` via
+    `claude -p --output-format stream-json --verbose --no-session-persistence --allowedTools "Bash(qmd --index mind-meld search:*)" "Bash(qmd --index mind-meld get:*)" -- <prompt>`.
+- **Final pointer line** (sole content of `$ROOT/home/.codex/AGENTS.md` and
+  `$ROOT/home/.claude/CLAUDE.md`):
+
+> If the owner mentions something they discussed with an agent before and you
+> can't find it in your own memory, search every agent's memory with
+> `qmd --index mind-meld search "<key words>" -n 10`
+> (`qmd --index mind-meld get <docid>` reads a hit). If memories disagree,
+> show the owner each one with its path and ask which is right.
+
+| Session | Prompt | Commands run (from transcript) | Answer excerpt | Verdict |
+|---|---|---|---|---|
+| Codex, Q1 | `Earlier I discussed the ledger nightly export with an agent, but I cannot remember the details. When does the ledger nightly export run and where does it write its file? Answer in two sentences.` | `qmd --index mind-meld search "ledger nightly export" -n 10`; `qmd --index mind-meld get '#be9616'` | "The ledger nightly export runs every night at 03:40 UTC. It writes its file to `exports/ledger-<date>.parquet`." | **PASS** |
+| Claude Code, Q1 | `I discussed regenerating the ledger fixtures with another agent before. How do I regenerate the ledger fixtures? Answer in one sentence.` | checked own memory dir; `qmd --index mind-meld search "regenerate ledger fixtures" -n 10`; `qmd --index mind-meld search "ledger fixtures" -n 10`; `qmd --index mind-meld search "fixtures seed" -n 10` | "Run `make ledger-fixtures SEED=8812`, according to another agent's notes in the shared memory index (`qmd://mm-codex-mac-a/MEMORY.md`, since my own memory had nothing on this)." | **PASS** |
+| Codex, Q2 | `I discussed the ledger database with an agent before — which database does the ledger use? Answer briefly.` | `qmd --index mind-meld search "ledger database" -n 10`; `qmd --index mind-meld get '#627ce9'`; `qmd --index mind-meld get '#cea051'` | "The agent memories disagree. - **PostgreSQL 16** — `qmd://mm-claude/-home-user-ledger/memory/db.md` - **SQLite** — `qmd://mm-codex-mac-a/MEMORY.md` Which is correct?" | **PASS** |
+| Claude Code, Q2 | `I discussed the ledger database with an agent before — which database does the ledger use? Answer briefly.` | checked own memory dir; `qmd --index mind-meld search "ledger database" -n 10`; `qmd --index mind-meld get "#627ce9"; echo ----; qmd --index mind-meld get "#cea051"` | "I found two saved memories about this, and they disagree: 1. `mm-claude/-home-user-ledger/memory/db.md` says: 'Use PostgreSQL 16 for the ledger.' 2. `mm-codex-mac-a/MEMORY.md` (under 'ledger database') says: 'The ledger uses SQLite, not Postgres.' Which one is right?" | **PASS** |
+
+The transcripts showed zero owner-store touches and zero `qmd query`,
+`qmd vsearch`, or `qmd embed` calls. All temporary credentials and `$ROOT`
+were deleted after the runs.
+
+**Outcome:** Q1 and Q2 passed in both directions with the revised pointer line
+and `--index mind-meld`, covering O9.6's isolated evidence. The owner's Mac
+and Linux fleet acceptance remains separate.
