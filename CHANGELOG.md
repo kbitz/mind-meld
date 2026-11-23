@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.84] - 2026-11-22
+
+Mind Meld now keeps agent memory in its own qmd index, refuses a bad qmd version before enabling that index, and explains how to update agent instructions.
+
+### Changed
+
+- Mind Meld now stores its agent-memory collections in a dedicated `mind-meld` qmd index (`--index mind-meld`), leaves qmd's default and project indexes alone, and links to the `Agent setup` guide after `mm memory-index on`.
+- Agent-memory searches use the dedicated `mind-meld` qmd index, and the upgrade guide explains how to switch shared agent instructions after each device refreshes.
+
+### Fixed
+
+- `mm memory-index on` rejects malformed qmd version output before changing configuration or index state.
+
+### Upgrade notes
+
+- Existing users should replace the earlier `--index index` pointer line in their agent instruction files with the updated `--index mind-meld` line from `README.md`, while legacy `mm-` collections in the default index are removed automatically on the next successful `mm memory-index on` or sync refresh.
+
 ## [1.12.83] - 2026-11-22
 
 Enabling the memory index now prints a copyable command to install or upgrade qmd when it is missing or older than 2.8.3.
