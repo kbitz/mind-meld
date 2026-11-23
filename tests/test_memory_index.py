@@ -1955,7 +1955,9 @@ def test_named_index_migration_isolation_retry_and_fresh_install(
     assert r_bare.exit_code == 0, r_bare.output
     assert "mm-claude" in r_bare.output
     assert "notes" not in r_bare.output
-    diag_view = memoryindex.diag_state(enabled_cfg)
+    r_diag = runner.invoke(cli.app, ["diag", "--json"])
+    assert r_diag.exit_code == 0, r_diag.output
+    diag_view = json.loads(r_diag.output)["memory_index"]
     assert set(diag_view["last_refresh"]) == {"state", "result", "at"}
     assert diag_view["collections"] == ["mm-claude", "mm-grok"]
     assert [p.read_bytes() for p in observed_files] == before_inspect
@@ -2080,7 +2082,12 @@ def test_memory_index_on_installed_qmd_preflight_failures_preserve_state(
             assert not memoryindex.state_path().exists()
 
         # (b) Exit 0 with unparseable stdout
-        for bad_stdout in ("qmd dev-snapshot", ""):
+        for bad_stdout in (
+            "qmd dev-snapshot",
+            "qmd dev-snapshot (Node 26.13.1)",
+            "qmd 2.8.3broken",
+            "",
+        ):
             before = len(stub.calls())
             with monkeypatch.context() as mp:
                 mp.setenv("QMD_STUB_VERSION", bad_stdout)

@@ -2451,8 +2451,8 @@ markdown files remain the source of truth.
   starts inside a project with its own qmd index, so default and project
   indexes are never updated, embedded, or touched on fresh installs or routine
   runs. Only the one-time migration cleanup touches the default `index`: when
-  an existing `memory-index.json` record has `"index" != "mind-meld"` (or
-  omits `"index"` on a legacy v1 record), the next successful
+  a valid `memory-index.json` record has `"index": "index"` (including a
+  legacy v1 record that omits `"index"`), the next successful
   `mm memory-index on` or enabled refresh creates/updates the desired
   collections in `--index mind-meld` and then removes only legacy `mm-`
   collections from `--index index` (never running `update` or `embed` there).

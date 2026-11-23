@@ -68,7 +68,10 @@ _MAX_SLUG_LEN = 64
 _MAX_COLLECTION_NAME_LEN = 256
 _STATE_COLLECTION_RE = re.compile(r"mm-[a-z0-9-]+")
 _VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
-_QMD_VERSION_RE = re.compile(r"\bv?(" + _VERSION_RE.pattern + r")([^\s]*)")
+_QMD_VERSION_RE = re.compile(
+    r"^qmd[ \t]+(?P<version>v?(?P<release>" + _VERSION_RE.pattern + r")\S*)",
+    re.MULTILINE,
+)
 _COLLECTION_COUNT_RE = re.compile(r"Collections \(([0-9]+)\):")
 _COLLECTION_LIST_RE = re.compile(r"^\s*(\S.*?)\s+\(qmd://")
 _SHOW_PATH_RE = re.compile(r"^\s*Path:\s*(.+?)\s*$")
@@ -330,14 +333,13 @@ def _qmd_version(
     match = _QMD_VERSION_RE.search(proc.stdout)
     if match is None:
         return ("failed", None)
-    ver_str = match.group(0).removeprefix("v")
     try:
-        parsed = Version(ver_str)
+        parsed = Version(match["version"])
     except InvalidVersion:
-        parsed = Version(match.group(1))
+        return ("failed", None)
     if parsed < MIN_QMD_VERSION:
         return ("version-too-old", str(parsed))
-    return ("ok", match.group(1))
+    return ("ok", match["release"])
 
 
 def _list_mm_collection_names(

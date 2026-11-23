@@ -468,6 +468,10 @@ Observed inside an isolated temporary root (`/var/tmp/mm-163a.XXXXXX`, mode
 symlinks bypassing `mise` shims) on `linux-a`: `codex-cli 0.171.0`,
 `2.1.330 (Claude Code)`, `qmd 2.8.3`, and `node v26.13.1`.
 
+- **Seeds:** The nightly export fact and PostgreSQL claim were in Claude's
+  `qmd://mm-claude/-home-user-ledger/memory/export.md` (`#be9616`) and `db.md`,
+  respectively. The fixture regeneration command and SQLite claim were in the
+  Codex peer copy, `qmd://mm-codex-mac-a/MEMORY.md`.
 - **Named-index isolation:** `qmd --index mind-meld collection add` and
   `qmd --index mind-meld update` created only
   `$ROOT/home/.cache/qmd/mind-meld.sqlite` and

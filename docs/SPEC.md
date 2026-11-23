@@ -444,8 +444,8 @@ index. mm never copies a memory into another agent's store. Design:
    with `qmd --index mind-meld search`, and show the owner each memory with its
    path and ask which is right when they disagree. For an instruction file that
    is a symlink (such as one in the owner's config repository), setup prints the
-   line and changes nothing. mm never edits an agent's MCP configuration; setup
-   prints the commands.
+   line and changes nothing. mm never edits an agent's MCP configuration. The
+   optional commands are in [Agent setup](../README.md#agent-setup).
 4. **Setup.** The bootstrap script installs qmd as it installs Syncthing.
    `mm init` offers the index (Enter = yes when qmd runs) and, separately,
    qmd's embedding model for semantic search (Enter = no; it downloads about

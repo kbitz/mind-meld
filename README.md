@@ -26,12 +26,14 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 **Dedicated `mind-meld` qmd index (Track 163A).** Mind Meld now keeps its
 `mm-` collections in a dedicated `mind-meld` qmd index (`--index mind-meld`)
-instead of qmd's default index. On your next successful `mm memory-index on`
-or enabled sync refresh, Mind Meld creates and updates its collections in
-`--index mind-meld` and automatically removes legacy `mm-` collections from
-the default index (leaving your other collections untouched). Replace the
-earlier `--index index` pointer line in your agent instruction files with the
-updated line in [Agent setup](#agent-setup).
+instead of qmd's default index. After upgrading, run `mm memory-index on` or
+let an enabled sync refresh succeed on each machine that uses the index.
+This builds the dedicated index. On machines with a legacy refresh record,
+it also removes the old `mm-` collections from the default index. Then use
+[Agent setup](#agent-setup) to replace the old pointer line. Complete the
+refreshes before editing shared instruction files. Running `mm memory-index
+off` first clears the record and can leave the legacy collections in the
+default index.
 
 **Codex memory folded into `codex` (Track 161A).** Codex memory copies now
 sync with the `codex` source. Run `mm migrate-config` on each machine with
@@ -986,14 +988,14 @@ Mind Meld can maintain one local [qmd](https://github.com/tobi/qmd) search index
   - `mm memory-index on` — verify qmd 2.8.3+, enable `[memory_index]` in `~/.config/mind-meld/config.toml`, reconcile collections, and run an initial refresh.
   - `mm memory-index off` — disable the index and remove only `mm-` collections from qmd.
 - **Automatic refresh:** attended `mm push` and `mm pull` reconcile `mm-` collections in `--index mind-meld` and run `qmd --index mind-meld update` after releasing the sync lock (printing nothing on success). `mm autopush` and `mm autopull` run the same refresh detached in the background and never wait or print. Previews (`--dry-run`) never refresh.
-- **Dedicated `mind-meld` index:** Every routine Mind Meld operation selects `--index mind-meld` (`~/.cache/qmd/mind-meld.sqlite` and `~/.config/qmd/mind-meld.yml`), leaving qmd's default index and any project-local `.qmd/index.yml` untouched. Upgrading from an earlier release that used the default index automatically removes legacy `mm-` collections from the default index on the next successful `mm memory-index on` or enabled sync refresh, and retries if cleanup is interrupted.
+- **Dedicated `mind-meld` index:** Every routine Mind Meld operation selects `--index mind-meld` (by default, `~/.cache/qmd/mind-meld.sqlite` and `~/.config/qmd/mind-meld.yml`). When the refresh record identifies a legacy installation, the next successful `mm memory-index on` or enabled sync refresh removes legacy `mm-` collections from the default index. A cleanup failure recorded as `failed` or `timed-out` is retried.
 - **Other qmd collections:** Mind Meld adds or removes only `mm-`-prefixed collections in `--index mind-meld` and never edits qmd's files directly. Non-`mm-` collections in qmd's default index or in project indexes are never updated, embedded, or touched by Mind Meld.
 - **Embeddings (optional):** keyword search (`qmd --index mind-meld search`) is the baseline and downloads no models. Answer yes to the embeddings question during `mm init` (or set `embeddings = true` under `[memory_index]` in `~/.config/mind-meld/config.toml`) to run `qmd --index mind-meld embed` in the background after each refresh (downloads qmd's ~334 MB embedding model on first run).
 - **Failures and diagnostics:** a missing qmd or a failed/timed-out refresh never changes a sync's outcome or exit code. `mm status` shows one line with its fix when the index is enabled and unhealthy; `mm diag` shows the qmd version, `mm-` collections, and last refresh result.
 
 #### Agent setup
 
-1. **Add the pointer line** to your global agent instruction files (`~/.claude/CLAUDE.md` and `CODEX_HOME/AGENTS.md`; if either file is a symlink into a config repository, edit the target file by hand). Existing users upgrading from an earlier release should replace the old `--index index` pointer line with this line:
+1. **Add the pointer line** to your global agent instruction files (`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, or `AGENTS.md` in your custom `CODEX_HOME`). Edit the target by hand for symlinked files. After the per-machine refresh in [Upgrading](#upgrading), replace any old `--index index` pointer with this line:
 
    > If the owner mentions something they discussed with an agent before and you can't find it in your own memory, search every agent's memory with `qmd --index mind-meld search "<key words>" -n 10` (`qmd --index mind-meld get <docid>` reads a hit). If memories disagree, show the owner each one with its path and ask which is right.
 
@@ -1004,7 +1006,7 @@ Mind Meld can maintain one local [qmd](https://github.com/tobi/qmd) search index
    "Bash(qmd --index mind-meld get:*)"
    ```
 
-3. **Codex sandbox writable root:** qmd 2.8.3 opens `~/.cache/qmd/mind-meld.sqlite` in WAL mode even for `search` and `get`, which fails with `SQLITE_CANTOPEN` under Codex's default `workspace-write` sandbox unless qmd's cache directory is writable. Add your qmd cache folder to `~/.codex/config.toml` (replace `/home/user` with your home path, or use `~/.cache/qmd` if your Codex permissions profile expands `~`):
+3. **Codex sandbox writable root.** qmd 2.8.3 opens `mind-meld.sqlite` in WAL mode for `search` and `get`. With `workspace-write`, add the absolute path of the folder that contains this database to `sandbox_workspace_write.writable_roots` in your Codex `config.toml`. The folder is `~/.cache/qmd` by default, or `$XDG_CACHE_HOME/qmd` when that variable is set for qmd. Append the directory to the existing list if you have one.
 
    ```toml
    [sandbox_workspace_write]
