@@ -44,6 +44,18 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Legacy qmd cleanup failure boundaries
+
+- **Description:** The three-index fixture covers partial removal followed by a successful retry. It does not individually pin a failed named refresh before cleanup, a failed legacy listing, or a legacy removal timeout or missing process. It also starts the disable check after migration has finished.
+- **Context:** Track 163A coverage audit. The current control flow keeps the legacy marker and skips embed on failed cleanup. The upgrade guide covers the ordering of disable and migration.
+- **Revisit when:** The next Track changes qmd reconciliation, legacy cleanup, or disable. Extend the existing fixture to assert the touched indexes, saved marker and retry behavior at those boundaries.
+
+### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Exact qmd version and diagnostic invocation
+
+- **Description:** Installed qmd passed with its commit-bearing version banner in the live smoke. Automated success uses a plain banner. The diag test checks the named index, returned names and fixture bytes. The stub leaves those bytes unchanged on listing, whereas real qmd can initialize the database.
+- **Context:** Track 163A testing and coverage audits. Bare inspection already pins the named `collection show` argv.
+- **Revisit when:** The next Track changes qmd preflight or read-only inspection. Exercise the observed version banner and pin the JSON diagnostic's `collection show` calls with `INDEX_PATH=:memory:`.
+
 ## Drain records
 
 ### Targeted roadmap regeneration of qmd isolation (2026-11-22)

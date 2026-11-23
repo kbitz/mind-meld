@@ -31,8 +31,8 @@ let an enabled sync refresh succeed on each machine that uses the index.
 This builds the dedicated index. On machines with a legacy refresh record,
 it also removes the old `mm-` collections from the default index. Then use
 [Agent setup](#agent-setup) to replace the old pointer line. Complete the
-refreshes before editing shared instruction files. Running `mm memory-index
-off` first clears the record and can leave the legacy collections in the
+refreshes before editing shared instruction files. Turning the index off
+before migration can clear the record and leave legacy collections in the
 default index.
 
 **Codex memory folded into `codex` (Track 161A).** Codex memory copies now
