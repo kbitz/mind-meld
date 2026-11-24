@@ -16934,9 +16934,9 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
     assert slow_res.stdout.startswith("Push: 1 content change published")
     term_out = slow_terminal.getvalue()
     assert "Capturing host usage" in term_out
-    assert "1/1 readers" in term_out
     assert "Recording activity" in term_out
-    assert "2/2 repositories" in term_out
+    assert "Walking repositories" in term_out
+    assert "2/2 ·" in term_out
     assert "\x1b[?25h" in term_out
 
     # 3. Piped output and --verbose leave no progress line even past the delay.

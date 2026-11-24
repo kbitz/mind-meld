@@ -32,6 +32,7 @@ from typer.core import TyperGroup
 from mind_meld import (
     __version__,
     attemptlog,
+    capturecatchup,
     core,
     crypto,
     devicesflow,
@@ -42,6 +43,7 @@ from mind_meld import (
     gcflow,
     identity,
     initflow,
+    lockfile,
     manifest,
     memoryindex,
     meshflow,
@@ -183,6 +185,8 @@ class PushResult:
     unwritable_roots: list[str] = field(default_factory=list)
     ledger_cause: str | None = None
     anchor_warnings: list[str] = field(default_factory=list)
+    phase_timings: tuple[capturecatchup.PhaseTiming, ...] = ()
+    capture_deadline_phases: tuple[str, ...] = ()
 
 
 _USAGE_ERROR_CLS = next(cls for cls in typer.BadParameter.__mro__ if cls.__name__ == "UsageError")
@@ -1247,13 +1251,7 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     try:
         with (
             token_usage.diagnostic_scope(core._sync_diagnostic),
-            events_tail.progress_scope(
-                lambda phase, completed, total, unit: (
-                    core._sync_progress_start_batch(phase, total, unit)
-                    if completed == 0
-                    else core._sync_progress_advance(1)
-                )
-            ),
+            events_tail.progress_scope(core._sync_progress_count),
         ):
             yield
     except (Exception, KeyboardInterrupt, SystemExit) as exc:
@@ -1277,6 +1275,10 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
             notice = _owner_action_detail(state.get("record"))
             if notice is not None:
                 core._notice(notice)
+        if verb == "push" and verbose and isinstance(result, PushResult) and result.phase_timings:
+            console.print("Phase timings:")
+            for timing_line in capturecatchup.format_verbose_timings(result.phase_timings):
+                console.print(timing_line)
         lines = _sync_success(verb, result)
         mesh_outcomes = state.get("mesh_outcomes")
         if mesh_outcomes:
@@ -1523,6 +1525,7 @@ def push(
                 except MindMeldError as e:
                     run["cause"] = "crypto-error" if isinstance(e, CryptoError) else "setup-error"
                     core._error(str(e) + refusal_suffix)
+                push_timer = capturecatchup.PhaseTimer()
                 try:
                     # One history transaction per push; per-source batches join it.
                     with pullhistory.batch():
@@ -1537,6 +1540,7 @@ def push(
                             attempt=attempt,
                             diagnostics=verbose or dry_run,
                             result_observer=lambda result: run.__setitem__("result", result),
+                            phase_timer=push_timer,
                         )
                     run["result"] = result
                     core_finished = True
@@ -1588,14 +1592,16 @@ def push(
                 ):
                     try:
                         core._sync_progress_phase("Cleaning up orphaned blobs")
-                        gc_res = gcflow._do_gc(
-                            config,
-                            passphrase,
-                            memory_kb,
-                            dry_run=False,
-                            verbose=False,
-                            emit_retention_summary=False,
-                        )
+                        with push_timer.measure("orphan_gc", "Orphan GC"):
+                            gc_res = gcflow._do_gc(
+                                config,
+                                passphrase,
+                                memory_kb,
+                                dry_run=False,
+                                verbose=False,
+                                emit_retention_summary=False,
+                            )
+                        result.phase_timings = push_timer.phases()
                         gc_pruned = gc_res.deleted
                         if gc_pruned and verbose:
                             console.print(f"  GC: deleted {gc_pruned} orphaned blobs.")
@@ -1611,6 +1617,13 @@ def push(
                     except (OSError, MindMeldError) as e:
                         result.maintenance_failures += 1
                         core._warning(f"GC skipped ({e}). Run: mm gc")
+                if not dry_run and result is not None:
+                    result.phase_timings = push_timer.phases()
+                    capturecatchup.record_push_timings(
+                        "attended",
+                        result.phase_timings,
+                        total_ms=push_timer.total_ms(),
+                    )
                 if not dry_run:
                     meshflow.run(
                         config,
@@ -1986,6 +1999,9 @@ def _push_core(
     diagnostics: bool | None = None,
     result_observer: Callable[[PushResult], None] | None = None,
     report_nested_repositories: bool = True,
+    prepared_tail: events_tail.PreparedEventsTail | None = None,
+    force_events_publish: bool = False,
+    phase_timer: capturecatchup.PhaseTimer | None = None,
 ) -> PushResult | None:
     """Core push logic shared by push, autopush, and recapture.
 
@@ -2008,6 +2024,7 @@ def _push_core(
     """
     show = not quiet and (diagnostics if diagnostics is not None else True)
     start = time.time()
+    timer = phase_timer or capturecatchup.PhaseTimer()
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
     max_file_size = config["sync"]["max_file_size"]
@@ -2123,13 +2140,14 @@ def _push_core(
         captured = attemptlog.CaptureOutcome()
         if attempt is not None:
             attempt.outcome = captured
-        captured = _capture_attended_usage(
-            config,
-            sources,
-            [*resolution.selected, *skipped_internal],
-            verbose=verbose,
-            outcome=captured,
-        )
+        with events_tail.phase_timer_scope(timer):
+            captured = _capture_attended_usage(
+                config,
+                sources,
+                [*resolution.selected, *skipped_internal],
+                verbose=verbose,
+                outcome=captured,
+            )
     host_row_appended = captured is not None and captured.appended is not None
     retro_catchup_pending = attended and not dry_run and _retro_catchup_pending(sources, device_id)
     skipped: list[tuple[str, str]] = []
@@ -2165,17 +2183,18 @@ def _push_core(
     core._sync_progress_phase("Scanning sources")
     if show:
         console.print("[bold]Building manifest...[/bold]")
-    local_manifest = build_manifest_v2(
-        device_id,
-        device_name,
-        sources,
-        max_file_size,
-        on_skip,
-        strict=True,
-        nested_roots=nested_roots,
-        held=held,
-        held_candidates=held_candidates,
-    )
+    with timer.measure("manifest_scan", "Manifest scan"):
+        local_manifest = build_manifest_v2(
+            device_id,
+            device_name,
+            sources,
+            max_file_size,
+            on_skip,
+            strict=True,
+            nested_roots=nested_roots,
+            held=held,
+            held_candidates=held_candidates,
+        )
 
     # Track 90A: the one decision about the project-name format, from the own
     # prior as recovered (before the consumer filters below copy it).
@@ -2369,6 +2388,7 @@ def _push_core(
         and not form.due
         and not names_pending
         and not anchor_is_pending
+        and not force_events_publish
     ):
         scan_held = _held_list(held_files)
         anchor_warnings = (
@@ -2400,6 +2420,8 @@ def _push_core(
                 left_out_clause=left_out_note,
                 left_out_files=guard.left_out_files,
                 anchor_warnings=anchor_warnings,
+                phase_timings=timer.phases(),
+                capture_deadline_phases=tuple(getattr(events_degradations, "deadline_phases", ())),
             )
             if result_observer is not None:
                 result_observer(result)
@@ -2440,18 +2462,27 @@ def _push_core(
     # the tail's own writes; the re-walk reads existing on-disk state.
     # Skipped entirely when no mm-internal source is selected for this push.
     if any(src["name"] in MM_INTERNAL_SOURCE_NAMES for src in sources):
-        core._sync_progress_phase("Recording activity")
-        events_degradations.extend(
-            events_tail._run_events_tail(
-                config,
-                sources,
-                device_id,
-                dry_run=dry_run,
-                quiet=quiet,
-                suppress_host_capture=capture_attempted,
-                capture_activity=retro_catchup_pending or not host_row_appended or content_changed,
+        if prepared_tail is not None:
+            _committed, tail_degs = events_tail._commit_prepared_tail(
+                prepared_tail, config, device_id
             )
-        )
+            events_degradations.extend(tail_degs)
+        else:
+            core._sync_progress_phase("Recording activity")
+            with events_tail.phase_timer_scope(timer):
+                events_degradations.extend(
+                    events_tail._run_events_tail(
+                        config,
+                        sources,
+                        device_id,
+                        dry_run=dry_run,
+                        quiet=quiet,
+                        suppress_host_capture=capture_attempted,
+                        capture_activity=(
+                            retro_catchup_pending or not host_row_appended or content_changed
+                        ),
+                    )
+                )
     if not dry_run:
         mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
         if mm_internal_cfgs:
@@ -2546,6 +2577,7 @@ def _push_core(
         if total_to_upload > 0:
             core._sync_progress_start_batch("Uploading files", total_to_upload, "files")
 
+    upload_started = time.monotonic()
     for src_name, src_data, _remote_src, diff in source_diffs_to_upload:
         if dry_run:
             if show:
@@ -2607,6 +2639,9 @@ def _push_core(
         if src_name not in MM_INTERNAL_SOURCE_NAMES:
             content_files -= len(uploaded.held)
 
+    if not dry_run:
+        timer.record("upload", "Upload", max(0, round((time.monotonic() - upload_started) * 1000)))
+
     if dry_run:
         if show:
             elapsed = time.time() - start
@@ -2665,6 +2700,7 @@ def _push_core(
         else:
             console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
     core._sync_progress_phase("Saving manifest")
+    save_started = time.monotonic()
     unwritable_roots = core.publish_anchors(local_manifest, sources, nested_roots)
     core.stamp_ancestry(local_manifest, remote_manifest, ledger)
     kept_wire_folders: dict[str, str] = {}
@@ -2741,6 +2777,13 @@ def _push_core(
         unwritable_roots=unwritable_roots,
     )
     backend.put(mkey, enc_manifest)
+    timer.record(
+        "save_manifest",
+        "Save manifest",
+        max(0, round((time.monotonic() - save_started) * 1000)),
+    )
+    result.phase_timings = timer.phases()
+    result.capture_deadline_phases = tuple(getattr(events_degradations, "deadline_phases", ()))
     result.content_accepted = True
     result.anchor_warnings = _record_push_anchor_observations(
         anchor_observations, attended=attended
@@ -4929,8 +4972,148 @@ def autopull() -> None:
                 pass
 
 
+_CATCHUP_LOCK_BACKOFFS_S = (0.05, 0.1, 0.2, 0.4, 0.6, 0.65)
+
+
+def _acquire_sync_lock_bounded(backoffs: tuple[float, ...] = _CATCHUP_LOCK_BACKOFFS_S) -> bool:
+    """Try acquiring mind-meld.lock with a short bounded retry ceiling (~2 s)."""
+    try:
+        acquire_lock()
+        return True
+    except LockError:
+        pass
+    for delay in backoffs:
+        time.sleep(delay)
+        try:
+            acquire_lock()
+            return True
+        except LockError:
+            continue
+    return False
+
+
+def _run_capture_catchup() -> None:
+    """Detached single-flight background catch-up: Phase 1 lock-free, Phase 2 brief lock."""
+    try:
+        lockfile.acquire_lock(capturecatchup.CATCHUP_LOCK_PATH)
+    except LockError:
+        return
+    started_at = datetime.now(timezone.utc).isoformat()
+    timer = capturecatchup.PhaseTimer()
+    capturecatchup.record_catchup_state(
+        state="running",
+        result=None,
+        published=False,
+        started_at=started_at,
+        finished_at=None,
+    )
+    try:
+        try:
+            cfg = load_config()
+        except Exception as exc:
+            capturecatchup.record_catchup_state(
+                state="finished",
+                result="failed",
+                published=False,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                detail=f"config unavailable ({type(exc).__name__})",
+            )
+            return
+        resolution = resolve_sources(cfg, strict=True, bootstrap=False)
+        sources = list(resolution.available)
+        if not sources or not any(s.get("name") == "mm-events" for s in sources):
+            capturecatchup.record_catchup_state(
+                state="finished",
+                result="no-sources",
+                published=False,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                detail="no mm-events source available",
+            )
+            return
+
+        with (
+            events_tail.phase_timer_scope(timer),
+            token_usage.diagnostic_scope(lambda *a, **k: None),
+        ):
+            prepared = events_tail._prepare_events_tail(cfg, sources, cfg["device"]["id"])
+        if prepared is None:
+            capturecatchup.record_catchup_state(
+                state="finished",
+                result="no-sources",
+                published=False,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                detail="no mm-events source available",
+            )
+            return
+
+        if not _acquire_sync_lock_bounded():
+            capturecatchup.record_catchup_state(
+                state="finished",
+                result="deferred",
+                published=False,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                detail="sync lock busy; caches warmed for next push",
+            )
+            return
+        try:
+            passphrase = get_passphrase(non_interactive=True)
+            if not passphrase:
+                capturecatchup.record_catchup_state(
+                    state="finished",
+                    result="no-passphrase",
+                    published=False,
+                    started_at=started_at,
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    detail="passphrase unavailable in keyring",
+                )
+                return
+            backend = get_backend(cfg)
+            memory_kb = core._init_crypto_session(backend, passphrase, cfg, read_only=False)
+            with (
+                token_usage.diagnostic_scope(lambda *a, **k: None),
+                pullhistory.command_scope(attended=False),
+                pullhistory.batch(),
+            ):
+                _push_core(
+                    cfg,
+                    passphrase,
+                    memory_kb,
+                    quiet=True,
+                    prepared_tail=prepared,
+                    force_events_publish=True,
+                    phase_timer=timer,
+                )
+            capturecatchup.record_catchup_state(
+                state="finished",
+                result="ok",
+                published=True,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+        finally:
+            core._release_sync_lock()
+    except Exception as exc:
+        capturecatchup.record_catchup_state(
+            state="finished",
+            result="failed",
+            published=False,
+            started_at=started_at,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            detail=type(exc).__name__,
+        )
+    finally:
+        capturecatchup.record_push_timings("catchup", timer.phases(), total_ms=timer.total_ms())
+        lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
+
+
 @app.command()
-def autopush() -> None:
+def autopush(
+    catchup: bool = typer.Option(False, "--catchup", hidden=True),
+) -> None:
     """Push changes silently. Designed for Claude Code -- no prompts, minimal output.
 
     Never prompts (`get_passphrase(non_interactive=True)`). Silent exit on:
@@ -4939,6 +5122,10 @@ def autopush() -> None:
     config, crypto init failure, unexpected bug inside `_push_core`. No
     auto-GC on autopush (prevents blob-deletion hole).
     """
+    if catchup:
+        _run_capture_catchup()
+        return
+
     diagnostics = events_tail.Degradations()
 
     def notice(message: str, degraded: bool = False) -> None:
@@ -4946,6 +5133,8 @@ def autopush() -> None:
             diagnostics.append(message.removeprefix("mm: notice: ").strip())
 
     detached_config: dict | None = None
+    trigger_phases: tuple[str, ...] = ()
+    push_timer = capturecatchup.PhaseTimer()
     with (
         token_usage.diagnostic_scope(notice),
         pullhistory.command_scope(attended=False),
@@ -4963,7 +5152,16 @@ def autopush() -> None:
                     setup.passphrase,
                     setup.memory_kb,
                     quiet=True,
+                    phase_timer=push_timer,
                 )
+
+            if result is not None:
+                capturecatchup.record_push_timings(
+                    "autopush",
+                    push_timer.phases(),
+                    total_ms=push_timer.total_ms(),
+                )
+                trigger_phases = result.capture_deadline_phases
 
             if diagnostics.total:
                 result = result or PushResult()
@@ -5056,6 +5254,11 @@ def autopush() -> None:
         if detached_config is not None:
             try:
                 memoryindex.start_detached_refresh(detached_config)
+            except Exception:
+                pass
+        if trigger_phases:
+            try:
+                capturecatchup.start_detached_catchup(trigger_phases)
             except Exception:
                 pass
 

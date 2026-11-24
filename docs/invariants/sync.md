@@ -2482,7 +2482,10 @@ markdown files remain the source of truth.
   (`sys.executable -P -m mind_meld.memoryindex`, all streams `DEVNULL`,
   `start_new_session=True`) after `_auto_command_scope` exits and releases the
   lock, never wait, and print nothing. The child starts outside the caller's
-  project directory.
+  project directory. Similarly, when `mm autopush` stops any capture phase at
+  its deadline, it spawns `capturecatchup.start_detached_catchup`
+  (`sys.executable -P -m mind_meld.cli autopush --catchup`, same detached
+  semantics) after releasing the lock; see `docs/invariants/events-retro.md`.
 - **Failure isolation and single-flight state.** A missing qmd, old version
   (< 2.8.3), or failed/timed-out refresh never changes a sync's outcome or exit
   code. `refresh` holds a single-flight `lockedjson.locked_json_rmw` flock on

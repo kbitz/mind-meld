@@ -8,10 +8,11 @@ their owner modules at call time so test monkeypatches take effect.
 
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from mind_meld import host_usage
 from mind_meld.hosts import codex as codex_host
@@ -54,6 +55,7 @@ def warm_host_cache_inline(
     *,
     budget_s: float = host_usage.DEFAULT_READ_BUDGET_S,
     reader: str = "codex",
+    progress: Callable[[int, int], None] | None = None,
 ) -> host_usage.HostUsageResult:
     """Read host usage under the attended caller's generous one-off budget.
 
@@ -69,14 +71,36 @@ def warm_host_cache_inline(
     ceiling. Full interpreter and phase measurements: events-retro.md.
     """
     deadline = time.monotonic() + budget_s
+
+    def _progress_kw(fn: Callable[..., Any]) -> dict[str, Any]:
+        if progress is None:
+            return {}
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return {}
+        if "progress" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            return {"progress": progress}
+        return {}
+
     if reader == "codex":
-        return codex_host.read_codex_usage(root, deadline=deadline)
+        return codex_host.read_codex_usage(
+            root, deadline=deadline, **_progress_kw(codex_host.read_codex_usage)
+        )
     if reader == "grok":
-        return grok_host.read_grok_usage(root, deadline=deadline, consented=True)
+        return grok_host.read_grok_usage(
+            root, deadline=deadline, consented=True, **_progress_kw(grok_host.read_grok_usage)
+        )
     if reader == "muse":
-        return host_usage.read_muse_usage(root, deadline=deadline, consented=True)
+        return host_usage.read_muse_usage(
+            root, deadline=deadline, consented=True, **_progress_kw(host_usage.read_muse_usage)
+        )
     if reader == "agy":
-        return host_usage.read_agy_usage(root, deadline=deadline, consented=True)
+        return host_usage.read_agy_usage(
+            root, deadline=deadline, consented=True, **_progress_kw(host_usage.read_agy_usage)
+        )
     raise ValueError(
         f"unknown host reader {reader!r}; register it in host_registry.py "
         "(docs/invariants/events-retro.md#host-reader-adapter-contract)"

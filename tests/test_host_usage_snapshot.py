@@ -561,8 +561,8 @@ class TestHostDeadline:
         assert capture.dropped == ()
         assert log == []
 
-    def test_later_readers_get_grace_after_codex_spends_the_sweep_budget(self):
-        """Every later reader gets 250 ms even when the sweep has expired."""
+    def test_each_reader_gets_equal_per_provider_allowance_even_after_first_overrun(self):
+        """Track 165A: every enabled reader gets its own equal allowance (no shared pool)."""
         log: list = []
         clock = {"t": 0.0}
         names = ["codex", "grok", SYNTH]
@@ -570,13 +570,10 @@ class TestHostDeadline:
         def reader_for(index: int):
             def read(*, deadline):
                 log.append(names[index])
+                assert deadline - clock["t"] == pytest.approx(10.0)
                 if index == 0:
-                    assert deadline == 10.0
                     clock["t"] = 10.0
                 else:
-                    assert deadline - clock["t"] == pytest.approx(
-                        events_tail.HOST_READER_GRACE_MS / 1000.0
-                    )
                     clock["t"] += 0.02
                 return _complete({"grok" if index else "codex": {"2026-08-15": _usage(1)}})
 
@@ -593,41 +590,20 @@ class TestHostDeadline:
         assert capture.hosts["grok"]["2026-08-15"] == _usage(2)
         assert log == names
 
-    def test_later_reader_grace_extends_a_short_remaining_sweep(self):
-        clock = {"t": 0.0}
-        seen: list[tuple[str, float]] = []
-
-        def codex(*, deadline):
-            seen.append(("codex", deadline))
-            clock["t"] = 9.97
-            return _complete({"codex": {"2026-08-15": _usage(1)}})
-
-        def grok(*, deadline):
-            seen.append(("grok", deadline))
-            return _complete({"grok": {"2026-08-15": _usage(1)}})
-
-        capture = events_tail._capture_host_usage(
-            deadline=10.0,
-            readers=_readers(("codex", codex), ("grok", grok)),
-            now=lambda: clock["t"],
-        )
-        assert seen[0][1] == 10.0
-        assert seen[1][1] - 9.97 == pytest.approx(events_tail.HOST_READER_GRACE_MS / 1000.0)
-        assert capture.token_sources == ("codex", "grok")
-
-    def test_first_reader_deadline_still_publishes_a_later_reader_that_finishes_in_grace(self):
+    def test_first_reader_deadline_does_not_shrink_sibling_allowance(self):
         clock = {"t": 0.0}
 
         def codex(*, deadline):
+            assert deadline == pytest.approx(1.0)
             clock["t"] = 100.0
             return _incomplete("deadline")
 
         def grok(*, deadline):
-            assert deadline - 100.0 == pytest.approx(events_tail.HOST_READER_GRACE_MS / 1000.0)
+            assert deadline - 100.0 == pytest.approx(1.0)
             return _complete({"grok": {"2026-08-15": _usage(3)}})
 
         capture = events_tail._capture_host_usage(
-            deadline=10.0,
+            deadline=1.0,
             readers=_readers(("codex", codex), ("grok", grok)),
             now=lambda: clock["t"],
         )
@@ -642,7 +618,7 @@ class TestHostDeadline:
         retry warms it, rather than incorrectly charging the next reader.
         """
         clock = {"t": 0.0}
-        log: list[str] = []
+        log: list = []
 
         def codex(*, deadline):
             log.append("codex")
@@ -668,8 +644,7 @@ class TestHostDeadline:
             ("grok", "deadline"),
             (SYNTH, "deadline"),
         )
-        grace = 100.0 + events_tail.HOST_READER_GRACE_MS / 1000.0
-        assert log == ["codex", ("grok", grace), (SYNTH, grace)]
+        assert log == ["codex", ("grok", 110.0), (SYNTH, 110.0)]
 
     @staticmethod
     def _clocked_reader(clock: dict, name: str, cost: float):
@@ -685,142 +660,28 @@ class TestHostDeadline:
 
         return read
 
-    def test_attended_reserve_lets_a_later_reader_finish_after_an_overrun(self):
-        """Track 101A: a reader that overruns takes its own share, not the
-        whole read of the readers after it. Antigravity needs 236 ms."""
+    def test_autopush_default_per_provider_budget_fits_measured_warm_reads(self):
+        """Track 165A: every enabled reader gets 1,000 ms independently."""
         clock = {"t": 0.0}
-        seen: dict[str, float] = {}
-
-        def codex(*, deadline):
-            seen["codex"] = deadline
-            clock["t"] = 2.4  # overran its 2.1 s share by 0.3 s
-            return _incomplete("deadline")
-
-        def later(name: str, cost: float):
-            inner = self._clocked_reader(clock, name, cost)
-
-            def read(*, deadline):
-                seen[name] = deadline
-                return inner(deadline=deadline)
-
-            return read
+        allowance_s = events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS / 1000.0
+        assert allowance_s == pytest.approx(1.0)
 
         capture = events_tail._capture_host_usage(
             _readers(
-                ("codex", codex),
-                ("grok", later("grok", 0.1)),
-                ("muse", later("muse", 0.084)),
-                ("agy", later("agy", 0.236)),
+                ("codex", self._clocked_reader(clock, "codex", 0.900)),
+                ("agy", self._clocked_reader(clock, "agy", 0.900)),
             ),
-            deadline=3.0,
-            now=lambda: clock["t"],
-            reserve_s=0.3,
-        )
-
-        assert seen["codex"] == pytest.approx(2.1)
-        assert capture.token_sources == ("grok", "muse", "agy")
-        assert capture.dropped == (("codex", "deadline"),)
-        assert clock["t"] <= 3.0
-
-    def test_without_a_reserve_the_same_overrun_costs_agy_its_read(self):
-        """The base behaviour the reserve fixes: with only the 250 ms grace, a
-        codex read that spends the whole sweep leaves agy 250 ms for 270 ms."""
-        clock = {"t": 0.0}
-
-        def codex(*, deadline):
-            clock["t"] = 3.0
-            return _incomplete("deadline")
-
-        capture = events_tail._capture_host_usage(
-            _readers(("codex", codex), ("agy", self._clocked_reader(clock, "agy", 0.270))),
-            deadline=3.0,
-            now=lambda: clock["t"],
-        )
-        assert capture.dropped == (("codex", "deadline"), ("agy", "deadline"))
-
-    def test_autopush_default_budget_and_grace_fit_measured_warm_reads(self):
-        """Track 149A: measured warm reads (Codex 266 ms, Antigravity 153 ms)
-        both complete inside the 750 ms default autopush sweep, and Antigravity
-        (153 ms) still completes inside the 250 ms grace floor when Codex
-        exhausts the sweep."""
-        clock = {"t": 0.0}
-        sweep_s = events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS / 1000.0
-        assert sweep_s == pytest.approx(0.75)
-        assert events_tail.HOST_READER_GRACE_MS == 250
-
-        capture = events_tail._capture_host_usage(
-            _readers(
-                ("codex", self._clocked_reader(clock, "codex", 0.266)),
-                ("agy", self._clocked_reader(clock, "agy", 0.153)),
-            ),
-            deadline=sweep_s,
+            deadline=allowance_s,
             now=lambda: clock["t"],
         )
         assert capture.complete is True
         assert capture.token_sources == ("codex", "agy")
         assert capture.dropped == ()
-        assert clock["t"] == pytest.approx(0.419)
-
-        # Even if Codex exhausts the 750 ms sweep, Antigravity's 153 ms warm
-        # read finishes inside the 250 ms later-reader grace floor.
-        clock_grace = {"t": 0.0}
-
-        def codex_exhausts(*, deadline):
-            clock_grace["t"] = sweep_s
-            return _incomplete("deadline")
-
-        capture_grace = events_tail._capture_host_usage(
-            _readers(
-                ("codex", codex_exhausts),
-                ("agy", self._clocked_reader(clock_grace, "agy", 0.153)),
-            ),
-            deadline=sweep_s,
-            now=lambda: clock_grace["t"],
-        )
-        assert capture_grace.complete is True
-        assert capture_grace.token_sources == ("agy",)
-        assert capture_grace.dropped == (("codex", "deadline"),)
-        assert clock_grace["t"] == pytest.approx(0.75 + 0.153)
-
-    def test_attended_reserve_fits_measured_warm_reads(self):
-        """The slowest reads measured on the owner's Mac (Codex 1.812 s, Grok
-        0.020 [19–20 ms warm Grok read, events_tail.py:238-240 / E16], Muse 0.642,
-        Antigravity 0.236) all complete inside 3.0 s."""
-        clock = {"t": 0.0}
-        names = ("codex", "grok", "muse", "agy")
-        costs = (1.812, 0.020, 0.642, 0.236)
-
-        capture = events_tail._capture_host_usage(
-            _readers(*[(n, self._clocked_reader(clock, n, c)) for n, c in zip(names, costs)]),
-            deadline=3.0,
-            now=lambda: clock["t"],
-            reserve_s=0.3,
-        )
-
-        assert capture.token_sources == names
-        assert capture.dropped == ()
-        assert clock["t"] <= 3.0
-
-    def test_reserve_never_vetoes_the_first_reader(self):
-        """The index-0 veto stays keyed to the sweep deadline, not the held-back one."""
-        log: list = []
-        capture = events_tail._capture_host_usage(
-            _readers(
-                ("codex", _recording_reader(_complete(), log, "codex")),
-                ("agy", _recording_reader(_complete(), log, "agy")),
-            ),
-            deadline=10.0,
-            now=lambda: 9.9,  # inside the sweep, but past 10.0 - 0.3
-            reserve_s=0.3,
-        )
-        assert capture.invoked is True
-        assert [name for name, _ in log] == ["codex", "agy"]
 
     def test_budgets_are_separate_from_the_walk_budget(self):
         """Deliberately its own pair of constants: reusing the walk budget
         would let a busy host store redefine the session-walk notice."""
-        assert events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS == 750
-        assert events_tail.HOST_READER_GRACE_MS == 250
+        assert events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS == 1000
         assert events_tail.HOST_USAGE_READ_BUDGET_INTERACTIVE_MS == 3000
         assert (
             events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS != _mm_host_usage.DEFAULT_READ_BUDGET_S
@@ -848,7 +709,7 @@ class TestHostDeadline:
             "dev-a",
             since=datetime.now(timezone.utc),
             budget_ms=500,
-            host_budget_ms=750,
+            host_budget_ms=1000,
             prepare_token_cache=lambda: None,
             host_readers=events_tail._default_host_readers(
                 [{"name": n, "type": "generic"} for n in _mm_events.HOST_USAGE_TOKEN_SOURCES],
@@ -857,8 +718,7 @@ class TestHostDeadline:
         after = _time.monotonic()
 
         assert len(seen) == 2
-        assert len(set(seen)) == 1, "cheap reads with ample time retain the sweep deadline"
-        assert before + 0.75 <= seen[0] <= after + 0.75
+        assert all(before + 1.0 <= d <= after + 1.0 for d in seen)
 
 
 # ---------------------------------------------------------------------------
@@ -1709,12 +1569,8 @@ class TestColdCacheWarmAndRetry:
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
         )
 
-        assert calls == [
-            "codex",
-            "muse",
-            SYNTH,
-            "warm:muse",
-        ]
+        assert set(calls[:3]) == {"codex", "muse", SYNTH}
+        assert calls[3:] == ["warm:muse"]
         assert degradations == []
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["token_sources"] == ["codex", "muse", SYNTH]
@@ -1772,7 +1628,8 @@ class TestColdCacheWarmAndRetry:
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
         )
 
-        assert calls == ["codex", "muse", SYNTH, "warm:muse"]
+        assert set(calls[:3]) == {"codex", "muse", SYNTH}
+        assert calls[3:] == ["warm:muse"]
         assert degradations == []
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {
@@ -1899,9 +1756,10 @@ class TestColdCacheWarmAndRetry:
         assert len(degradations) == 1
         assert degradations[0].startswith("host-usage snapshot skipped (codex deadline)")
 
-    def test_autopush_sweep_keeps_grace_and_never_warms(self, tmp_path, monkeypatch):
-        """Track 101A / Track 149A: the reserve is attended-only. An autopush sweep keeps its
-        fixed 750 ms and the 250 ms later-reader grace, and nothing warms."""
+    def test_autopush_sweep_gives_equal_1000ms_per_provider_and_never_warms(
+        self, tmp_path, monkeypatch
+    ):
+        """Track 165A: autopush gives every reader an equal 1,000 ms deadline and never warms."""
         clock = {"t": 100.0}
         monkeypatch.setattr(events_tail.time, "monotonic", lambda: clock["t"])
         real_capture = events_tail._capture_host_usage
@@ -1923,9 +1781,9 @@ class TestColdCacheWarmAndRetry:
 
             return read
 
-        # Codex overruns the 750 ms sweep by 20 ms; the others are instant.
+        # Codex overruns its 1,000 ms deadline by 20 ms; the others still get 1,000 ms each.
         readers = tuple(
-            (name, reader(name, 0.77 if name == "codex" else 0.0))
+            (name, reader(name, 1.02 if name == "codex" else 0.0))
             for name in ("codex", "grok", "muse", "agy")
         )
         monkeypatch.setattr(events_tail, "_default_host_readers", lambda *_a, **_kw: readers)
@@ -1941,11 +1799,8 @@ class TestColdCacheWarmAndRetry:
         )
 
         assert [name for name, _start, _deadline in seen] == ["codex", "grok", "muse", "agy"]
-        _name, first_start, sweep = seen[0]
-        assert sweep - first_start == pytest.approx(0.75)
-        for _name, start, deadline in seen[1:]:
-            assert deadline == pytest.approx(max(sweep, start + 0.25))
-        assert seen[1][2] > sweep, "the overrun leaves the next reader exactly the 250 ms grace"
+        for _name, start, deadline in seen:
+            assert deadline - start == pytest.approx(1.0)
         assert warmed == [], "autopush never warms"
 
     def test_healthy_capture_never_pays_for_a_warm(self, tmp_path, monkeypatch, capsys):
@@ -2857,7 +2712,7 @@ class TestCaptureBudget85A:
     def test_autopush_budget_unaffected_by_capture_budget(self):
         config = {"retro": {"capture_budget_ms": 4000, "attended_capture_cap_ms": 20000}}
         assert events_tail.resolve_host_read_budget(config, interactive=False) == (
-            750,
+            1000,
             "default",
         )
         config["retro"]["host_usage_autopush_budget_ms"] = 400
@@ -2967,21 +2822,22 @@ class TestCaptureBudget85A:
         calls: list[dict] = []
         real = events_tail._capture_host_usage
 
-        def spy(readers, *, deadline, now=None, reserve_s=0.0):
+        def spy(readers, *, deadline, now=None, concurrent=None):
             calls.append(
                 {
                     "names": tuple(name for name, _ in readers),
                     "deadline": deadline,
-                    "reserve_s": reserve_s,
                 }
             )
             extra = {"now": events_tail.time.monotonic if now is None else now}
-            return real(readers, deadline=deadline, reserve_s=reserve_s, **extra)
+            if concurrent is not None:
+                extra["concurrent"] = concurrent
+            return real(readers, deadline=deadline, **extra)
 
         monkeypatch.setattr(events_tail, "_capture_host_usage", spy)
         return calls
 
-    def test_snapshot_reserves_only_for_attended_callers(self, monkeypatch):
+    def test_snapshot_warms_only_for_attended_callers(self, monkeypatch):
         calls = self._spy_sweeps(monkeypatch)
         warmed: list[str] = []
         monkeypatch.setattr(
@@ -2989,31 +2845,19 @@ class TestCaptureBudget85A:
             "warm_host_cache_inline",
             lambda **kw: warmed.append(kw["reader"]) or _complete(),
         )
-        four = tuple((n, lambda *, deadline: _complete()) for n in ("codex", "grok", "muse", "agy"))
         slow = tuple((n, lambda *, deadline: _incomplete("deadline")) for n in ("codex", "muse"))
 
-        events_tail._capture_host_snapshot(
-            "dev-a", four, host_budget_ms=3000, warm_host_cache=lambda _name: None
-        )
-        assert calls[-1]["reserve_s"] == pytest.approx(0.3)
-
-        events_tail._capture_host_snapshot(
-            "dev-a", four, host_budget_ms=1000, warm_host_cache=lambda _name: None
-        )
-        assert calls[-1]["reserve_s"] == pytest.approx(0.125)
-
-        events_tail._capture_host_snapshot(
-            "dev-a", four[:1], host_budget_ms=3000, warm_host_cache=lambda _name: None
-        )
-        assert calls[-1]["reserve_s"] == 0.0, "one reader has nobody to hold a reserve for"
-
         before = len(calls)
-        events_tail._capture_host_snapshot("dev-a", slow, host_budget_ms=3000)
-        assert [c["reserve_s"] for c in calls[before:]] == [0.0]
-        assert len(calls) == before + 1 and warmed == [], "no callback: no reserve and no warm"
+        events_tail._capture_host_snapshot("dev-a", slow, host_budget_ms=1000)
+        assert len(calls) == before + 1 and warmed == [], "no callback: no warm"
 
-    def test_attended_warm_retries_hold_reserves(self, monkeypatch):
-        """Each retry leaves the later ones their reserve under the phase deadline."""
+        events_tail._capture_host_snapshot(
+            "dev-a", slow, host_budget_ms=3000, warm_host_cache=lambda _name: None
+        )
+        assert warmed == ["codex", "muse"]
+
+    def test_attended_warm_retries_stay_within_phase_deadline(self, monkeypatch):
+        """Each retry stays bounded by the three-fifths phase deadline."""
         import time as _time
 
         calls = self._spy_sweeps(monkeypatch)
@@ -3030,10 +2874,9 @@ class TestCaptureBudget85A:
         after = _time.monotonic()
 
         sweep, first, second = calls
-        assert sweep["names"] == ("codex", "muse") and sweep["reserve_s"] == pytest.approx(0.3)
+        assert sweep["names"] == ("codex", "muse")
         assert (first["names"], second["names"]) == (("codex",), ("muse",))
-        assert second["deadline"] - first["deadline"] == pytest.approx(0.3)
-        # The phase is three fifths of 10 s, counted from the snapshot's start.
+        assert before + 6.0 <= first["deadline"] <= after + 6.0
         assert before + 6.0 <= second["deadline"] <= after + 6.0
 
     def test_expired_retry_does_not_announce_a_read(self, monkeypatch):
@@ -3802,9 +3645,9 @@ def test_track_125a_progress_scope_receives_host_and_git_counts_and_isolates_fau
             root_discovery_budget_ms=_mm_events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS,
         )
     assert calls == [
-        ("Recording activity", 0, 2, "repositories"),
-        ("Recording activity", 1, 2, "repositories"),
-        ("Recording activity", 2, 2, "repositories"),
+        ("Walking repositories", 0, 2, ""),
+        ("Walking repositories", 1, 2, ""),
+        ("Walking repositories", 2, 2, ""),
     ]
 
     def broken_sink(*_args):

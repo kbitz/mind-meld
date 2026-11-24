@@ -29,7 +29,7 @@ import stat
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from mind_meld import host_usage, token_usage
 from mind_meld.lockedjson import (
@@ -369,6 +369,8 @@ def _scan_grok_root(
     root: Path,
     cached_files: dict[str, dict[str, Any]],
     deadline: float,
+    *,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[host_usage.HostUsageResult, dict[str, dict[str, Any]]]:
     """Walk ``root/*/*``; returns the result and every session entry staged so far."""
     if host_usage._expired(deadline):
@@ -387,12 +389,26 @@ def _scan_grok_root(
         canonical_root = root
     staged: dict[str, dict[str, Any]] = {}
     try:
+        session_paths: list[Path] = []
         for _cwd_name, cwd_path in _child_dirs(root, deadline=deadline):
             for _session_name, session_path in _child_dirs(cwd_path, deadline=deadline):
-                if host_usage._expired(deadline):
-                    raise host_usage._ReadFailure("deadline")
-                key = host_usage._cache_key(session_path, root=root, canonical_root=canonical_root)
-                staged[key] = _session_entry(session_path / "usage.json", cached_files.get(key))
+                session_paths.append(session_path)
+        total = len(session_paths)
+        if progress is not None and total > 0:
+            try:
+                progress(0, total)
+            except Exception:
+                pass
+        for idx, session_path in enumerate(session_paths, 1):
+            if host_usage._expired(deadline):
+                raise host_usage._ReadFailure("deadline")
+            key = host_usage._cache_key(session_path, root=root, canonical_root=canonical_root)
+            staged[key] = _session_entry(session_path / "usage.json", cached_files.get(key))
+            if progress is not None and total > 0:
+                try:
+                    progress(idx, total)
+                except Exception:
+                    pass
         return _aggregate_files(staged), staged
     except host_usage._ReadFailure as failure:
         return host_usage._incomplete(failure.reason), staged
@@ -416,6 +432,7 @@ def read_grok_usage(
     *,
     deadline: float | None = None,
     consented: bool = False,
+    progress: Callable[[int, int], None] | None = None,
 ) -> host_usage.HostUsageResult:
     """Read completed Grok Build turn totals from ``usage.json`` files.
 
@@ -461,7 +478,12 @@ def read_grok_usage(
             if host_usage._expired(read_deadline):
                 result, staged_files = host_usage._incomplete("deadline"), {}
             else:
-                result, staged_files = _scan_grok_root(source_root, cached_files, read_deadline)
+                result, staged_files = _scan_grok_root(
+                    source_root,
+                    cached_files,
+                    read_deadline,
+                    **({"progress": progress} if progress is not None else {}),
+                )
             ready = time.monotonic()
             over_budget = result.complete and host_usage._expired(read_deadline)
             now = datetime.now(timezone.utc)

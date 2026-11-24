@@ -722,7 +722,7 @@ def test_every_default_host_readers_call_site_passes_the_same_grok_verdict():
                 continue
             keywords = {kw.arg: ast.unparse(kw.value) for kw in node.keywords}
             sites.append((path.name, node.lineno, keywords.get("grok_consented")))
-    assert len(sites) == 5, sites
+    assert len(sites) == 6, sites
     for file, line, verdict in sites:
         assert verdict is not None and verdict.endswith("grok_usage_consented(config)"), (
             file,

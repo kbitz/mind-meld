@@ -187,8 +187,8 @@ host reads (sweep plus inline warm) get up to three fifths of the attended scan 
 slow Codex read can no longer take Antigravity's or Muse's. Autopush stayed
 at 250 ms in Track 101A before settled-aggregate memoization; after Track 105A cut
 warm Codex reads to 266 ms over 7,536 rollouts, Track 149A raised the autopush sweep
-default (`host_usage_autopush_budget_ms`) to 750 ms with a 250 ms later-reader grace
-floor (autopush still never warms). If you pinned `host_usage_interactive_budget_ms`
+default (`host_usage_autopush_budget_ms`) to 1,000 ms per provider concurrently
+(Track 165A; previously a 750 ms shared sweep in Track 149A; autopush still never warms). If you pinned `host_usage_interactive_budget_ms`
 in `~/.config/mind-meld/config.toml` as a workaround, remove that line and run
 `mm push`; the measured reader timings fit the new default. Live verification
 across up to three attended pushes follows release installation. Codex also
@@ -1151,7 +1151,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Open with a scoped verdict comparing local context with this device's last push, then show Syncthing state (including knocking unpublished fleet machines with `Run: mm update`, superseded old registrations alongside join requests with `Run: mm devices retire <old-id>`, and a count-only `Run: mm devices approve` line for other pending join requests on a machine where `mm` manages Syncthing), each peer's last push and applied state, the latest auto or attended run per verb, and current diagnostics. Peer pushes overdue by more than 24 h warn in every mode. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
-| `mm diag` | Dump non-secret crypto, sync, Syncthing, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`, with `grok` beside `codex`, `muse` and `agy`), git-root `discovery`, recorded-vs-fresh `git_capture`, and local `memory_index` state for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`, `memory_index`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
+| `mm diag` | Dump non-secret crypto, sync, Syncthing, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`, with `grok` beside `codex`, `muse` and `agy`), git-root `discovery`, recorded-vs-fresh `git_capture`, local `memory_index` state, `push_timings`, and `capture_catchup` state for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`, `memory_index`, `push_timings`, `capture_catchup`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm devices approve [name\|short-id\|device-id]` | On a fleet machine where mm manages Syncthing, approve a newly joining machine by **Syncthing** device ID, short Syncthing ID (at least 4 base32 chars, terminal required), device name (terminal required), or with no argument to list pending devices and choose interactively on a terminal. Explains and filters out pending devices already vouched by `syncthing/<id>.enc`, labels knocking fleet machines that have not yet published their Syncthing ID, flags retired Syncthing IDs (`(retired)`, requiring the full Syncthing ID to re-approve), and finishes a half-finished approval by full Syncthing device ID |
@@ -2303,7 +2303,7 @@ Use the [second-Mac publication check](#antigravity-agy); cache success alone do
 
 **`mm enable-source opencode` says the source was retired.** The OpenCode sync source was retired in v0.12.55 and is rejected even with `--force`. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes leftover retired `[[sync.sources]]` blocks and records the name in `disabled_sources`. Push and pull already ignore retired sources without minting deletion tombstones, including before migration.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`, and `memory_index`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before (`null` with no `claude` source, an invalid config or an unresolved home), `reason` is `projects_unlisted`, `home_unresolved`, `encoding_mismatch`, `config_invalid` or `null`, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`, `memory_index`, `push_timings`, and `capture_catchup`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before (`null` with no `claude` source, an invalid config or an unresolved home), `reason` is `projects_unlisted`, `home_unresolved`, `encoding_mismatch`, `config_invalid` or `null`, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 
@@ -2673,9 +2673,23 @@ Older undated blockers gain a date when this version first observes them.
 Every attended push attempts a fresh capture. If every consented reader later
 fails, no host row is written and this snapshot ages. If another reader
 completes, the newer row supersedes the device's coverage and may omit the
-failed reader. Status shows the latest coverage. The default 750 ms autopush
-sweep and 250 ms later-reader grace floor cover ordinary warm reads; attended
-`mm push` and `attended_capture_cap_ms` handle cold or outsized corpora.
+failed reader. Status shows the latest coverage. Enabled host readers run
+concurrently on autopush with an equal **1,000 ms** per-provider deadline
+(default `host_usage_autopush_budget_ms = 1000`), so hook wall time stays near
+one deadline rather than the sum across providers; a reader that finishes early
+returns immediately without reserving time. When an autopush stops any capture
+phase (host readers, repository discovery, Git walks, or session scans) at its
+deadline with work left, it spawns one detached single-flight background
+catch-up with the attended budgets (`capture-catchup.lock` / `capture-catchup.json`)
+and returns immediately without waiting or printing. Previews (`--dry-run`)
+never start a catch-up. Attended `mm push` shows per-phase progress with counts
+and elapsed time on a terminal (clearing before the outcome line; piped output
+stays silent), `mm push --verbose` ends with per-phase millisecond timings
+against each phase's allowance, and `mm diag` exposes recorded `push_timings`
+and `capture_catchup` state. `mm status` shows the catch-up's state/result and
+suppresses manual `mm push` nags while a running or recently published catch-up
+covers the deadline backlog. Attended `mm push` and `attended_capture_cap_ms`
+handle cold or outsized corpora.
 Fleet retros flag devices whose last snapshot predates the requested window.
 Days a `deadline` read missed come back on the reader's next complete read: readers
 aggregate the whole local corpus, each row carries the device's last 90 UTC days, and
@@ -2693,7 +2707,7 @@ pull_syncthing_wait_ms = 15000
 [retro]
 capture_budget_ms = 5000
 attended_capture_cap_ms = 30000
-host_usage_autopush_budget_ms = 750
+host_usage_autopush_budget_ms = 1000
 host_usage_interactive_budget_ms = 3000
 ```
 
@@ -2715,24 +2729,22 @@ keeping the initial host sweep capped by `host_usage_interactive_budget_ms`).
 Setting `attended_capture_cap_ms = capture_budget_ms` restores
 the previous capture deadlines. These are cooperative scan deadlines, not a bound
 on the whole command: filesystem calls, cache writes and running Git workers can
-finish later. Each reader after the first keeps a reserve of
-up to 300 ms in the sweep and across the warm retries (at most half the sweep divided
-by the reader count), so one reader's overrun cannot take another's whole read. Setting either capture key selects the partition;
+finish later. Enabled host readers run concurrently with equal per-provider
+deadlines, so one slow reader cannot shrink another reader's allowance. Setting either capture key selects the partition;
 `host_usage_interactive_budget_ms` remains the sweep preference within its host share.
 `attended_capture_cap_ms` applies only to attended pushes.
 
-Autopush defaults to **750 ms** (range **100–5,000**, with a **250 ms** later-reader grace floor; sized from measured warm reads of 266 ms for Codex over 7,536 rollouts, 104–153 ms for Antigravity over 500 conversation DBs, and 19–20 ms for Grok Build); interactive push and init default to **3,000 ms** (range **250–5,000**).
+Autopush defaults to **1,000 ms per provider** (range **100–5,000**, running enabled host readers concurrently); interactive push and init default to **3,000 ms** (range **250–5,000**).
 All must be integers. An explicit `host_usage_autopush_budget_ms` must not exceed `capture_budget_ms`
 when that key is set, and must not exceed an explicitly set interactive budget.
 When neither is set, it must not exceed the 3,000 ms interactive default. When
 both ceilings apply, it must not exceed the smaller one. When `host_usage_autopush_budget_ms` is unset,
-mm clamps the 750 ms default to the active attended ceiling (`capture_budget_ms` and/or `host_usage_interactive_budget_ms`, else 3,000 ms).
+mm clamps the 1,000 ms default to the active attended ceiling (`capture_budget_ms` and/or `host_usage_interactive_budget_ms`, else 3,000 ms).
 Invalid values stop sync like any other `[retro]` error. Raising
 a budget trades more autopush latency for read headroom. This is per machine and
 per mm version: remeasure after corpus or interpreter changes; do not copy a
-fleet-wide number. `mm diag` shows the effective host sweep budgets and base capture
-budget with their `default` or `config` source, each reader's **last complete read**, and the combined sweep
-estimate. The estimate excludes cache writes and later-reader grace and is
+fleet-wide number. `mm diag` shows the effective per-provider host read budgets and base capture
+budget with their `default` or `config` source, each reader's **last complete read**, the slowest concurrent reader against the per-provider autopush budget, recorded `push_timings`, and `capture_catchup` state. The sweep estimate excludes cache writes and is
 not a publication check. Missing measurements say `unknown`; future dates
 say `in the future`. Lowering `host_usage_interactive_budget_ms` does not cap
 the separate warm allowance. Outside legacy-only configurations, host sweep and

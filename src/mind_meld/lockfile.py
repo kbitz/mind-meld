@@ -162,3 +162,36 @@ def release_lock(path: Path | None = None) -> None:
         os.close(fd)
     except OSError:
         pass
+
+
+def is_lock_held(path: Path) -> bool:
+    """Read-only non-blocking probe whether another process holds ``path``.
+
+    Never creates or modifies ``path``. Returns ``False`` if the lockfile does
+    not exist or cannot be probed.
+    """
+    lock_path = Path(path).expanduser()
+    key = _resolve_key(lock_path)
+    if key in _LOCK_FDS:
+        return True
+    try:
+        fd = os.open(str(lock_path), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass

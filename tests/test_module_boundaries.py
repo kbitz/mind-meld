@@ -30,6 +30,7 @@ HOST_ADAPTER_MODULES = [
 # Adding a module here is how a future extraction opts into every gate below.
 EXTRACTED = [
     "attemptlog",
+    "capturecatchup",
     "pullplan",
     "consoles",
     "conflictmtime",
@@ -58,6 +59,7 @@ EXTRACTED = [
 LEAVES = [
     "statedb",
     "attemptlog",
+    "capturecatchup",
     "pullplan",
     "consoles",
     "conflictmtime",
@@ -1097,6 +1099,7 @@ PULL_CORE_DEFINITIONS = frozenset(
     _stop_sync_progress
     _sync_diagnostic
     _sync_progress_advance
+    _sync_progress_count
     _sync_progress_ensure_batch
     _sync_progress_phase
     _sync_progress_start_batch

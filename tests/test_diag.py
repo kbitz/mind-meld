@@ -887,6 +887,8 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "host_publication",
         "discovery",
         "git_capture",
+        "push_timings",
+        "capture_catchup",
     ):
         assert section in payload, f"missing {section}"
     muse_hu = payload["host_usage"]["muse"]
@@ -1876,18 +1878,18 @@ class TestDiagGitCapture:
 
 
 @pytest.mark.parametrize(
-    "case,total,margin",
+    "case,slowest,count,margin",
     [
-        ("both", 215, "535 ms spare"),
-        ("over", 768, "over by 18 ms"),
-        ("codex-only", 197, "553 ms spare"),
-        ("muse-only", 18, "732 ms spare"),
-        ("missing-read", None, "a reader has no complete read"),
-        ("none", None, "no reader enabled"),
+        ("both", 197, 2, "803 ms spare"),
+        ("over", 1050, 2, "over by 50 ms"),
+        ("codex-only", 197, 1, "803 ms spare"),
+        ("muse-only", 18, 1, "982 ms spare"),
+        ("missing-read", None, 2, "a reader has no complete read"),
+        ("none", None, 0, "no reader enabled"),
     ],
 )
 def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
-    tmp_path, monkeypatch, case, total, margin
+    tmp_path, monkeypatch, case, slowest, count, margin
 ):
     from datetime import datetime, timedelta, timezone
 
@@ -1911,7 +1913,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     save_config(config)
     _enable_capture_sources(tmp_path, readers=())
     at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(timespec="seconds")
-    for reader, ms in (("codex", 750 if case == "over" else 197), ("muse", 18)):
+    for reader, ms in (("codex", 1050 if case == "over" else 197), ("muse", 18)):
         path = codex_host.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -1923,7 +1925,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
                     "last_complete_ms": None if case == "missing-read" and reader == "muse" else ms,
                     "last_complete_at": at,
                     "last_reason": "deadline",
-                    "last_deadline_allotted_ms": 750,
+                    "last_deadline_allotted_ms": 1000,
                 }
             )
         )
@@ -1946,8 +1948,9 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["host_read_budgets"] == {
-        "autopush_ms": 750,
+        "autopush_ms": 1000,
         "autopush_source": "default",
+        "mode": "per_provider_concurrent",
         "interactive_ms": 1000,
         "interactive_source": "config",
         "capture_ms": 5000,
@@ -1956,20 +1959,21 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     }
     assert tuple(payload["host_publication"]["readers"]) in selection
     assert payload["host_usage"]["codex"]["last_complete_at"] == at
-    assert payload["host_usage"]["codex"]["last_deadline_allotted_ms"] == 750
+    assert payload["host_usage"]["codex"]["last_deadline_allotted_ms"] == 1000
     line = statusflow._host_read_sweep_line(payload)
-    if total is None:
+    if slowest is None:
         assert line == f"unknown ({margin})"
     else:
         assert line == (
-            f"{total} ms of the 750 ms autopush budget, {margin} "
-            "(excludes cache writes and the later-reader grace; not a publication check)"
+            f"{slowest} ms slowest of {count} concurrent reader(s) against "
+            f"1000 ms per-provider autopush budget, {margin} "
+            "(excludes cache writes; not a publication check)"
         )
     result = runner.invoke(app, ["diag"])
     assert result.exit_code == 0, result.output
     plain = " ".join(result.output.split())
     assert (
-        "host read budgets: autopush 750 ms (default) · interactive 1000 ms (config)"
+        "host read budgets: autopush 1000 ms per provider (default) · interactive 1000 ms (config)"
         " · capture 5000 ms (default)" in plain
     )
     assert "host read sweep estimate: " + line in plain
@@ -1979,11 +1983,11 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
         )
     assert "read it without that budget, then `mm diag`" not in plain
     if case in {"both", "codex-only"}:
-        assert "Last read allowed 750 ms; last complete read 197 ms" in plain
+        assert "Last read allowed 1000 ms; last complete read 197 ms" in plain
     elif case == "over":
-        assert "Last read allowed 750 ms; last complete read 750 ms" in plain
+        assert "Last read allowed 1000 ms; last complete read 1050 ms" in plain
     elif case == "muse-only":
-        assert "Last read allowed 750 ms; last complete read 18 ms" in plain
+        assert "Last read allowed 1000 ms; last complete read 18 ms" in plain
 
 
 @pytest.mark.parametrize("invalid", [False, True])
@@ -1998,6 +2002,7 @@ def test_diag_unknown_host_read_budget_without_usable_config(tmp_path, monkeypat
     assert json.loads(result.stdout)["host_read_budgets"] == {
         "autopush_ms": None,
         "autopush_source": None,
+        "mode": "per_provider_concurrent",
         "interactive_ms": None,
         "interactive_source": None,
         "capture_ms": None,

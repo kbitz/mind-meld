@@ -29,8 +29,11 @@ Each reader stays all-or-nothing internally.
 
 from __future__ import annotations
 
+import contextvars
 import inspect
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -40,6 +43,7 @@ from typing import Callable, Literal, Mapping, Sequence, get_args
 
 from mind_meld import (
     __version__,
+    capturecatchup,
     events,
     host_registry,
     host_usage,
@@ -67,6 +71,7 @@ HostReader = Callable[..., host_usage.HostUsageResult]
 _PROGRESS: ContextVar[Callable[[str, int, int, str], None] | None] = ContextVar(
     "events_progress", default=None
 )
+_PHASE_TIMER: ContextVar[capturecatchup.PhaseTimer | None] = ContextVar("phase_timer", default=None)
 
 
 @contextmanager
@@ -76,6 +81,40 @@ def progress_scope(sink: Callable[[str, int, int, str], None] | None):
         yield
     finally:
         _PROGRESS.reset(token)
+
+
+@contextmanager
+def phase_timer_scope(timer: capturecatchup.PhaseTimer | None):
+    token = _PHASE_TIMER.set(timer)
+    try:
+        yield
+    finally:
+        _PHASE_TIMER.reset(token)
+
+
+def _record_phase(
+    phase: str,
+    label: str,
+    elapsed_ms: int,
+    *,
+    budget_ms: int | None = None,
+    completed: int | None = None,
+    total: int | None = None,
+    status: str = "ok",
+    accumulate: bool = False,
+) -> None:
+    timer = _PHASE_TIMER.get()
+    if timer is not None:
+        timer.record(
+            phase,
+            label,
+            elapsed_ms,
+            budget_ms=budget_ms,
+            completed=completed,
+            total=total,
+            status=status,
+            accumulate=accumulate,
+        )
 
 
 def _progress(phase: str, completed: int, total: int, unit: str) -> None:
@@ -103,10 +142,12 @@ class Degradations(list[str]):
 
     def __init__(self):
         super().__init__()
+        self._lock = threading.Lock()
         self.total = 0
         self.omitted = 0
+        self.deadline_phases: tuple[str, ...] = ()
 
-    def append(self, detail):
+    def _append_unlocked(self, detail):
         if isinstance(detail, str):
             detail = safe_terminal_str(detail)
         self.total = min(2**53, self.total + 1)
@@ -115,11 +156,23 @@ class Degradations(list[str]):
         else:
             self.omitted = min(2**53, self.omitted + 1)
 
+    def append(self, detail):
+        with self._lock:
+            self._append_unlocked(detail)
+
     def extend(self, details):
-        for detail in details:
-            self.append(detail)
-        self.total = min(2**53, self.total + getattr(details, "omitted", 0))
-        self.omitted = min(2**53, self.omitted + getattr(details, "omitted", 0))
+        with self._lock:
+            for detail in details:
+                self._append_unlocked(detail)
+            self.total = min(2**53, self.total + getattr(details, "omitted", 0))
+            self.omitted = min(2**53, self.omitted + getattr(details, "omitted", 0))
+            extra_phases = getattr(details, "deadline_phases", ())
+            if extra_phases:
+                merged = list(self.deadline_phases)
+                for p in extra_phases:
+                    if p not in merged:
+                        merged.append(p)
+                self.deadline_phases = tuple(merged)
 
 
 HOST_USAGE_READ_BUDGET_INTERACTIVE_MS = DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS
@@ -282,28 +335,6 @@ def resolve_host_read_budget(
     return min(HOST_USAGE_READ_BUDGET_AUTOPUSH_MS, ceiling), "default"
 
 
-HOST_READER_GRACE_MS = 250
-"""Minimum time for each reader after the first, beyond the sweep deadline.
-Sized from measured warm reads: Codex 266 ms over 7,536 rollouts and
-Antigravity 104 ms over 500 conversation DBs on mac-a, Antigravity 153 ms over
-500 conversation DBs on linux-a, and Grok Build 19 to 20 ms (Track 57A E16).
-Together Codex + Antigravity cost 419 ms (439 ms with Grok), so the 750 ms
-autopush sweep default leaves 331 ms (311 ms) headroom while staying one
-quarter of the 3,000 ms interactive sweep default, and a 250 ms grace floor
-gives linux-a's 153 ms Antigravity read 97 ms headroom even when an earlier
-reader exhausts the sweep while staying below HOST_READER_RESERVE_MS (300 ms).
-Deadlines are cooperative, not filesystem-interrupt ceilings."""
-
-HOST_READER_RESERVE_MS = 300
-"""Attended sweep: time held back for EACH later reader (Track 101A), so one
-reader's overrun cannot take another's whole read. Sized from measured reads:
-Grok Build 19 to 20 ms warm (Track 57A E16), Antigravity 109 to 236 ms, Muse
-84 to 642 ms, and Codex 746 ms warm to 1,812 ms while learning new rollouts,
-which under the 3,000 ms attended default gets a 2,100 ms first share (three
-later readers: Grok Build, Muse and Antigravity). Capped per sweep at
-``sweep / (2 * readers)`` and floored per later reader at the reserve. The
-autopush sweep passes no reserve and keeps ``HOST_READER_GRACE_MS``."""
-
 _ROOT_DISCOVERY_DEGRADATION = (
     "git repository discovery hit its time budget: this push captured an incomplete "
     "repository set. Run mm diag, then mm recapture 30d to recover the omitted commits"
@@ -455,6 +486,9 @@ class HostUsageCapture:
     Model-family membership cannot identify a reader's contribution.
     """
     deadline_evidence: Mapping[str, HostReadEvidence] = field(default_factory=dict)
+    reader_timings: Mapping[str, capturecatchup.PhaseTiming] = field(
+        default_factory=dict, compare=False
+    )
 
     @property
     def complete(self) -> bool:
@@ -610,20 +644,50 @@ def _default_host_readers(
         chosen.append(("codex", codex_host.read_codex_usage))
     if grok_consented:
 
-        def _read_grok(*, deadline: float) -> host_usage.HostUsageResult:
-            return grok_host.read_grok_usage(deadline=deadline, consented=True)
+        def _read_grok(
+            *, deadline: float, progress: Callable[[int, int], None] | None = None
+        ) -> host_usage.HostUsageResult:
+            return grok_host.read_grok_usage(
+                deadline=deadline,
+                consented=True,
+                **(
+                    _accepted_kwargs(grok_host.read_grok_usage, progress=progress)
+                    if progress is not None
+                    else {}
+                ),
+            )
 
         chosen.append(("grok", _read_grok))
     if HOST_READER_SOURCE_GATE["muse"] in enabled:
 
-        def _read_muse(*, deadline: float) -> host_usage.HostUsageResult:
-            return host_usage.read_muse_usage(deadline=deadline, consented=True)
+        def _read_muse(
+            *, deadline: float, progress: Callable[[int, int], None] | None = None
+        ) -> host_usage.HostUsageResult:
+            return host_usage.read_muse_usage(
+                deadline=deadline,
+                consented=True,
+                **(
+                    _accepted_kwargs(host_usage.read_muse_usage, progress=progress)
+                    if progress is not None
+                    else {}
+                ),
+            )
 
         chosen.append(("muse", _read_muse))
     if HOST_READER_SOURCE_GATE["agy"] in enabled:
 
-        def _read_agy(*, deadline: float) -> host_usage.HostUsageResult:
-            return host_usage.read_agy_usage(deadline=deadline, consented=True)
+        def _read_agy(
+            *, deadline: float, progress: Callable[[int, int], None] | None = None
+        ) -> host_usage.HostUsageResult:
+            return host_usage.read_agy_usage(
+                deadline=deadline,
+                consented=True,
+                **(
+                    _accepted_kwargs(host_usage.read_agy_usage, progress=progress)
+                    if progress is not None
+                    else {}
+                ),
+            )
 
         chosen.append(("agy", _read_agy))
     return tuple(chosen)
@@ -634,38 +698,20 @@ def _capture_host_usage(
     *,
     deadline: float,
     now: Callable[[], float] = time.monotonic,
-    reserve_s: float = 0.0,
+    concurrent: bool | None = None,
 ) -> HostUsageCapture:
-    """Read consented hosts under a sweep deadline plus later-reader grace.
+    """Read consented hosts with equal per-provider deadlines and concurrent execution.
 
-    ``reserve_s`` (Track 101A, attended sweeps only) holds that much of the
-    sweep back for each reader still to come: reader ``i`` of ``n`` gets
-    ``deadline - reserve_s * (n - i - 1)``, and a later reader never gets less
-    than ``max(HOST_READER_GRACE_MS, reserve_s)`` from its own start, so an
-    overrun by an earlier reader cannot take a later reader's whole read. At
-    ``0.0`` (autopush, and every caller that does not pass it) the rule is the
-    grace floor alone.
+    Each enabled reader receives an equal per-provider allowance derived from
+    ``deadline - initial_now`` (default 1,000 ms on autopush, ``host_budget_ms``
+    on attended sweeps). A reader that finishes early returns immediately without
+    reserving time; one slow reader cannot shrink a sibling reader's allowance.
 
-    Reader-scoped for FAILURES (Track 31A): a file/record failure still fails
-    that whole reader, but a reader failure no longer discards the others.
-    The original "partial totals are worse than no totals" argument predates
-    ``token_sources``; with per-reader coverage on the wire, deleting known
-    Codex tokens because Grok failed is the less truthful behaviour. Publish
-    no row only when no reader completed, or the sweep expired before any
-    reader was invoked.
-
-    A source that can never hold a ledger is NOT a failure (see
-    ``_HOST_ABSENT_REASONS``). It is omitted from ``token_sources`` and from
-    ``dropped`` — a standing property of the source, correctly silent.
-
-    A reader that RAISES is caught here rather than at the tail's outer guard,
-    because that guard would also discard the git and session rows already
-    captured and the terminal ``mm-push`` row with them — an unreadable host
-    store must not cost the retro its actual content. The raise is a reader
-    failure (``unavailable``) and the sweep continues.
-
-    ``readers`` and ``now`` are injected so ordering, isolation, gating and
-    deadline behavior are table-testable without touching a real host store.
+    When ``concurrent`` is True (default when multiple readers run against the
+    real monotonic clock), readers execute concurrently in a ``ThreadPoolExecutor``
+    with copied ``contextvars`` and strict canonical-order merging. ``Exception``
+    is caught per reader for failure isolation while ``BaseException`` (including
+    test write-guard errors) propagates to the caller.
     """
     merged: dict[str, dict[str, token_usage.Usage]] = {}
     merged_by_day: dict[str, token_usage.DayBucket] = {}
@@ -673,51 +719,191 @@ def _capture_host_usage(
     usage_days: dict[str, frozenset[str]] = {}
     dropped: list[tuple[str, str]] = []
     partial_days: dict[str, frozenset[str]] = {}
+    reader_timings: dict[str, capturecatchup.PhaseTiming] = {}
     names_in_order = tuple(name for name, _ in readers)
     total_readers = len(readers)
-    if total_readers:
-        _progress("Capturing host usage", 0, total_readers, "readers")
-    for index, (name, read) in enumerate(readers):
-        start = now()
-        if index == 0 and start >= deadline:
-            return HostUsageCapture(None, name, "deadline", invoked=False)
-        later = total_readers - index - 1
-        held_back = deadline - reserve_s * later
-        reader_deadline = (
-            max(held_back, start + max(HOST_READER_GRACE_MS / 1000.0, reserve_s))
-            if index
-            else held_back
+    if not total_readers:
+        return HostUsageCapture(
+            merged,
+            token_sources=(),
+            dropped=(),
+            tokens_by_day=merged_by_day,
+            partial_days={},
+            partial=(),
+            usage_days={},
+            reader_timings={},
         )
+
+    initial_now = now()
+    if initial_now >= deadline:
+        return HostUsageCapture(None, names_in_order[0], "deadline", invoked=False)
+    allowance_s = deadline - initial_now
+    budget_ms = max(0, round(allowance_s * 1000))
+
+    use_concurrent = (
+        (total_readers > 1 and now is time.monotonic) if concurrent is None else bool(concurrent)
+    )
+    progress_sink = _PROGRESS.get()
+    progress_lock = threading.Lock()
+    unfinished: list[str] = list(names_in_order)
+    reader_counts: dict[str, tuple[int, int]] = {}
+    readers_with_item_progress: set[str] = set()
+    completed_readers = 0
+    if progress_sink is not None:
+        _progress("Capturing host usage", 0, total_readers, "readers")
+
+    def _emit_active_progress() -> None:
+        if progress_sink is None or not unfinished:
+            return
+        active = unfinished[0]
+        if active in reader_counts:
+            done, total = reader_counts[active]
+            label = _HOST_DISPLAY_NAMES.get(active, active)
+            _progress(f"Reading {label} usage", done, total, "")
+
+    def _make_reader_progress(reader_name: str) -> Callable[[int, int], None] | None:
+        if progress_sink is None:
+            return None
+
+        def _cb(completed: int, total: int) -> None:
+            with progress_lock:
+                readers_with_item_progress.add(reader_name)
+                reader_counts[reader_name] = (completed, total)
+                if unfinished and unfinished[0] == reader_name:
+                    label = _HOST_DISPLAY_NAMES.get(reader_name, reader_name)
+                    _progress(f"Reading {label} usage", completed, total, "")
+
+        return _cb
+
+    def _run_one(
+        name: str, read: HostReader
+    ) -> tuple[host_usage.HostUsageResult | None, Exception | None, int]:
+        nonlocal completed_readers
+        start_i = now()
+        reader_deadline = start_i + allowance_s
+        cb = _make_reader_progress(name)
+        extra = _accepted_kwargs(read, progress=cb) if cb is not None else {}
         try:
-            result = read(deadline=reader_deadline)
-        except Exception as e:
-            # The breadcrumb reason stays a closed vocabulary, but the TYPE
-            # goes to stderr like every other swallow in this module. Without
-            # it a `TypeError` regression inside a reader is indistinguishable
-            # from a benign transient and can crash-loop on every push while
-            # the breadcrumb calmly promises a retry.
+            res = read(deadline=reader_deadline, **extra)
+            elapsed_ms = max(0, round((now() - start_i) * 1000))
+            return res, None, elapsed_ms
+        except Exception as exc:
+            elapsed_ms = max(0, round((now() - start_i) * 1000))
+            return None, exc, elapsed_ms
+        finally:
+            if progress_sink is not None:
+                with progress_lock:
+                    completed_readers += 1
+                    if name in unfinished:
+                        unfinished.remove(name)
+                    if name not in readers_with_item_progress and not readers_with_item_progress:
+                        _progress(
+                            "Capturing host usage", completed_readers, total_readers, "readers"
+                        )
+                    else:
+                        _emit_active_progress()
+
+    raw_outcomes: list[tuple[str, host_usage.HostUsageResult | None, Exception | None, int]] = []
+    if use_concurrent:
+        with ThreadPoolExecutor(max_workers=total_readers) as pool:
+            futures: list[tuple[str, Future]] = []
+            for name, read in readers:
+                ctx = contextvars.copy_context()
+                futures.append((name, pool.submit(ctx.run, _run_one, name, read)))
+            for name, fut in futures:
+                res, exc, elapsed_ms = fut.result()
+                raw_outcomes.append((name, res, exc, elapsed_ms))
+    else:
+        for name, read in readers:
+            res, exc, elapsed_ms = _run_one(name, read)
+            raw_outcomes.append((name, res, exc, elapsed_ms))
+
+    for name, result, exc, elapsed_ms in raw_outcomes:
+        label = f"{_HOST_DISPLAY_NAMES.get(name, name)} usage"
+        if exc is not None:
             token_usage._diagnostic(
-                f"mm: notice: host reader {name} raised: {_exception_detail(e)}\n"
+                f"mm: notice: host reader {name} raised: {_exception_detail(exc)}\n"
             )
             dropped.append((name, _HOST_UNKNOWN_REASON))
-            _progress("Capturing host usage", index + 1, total_readers, "readers")
+            timing = capturecatchup.PhaseTiming(
+                phase=f"host:{name}",
+                label=label,
+                elapsed_ms=elapsed_ms,
+                budget_ms=budget_ms,
+                status="error",
+            )
+            reader_timings[name] = timing
+            _record_phase(
+                timing.phase,
+                timing.label,
+                timing.elapsed_ms,
+                budget_ms=timing.budget_ms,
+                status=timing.status,
+                accumulate=True,
+            )
             continue
+        assert result is not None
         if not result.complete:
             reason = result.reason if result.reason in _HOST_READ_REASONS else _HOST_UNKNOWN_REASON
             if reason in _HOST_ABSENT_REASONS:
-                # Not installed, in effect. Drop it silently and keep going —
-                # the row will name only the sources that actually contributed.
-                _progress("Capturing host usage", index + 1, total_readers, "readers")
+                timing = capturecatchup.PhaseTiming(
+                    phase=f"host:{name}",
+                    label=label,
+                    elapsed_ms=elapsed_ms,
+                    budget_ms=budget_ms,
+                    status="skipped",
+                )
+                reader_timings[name] = timing
+                _record_phase(
+                    timing.phase,
+                    timing.label,
+                    timing.elapsed_ms,
+                    budget_ms=timing.budget_ms,
+                    status=timing.status,
+                    accumulate=True,
+                )
                 continue
             dropped.append((name, reason))
-            _progress("Capturing host usage", index + 1, total_readers, "readers")
+            status = "deadline" if reason == "deadline" else "error"
+            timing = capturecatchup.PhaseTiming(
+                phase=f"host:{name}",
+                label=label,
+                elapsed_ms=elapsed_ms,
+                budget_ms=budget_ms,
+                status=status,
+            )
+            reader_timings[name] = timing
+            _record_phase(
+                timing.phase,
+                timing.label,
+                timing.elapsed_ms,
+                budget_ms=timing.budget_ms,
+                status=timing.status,
+                accumulate=True,
+            )
             continue
         contributed.append(name)
         usage_days[name] = frozenset(day for days in result.hosts.values() for day in days)
         if result.partial_days:
             partial_days[name] = frozenset(result.partial_days)
         _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
-        _progress("Capturing host usage", index + 1, total_readers, "readers")
+        timing = capturecatchup.PhaseTiming(
+            phase=f"host:{name}",
+            label=label,
+            elapsed_ms=elapsed_ms,
+            budget_ms=budget_ms,
+            status="ok",
+        )
+        reader_timings[name] = timing
+        _record_phase(
+            timing.phase,
+            timing.label,
+            timing.elapsed_ms,
+            budget_ms=timing.budget_ms,
+            status=timing.status,
+            accumulate=True,
+        )
+
     if contributed or not dropped:
         return HostUsageCapture(
             merged,
@@ -727,9 +913,16 @@ def _capture_host_usage(
             partial_days=dict(partial_days),
             partial=_canonical_partial(names_in_order, partial_days),
             usage_days=usage_days,
+            reader_timings=reader_timings,
         )
     first_reader, first_reason = dropped[0]
-    return HostUsageCapture(None, first_reader, first_reason, dropped=tuple(dropped))
+    return HostUsageCapture(
+        None,
+        first_reader,
+        first_reason,
+        dropped=tuple(dropped),
+        reader_timings=reader_timings,
+    )
 
 
 def _merge_host_usage_maps(
@@ -813,6 +1006,19 @@ def _merge_warm_retry_capture(
     partial_days = _merge_partial_days(initial.partial_days, retry.partial_days)
     partial = _canonical_partial(names_in_order, partial_days)
     usage_days = {**initial.usage_days, **retry.usage_days}
+    reader_timings = dict(initial.reader_timings)
+    for name, timing in retry.reader_timings.items():
+        prev = reader_timings.get(name)
+        if prev is not None:
+            reader_timings[name] = capturecatchup.PhaseTiming(
+                phase=timing.phase,
+                label=timing.label,
+                elapsed_ms=prev.elapsed_ms + timing.elapsed_ms,
+                budget_ms=timing.budget_ms or prev.budget_ms,
+                status=timing.status,
+            )
+        else:
+            reader_timings[name] = timing
 
     if initial.complete or retry.complete:
         return HostUsageCapture(
@@ -824,6 +1030,7 @@ def _merge_warm_retry_capture(
             partial_days=partial_days,
             partial=partial,
             usage_days=usage_days,
+            reader_timings=reader_timings,
         )
     if dropped:
         first_reader, first_reason = dropped[0]
@@ -833,8 +1040,9 @@ def _merge_warm_retry_capture(
             first_reason,
             dropped=dropped,
             invoked=True,
+            reader_timings=reader_timings,
         )
-    return HostUsageCapture(None, invoked=True)
+    return HostUsageCapture(None, invoked=True, reader_timings=reader_timings)
 
 
 def _warm_host_cache_with_notice(reader: str = "codex") -> None:
@@ -1328,14 +1536,8 @@ def _capture_host_snapshot(
     phase_deadline = (
         started + _host_phase_ms(capture_ms) / 1000.0 if capture_ms is not None else None
     )
-    reserve_s = (
-        min(HOST_READER_RESERVE_MS, host_budget_ms // (2 * len(host_readers))) / 1000.0
-        if warm_host_cache is not None and len(host_readers) >= 2
-        else 0.0
-    )
-    sweep_kwargs = _accepted_kwargs(_capture_host_usage, reserve_s=reserve_s) if reserve_s else {}
     host_capture = _capture_host_usage(
-        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0, **sweep_kwargs
+        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
     )
     if not host_capture.invoked and host_capture.reason == "deadline":
         # No reader ran: declare every omission so a failed warm cannot vanish
@@ -1358,22 +1560,29 @@ def _capture_host_snapshot(
         ]
         for position, name in enumerate(retry_names):
 
-            def warm_read(*, deadline: float) -> host_usage.HostUsageResult:
+            def warm_read(
+                *, deadline: float, progress: Callable[[int, int], None] | None = None
+            ) -> host_usage.HostUsageResult:
                 warm_host_cache(name)
                 remaining = max(0.0, deadline - time.monotonic())
+                extra = _accepted_kwargs(
+                    host_registry.warm_host_cache_inline,
+                    budget_s=remaining,
+                    **({"progress": progress} if progress is not None else {}),
+                )
                 return host_registry.warm_host_cache_inline(
                     reader=name,
-                    **_accepted_kwargs(host_registry.warm_host_cache_inline, budget_s=remaining),
+                    **extra,
                 )
 
+            retry_deadline = (
+                phase_deadline
+                if phase_deadline is not None
+                else time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S
+            )
             retry_capture = _capture_host_usage(
                 ((name, warm_read),),
-                deadline=(
-                    # Each retry holds a reserve for the retries after it.
-                    phase_deadline - reserve_s * (len(retry_names) - position - 1)
-                    if phase_deadline is not None
-                    else time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S
-                ),
+                deadline=retry_deadline,
             )
             host_capture = _merge_warm_retry_capture(
                 host_capture,
@@ -1404,6 +1613,7 @@ def _capture_host_snapshot(
                 partial=host_capture.partial,
                 usage_days=host_capture.usage_days,
                 deadline_evidence=deadline_evidence,
+                reader_timings=host_capture.reader_timings,
             )
     elif host_capture.hosts is not None and any(
         reason == "deadline" for _name, reason in host_capture.dropped
@@ -1526,18 +1736,29 @@ def _capture_event_snapshots(
     warn_lock_unavailable = False
 
     def walk_sessions(token_cache_files: dict | None) -> None:
+        session_progress = (
+            (lambda done, total: _progress("Scanning sessions", done, total, ""))
+            if _PROGRESS.get() is not None
+            else None
+        )
         for claude_dir in claude_paths:
+            extra_session = _accepted_kwargs(
+                events.walk_session_metadata,
+                persist=persist,
+                **({"progress": session_progress} if session_progress is not None else {}),
+            )
             for row in events.walk_session_metadata(
                 claude_dir,
                 deadline_monotonic=deadline,
                 token_cache_files=token_cache_files,
-                **_accepted_kwargs(events.walk_session_metadata, persist=persist),
+                **extra_session,
             ):
                 projects.extend(row.get("projects", []))
 
     # Track 85A d9: walk_done is bound in every branch BEFORE the token
     # cache context writes on exit, so cache serialization never masquerades
     # as walk time; staged session state flushes only after that exit.
+    session_started = time.monotonic()
     try:
         if token_cache_mode is None:
             walk_sessions(None)
@@ -1564,6 +1785,16 @@ def _capture_event_snapshots(
             except Exception:
                 events.discard_pending_session_state()
         raise
+    if claude_paths:
+        _record_phase(
+            "session_scan",
+            "Session scan",
+            max(0, round((walk_done - session_started) * 1000)),
+            budget_ms=max(0, round((deadline - session_started) * 1000))
+            if session_deadline is not None
+            else budget_ms,
+            status="deadline" if walk_done > deadline else "ok",
+        )
     if persist:
         events.flush_pending_session_state()
     session_rows: list[dict] = []
@@ -1636,14 +1867,36 @@ def _capture_git_rows(
     from push counts. Only recapture passes ``per_repo_timeout_ms``; the
     other callers keep the walker's budget-derived, capped limit.
     """
-    discovery_deadline = time.monotonic() + root_discovery_budget_ms / 1000.0
+    discovery_started = time.monotonic()
+    discovery_deadline = discovery_started + root_discovery_budget_ms / 1000.0
     if deadline_monotonic is not None:
         discovery_deadline = min(discovery_deadline, deadline_monotonic)
+    discovery_progress = (
+        (lambda done, total: _progress("Discovering repositories", done, total, ""))
+        if _PROGRESS.get() is not None
+        else None
+    )
+    discovery_extra = (
+        _accepted_kwargs(events.discover_git_roots, progress=discovery_progress)
+        if discovery_progress is not None
+        else {}
+    )
     root_discovery = events.discover_git_roots(
         config,
         deadline_monotonic=discovery_deadline,
         persist=persist,
         since=since,
+        **discovery_extra,
+    )
+    discovery_elapsed_ms = max(0, round((time.monotonic() - discovery_started) * 1000))
+    _record_phase(
+        "git_discovery",
+        "Git discovery",
+        discovery_elapsed_ms,
+        budget_ms=root_discovery_budget_ms,
+        status=(
+            "deadline" if root_discovery.exceeded else "error" if root_discovery.errors else "ok"
+        ),
     )
     root_discovery = events.dedup_git_root_discovery(root_discovery)
     roots, _discovery_errors = root_discovery
@@ -1653,7 +1906,14 @@ def _capture_git_rows(
         {} if token_usage._DIAGNOSTIC.get() is None else {"diagnostic": token_usage._diagnostic}
     )
     if _PROGRESS.get() is not None:
-        walk_kwargs.update(_accepted_kwargs(events.walk_git_projects, progress=_progress))
+        walk_kwargs.update(
+            _accepted_kwargs(
+                events.walk_git_projects,
+                progress=lambda _phase, done, total, _unit: _progress(
+                    "Walking repositories", done, total, ""
+                ),
+            )
+        )
     if use_repo_cursors and roots:
         walk_kwargs["use_repo_cursors"] = True
     if per_repo_timeout_ms is not None:
@@ -1673,14 +1933,25 @@ def _capture_git_rows(
         walk_budget_ms = min(
             walk_budget_ms, max(0, int((deadline_monotonic - time.monotonic()) * 1000))
         )
+    walk_started = time.monotonic()
     git_rows = events.walk_git_projects(
         roots,
         since=since,
         total_budget_ms=walk_budget_ms,
         **walk_kwargs,
     )
+    walk_elapsed_ms = max(0, round((time.monotonic() - walk_started) * 1000))
     skipped = git_rows[0].get("skipped") or [] if git_rows else []
     aborts, errs = events.walk_skip_counts(skipped)
+    _record_phase(
+        "git_walk",
+        "Git walk",
+        walk_elapsed_ms,
+        budget_ms=walk_budget_ms,
+        completed=max(0, len(roots) - aborts - errs) if roots else 0,
+        total=len(roots),
+        status="deadline" if aborts > 0 else "error" if errs > 0 else "ok",
+    )
     capture = events.make_git_capture(
         since=since,
         discovery=events.classify_discovery(root_discovery),
@@ -2081,11 +2352,278 @@ def _run_events_tail(
             )
             degradations.append(phrase)
             token_usage._diagnostic(f"mm: notice: {phrase}\n")
+        degradations.deadline_phases = deadline_stopped_phases(capture)
     except Exception as e:
         _attended_host_elapsed_s = None
         degradations.append(f"events tail failed ({type(e).__name__})")
         token_usage._diagnostic(f"mm: notice: events tail failed: {_exception_detail(e)}\n")
     return degradations
+
+
+def deadline_stopped_phases(capture: CaptureResult) -> tuple[str, ...]:
+    """Return every capture phase that stopped at its deadline with work left."""
+    stopped: list[str] = []
+    if capture.host_capture.dropped:
+        for name, reason in capture.host_capture.dropped:
+            if reason == "deadline":
+                stopped.append(f"host:{name}")
+    elif not capture.host_capture.complete and capture.host_capture.reason == "deadline":
+        reader = capture.host_capture.reader or "all"
+        stopped.append(f"host:{reader}")
+    if capture.root_discovery.exceeded:
+        stopped.append("git_discovery")
+    if capture.walk_budget_aborts > 0:
+        stopped.append("git_walk")
+    if capture.session_walk_exceeded_budget:
+        stopped.append("session_scan")
+    return tuple(stopped)
+
+
+@dataclass
+class PreparedEventsTail:
+    """Lock-free Phase-1 capture payload committed in Phase 2 under mind-meld.lock."""
+
+    started_at: datetime
+    events_dir: Path
+    since: datetime
+    capture: CaptureResult
+    mm_event: dict
+    published_git_left: int | None = None
+
+
+def _prepare_events_tail(
+    config: dict,
+    sources: list[dict],
+    device_id: str,
+) -> PreparedEventsTail | None:
+    """Phase 1 of background catch-up: run attended-budget capture outside mind-meld.lock."""
+    mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
+    if mm_events_src is None:
+        return None
+    started_at = datetime.now(timezone.utc)
+    events_dir = Path(mm_events_src["path"]).expanduser() / "events"
+    events.reconcile_uncommitted_push_cursors(events_dir, device_id)
+    cursor = events.resolve_push_cursor(events_dir, device_id)
+    since = events.effective_capture_since([], cursor.since)
+
+    retro = config.get("retro")
+    legacy_only = (
+        isinstance(retro, dict)
+        and "host_usage_interactive_budget_ms" in retro
+        and "capture_budget_ms" not in retro
+        and "attended_capture_cap_ms" not in retro
+    )
+    tail_deadline: float | None = None
+    extension_ms = 0
+    if legacy_only:
+        budget_ms = events.WALK_TIME_BUDGET_INTERACTIVE_MS
+        git_budget_ms = events.git_walk_budget_ms(quiet=False, since=since)
+    else:
+        capture_ms, _ = resolve_capture_budget(config)
+        total_ms, _ = resolve_attended_capture_cap(config)
+        extension_ms = max(0, total_ms - capture_ms)
+        budget_ms = max(1, total_ms - _host_phase_ms(total_ms))
+        git_budget_ms = min(
+            events.git_walk_budget_ms(quiet=False, since=since) + extension_ms,
+            budget_ms,
+        )
+        tail_deadline = time.monotonic() + budget_ms / 1000.0
+
+    claude_paths = _enabled_claude_paths(sources)
+
+    def prepare_catchup_token_cache() -> CacheLockMode:
+        warm_kwargs = (
+            _accepted_kwargs(
+                _decide_token_walk_policy,
+                warm_deadline_s=max(0.0, tail_deadline - time.monotonic()),
+            )
+            if tail_deadline is not None
+            else {}
+        )
+        do_token_walk = _decide_token_walk_policy(claude_paths, quiet=False, **warm_kwargs)
+        return "block" if do_token_walk else None
+
+    host_budget_ms = resolve_host_read_budget(config, interactive=True)[0]
+    capture = _capture_event_snapshots(
+        config,
+        claude_paths,
+        device_id,
+        since=since,
+        budget_ms=budget_ms,
+        git_budget_ms=git_budget_ms,
+        persist=True,
+        use_repo_cursors=True,
+        root_discovery_budget_ms=(
+            events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS + extension_ms
+            if tail_deadline is not None
+            else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
+        ),
+        host_budget_ms=host_budget_ms,
+        session_deadline=tail_deadline,
+        per_repo_cap_ms=(
+            events.PER_REPO_TIMEOUT_CAP_MS + extension_ms if tail_deadline is not None else None
+        ),
+        warm_host_cache=_warm_host_cache_with_notice,
+        suppress_host_capture=False,
+        prepare_token_cache=prepare_catchup_token_cache,
+        host_readers=_default_host_readers(
+            sources,
+            grok_consented=mm_config.grok_usage_consented(config),
+        ),
+    )
+    if capture.git_rows:
+        since = datetime.fromisoformat(capture.git_rows[0]["git_capture"]["since"])
+    source_names = [s["name"] for s in sources if isinstance(s.get("name"), str)]
+    configured = events.configured_author_emails(config, capture.root_discovery.roots)
+    gathered = identity.gather_local_identities(
+        allow_refresh=True,
+        root_discovery=capture.root_discovery,
+        **(
+            {"diagnostic": token_usage._DIAGNOSTIC.get()}
+            if token_usage._DIAGNOSTIC.get() is not None
+            else {}
+        ),
+        **_accepted_kwargs(
+            identity.gather_local_identities,
+            inputs_digest=_identity_inputs_digest_for_push(
+                config, capture.root_discovery, quiet=False
+            ),
+        ),
+    )
+    local_emails = sorted({*gathered, *configured})
+    mm_event = events.make_mm_push_event(
+        device=device_id,
+        mm_version=__version__,
+        sources=source_names,
+        discovery_errors=capture.discovery_errors,
+        local_emails=local_emails,
+        git_capture=events.make_git_capture(
+            since=since,
+            discovery=events.classify_discovery(capture.root_discovery),
+            walk_budget_aborts=capture.walk_budget_aborts,
+            walk_errors=capture.walk_errors,
+        ),
+    )
+    mm_event_ts = datetime.fromisoformat(mm_event["ts"])
+    published_git_left: int | None = None
+    if capture.walk_budget_aborts > 0 and capture.walk_errors == 0:
+        try:
+            preview_left = events.preview_pending_repositories(
+                capture.root_discovery.roots,
+                capture.git_rows,
+                since=since,
+                cursor_ts=mm_event_ts,
+            )
+        except Exception:
+            preview_left = None
+        published_git_left = _attach_git_pending_left(capture, mm_event, preview_left)
+
+    return PreparedEventsTail(
+        started_at=started_at,
+        events_dir=events_dir,
+        since=since,
+        capture=capture,
+        mm_event=mm_event,
+        published_git_left=published_git_left,
+    )
+
+
+def _is_superseded_by_newer_complete_capture(
+    prepared: PreparedEventsTail,
+    device_id: str,
+) -> bool:
+    """True when a newer complete capture already landed after Phase 1 started."""
+    scan = events.latest_event_rows(
+        prepared.events_dir,
+        device_id,
+        {"mm-push", "host-usage-snapshot"},
+    )
+    latest_push = scan.rows.get("mm-push")
+    if not isinstance(latest_push, Mapping):
+        return False
+    raw_ts = latest_push.get("ts")
+    if not isinstance(raw_ts, str):
+        return False
+    try:
+        push_ts = datetime.fromisoformat(raw_ts)
+    except ValueError:
+        return False
+    if push_ts.tzinfo is None or push_ts <= prepared.started_at:
+        return False
+    projected = events.project_recorded_capture(dict(latest_push))
+    if projected is None or not projected.get("advances_cursor"):
+        return False
+    if (projected.get("walk_budget_aborts") or 0) > 0 or (projected.get("walk_errors") or 0) > 0:
+        return False
+    if prepared.capture.host_rows:
+        latest_host = scan.rows.get("host-usage-snapshot")
+        if not isinstance(latest_host, Mapping):
+            return False
+        raw_host_ts = latest_host.get("ts")
+        if not isinstance(raw_host_ts, str):
+            return False
+        try:
+            host_ts = datetime.fromisoformat(raw_host_ts)
+        except ValueError:
+            return False
+        if host_ts.tzinfo is None or host_ts <= prepared.started_at:
+            return False
+        if latest_host.get("degraded_sources"):
+            return False
+    return True
+
+
+def _commit_prepared_tail(
+    prepared: PreparedEventsTail,
+    config: dict,
+    device_id: str,
+) -> tuple[bool, list[str]]:
+    """Phase 2 of background catch-up: commit prepared rows under mind-meld.lock.
+
+    Returns ``(committed, degradations)``. Skips writing if a newer complete
+    capture already landed while Phase 1 ran.
+    """
+    degradations: list[str] = Degradations()
+    if _is_superseded_by_newer_complete_capture(prepared, device_id):
+        return False, degradations
+    capture = prepared.capture
+    mm_event = prepared.mm_event
+    mm_event_ts = datetime.fromisoformat(mm_event["ts"])
+    if capture.git_rows:
+        events.record_uncommitted_push_roots(capture.git_rows, push_ts=mm_event["ts"])
+    append_result = events.write_push_event(
+        prepared.events_dir,
+        device_id,
+        [
+            *capture.git_rows,
+            *capture.session_rows,
+            *capture.host_rows,
+            mm_event,
+        ],
+        max_file_size=config.get("sync", {}).get("max_file_size", mm_config.DEFAULT_MAX_FILE_SIZE),
+    )
+    if isinstance(append_result, events.EventAppendSkipped):
+        degradations.append("event append skipped (max-file-size)")
+        return False, degradations
+    if events.latest_mm_push_row(prepared.events_dir, device_id) == mm_event:
+        events.commit_repo_cursors(
+            capture.git_rows,
+            since=prepared.since,
+            cursor_ts=mm_event_ts,
+            recorded_ts=mm_event["ts"],
+            complete=(
+                events.classify_discovery(capture.root_discovery) not in {"partial", "empty"}
+                and not capture.walk_budget_aborts
+                and not capture.walk_errors
+            ),
+        )
+        _record_git_progress(
+            device_id=device_id,
+            published=prepared.published_git_left,
+            clear=prepared.published_git_left is None,
+            now=mm_event_ts,
+        )
+    return True, degradations
 
 
 def _run_events_backfill(

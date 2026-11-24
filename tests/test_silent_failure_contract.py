@@ -1935,10 +1935,10 @@ def test_autopush_measured_warm_reads_record_success_breadcrumb_and_overrun_reco
     assert host_row_ok["token_sources"] == ["codex", "agy"]
     assert "degraded_sources" not in host_row_ok
 
-    # Now make a substantive edit and make Codex overrun the 750 ms default (800 ms);
-    # Antigravity still completes in its grace window while Codex records deadline.
+    # Now make a substantive edit and make Codex overrun the 1000 ms per-provider default (1100 ms);
+    # Antigravity still completes in its own 1000 ms allowance while Codex records deadline.
     (claude_root / "projects" / "-Users-user-myapp" / "memory" / "role.md").write_text("updated")
-    costs["codex"] = 0.800
+    costs["codex"] = 1.100
     r_over = runner.invoke(app, ["autopush"])
     assert r_over.exit_code == 0, (r_over.stdout, r_over.stderr)
     crumb_over = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")

@@ -297,11 +297,15 @@ def _isolate_devices_write_lock(monkeypatch, tmp_path) -> None:
 def _isolate_git_capture_cache(monkeypatch, tmp_path):
     from pathlib import Path
 
-    from mind_meld import config, events, events_tail, rootprobes
+    from mind_meld import capturecatchup, config, events, events_tail, rootprobes
 
     real_home = Path.home()
     monkeypatch.setattr(config, "GIT_CAPTURE_CACHE_PATH", tmp_path / "git-capture-cache.json")
     monkeypatch.setattr(events_tail, "CAPTURE_PROGRESS_PATH", tmp_path / "capture-progress.json")
+    monkeypatch.setattr(capturecatchup, "PUSH_TIMINGS_PATH", tmp_path / "push-timings.json")
+    monkeypatch.setattr(capturecatchup, "CATCHUP_STATE_PATH", tmp_path / "capture-catchup.json")
+    monkeypatch.setattr(capturecatchup, "CATCHUP_LOCK_PATH", tmp_path / "capture-catchup.lock")
+    monkeypatch.setattr(capturecatchup, "start_detached_catchup", lambda trigger_phases: False)
     monkeypatch.setattr(
         events,
         "_claude_projects_dir",

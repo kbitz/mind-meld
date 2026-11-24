@@ -3865,6 +3865,11 @@ class TestSyncUpdateDisplay:
         assert result.exit_code == 0, result.output
         # Normalize only the per-test pytest tmp_path embedded in PIPX_HOME=... by reinstall_cmd.
         actual = result.output.replace(str(venv.parent.parent), "/tmp/pipx")
+        if command == "push" and mode == "--verbose":
+            import re
+
+            assert "Phase timings:\n" in actual
+            actual = re.sub(r"Phase timings:\n(?:  .+\n)+", "", actual)
         updated_notice = (
             "mm: notice: updating mm 1.2.0 → 1.3.0 (pipx upgrade mind-meld)…\n"
             "mm: notice: updated mm 1.2.0 → 1.3.0; the next mm command runs it\n"
