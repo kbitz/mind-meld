@@ -2,7 +2,7 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/pullflow.py` — `_pull_core` / `notice_pending_syncthing_join`
+- `src/mind_meld/pullflow.py` — `_pull_core` / `notice_pending_syncthing_join` / `AppliedPeer` / `applied_clause` / `PullResult.applied_by_device`
 - `src/mind_meld/meshflow.py` — `MeshResult` / `run` / `format_share_summary` / `compose_hook_breadcrumb` / `ATTENDED_REQUEST_TIMEOUT_S` / `ATTENDED_PASS_BUDGET_S` / `HOOK_REQUEST_TIMEOUT_S` / `HOOK_PASS_BUDGET_S`
 - `src/mind_meld/syncthing.py` — `SyncthingState` / `read_state` / `PENDING_JOIN_FIX` / `pending_join_message` / `has_valid_device_id_check_digits` / `local_device_id_offline` / `ConfiguredDevice` / `MeshSnapshot` / `SyncthingWriter` / `SyncthingWriter.mesh_snapshot`
 - `src/mind_meld/statusflow.py` — `status` / `_managed_syncthing_record` / `_syncthing_status_lines`
@@ -96,9 +96,14 @@ only with publication proof, never counted as user files, and omitted from the
 default `Push:` outcome line (a push that publishes only usage prints
 `Push: no content changes.`). Held counts print on their own outcome line
 (`Push: 1 file held.` / `Push: N files held.`); paths/reasons are verbose. Pull
-uses total_applied with conflict copies included and distinct skipped/failed
-counts, across the selected scope, not as unique paths; skipped counts are
-omitted from the default `Pull:` outcome line (available in `mm pull -v`,
+records per-peer applied counts (written, merged, and conflict copies) in
+`PullResult.applied_by_device` and renders the attended success lead via
+`pullflow.applied_clause` (`<n> content change(s) from <device>`, sorted by
+sanitized display name via `safety.safe_terminal_str`, omitting peers with zero
+applied files, with conflict copies still appended on the lead line).
+`PullResult.total_applied` stays unchanged for failure/incomplete lines and
+other clauses, with distinct skipped/failed counts across the selected scope,
+not as unique paths; skipped counts are omitted from the default `Pull:` outcome line (available in `mm pull -v`,
 `mm status`, and `mm diag`, so a pull that only skips newer local files prints
 `Pull: no changes.`). Track 91A's deleted clause, `older` clause, `waiting`
 clause, and `old_form` clause each emit as their own `Pull: <clause>.` line on
@@ -124,7 +129,8 @@ command: `mm update` (newer/unsupported format), `mm migrate-config`, `mm init`,
 unexpected errors show only their class name. Setup, authentication, lock-held
 and refused stops, and setup/crypto-session errors without a returned result,
 report no content published / no files applied. Counts are singular at 1
-(`1 file applied`, `1 content change published`, `1 file held`). The `MINDMELD_PASSPHRASE`
+(`1 content change from <device>` on pull success, `1 file applied` on pull
+failure/incomplete, `1 content change published`, `1 file held`). The `MINDMELD_PASSPHRASE`
 remedy replaces a passphrase error only when stdin is not a terminal. A
 no-source attended push ends `Push: no enabled sources.` and records run cause
 `no-changes`, not `ok`.

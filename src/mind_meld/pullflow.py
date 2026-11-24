@@ -201,6 +201,14 @@ class OldFormPeer:
 
 
 @dataclass
+class AppliedPeer:
+    """Files applied from one peer device in a pull (Track 164A)."""
+
+    device_name: str
+    files: int = 0
+
+
+@dataclass
 class OlderEdit:
     """A peer's edit built on this machine's version but with an older timestamp."""
 
@@ -292,6 +300,8 @@ class PullResult:
     # A registered peer can have no manifest yet, independently of corruption
     # or a manifest that vanished mid-read. Join setup checks all three cases.
     missing_peer_manifests: bool = False
+    # Track 164A: applied files (written + merged + conflicted) per peer device_id.
+    applied_by_device: dict[str, AppliedPeer] = field(default_factory=dict)
 
     @property
     def total_applied(self) -> int:
@@ -3247,6 +3257,25 @@ def _waiting_items(result: PullResult, *, detail: bool) -> list[str]:
     return items
 
 
+def applied_clause(result: PullResult) -> str:
+    """The outcome-line lead for applied content changes per peer device, or ""
+    when none: ``1 content change from mac-a, 2 content changes from mac-b``.
+    Peer names go through `safety.safe_terminal_str` and sort case-insensitively
+    by sanitized display name, with deterministic tie-breaking on exact name
+    and device ID."""
+    entries: list[tuple[str, str, str, int]] = []
+    for did, peer in result.applied_by_device.items():
+        if peer.files <= 0:
+            continue
+        safe_name = safety.safe_terminal_str(peer.device_name or did)
+        entries.append((safe_name.casefold(), safe_name, did, peer.files))
+    entries.sort(key=lambda item: (item[0], item[1], item[2]))
+    return ", ".join(
+        f"{core._count(files, 'content change', 'content changes')} from {safe_name}"
+        for _, safe_name, _, files in entries
+    )
+
+
 def waiting_clause(result: PullResult) -> str:
     """The outcome-line clause for undelivered content, or "" when none:
     ``waiting for 2 files from Mac B, Mac C's manifest``. Peer text goes
@@ -4608,6 +4637,7 @@ def _pull_core(
         unknown_sources: list[_UnknownSourceWarning] = []
         touched_parents: set[Path] = set()
         device_names: list[str] = []
+        applied_by_device: dict[str, AppliedPeer] = {}
         fsync_warnings: list[_FsyncWarning] = []
         total_written = total_merged = total_skipped = total_conflicted = 0
         total_failed = total_skipped_unknown_source = bytes_transferred = 0
@@ -4629,14 +4659,24 @@ def _pull_core(
             per_source_results.append(per_source)
             bytes_transferred += per_source.bytes_transferred
             touched_parents |= per_source.touched_parents
-            total_written += len(per_source.outcomes["written"])
-            total_merged += len(per_source.outcomes["merged"]) + len(
-                per_source.outcomes["merged-via-lcs"]
-            )
+            written = len(per_source.outcomes["written"])
+            merged = len(per_source.outcomes["merged"]) + len(per_source.outcomes["merged-via-lcs"])
+            conflicted = len(per_source.outcomes["conflicted"])
+            total_written += written
+            total_merged += merged
             total_skipped += len(per_source.outcomes["skipped"])
-            total_conflicted += len(per_source.outcomes["conflicted"])
+            total_conflicted += conflicted
             total_failed += len(per_source.outcomes["failed"])
             total_waiting += len(per_source.outcomes.get("waiting", ()))
+            applied = written + merged + conflicted
+            if applied > 0:
+                peer = applied_by_device.get(per_source.device_id)
+                if peer is None:
+                    applied_by_device[per_source.device_id] = AppliedPeer(
+                        per_source.device_name or per_source.device_id, applied
+                    )
+                else:
+                    peer.files += applied
 
         try:
             for device in pull_targets:
@@ -4947,6 +4987,7 @@ def _pull_core(
                 retired_copies_removed=retired_copies_removed,
                 retired_copies_names=retired_copies_names,
                 retired_copies_folder=retired_copies_folder,
+                applied_by_device=applied_by_device,
             )
             _save_pull_observations(
                 _partial_result,

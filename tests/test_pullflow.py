@@ -213,6 +213,8 @@ def test_two_device_pull_counts_and_summary(fleet, monkeypatch, mode, scenario):
         if counter is None
         else {f"total_{counter}": 1, "bytes_transferred": transferred, "device_names": ["Peer B"]}
     )
+    if counter in {"written", "merged", "conflicted"}:
+        expected["applied_by_device"] = {PEER: {"device_name": "Peer B", "files": 1}}
     _counts(result, **expected)
     if scenario == "clean":
         assert (fleet.local / name).read_bytes() == remote
@@ -538,6 +540,7 @@ def test_manifest_before_blobs_reports_waiting_then_applies(fleet, syncthing, mo
         total_written=2,
         bytes_transferred=result.bytes_transferred,
         device_names=["Peer B"],
+        applied_by_device={PEER: {"device_name": "Peer B", "files": 2}},
     )
     assert (fleet.local / "a.md").read_bytes() == b"alpha\n"
     assert (fleet.local / "b.md").read_bytes() == b"bravo\n"
@@ -622,6 +625,7 @@ def test_vanished_device_entry_is_waiting_and_never_refuses(fleet, syncthing, mo
         bytes_transferred=result.bytes_transferred,
         device_names=["Peer B"],
         waiting=[_waiting(THIRD, THIRD, entry=True)],
+        applied_by_device={PEER: {"device_name": "Peer B", "files": 1}},
     )
     assert (fleet.local / "note.md").read_bytes() == b"peer content\n"
     # One inventory per pull feeds the gate, selection and the tombstone set.
@@ -687,7 +691,11 @@ def test_conflict_copies_and_misnamed_device_files_never_refuse_or_duplicate(
     result, _, _ = _run(fleet, monkeypatch, "attended")
 
     _counts(
-        result, total_written=1, bytes_transferred=result.bytes_transferred, device_names=["Peer B"]
+        result,
+        total_written=1,
+        bytes_transferred=result.bytes_transferred,
+        device_names=["Peer B"],
+        applied_by_device={PEER: {"device_name": "Peer B", "files": 1}},
     )
     assert result.waiting == []
 
@@ -832,7 +840,13 @@ def test_an_untouched_file_fast_forwards_instead_of_conflicting_when_a_base_exis
 
     result, summaries, _ = _run(fleet, monkeypatch, mode)
 
-    _counts(result, total_written=1, bytes_transferred=transferred, device_names=["Peer B"])
+    _counts(
+        result,
+        total_written=1,
+        bytes_transferred=transferred,
+        device_names=["Peer B"],
+        applied_by_device={PEER: {"device_name": "Peer B", "files": 1}},
+    )
     assert local.read_bytes() == b"peer content\n"
     assert int(local.stat().st_mtime) == 1_700_000_000  # the peer's mtime is restored
     assert list(fleet.local.glob("*.sync-conflict-*")) == []
@@ -4739,7 +4753,7 @@ def test_syncthing_delivery_wait_bound_expiry_reports_clause_and_applies_arrived
     )
     assert "Syncthing is still delivering 3 files. Run: mm pull" in summaries[0][0]
     assert cli._sync_success("Pull", result) == [
-        "Pull: 1 file applied.",
+        "Pull: 1 content change from Peer B.",
         "Pull: Syncthing is still delivering 3 files. Run: mm pull.",
     ]
 
@@ -5056,6 +5070,10 @@ def test_multi_peer_summary_labels_and_totals_across_modes(fleet, monkeypatch, m
         total_conflicted=1,
         bytes_transferred=b_transferred + c_transferred,
         device_names=["Peer B", "Peer C"],
+        applied_by_device={
+            PEER: {"device_name": "Peer B", "files": 1},
+            THIRD: {"device_name": "Peer C", "files": 2},
+        },
     )
     summary_out, summary_err = summaries[0]
     if mode == "quiet":
@@ -5157,6 +5175,7 @@ def test_mixed_source_outcomes_up_to_date_line_for_held_only_but_not_applied(
         bytes_transferred=c_transferred,
         device_names=["Peer C"],
         older=_older("held.md"),
+        applied_by_device={THIRD: {"device_name": "Peer C", "files": 1}},
     )
     assert err == ""
     lines = out.splitlines()
@@ -5171,3 +5190,36 @@ def test_mixed_source_outcomes_up_to_date_line_for_held_only_but_not_applied(
         assert "  Up to date with Peer B/reference." not in lines
         assert "  Up to date with Peer C/notes." not in lines
         assert summaries == [("", "")]
+
+
+def test_multi_source_applied_counts_aggregate_per_peer_device(fleet, monkeypatch):
+    peer, _ = _seed(fleet, {"note.md": b"from notes\n"})
+    ref_local = fleet.root / "reference"
+    ref_peer = fleet.root / "peer_reference"
+    ref_local.mkdir()
+    ref_peer.mkdir()
+    for name, data in (("one.md", b"ref one\n"), ("two.md", b"ref two\n")):
+        path = ref_peer / name
+        path.write_bytes(data)
+        os.utime(path, (1_700_000_000, 1_700_000_000))
+    fleet.config["sync"]["sources"].append(
+        {"name": "reference", "type": "generic", "path": str(ref_local), "include_dirs": ["."]}
+    )
+    ref_manifest = manifest.build_manifest_v2(
+        PEER,
+        "Peer B",
+        [{"name": "reference", "type": "generic", "path": str(ref_peer), "include_dirs": ["."]}],
+    )
+    for name, info in ref_manifest["sources"]["reference"]["files"].items():
+        encrypted = crypto.encrypt((ref_peer / name).read_bytes(), PASSPHRASE, MEMORY_KB)
+        fleet.backend.put(blob_key(PEER, info["sha256"]), encrypted)
+    peer["sources"]["reference"] = ref_manifest["sources"]["reference"]
+    fleet.backend.put(
+        manifest_key(PEER), crypto.encrypt(manifest.serialize_manifest(peer), PASSPHRASE, MEMORY_KB)
+    )
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_applied == 3
+    assert result.applied_by_device == {PEER: pullflow.AppliedPeer("Peer B", 3)}
+    assert pullflow.applied_clause(result) == "3 content changes from Peer B"
