@@ -1192,10 +1192,17 @@ def _scan_muse_root(
             for turn in staged[key]["turns"]
             if turn["key"][:_MUSE_KEY_PREFIX] in held
         }
+        if copied:
+            # Each reopened day adds work after the original frozen-day pass.
+            progress_total += len(copied)
+            _report_progress()
         for rel in sorted(copied):
             del kept[rel]
             learned = True
-            read_live(rel, _muse_day_logs(day_dirs[rel], deadline))
+            logs = _muse_day_logs(day_dirs[rel], deadline)
+            progress_total += len(logs) - 1
+            _report_progress()
+            read_live(rel, logs)
     except _ReadFailure as failure:
         return _incomplete(failure.reason), staged, frozen, learned, True
 
