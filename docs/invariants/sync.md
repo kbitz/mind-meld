@@ -100,12 +100,14 @@ records per-peer applied counts (written, merged, and conflict copies) in
 `PullResult.applied_by_device` and renders the attended success lead via
 `pullflow.applied_clause` (`<n> content change(s) from <device>`, sorted by
 sanitized display name via `safety.safe_terminal_str`, omitting peers with zero
-applied files, with conflict copies still appended on the lead line).
+applied files, with conflict copies still appended on the lead line). A name
+that is blank after sanitization uses the sanitized device ID as its label.
 `PullResult.total_applied` stays unchanged for failure/incomplete lines and
 other clauses, with distinct skipped/failed counts across the selected scope,
-not as unique paths; skipped counts are omitted from the default `Pull:` outcome line (available in `mm pull -v`,
-`mm status`, and `mm diag`, so a pull that only skips newer local files prints
-`Pull: no changes.`). Track 91A's deleted clause, `older` clause, `waiting`
+not as unique paths; skipped counts are omitted from the default `Pull:` outcome
+line and available in `mm pull -v`, `mm status`, and `mm diag`. A pull that only
+skips newer local files prints `Pull: no changes.`. Track 91A's deleted clause,
+`older` clause, `waiting`
 clause, and `old_form` clause each emit as their own `Pull: <clause>.` line on
 success (see "Fast-forward, propagated deletions and anchors (Track 91A)"). No
 peers/no sources are explicit branch facts.

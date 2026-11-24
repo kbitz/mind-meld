@@ -17425,9 +17425,9 @@ def test_pull_outcome_line_names_each_applying_peer_sorted(tmp_path, monkeypatch
     storage_dir = tmp_path / "storage"
     backend = LocalBackend(storage_dir)
     bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
-    # Register mac-b before mac-a to prove output sorts by display name, not registration order.
-    register_device(backend, "dev-b", "mac-b")
-    register_device(backend, "dev-a", "mac-a")
+    # Storage enumerates device IDs in lexical order, so mac-b is visited first.
+    register_device(backend, "dev-1", "mac-b")
+    register_device(backend, "dev-2", "mac-a")
     register_device(backend, "dev-c", "mac-c")
     register_device(backend, "dev-local", "mac-d")
 
@@ -17461,8 +17461,8 @@ def test_pull_outcome_line_names_each_applying_peer_sorted(tmp_path, monkeypatch
     notes_a = tmp_path / "notes_a"
     notes_c = tmp_path / "notes_c"
     notes_local = tmp_path / "notes_local"
-    cfg_b = _config_for("dev-b", "mac-b", notes_b)
-    cfg_a = _config_for("dev-a", "mac-a", notes_a)
+    cfg_b = _config_for("dev-1", "mac-b", notes_b)
+    cfg_a = _config_for("dev-2", "mac-a", notes_a)
     cfg_c = _config_for("dev-c", "mac-c", notes_c)
     cfg_local = _config_for("dev-local", "mac-d", notes_local)
 

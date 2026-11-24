@@ -720,10 +720,11 @@ class TestAppliedClause:
             "2 content changes from mac-b"
         )
 
-    def test_empty_name_falls_back_to_device_id(self):
+    @pytest.mark.parametrize("name", ["", "  ", "\x1b[0m"])
+    def test_blank_display_name_falls_back_to_device_id(self, name):
         result = pullflow.PullResult(
             total_written=1,
-            applied_by_device={"dev-x": pullflow.AppliedPeer("", 1)},
+            applied_by_device={"dev-x": pullflow.AppliedPeer(name, 1)},
         )
         assert pullflow.applied_clause(result) == "1 content change from dev-x"
 

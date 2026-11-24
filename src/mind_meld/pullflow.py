@@ -3260,14 +3260,15 @@ def _waiting_items(result: PullResult, *, detail: bool) -> list[str]:
 def applied_clause(result: PullResult) -> str:
     """The outcome-line lead for applied content changes per peer device, or ""
     when none: ``1 content change from mac-a, 2 content changes from mac-b``.
-    Peer names go through `safety.safe_terminal_str` and sort case-insensitively
-    by sanitized display name, with deterministic tie-breaking on exact name
-    and device ID."""
+    Peer labels sort case-insensitively after sanitization, with ties broken
+    by exact label and device ID. A blank label falls back to the device ID."""
     entries: list[tuple[str, str, str, int]] = []
     for did, peer in result.applied_by_device.items():
         if peer.files <= 0:
             continue
-        safe_name = safety.safe_terminal_str(peer.device_name or did)
+        safe_name = safety.safe_terminal_str(peer.device_name)
+        if not safe_name.strip():
+            safe_name = safety.safe_terminal_str(did)
         entries.append((safe_name.casefold(), safe_name, did, peer.files))
     entries.sort(key=lambda item: (item[0], item[1], item[2]))
     return ", ".join(
