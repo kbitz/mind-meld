@@ -98,6 +98,46 @@ here by hand, use the H3 form.
 - **Evidence:** Track 164A coverage audit of `_sync_success` and the old-form result fixture.
 - **Revisit when:** A Track changes old-form reporting or attended pull line ordering.
 
+### [review:files=src/mind_meld/capturecatchup.py|src/mind_meld/events_tail.py|tests/test_capture_catchup.py] Show the shared host allowance across warm retries
+
+- **Description:** A reader timing sums its sweep and retry allowances even when the retry spends what remains of an existing host phase. A reader that returns a deadline result early can make the reported allowance look larger than the real ceiling.
+- **Context:** PR #382 repair review. The current worker keeps the configured scan cap. Both outside reviews flagged the displayed allowance as a follow-up.
+- **Revisit when:** An attended timing is used to size a new budget, or the warm-retry path changes. Use a fixture with one early deadline and an inline retry to compare the displayed budget with the phase deadline.
+
+### [review:files=src/mind_meld/cli.py|src/mind_meld/capturecatchup.py|src/mind_meld/events_tail.py] Preserve catch-up progress across overlapping hooks
+
+- **Description:** A second deadline-stopped hook can lose its launch request while the first worker holds the catch-up lock. A newer incomplete capture can then defer the first worker and discard its staged Git and session progress. Repeated hooks can also start successive attended scans that defer.
+- **Context:** PR #382 Red Team and outside review. The branch preserves stale-publication protection and keeps a later hook visible in status. No owner reproduction established that the backlog persists through later pushes.
+- **Revisit when:** Consecutive hooks repeatedly defer catch-up on an owner machine. Measure the failed hand-offs and compare one remembered successor request with a retry delay.
+
+### [review:files=src/mind_meld/sourceflow.py|src/mind_meld/lockfile.py|tests/test_source_toggle.py] Clarify source-toggle lock contention
+
+- **Description:** A source toggle can finish its prompts and then stop immediately when a sync holds the lock. The contended path has no source-specific retry command and includes a redundant raise after the CLI error exit.
+- **Context:** PR #382 maintainability and outside review. The source remains selected until the toggle can commit the update safely.
+- **Revisit when:** The owner reports repeated difficulty disabling a source during routine sync. Check a short bounded wait and an exact retry command against existing lock semantics.
+
+### [review:files=src/mind_meld/events_tail.py|src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py] Use one timing record for host reads
+
+- **Description:** The host capture object carries a timing map alongside the measurements recorded by the phase timer. The copies are merged differently during warm retries, and the extra map is otherwise observed only by tests.
+- **Context:** PR #382 simplification review. This is a cleanup suggestion without an observed product failure.
+- **Revisit when:** Host telemetry or warm retries next change. Move the reader timing assertions to the phase timer before removing the duplicate state.
+
+### [review:files=src/mind_meld/events.py|src/mind_meld/events_tail.py|tests/test_capture_catchup.py] Test gap: Read failures while replaying an older cursor journal
+
+- **Test gap:** No demonstrated defect. The interrupted-cursor fixture covers a failed cache write, and separate tests exercise oversized historical files in the staleness check.
+- **Description:** Neither test directly exercises an unreadable event file old enough to be outside the staleness scan while it can still contain a pending journal row.
+- **Hypothesis (untested):** Make the previous day's journal-bearing file unreadable after preparation. Verify that replay stops publication and leaves the existing journal intact.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/events.py, detached replay's day-file read
+- **Context:** Track 165A continuation for PR #382.
+- **Revisit when:** The cursor journal or event file read-error handling changes.
+
+### [review:files=src/mind_meld/events.py|src/mind_meld/cli.py|tests/test_capture_catchup.py] Name a Git index read failure in catch-up status
+
+- **Description:** A strict read of the initial Git capture index can stop the worker safely. The worker reports the exception type and loses the name of the affected index.
+- **Context:** PR #382 convergence-pass maintainability review. Cursor replay already records a path-free Git recovery message.
+- **Revisit when:** A catch-up reports an I/O error from this index on an owner machine or the diagnostic path is next changed.
+
 ## Drain records
 
 ### Targeted roadmap regeneration of qmd isolation (2026-11-22)
