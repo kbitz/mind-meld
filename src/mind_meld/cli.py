@@ -1657,13 +1657,13 @@ def push(
                                 f"({type(e).__name__}); check mm status"
                             )
                 finally:
-                    if not dry_run and push_timer.phases():
-                        pushtimings.record_push_timings(
-                            "attended",
-                            push_timer.phases(),
-                            total_ms=push_timer.total_ms(),
-                        )
-                    core._release_sync_lock()
+                    try:
+                        if not dry_run and (phases := push_timer.phases()):
+                            pushtimings.record_push_timings(
+                                "attended", phases, total_ms=push_timer.total_ms()
+                            )
+                    finally:
+                        core._release_sync_lock()
                 if not dry_run and core_finished and sys.exception() is None:
                     _sync_memory_index(config)
                 # Failed attended attempts need the update or nudge too; previews never
@@ -4997,20 +4997,20 @@ def autopush() -> None:
                 pullhistory.record_failure(statedb.recover_if_needed())
 
             push_timer = pushtimings.PhaseTimer()
-            with pullhistory.batch():
-                result = _push_core(
-                    setup.config,
-                    setup.passphrase,
-                    setup.memory_kb,
-                    quiet=True,
-                    phase_timer=push_timer,
-                )
-            if push_timer.phases():
-                pushtimings.record_push_timings(
-                    "autopush",
-                    push_timer.phases(),
-                    total_ms=push_timer.total_ms(),
-                )
+            try:
+                with pullhistory.batch():
+                    result = _push_core(
+                        setup.config,
+                        setup.passphrase,
+                        setup.memory_kb,
+                        quiet=True,
+                        phase_timer=push_timer,
+                    )
+            finally:
+                if phases := push_timer.phases():
+                    pushtimings.record_push_timings(
+                        "autopush", phases, total_ms=push_timer.total_ms()
+                    )
 
             if diagnostics.total:
                 result = result or PushResult()

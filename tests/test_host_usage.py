@@ -3900,8 +3900,8 @@ def test_phase_timer_and_pushtimings_persistence_165b(tmp_path: Path, monkeypatc
     assert "  Codex usage: 350 ms / 6000 ms" in lines
     assert any(line.startswith("  Upload: ") and line.endswith(" [error]") for line in lines)
 
-    # Unknown kind (e.g. "catchup") is ignored.
-    pushtimings.record_push_timings("catchup", timer.phases(), total_ms=500)
+    # Unknown kinds are ignored.
+    pushtimings.record_push_timings("unknown", timer.phases(), total_ms=500)
     assert not timings_path.exists()
 
     pushtimings.record_push_timings("attended", timer.phases(), total_ms=420)

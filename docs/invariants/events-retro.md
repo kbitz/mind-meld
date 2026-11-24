@@ -1701,9 +1701,12 @@ movement that never happened.
 **Equal per-provider deadlines, concurrent, started after `walk_done` (Track 165B).**
 `HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (1000; 750 in Track 149A; 250 before) / `_INTERACTIVE_MS` (3000) set each
 enabled reader's equal allowance (`allowance_s = deadline - initial_now`). Every
-reader gets its own `start_i + allowance_s` deadline; an early-finishing reader
-returns immediately without holding unused time, and a slow reader never shrinks
-a sibling's deadline. Production multi-reader sweeps (`now is time.monotonic`)
+reader gets its own `start_i + allowance_s` deadline. Its deadline is a
+cooperative wall-clock limit and readers can compete for CPU or disk bandwidth.
+Under an attended shared host phase, the phase deadline caps each reader's
+deadline and readers skip starting once that phase expires. Terminal progress
+uses the reader's actual start time when the display switches readers.
+Production multi-reader sweeps (`now is time.monotonic`)
 run concurrently in a `ThreadPoolExecutor` because every enabled host reader
 uses an independent source tree and private `lockedjson` cache, with thread-safe
 depth-counted `host_usage._pause_gc()`, copied `contextvars` per worker,
@@ -1717,7 +1720,9 @@ phase, and record the shared host-phase ceiling (`accumulate_budget=False`) into
 legacy-only independent 5 s warm retries use `accumulate_budget=True`).
 `PhaseTimer` is the single timing record for host reads (no duplicate map on
 `HostUsageCapture`); `pushtimings.record_push_timings` persists `attended` and
-`autopush` runs to `push-timings.json` (never on `--dry-run`). These deadlines are cooperative. Two halves remain load-bearing: capture begins
+`autopush` runs to `push-timings.json` (never on `--dry-run`). The record
+includes phases reached by a failed push and uses a best-effort write.
+Two halves remain load-bearing: capture begins
 AFTER the `walk_done` snapshot (invariant 4) so host time can never trip or
 redefine the session-walk notice, and the deadline is FRESH rather than the
 walk's leftovers — reusing `deadline` would make the row vanish exactly on the

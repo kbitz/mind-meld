@@ -183,7 +183,13 @@ Pins in `[retro] repo_roots` for repositories these sources now name can be remo
 **Attended usage reads get 3,000 ms, and autopush gives each provider 1,000 ms concurrently (Tracks 101A / 149A / 165B):** the attended
 host-usage default (`host_usage_interactive_budget_ms`) is 3,000 ms,
 host reads (sweep plus inline warm) get up to three fifths of the attended scan cap
-(`capture_budget_ms` before Track 124A; half before Track 101A), and sequential attended warm retries keep a reserve of up to 300 ms per later retry. On autopush, Track 165B replaces the old shared 750 ms sweep and 250 ms later-reader grace floor with an equal **1,000 ms per-provider deadline** (`host_usage_autopush_budget_ms`) across enabled readers running concurrently (autopush still never warms), so an early-finishing reader returns immediately without holding unused time and one slow reader never shrinks a sibling's allowance. Attended push progress also shows per-phase counts and elapsed time, `mm push --verbose` prints per-phase timings before the final `Push:` line, and `mm diag` exposes `push_timings`. If you pinned `host_usage_interactive_budget_ms`
+(`capture_budget_ms` before Track 124A; half before Track 101A), and sequential
+attended warm retries keep a reserve of up to 300 ms per later retry. Track
+165B gives each enabled reader an equal **1,000 ms wall-clock deadline**
+(`host_usage_autopush_budget_ms`) on autopush. Readers run concurrently and
+return when they finish. Attended push progress shows phase counts and
+elapsed time, `mm push --verbose` prints phase timings before the final
+`Push:` line, and `mm diag` exposes `push_timings`. If you pinned `host_usage_interactive_budget_ms`
 in `~/.config/mind-meld/config.toml` as a workaround, remove that line and run
 `mm push`; the measured reader timings fit the new default. Live verification
 across up to three attended pushes follows release installation. Codex also
@@ -2725,7 +2731,10 @@ count), so one cold reader's retry cannot starve a sibling retry. Setting either
 `host_usage_interactive_budget_ms` remains the sweep preference within its host share.
 `attended_capture_cap_ms` applies only to attended pushes.
 
-Autopush gives each enabled host reader its own **1,000 ms** deadline (range **100–5,000**), running enabled readers concurrently so hook wall time tracks the slowest reader rather than their sum; interactive push and init default to **3,000 ms** (range **250–5,000**).
+Autopush gives each enabled host reader its own **1,000 ms** wall-clock
+deadline (range **100–5,000**). The reads overlap and can compete for CPU
+and disk bandwidth. Interactive push and init default to **3,000 ms**
+(range **250–5,000**).
 All must be integers. An explicit `host_usage_autopush_budget_ms` must not exceed `capture_budget_ms`
 when that key is set, and must not exceed an explicitly set interactive budget.
 When neither is set, it must not exceed the 3,000 ms interactive default. When

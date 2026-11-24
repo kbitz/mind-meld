@@ -16961,6 +16961,7 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
     assert "3/3" in term_out
     assert "Discovering repositories" in term_out
     assert "Walking repositories" in term_out
+    assert "Scanning sessions" in term_out
     assert "2/2" in term_out
     assert "· " in term_out
     assert "\x1b[?25h" in term_out
@@ -17581,7 +17582,8 @@ def test_push_verbose_timings_before_outcome_and_dry_run_write_free_165b(tmp_pat
     assert idx_timings < len(lines) - 1
     assert any("Manifest scan:" in line for line in lines[idx_timings + 1 : -1])
     assert timings_path.exists()
-    assert "attended" in pushtimings.read_push_timings()["by_kind"]
+    attended = pushtimings.read_push_timings()["by_kind"]["attended"]
+    assert lines[idx_timings + 1 : -1] == pushtimings.format_verbose_timings(attended["phases"])
 
     # 3. No-op attended push --verbose still prints Phase timings before Push:
     res_noop = runner.invoke(app, ["push", "--verbose"])
@@ -17595,3 +17597,42 @@ def test_push_verbose_timings_before_outcome_and_dry_run_write_free_165b(tmp_pat
     auto = runner.invoke(app, ["autopush"])
     assert auto.exit_code == 0, auto.output
     assert set(pushtimings.read_push_timings()["by_kind"]) == {"attended", "autopush"}
+
+
+def test_failed_autopush_records_the_error_phase_165b(capture61, monkeypatch):
+    from mind_meld import pushtimings
+
+    pushtimings.record_push_timings(
+        "autopush", [pushtimings.PhaseTiming("manifest_scan", "Manifest scan", 5)]
+    )
+
+    def fail_scan(*args, **kwargs):
+        raise OSError("synthetic scan failure")
+
+    monkeypatch.setattr(cli_module, "build_manifest_v2", fail_scan)
+    result = runner.invoke(app, ["autopush"])
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert "push failed" in result.stderr
+    timing = pushtimings.read_push_timings()["latest"]
+    assert timing["kind"] == "autopush"
+    assert timing["phases"][0]["phase"] == "manifest_scan"
+    assert timing["phases"][0]["status"] == "error"
+
+
+def test_interrupted_timing_write_releases_attended_push_lock_165b(capture61, monkeypatch):
+    from mind_meld import pushtimings
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(pushtimings, "record_push_timings", interrupt)
+    result = runner.invoke(app, ["push"])
+
+    try:
+        assert result.exit_code == 1, result.output
+        assert "Push interrupted" in result.stderr
+        cli_module.acquire_lock()
+    finally:
+        cli_module.release_lock()

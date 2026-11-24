@@ -3288,18 +3288,17 @@ def test_push_and_autopush_with_not_readable_check_print_no_new_stderr_line_124b
 
 
 def test_diag_push_timings_section_and_read_only_safety_165b(tmp_path, monkeypatch):
-    from mind_meld import pushtimings
+    from mind_meld import lockedjson, pushtimings
 
     _setup(tmp_path, monkeypatch)
     timings_path = tmp_path / "push-timings.json"
     monkeypatch.setattr(pushtimings, "PUSH_TIMINGS_PATH", timings_path)
 
-    # Missing file: diag reports empty push_timings, no capture_catchup key, and writes nothing.
+    # A missing timing file reads as empty without being created.
     res_empty = runner.invoke(app, ["diag", "--json"])
     assert res_empty.exit_code == 0, res_empty.output
     payload_empty = json.loads(res_empty.stdout)
     assert payload_empty["push_timings"] == {"latest": None, "by_kind": {}}
-    assert "capture_catchup" not in payload_empty
     assert not timings_path.exists()
 
     res_plain_empty = runner.invoke(app, ["diag"])
@@ -3342,3 +3341,11 @@ def test_diag_push_timings_section_and_read_only_safety_165b(tmp_path, monkeypat
     assert "autopush: 110 ms" in res_plain.output
     assert "Codex usage: 140 ms / 3000 ms" in res_plain.output
     assert "Codex usage: 90 ms / 1000 ms" in res_plain.output
+
+    before = timings_path.read_bytes(), timings_path.stat().st_mtime_ns
+    with lockedjson.locked_json_rmw(timings_path) as writer:
+        writer.write_on_exit = False
+        res_locked = runner.invoke(app, ["diag", "--json"])
+        assert res_locked.exit_code == 0, res_locked.output
+        assert json.loads(res_locked.stdout)["push_timings"] == {"latest": None, "by_kind": {}}
+    assert (timings_path.read_bytes(), timings_path.stat().st_mtime_ns) == before

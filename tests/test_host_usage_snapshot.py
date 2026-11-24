@@ -3780,6 +3780,83 @@ def test_track_125a_progress_scope_receives_host_and_git_counts_and_isolates_fau
     assert (aborts, errors) == (0, 0)
 
 
+def test_attended_reader_does_not_start_after_progress_spends_the_phase_cap(monkeypatch):
+    now_at = 100.0
+    deadlines = []
+
+    def now():
+        return now_at
+
+    def slow_display(*_args):
+        nonlocal now_at
+        now_at = 104.0
+
+    def reader(*, deadline):
+        deadlines.append(deadline)
+        return _incomplete("deadline")
+
+    capture_usage = events_tail._capture_host_usage
+
+    def use_test_clock(readers, **kwargs):
+        return capture_usage(readers, now=now, **kwargs)
+
+    monkeypatch.setattr(events_tail.time, "monotonic", now)
+    monkeypatch.setattr(events_tail, "_capture_host_usage", use_test_clock)
+    monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 5000)
+    with events_tail.progress_scope(slow_display):
+        result, rows = events_tail._capture_host_snapshot(
+            "dev-a", (("codex", reader),), host_budget_ms=3000
+        )
+
+    assert deadlines == []
+    assert result.invoked is False
+    assert result.dropped == (("codex", "deadline"),)
+    assert rows == []
+
+
+def test_concurrent_reader_progress_keeps_elapsed_time_on_handoff(monkeypatch):
+    from threading import Event
+
+    from mind_meld import core
+
+    clock = 100.0
+    muse_counted = Event()
+    muse_displayed = Event()
+    detail = []
+
+    def now():
+        return clock
+
+    monkeypatch.setattr(core.time, "monotonic", now)
+    progress = core._SyncProgress(enabled=False, include_elapsed=True)
+
+    def capture_count(phase, done, total, unit, **kwargs):
+        progress.set_count(phase, done, total, unit, **kwargs)
+        if phase == "Reading Muse usage":
+            detail.append(progress._format_detail_locked(progress._state, now()))
+            muse_displayed.set()
+
+    def codex(*, deadline):
+        nonlocal clock
+        assert muse_counted.wait(5)
+        clock = 101.5
+        return _complete()
+
+    def muse(*, deadline, progress):
+        progress(1, 2)
+        muse_counted.set()
+        assert muse_displayed.wait(5)
+        return _complete()
+
+    with events_tail.progress_scope(capture_count):
+        result = events_tail._capture_host_usage(
+            (("codex", codex), ("muse", muse)), deadline=103.0, now=now, concurrent=True
+        )
+
+    assert result.token_sources == ("codex", "muse")
+    assert detail == ["1/2 · 1.5s"]
+
+
 def test_track_125a_codex_deadline_catching_up_matches_diag_pending_and_failures_stay_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

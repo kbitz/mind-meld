@@ -2861,9 +2861,17 @@ class _SyncProgress:
         self._last_render_at = now
         return True
 
-    def _render_locked(self, state: updateprogress.UpdateProgress, *, force: bool = False) -> None:
+    def _render_locked(
+        self,
+        state: updateprogress.UpdateProgress,
+        *,
+        force: bool = False,
+        started_at: float | None = None,
+    ) -> None:
         now = time.monotonic()
-        if state.phase != self._state.phase:
+        if started_at is not None:
+            self._phase_started_at = started_at
+        elif state.phase != self._state.phase:
             self._phase_started_at = now
         self._state = state
         if not self._enabled or self._pause_depth > 0:
@@ -2999,7 +3007,15 @@ class _SyncProgress:
                 force=self._batch_completed in (1, self._batch_total),
             )
 
-    def set_count(self, phase: str, completed: int, total: int, unit: str = "") -> None:
+    def set_count(
+        self,
+        phase: str,
+        completed: int,
+        total: int,
+        unit: str = "",
+        *,
+        started_at: float | None = None,
+    ) -> None:
         with self._lock:
             phase_changed = phase != self._state.phase
             self._batch_phase = phase
@@ -3022,6 +3038,7 @@ class _SyncProgress:
             self._render_locked(
                 state,
                 force=phase_changed or self._batch_completed in (0, 1, self._batch_total),
+                started_at=started_at,
             )
 
     @contextmanager
@@ -3134,10 +3151,12 @@ def _sync_progress_advance(step: int = 1) -> None:
         progress.advance(step)
 
 
-def _sync_progress_count(phase: str, completed: int, total: int, unit: str = "") -> None:
+def _sync_progress_count(
+    phase: str, completed: int, total: int, unit: str = "", *, started_at: float | None = None
+) -> None:
     progress = _current_sync_progress()
     if progress is not None:
-        progress.set_count(phase, completed, total, unit)
+        progress.set_count(phase, completed, total, unit, started_at=started_at)
 
 
 def _stop_sync_progress() -> None:

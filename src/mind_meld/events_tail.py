@@ -68,15 +68,19 @@ CacheLockMode = Literal["warn", "block"] | None
 HostReader = Callable[..., host_usage.HostUsageResult]
 
 
-_PROGRESS: ContextVar[Callable[[str, int, int, str], None] | None] = ContextVar(
-    "events_progress", default=None
-)
+_PROGRESS: ContextVar[Callable[..., None] | None] = ContextVar("events_progress", default=None)
 _PHASE_TIMER: ContextVar[pushtimings.PhaseTimer | None] = ContextVar("phase_timer", default=None)
 
 
 @contextmanager
-def progress_scope(sink: Callable[[str, int, int, str], None] | None):
-    token = _PROGRESS.set(sink)
+def progress_scope(sink: Callable[..., None] | None):
+    receiver = sink
+    if sink is not None and not _accepted_kwargs(sink, started_at=0.0):
+        # Older observers only consume the four counter fields.
+        def receiver(phase: str, completed: int, total: int, unit: str, *, started_at):
+            sink(phase, completed, total, unit)
+
+    token = _PROGRESS.set(receiver)
     try:
         yield
     finally:
@@ -120,12 +124,14 @@ def _record_phase(
     )
 
 
-def _progress(phase: str, completed: int, total: int, unit: str) -> None:
+def _progress(
+    phase: str, completed: int, total: int, unit: str, *, started_at: float | None = None
+) -> None:
     sink = _PROGRESS.get()
     if sink is None:
         return
     try:
-        sink(phase, completed, total, unit)
+        sink(phase, completed, total, unit, started_at=started_at)
     except (Exception, SystemExit):
         pass
 
@@ -702,6 +708,7 @@ def _capture_host_usage(
     deadline: float,
     now: Callable[[], float] = time.monotonic,
     concurrent: bool | None = None,
+    phase_deadline: float | None = None,
     budget_ms_override: int | None = None,
     accumulate_budget: bool = False,
 ) -> HostUsageCapture:
@@ -712,7 +719,8 @@ def _capture_host_usage(
     without holding unused time, and a slow reader never shrinks a sibling's
     deadline. Production multi-reader sweeps (``now is time.monotonic``) run in a
     thread pool with copied ``contextvars`` and canonical-order merging; synthetic
-    clocks stay sequential unless ``concurrent=True``.
+    clocks stay sequential unless ``concurrent=True``. An attended shared phase
+    also caps each reader's deadline and vetoes starts after expiry.
 
     Reader-scoped for FAILURES (Track 31A): a file/record failure still fails
     that whole reader, but a reader failure no longer discards the others.
@@ -744,6 +752,8 @@ def _capture_host_usage(
             partial=False,
             usage_days={},
         )
+    if phase_deadline is not None:
+        deadline = min(deadline, phase_deadline)
     initial_now = now()
     if initial_now >= deadline:
         return HostUsageCapture(None, names_in_order[0], "deadline", invoked=False)
@@ -762,16 +772,14 @@ def _capture_host_usage(
     progress_lock = threading.Lock()
     unfinished: list[str] = list(names_in_order)
     latest_counts: dict[str, tuple[int, int]] = {}
+    reader_starts: dict[str, float] = {}
     completed_readers = 0
-    saw_item_progress = False
     if progress_enabled:
         _progress("Capturing host usage", 0, total_readers, "readers")
 
     def _make_item_progress(reader_name: str) -> Callable[[int, int], None]:
         def _on_item(done: int, total: int) -> None:
-            nonlocal saw_item_progress
             with progress_lock:
-                saw_item_progress = True
                 latest_counts[reader_name] = (done, total)
                 if unfinished and unfinished[0] == reader_name:
                     _progress(
@@ -779,6 +787,7 @@ def _capture_host_usage(
                         done,
                         total,
                         "",
+                        started_at=reader_starts[reader_name],
                     )
 
         return _on_item
@@ -791,26 +800,41 @@ def _capture_host_usage(
             completed_readers += 1
             if reader_name in unfinished:
                 unfinished.remove(reader_name)
-            if saw_item_progress:
+            if latest_counts:
                 if unfinished:
                     nxt = unfinished[0]
                     done, total = latest_counts.get(nxt, (0, 0))
-                    _progress(f"Reading {_host_progress_label(nxt)} usage", done, total, "")
+                    _progress(
+                        f"Reading {_host_progress_label(nxt)} usage",
+                        done,
+                        total,
+                        "",
+                        started_at=reader_starts.get(nxt),
+                    )
             else:
                 _progress("Capturing host usage", completed_readers, total_readers, "readers")
 
     def _run_one(
         name: str, read: HostReader
-    ) -> tuple[host_usage.HostUsageResult | None, Exception | None, int]:
-        start = now()
-        reader_deadline = start + allowance_s
+    ) -> tuple[host_usage.HostUsageResult | None, int, bool]:
         call_kwargs = (
             _accepted_kwargs(read, progress=_make_item_progress(name)) if progress_enabled else {}
         )
+        if progress_enabled:
+            with progress_lock:
+                start = now()
+                reader_starts[name] = start
+        else:
+            start = now()
+        reader_deadline = start + allowance_s
+        if phase_deadline is not None:
+            reader_deadline = min(reader_deadline, phase_deadline)
         try:
+            if start >= reader_deadline:
+                return None, 0, False
             result = read(deadline=reader_deadline, **call_kwargs)
             elapsed_ms = max(0, round((now() - start) * 1000))
-            return result, None, elapsed_ms
+            return result, elapsed_ms, True
         except Exception as e:
             elapsed_ms = max(0, round((now() - start) * 1000))
             # The breadcrumb reason stays a closed vocabulary, but the TYPE
@@ -821,7 +845,7 @@ def _capture_host_usage(
             token_usage._diagnostic(
                 f"mm: notice: host reader {name} raised: {_exception_detail(e)}\n"
             )
-            return None, e, elapsed_ms
+            return None, elapsed_ms, True
         finally:
             _finish_progress(name)
 
@@ -835,59 +859,34 @@ def _capture_host_usage(
     else:
         raw_outcomes = [(name, _run_one(name, read)) for name, read in readers]
 
-    for name, (result, exc, elapsed_ms) in raw_outcomes:
+    invoked = False
+    for name, (result, elapsed_ms, ran) in raw_outcomes:
+        invoked |= ran
         label = f"{_host_progress_label(name)} usage"
         counts = latest_counts.get(name)
         done, total = counts if counts is not None else (None, None)
-        if exc is not None or result is None:
+        if not ran:
+            status = "deadline"
+            dropped.append((name, "deadline"))
+        elif result is None:
+            status = "error"
             dropped.append((name, _HOST_UNKNOWN_REASON))
-            _record_phase(
-                f"host:{name}",
-                label,
-                elapsed_ms,
-                budget_ms=budget_ms,
-                completed=done,
-                total=total,
-                status="error",
-                accumulate=True,
-                accumulate_budget=accumulate_budget,
-            )
-            continue
-        if not result.complete:
+        elif not result.complete:
             reason = result.reason if result.reason in _HOST_READ_REASONS else _HOST_UNKNOWN_REASON
             if reason in _HOST_ABSENT_REASONS:
                 # Not installed, in effect. Drop it silently and keep going —
                 # the row will name only the sources that actually contributed.
-                _record_phase(
-                    f"host:{name}",
-                    label,
-                    elapsed_ms,
-                    budget_ms=budget_ms,
-                    completed=done,
-                    total=total,
-                    status="skipped",
-                    accumulate=True,
-                    accumulate_budget=accumulate_budget,
-                )
-                continue
-            dropped.append((name, reason))
-            _record_phase(
-                f"host:{name}",
-                label,
-                elapsed_ms,
-                budget_ms=budget_ms,
-                completed=done,
-                total=total,
-                status="deadline" if reason == "deadline" else "error",
-                accumulate=True,
-                accumulate_budget=accumulate_budget,
-            )
-            continue
-        contributed.append(name)
-        usage_days[name] = frozenset(day for days in result.hosts.values() for day in days)
-        if result.partial_days:
-            partial_days[name] = frozenset(result.partial_days)
-        _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
+                status = "skipped"
+            else:
+                status = "deadline" if reason == "deadline" else "error"
+                dropped.append((name, reason))
+        else:
+            status = "ok"
+            contributed.append(name)
+            usage_days[name] = frozenset(day for days in result.hosts.values() for day in days)
+            if result.partial_days:
+                partial_days[name] = frozenset(result.partial_days)
+            _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
         _record_phase(
             f"host:{name}",
             label,
@@ -895,7 +894,7 @@ def _capture_host_usage(
             budget_ms=budget_ms,
             completed=done,
             total=total,
-            status="ok",
+            status=status,
             accumulate=True,
             accumulate_budget=accumulate_budget,
         )
@@ -910,7 +909,9 @@ def _capture_host_usage(
             usage_days=usage_days,
         )
     first_reader, first_reason = dropped[0]
-    return HostUsageCapture(None, first_reader, first_reason, dropped=tuple(dropped))
+    return HostUsageCapture(
+        None, first_reader, first_reason, dropped=tuple(dropped), invoked=invoked
+    )
 
 
 def _merge_host_usage_maps(
@@ -1497,9 +1498,8 @@ def _capture_host_snapshot(
     attended scan cap, or the capture budget for init. Sweep + inline warm
     share one phase deadline of at most three fifths of that total;
     legacy-key-only configs instead keep a fresh allowance per warm retry.
-    Attended callers (a warm callback) also hold a reserve for each
-    later reader, in the sweep and across the warm retries. Elapsed attended
-    time is recorded for the events tail.
+    Sequential warm retries hold a reserve for each later retry. Elapsed
+    attended time is recorded for the events tail.
     """
     global _attended_host_elapsed_s, _pending_capture_budget_ms
     started = time.monotonic()
@@ -1509,8 +1509,13 @@ def _capture_host_snapshot(
     phase_deadline = (
         started + _host_phase_ms(capture_ms) / 1000.0 if capture_ms is not None else None
     )
+    sweep_kwargs = (
+        _accepted_kwargs(_capture_host_usage, phase_deadline=phase_deadline)
+        if phase_deadline is not None
+        else {}
+    )
     host_capture = _capture_host_usage(
-        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
+        host_readers, deadline=started + host_budget_ms / 1000.0, **sweep_kwargs
     )
     if not host_capture.invoked and host_capture.reason == "deadline":
         # No reader ran: declare every omission so a failed warm cannot vanish
@@ -1563,6 +1568,7 @@ def _capture_host_snapshot(
             retry_kwargs = (
                 _accepted_kwargs(
                     _capture_host_usage,
+                    phase_deadline=retry_deadline,
                     budget_ms_override=max(0, round((retry_deadline - started) * 1000)),
                     accumulate_budget=False,
                 )
