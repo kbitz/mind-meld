@@ -185,11 +185,12 @@ host-usage default (`host_usage_interactive_budget_ms`) is 3,000 ms,
 host reads (sweep plus inline warm) get up to three fifths of the attended scan cap
 (`capture_budget_ms` before Track 124A; half before Track 101A), and sequential
 attended warm retries keep a reserve of up to 300 ms per later retry. Track
-165B gives each enabled reader an equal **1,000 ms wall-clock deadline**
-(`host_usage_autopush_budget_ms`) on autopush. Readers run concurrently and
-return when they finish. Attended push progress shows phase counts and
-elapsed time, `mm push --verbose` prints phase timings before the final
-`Push:` line, and `mm diag` exposes `push_timings`. If you pinned `host_usage_interactive_budget_ms`
+165B gives each enabled reader its own cooperative deadline on autopush.
+The default is **1,000 ms** per reader, and an explicit
+`host_usage_autopush_budget_ms` now applies to each reader. Readers run
+concurrently. Attended push progress shows phase counts and elapsed time,
+`mm push --verbose` prints phase timings before the `Push:` outcome lines,
+and `mm diag` exposes `push_timings`. If you pinned `host_usage_interactive_budget_ms`
 in `~/.config/mind-meld/config.toml` as a workaround, remove that line and run
 `mm push`; the measured reader timings fit the new default. Live verification
 across up to three attended pushes follows release installation. Codex also
@@ -1192,9 +1193,10 @@ Attended `mm push` shows per-phase counts and elapsed time (`Reading Codex usage
 1/2 files · 0.2s`), while `mm pull` shows manifest and file counters (`Reading
 peer manifests 50.0% 1/2 manifests`, `Applying files 50.0% 1/2 files` per source
 batch). The spinner pauses cleanly for mid-run warnings or conflict prompts on
-the push/pull paths and clears before the final outcome lines; `mm push --verbose`
-prints a `Phase timings:` block (milliseconds used against each phase's allowance)
-immediately before the closing `Push:` outcome line. `mm update` and an
+the push/pull paths and clears before the final outcome lines. A successful
+`mm push --verbose` prints a `Phase timings:` block before the `Push:`
+outcome lines. Each recorded phase shows elapsed milliseconds and, when
+applicable, its allowance. `mm update` and an
 automatic update during an attended terminal `mm push` or `mm pull` share the
 same transient spinner (`Updating mm <old> → <new>`, then installer phases and
 counters). Redirected output (even with `FORCE_COLOR`), `--dry-run`, `autopush`,
@@ -2731,9 +2733,11 @@ count), so one cold reader's retry cannot starve a sibling retry. Setting either
 `host_usage_interactive_budget_ms` remains the sweep preference within its host share.
 `attended_capture_cap_ms` applies only to attended pushes.
 
-Autopush gives each enabled host reader its own **1,000 ms** wall-clock
-deadline (range **100–5,000**). The reads overlap and can compete for CPU
-and disk bandwidth. Interactive push and init default to **3,000 ms**
+Autopush gives each enabled host reader its own cooperative wall-clock
+deadline from the start of its read (default **1,000 ms**, range **100–5,000**).
+The reads overlap and can compete for CPU and disk bandwidth. A filesystem
+call or cache write already underway can finish after the deadline.
+Interactive push and init default to **3,000 ms**
 (range **250–5,000**).
 All must be integers. An explicit `host_usage_autopush_budget_ms` must not exceed `capture_budget_ms`
 when that key is set, and must not exceed an explicitly set interactive budget.
@@ -2788,11 +2792,18 @@ missing, malformed, version-mismatched or locked caches show `unknown`, not 0.
 Both reader dictionaries also expose `last_complete_ms`, `last_complete_at`,
 and `last_deadline_allotted_ms`. The top-level `host_read_budgets` contains
 `autopush_ms` (preserved for JSON readers), `autopush_source`, `interactive_ms`, `interactive_source`,
-`capture_ms`, `capture_source`, `warm_ms` (always 5000, the legacy warm constant), and `mode` (`"per_provider_concurrent"`). Top-level `push_timings` records `{latest, by_kind}` for the most recent `attended` and `autopush` runs (each with `kind`, `recorded_at`, `total_ms`, and per-phase `{phase, label, elapsed_ms, budget_ms, status}` entries). `capture_ms` is the base
+`capture_ms`, `capture_source`, `warm_ms` (always 5000, the legacy warm constant), and `mode` (`"per_provider_concurrent"`). `capture_ms` is the base
 capture budget; this map does not expose the attended scan cap. `warm_ms` is
 not the effective host-phase limit: attended sweep and inline warm share three
 fifths of the scan cap unless only the legacy interactive key is set.
-Timings exclude cache serialization. Dates are normalized
+`push_timings` exposes `{latest, by_kind}` for the latest recorded `attended`
+and `autopush` runs. Recording is best-effort and a failed push can record
+the phases it reached. Each run includes `kind`, `recorded_at`, `total_ms`,
+and `phases`. Each phase has `phase`, `label`, `elapsed_ms`, a nullable
+`budget_ms`, and `status`. Counts appear as `completed` and `total` when
+recorded. Host phase elapsed times include time spent in the reader's cache
+write path. The reader cache's separate `last_complete_ms` measures the scan
+before cache serialization. Reader cache dates are normalized
 UTC ISO text or null; missing old fields become null,
 and an invalid date never erases a valid blocker. Diag reads caches without
 opening host logs or needing a passphrase; Codex counts rollout paths under both

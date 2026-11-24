@@ -198,8 +198,9 @@ more time before reporting unfinished capture. The tail's git walk, token warm a
 deadline minted from that share, so the share is spent once across phases,
 not once per phase (if discovery exhausts the deadline, `walk_git_projects`
 records `WALK_SKIP_BUDGET_ABORT` for discovered roots without spawning worker
-threads). With only the legacy interactive key configured, host
-sweep/warm and tail budgets keep their legacy behavior unchanged; with
+threads). With only the legacy interactive key configured, the concurrent
+host sweep uses that key's allowance per reader. Warm retries keep separate
+allowances, and the tail keeps its legacy budgets. With
 no key set the 30000 ms attended cap partitions both phases on attended push (and 5000 ms on `mm init` backfill), so the attended
 session walk is no longer capped at the legacy 500 ms. Autopush uses separate
 walk and discovery budgets, gives each enabled host reader an equal 1,000 ms per-provider deadline concurrently, and never warms.
@@ -1698,7 +1699,7 @@ ROW, over the sorted raw ids** — never per day off insertion order, which
 would let `a_b` mean `a/b` on Monday and `a?b` on Tuesday and read as per-day
 movement that never happened.
 
-**Equal per-provider deadlines, concurrent, started after `walk_done` (Track 165B).**
+**Equal per-provider deadlines in the initial host sweep (Track 165B).**
 `HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (1000; 750 in Track 149A; 250 before) / `_INTERACTIVE_MS` (3000) set each
 enabled reader's equal allowance (`allowance_s = deadline - initial_now`). Every
 reader gets its own `start_i + allowance_s` deadline. Its deadline is a
@@ -1715,15 +1716,19 @@ canonical-order result merge. Synthetic-clock unit tests stay sequential unless
 they pass `concurrent=True`. Sequential attended warm retries inside
 `_capture_host_snapshot` keep an internal `_WARM_RETRY_RESERVE_MS` (300 ms, capped
 at `host_budget_ms // (2 * readers)`) per later retry under the shared host
-phase, and record the shared host-phase ceiling (`accumulate_budget=False`) into
-`pushtimings.PhaseTimer` rather than summing sweep and retry allowances (only
-legacy-only independent 5 s warm retries use `accumulate_budget=True`).
+phase. Each retry records its effective cutoff measured from the start of the
+host phase, after reserving time for later retries. `accumulate_budget=False`
+keeps that allowance in `pushtimings.PhaseTimer` while the measured sweep
+and retry durations are added together. Legacy-only independent 5 s warm
+retries use `accumulate_budget=True`. The inline warmer reconstructs its
+deadline from the remaining duration. A scheduling delay at the handoff can
+therefore extend its cutoff, as recorded in [TODOS](../TODOS.md).
 `PhaseTimer` is the single timing record for host reads (no duplicate map on
 `HostUsageCapture`); `pushtimings.record_push_timings` persists `attended` and
-`autopush` runs to `push-timings.json` (never on `--dry-run`). The record
-includes phases reached by a failed push and uses a best-effort write.
-Two halves remain load-bearing: capture begins
-AFTER the `walk_done` snapshot (invariant 4) so host time can never trip or
+`autopush` runs to `push-timings.json` when there are phases to record. A
+failed push can record the phases it reached. Writes are best-effort and
+previews skip them. Two halves remain load-bearing for host capture in the
+events tail: capture begins AFTER the `walk_done` snapshot (invariant 4) so host time can never trip or
 redefine the session-walk notice, and the deadline is FRESH rather than the
 walk's leftovers — reusing `deadline` would make the row vanish exactly on the
 busy machines where it is most interesting. No UNATTENDED caller may fall
@@ -1959,10 +1964,10 @@ when a written root carries `deadline` from this pass, carries while that
 reason remains, and is removed when the reason clears. Millisecond fields
 accept only ints in 0–86,400,000. Date validation matches `last_reason_since`;
 invalid or absent values are unknown, never inferred from counts.
-Each enabled reader receives the full configured per-provider allowance
-(`autopush_ms`, default 1,000 ms, or `interactive_ms`, default 3,000 ms) from
-its own start time concurrently, so one reader's elapsed time does not shrink
-another's allowance. `host_read_budgets` preserves `autopush_ms` for JSON
+The initial sweep starts the enabled readers concurrently. Each gets the
+resolved per-provider allowance from its own start time, subject to the
+shared phase cutoff where applicable. Defaults are 1,000 ms for autopush
+and 3,000 ms for attended push and init. `host_read_budgets` preserves `autopush_ms` for JSON
 readers and adds `mode: "per_provider_concurrent"`. Complete passes still rewrite by design.
 Diag exposes per-reader cache timings, top-level `host_read_budgets`, and
 top-level `push_timings`. Its sweep estimate evaluates `max(last_complete_ms)`

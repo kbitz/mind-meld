@@ -395,7 +395,7 @@ mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optiona
 mm status [--source NAME]   # show local pending changes, each peer's last push and applied state, and Syncthing state
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
-                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, syncthing, project_index, sync_scope, fast_forward, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_usage, host_read_budgets, host_publication, discovery, git_capture, memory_index
+                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, syncthing, project_index, sync_scope, fast_forward, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_usage, host_read_budgets, host_publication, discovery, git_capture, memory_index, push_timings
                             # syncthing (read-only): reachability, folder state, needed files, pull errors, connected peer counts, folder-option and .stignore lint
                             # fast_forward (read-only): pull-ledger state, peer_base rows per peer, seen_version rows, scan-root anchor state and historical older-edit/anchor observations (possibly stale)
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
@@ -453,8 +453,9 @@ capture and publication evidence (`host_publication`). The latter includes
 `state`, `publication`, `readers`, and `readiness` (ready / disabled / unavailable /
 no-reader / unknown); unreadable config means unknown, without bootstrapping paths.
 `host_read_budgets` contains `autopush_ms`, `autopush_source`, `interactive_ms`,
-`interactive_source`, `capture_ms`, `capture_source`, and `warm_ms` (always
-5000, the legacy warm constant). `capture_ms` is the base capture budget;
+`interactive_source`, `capture_ms`, `capture_source`, `warm_ms` (always
+5000, the legacy warm constant), and `mode` (`"per_provider_concurrent"`).
+`capture_ms` is the base capture budget;
 this diagnostic map does not expose the attended scan cap. Host sweep and
 inline warm share three fifths of that cap on a partitioned attended push.
 These are local diagnostics, not an attempt
