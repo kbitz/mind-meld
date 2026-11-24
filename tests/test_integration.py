@@ -16891,7 +16891,10 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
     monkeypatch.setattr(
         _mm_events,
         "discover_git_roots",
-        lambda *a, **k: _mm_events.GitRootDiscovery([repo_a.resolve(), repo_b.resolve()], ()),
+        lambda *a, progress=None, **k: (
+            (progress(0, 2), progress(2, 2)) if progress is not None else None,
+            _mm_events.GitRootDiscovery([repo_a.resolve(), repo_b.resolve()], ()),
+        )[1],
     )
     monkeypatch.setattr(
         _mm_events,
@@ -16905,7 +16908,10 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
     monkeypatch.setattr(
         _mm_codex_host,
         "read_codex_usage",
-        lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
+        lambda *, deadline=None, progress=None, **kw: (
+            (progress(0, 3), progress(3, 3)) if progress is not None else None,
+            _mm_host_usage.HostUsageResult({}, complete=True),
+        )[1],
     )
     monkeypatch.setattr(
         _mm_events,
@@ -16951,10 +16957,12 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
     assert len(slow_res.stdout.splitlines()) == 1
     assert slow_res.stdout.startswith("Push: 1 content change published")
     term_out = slow_terminal.getvalue()
-    assert "Capturing host usage" in term_out
-    assert "1/1 readers" in term_out
-    assert "Recording activity" in term_out
-    assert "2/2 repositories" in term_out
+    assert "Reading Codex usage" in term_out
+    assert "3/3" in term_out
+    assert "Discovering repositories" in term_out
+    assert "Walking repositories" in term_out
+    assert "2/2" in term_out
+    assert "· " in term_out
     assert "\x1b[?25h" in term_out
 
     # 3. Piped output and --verbose leave no progress line even past the delay.
@@ -17522,3 +17530,68 @@ def test_pull_outcome_line_names_each_applying_peer_sorted(tmp_path, monkeypatch
     assert auto.stderr == ""
     assert (notes_local / "auto_a.md").read_bytes() == b"auto a\n"
     assert (notes_local / "auto_b.md").read_bytes() == b"auto b\n"
+
+
+def test_push_verbose_timings_before_outcome_and_dry_run_write_free_165b(tmp_path, monkeypatch):
+    from mind_meld import pushtimings
+
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "a.md").write_text("hello\n", encoding="utf-8")
+
+    cfg_path = tmp_path / "config.toml"
+    backend = LocalBackend(storage)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-a", "Mac A")
+    cfg = {
+        "device": {"id": "dev-a", "name": "Mac A"},
+        "storage": {"path": str(storage)},
+        "sync": {
+            "sources": [
+                {"name": "notes", "path": str(notes), "type": "generic", "include_dirs": ["."]}
+            ],
+            "max_file_size": 10 * 1024 * 1024,
+        },
+        "crypto": {"argon2_memory_kb": MEMORY_KB},
+    }
+    save_config(cfg, cfg_path)
+    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli_module, "acquire_lock", lambda *a, **k: None)
+    monkeypatch.setattr(core, "_release_sync_lock", lambda *a, **k: None)
+    monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+    timings_path = tmp_path / "push-timings.json"
+    monkeypatch.setattr(pushtimings, "PUSH_TIMINGS_PATH", timings_path)
+
+    # 1. --dry-run must never create push-timings.json
+    dry = runner.invoke(app, ["push", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert not timings_path.exists()
+
+    # 2. Attended push --verbose prints `Phase timings:` right before the closing `Push:` line
+    res = runner.invoke(app, ["push", "--verbose"])
+    assert res.exit_code == 0, res.output
+    lines = [line for line in res.stdout.splitlines() if line.strip()]
+    assert lines[-1].startswith("Push: ")
+    idx_timings = next(i for i, line in enumerate(lines) if line == "Phase timings:")
+    assert idx_timings < len(lines) - 1
+    assert any("Manifest scan:" in line for line in lines[idx_timings + 1 : -1])
+    assert timings_path.exists()
+    assert "attended" in pushtimings.read_push_timings()["by_kind"]
+
+    # 3. No-op attended push --verbose still prints Phase timings before Push:
+    res_noop = runner.invoke(app, ["push", "--verbose"])
+    assert res_noop.exit_code == 0, res_noop.output
+    noop_lines = [line for line in res_noop.stdout.splitlines() if line.strip()]
+    assert noop_lines[-1].startswith("Push: ")
+    assert "Phase timings:" in noop_lines
+
+    # 4. Autopush records autopush timings
+    (notes / "b.md").write_text("world\n", encoding="utf-8")
+    auto = runner.invoke(app, ["autopush"])
+    assert auto.exit_code == 0, auto.output
+    assert set(pushtimings.read_push_timings()["by_kind"]) == {"attended", "autopush"}

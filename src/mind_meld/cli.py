@@ -49,6 +49,7 @@ from mind_meld import (
     projectid,
     pullflow,
     pullhistory,
+    pushtimings,
     recaptureflow,
     resolveflow,
     safety,
@@ -183,6 +184,7 @@ class PushResult:
     unwritable_roots: list[str] = field(default_factory=list)
     ledger_cause: str | None = None
     anchor_warnings: list[str] = field(default_factory=list)
+    phase_timings: tuple[pushtimings.PhaseTiming, ...] = ()
 
 
 _USAGE_ERROR_CLS = next(cls for cls in typer.BadParameter.__mro__ if cls.__name__ == "UsageError")
@@ -1241,20 +1243,14 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     if dry_run:
         yield
         return
-    progress = core._SyncProgress(enabled=not verbose)
+    progress = core._SyncProgress(enabled=not verbose, include_elapsed=verb == "push")
     state = {"verbose": verbose, "diagnostics": events_tail.Degradations(), "progress": progress}
     token = core._SYNC_OUTPUT.set(state)
     error = None
     try:
         with (
             token_usage.diagnostic_scope(core._sync_diagnostic),
-            events_tail.progress_scope(
-                lambda phase, completed, total, unit: (
-                    core._sync_progress_start_batch(phase, total, unit)
-                    if completed == 0
-                    else core._sync_progress_advance(1)
-                )
-            ),
+            events_tail.progress_scope(core._sync_progress_count),
         ):
             yield
     except (Exception, KeyboardInterrupt, SystemExit) as exc:
@@ -1278,6 +1274,17 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
             notice = _owner_action_detail(state.get("record"))
             if notice is not None:
                 core._notice(notice)
+        if verb == "push" and verbose:
+            timer = state.get("phase_timer")
+            phases = (
+                timer.phases()
+                if isinstance(timer, pushtimings.PhaseTimer)
+                else (result.phase_timings if isinstance(result, PushResult) else ())
+            )
+            if phases:
+                console.print("Phase timings:", markup=False)
+                for timing_line in pushtimings.format_verbose_timings(phases):
+                    console.print(timing_line, markup=False)
         lines = _sync_success(verb, result)
         mesh_outcomes = state.get("mesh_outcomes")
         if mesh_outcomes:
@@ -1506,6 +1513,10 @@ def push(
             stop_cause = "error"
             stop_errno = None
 
+            push_timer = pushtimings.PhaseTimer()
+            if (sync_state := core._SYNC_OUTPUT.get()) is not None:
+                sync_state["phase_timer"] = push_timer
+
             try:
                 acquire_lock()
             except LockError as e:
@@ -1538,6 +1549,7 @@ def push(
                             attempt=attempt,
                             diagnostics=verbose or dry_run,
                             result_observer=lambda result: run.__setitem__("result", result),
+                            phase_timer=push_timer,
                         )
                     run["result"] = result
                     core_finished = True
@@ -1589,14 +1601,16 @@ def push(
                 ):
                     try:
                         core._sync_progress_phase("Cleaning up orphaned blobs")
-                        gc_res = gcflow._do_gc(
-                            config,
-                            passphrase,
-                            memory_kb,
-                            dry_run=False,
-                            verbose=False,
-                            emit_retention_summary=False,
-                        )
+                        with push_timer.measure("orphan_gc", "Orphan GC"):
+                            gc_res = gcflow._do_gc(
+                                config,
+                                passphrase,
+                                memory_kb,
+                                dry_run=False,
+                                verbose=False,
+                                emit_retention_summary=False,
+                            )
+                        result.phase_timings = push_timer.phases()
                         gc_pruned = gc_res.deleted
                         if gc_pruned and verbose:
                             console.print(f"  GC: deleted {gc_pruned} orphaned blobs.")
@@ -1643,6 +1657,12 @@ def push(
                                 f"({type(e).__name__}); check mm status"
                             )
                 finally:
+                    if not dry_run and push_timer.phases():
+                        pushtimings.record_push_timings(
+                            "attended",
+                            push_timer.phases(),
+                            total_ms=push_timer.total_ms(),
+                        )
                     core._release_sync_lock()
                 if not dry_run and core_finished and sys.exception() is None:
                     _sync_memory_index(config)
@@ -1987,6 +2007,7 @@ def _push_core(
     diagnostics: bool | None = None,
     result_observer: Callable[[PushResult], None] | None = None,
     report_nested_repositories: bool = True,
+    phase_timer: pushtimings.PhaseTimer | None = None,
 ) -> PushResult | None:
     """Core push logic shared by push, autopush, and recapture.
 
@@ -2008,6 +2029,7 @@ def _push_core(
     at and still refuses.
     """
     show = not quiet and (diagnostics if diagnostics is not None else True)
+    timer = phase_timer or pushtimings.PhaseTimer()
     start = time.time()
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
@@ -2124,13 +2146,14 @@ def _push_core(
         captured = attemptlog.CaptureOutcome()
         if attempt is not None:
             attempt.outcome = captured
-        captured = _capture_attended_usage(
-            config,
-            sources,
-            [*resolution.selected, *skipped_internal],
-            verbose=verbose,
-            outcome=captured,
-        )
+        with events_tail.phase_timer_scope(timer):
+            captured = _capture_attended_usage(
+                config,
+                sources,
+                [*resolution.selected, *skipped_internal],
+                verbose=verbose,
+                outcome=captured,
+            )
     host_row_appended = captured is not None and captured.appended is not None
     retro_catchup_pending = attended and not dry_run and _retro_catchup_pending(sources, device_id)
     skipped: list[tuple[str, str]] = []
@@ -2166,17 +2189,18 @@ def _push_core(
     core._sync_progress_phase("Scanning sources")
     if show:
         console.print("[bold]Building manifest...[/bold]")
-    local_manifest = build_manifest_v2(
-        device_id,
-        device_name,
-        sources,
-        max_file_size,
-        on_skip,
-        strict=True,
-        nested_roots=nested_roots,
-        held=held,
-        held_candidates=held_candidates,
-    )
+    with timer.measure("manifest_scan", "Manifest scan"):
+        local_manifest = build_manifest_v2(
+            device_id,
+            device_name,
+            sources,
+            max_file_size,
+            on_skip,
+            strict=True,
+            nested_roots=nested_roots,
+            held=held,
+            held_candidates=held_candidates,
+        )
 
     # Track 90A: the one decision about the project-name format, from the own
     # prior as recovered (before the consumer filters below copy it).
@@ -2401,6 +2425,7 @@ def _push_core(
                 left_out_clause=left_out_note,
                 left_out_files=guard.left_out_files,
                 anchor_warnings=anchor_warnings,
+                phase_timings=timer.phases(),
             )
             if result_observer is not None:
                 result_observer(result)
@@ -2442,17 +2467,20 @@ def _push_core(
     # Skipped entirely when no mm-internal source is selected for this push.
     if any(src["name"] in MM_INTERNAL_SOURCE_NAMES for src in sources):
         core._sync_progress_phase("Recording activity")
-        events_degradations.extend(
-            events_tail._run_events_tail(
-                config,
-                sources,
-                device_id,
-                dry_run=dry_run,
-                quiet=quiet,
-                suppress_host_capture=capture_attempted,
-                capture_activity=retro_catchup_pending or not host_row_appended or content_changed,
+        with events_tail.phase_timer_scope(timer):
+            events_degradations.extend(
+                events_tail._run_events_tail(
+                    config,
+                    sources,
+                    device_id,
+                    dry_run=dry_run,
+                    quiet=quiet,
+                    suppress_host_capture=capture_attempted,
+                    capture_activity=retro_catchup_pending
+                    or not host_row_appended
+                    or content_changed,
+                )
             )
-        )
     if not dry_run:
         mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
         if mm_internal_cfgs:
@@ -2547,66 +2575,71 @@ def _push_core(
         if total_to_upload > 0:
             core._sync_progress_start_batch("Uploading files", total_to_upload, "files")
 
-    for src_name, src_data, _remote_src, diff in source_diffs_to_upload:
-        if dry_run:
-            if show:
-                console.print(f"\n[bold]Source '{src_name}':[/bold]")
-                _print_diff_summary(diff, 0)
-            continue
+    with ExitStack() as upload_stack:
+        if not dry_run:
+            upload_stack.enter_context(timer.measure("upload", "Upload"))
+        for src_name, src_data, _remote_src, diff in source_diffs_to_upload:
+            if dry_run:
+                if show:
+                    console.print(f"\n[bold]Source '{src_name}':[/bold]")
+                    _print_diff_summary(diff, 0)
+                continue
 
-        # Frozen checkout entries are already stored; their local bytes may differ.
-        # Held files keep their prior entry and are never read again here.
-        to_upload = {
-            rel: info
-            for rel, info in {**diff.new, **diff.modified}.items()
-            if rel not in frozen.get(src_name, ()) and rel not in held_files.get(src_name, ())
-        }
-        base_path = Path(src_data["base_path"])
-        src_cfg = source_by_name.get(src_name, {})
+            # Frozen checkout entries are already stored; their local bytes may differ.
+            # Held files keep their prior entry and are never read again here.
+            to_upload = {
+                rel: info
+                for rel, info in {**diff.new, **diff.modified}.items()
+                if rel not in frozen.get(src_name, ()) and rel not in held_files.get(src_name, ())
+            }
+            base_path = Path(src_data["base_path"])
+            src_cfg = source_by_name.get(src_name, {})
 
-        if verbose and not quiet:
-            console.print(f"\n[bold]Uploading {len(to_upload)} files from '{src_name}'...[/bold]")
+            if verbose and not quiet:
+                console.print(
+                    f"\n[bold]Uploading {len(to_upload)} files from '{src_name}'...[/bold]"
+                )
 
-        uploaded = _upload_changed_blobs(
-            backend,
-            base_path,
-            to_upload,
-            device_id,
-            passphrase,
-            memory_kb,
-            verbose=(verbose and not quiet),
-            src_name=src_name,
-            source_type=src_cfg.get("type", "claude"),
-            max_file_size=max_file_size,
-            allow_hold=hold_eligible,
-        )
-        total_bytes += uploaded.bytes_transferred
-        if src_name in remote_sources and "vanished" in uploaded.held.values():
-            # A vanished file may mean its entire published root disappeared.
-            core._require_published_source_root(src_name, Path(src_cfg["path"]).expanduser())
-        # Apply the upload's patches and holds to the manifest BEFORE it is
-        # serialized: a settled re-read advertises its own revision, and a held
-        # file goes back to its accepted prior entry (or out), so the manifest
-        # never names a blob that was not put.
-        local_files = local_manifest["sources"][src_name]["files"]
-        local_files.update(uploaded.patches)
-        upload_held |= bool(uploaded.held)
-        for rel, reason in uploaded.held.items():
-            prior = remote_sources.get(src_name, {}).get("files", {}).get(rel)
-            tombstoned = is_tombstoned(src_name, rel, (real_remote or {}).get("tombstones", {}))
-            if prior is not None and not tombstoned:
-                local_files[rel] = dict(prior)
-            else:
-                local_files.pop(rel, None)
-            if not tombstoned:
-                held_files.setdefault(src_name, {})[rel] = reason
-        held_new = sum(1 for rel in uploaded.held if rel in diff.new)
-        held_modified = sum(1 for rel in uploaded.held if rel in diff.modified)
-        total_new += len(diff.new) - held_new
-        total_modified += len(diff.modified) - held_modified
-        total_deleted += len(diff.deleted)
-        if src_name not in MM_INTERNAL_SOURCE_NAMES:
-            content_files -= len(uploaded.held)
+            uploaded = _upload_changed_blobs(
+                backend,
+                base_path,
+                to_upload,
+                device_id,
+                passphrase,
+                memory_kb,
+                verbose=(verbose and not quiet),
+                src_name=src_name,
+                source_type=src_cfg.get("type", "claude"),
+                max_file_size=max_file_size,
+                allow_hold=hold_eligible,
+            )
+            total_bytes += uploaded.bytes_transferred
+            if src_name in remote_sources and "vanished" in uploaded.held.values():
+                # A vanished file may mean its entire published root disappeared.
+                core._require_published_source_root(src_name, Path(src_cfg["path"]).expanduser())
+            # Apply the upload's patches and holds to the manifest BEFORE it is
+            # serialized: a settled re-read advertises its own revision, and a held
+            # file goes back to its accepted prior entry (or out), so the manifest
+            # never names a blob that was not put.
+            local_files = local_manifest["sources"][src_name]["files"]
+            local_files.update(uploaded.patches)
+            upload_held |= bool(uploaded.held)
+            for rel, reason in uploaded.held.items():
+                prior = remote_sources.get(src_name, {}).get("files", {}).get(rel)
+                tombstoned = is_tombstoned(src_name, rel, (real_remote or {}).get("tombstones", {}))
+                if prior is not None and not tombstoned:
+                    local_files[rel] = dict(prior)
+                else:
+                    local_files.pop(rel, None)
+                if not tombstoned:
+                    held_files.setdefault(src_name, {})[rel] = reason
+            held_new = sum(1 for rel in uploaded.held if rel in diff.new)
+            held_modified = sum(1 for rel in uploaded.held if rel in diff.modified)
+            total_new += len(diff.new) - held_new
+            total_modified += len(diff.modified) - held_modified
+            total_deleted += len(diff.deleted)
+            if src_name not in MM_INTERNAL_SOURCE_NAMES:
+                content_files -= len(uploaded.held)
 
     if dry_run:
         if show:
@@ -2666,82 +2699,87 @@ def _push_core(
         else:
             console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
     core._sync_progress_phase("Saving manifest")
-    unwritable_roots = core.publish_anchors(local_manifest, sources, nested_roots)
-    core.stamp_ancestry(local_manifest, remote_manifest, ledger)
-    kept_wire_folders: dict[str, str] = {}
-    if form.publish_new and guard.left_out.get("claude") and remote_manifest is not None:
-        dropped = {
-            parts[1]
-            for rel in guard.left_out["claude"]
-            if len(parts := rel.split("/", 2)) == 3 and parts[0] == "projects"
-        }
-        prior_folders = ((remote_manifest.get("sources") or {}).get("claude") or {}).get(
-            "wire_folders"
-        )
-        kept_wire_folders = {
-            wire: folder
-            for wire, folder in (prior_folders if isinstance(prior_folders, dict) else {}).items()
-            if folder in dropped
-        }
-    enc_manifest = core.encode_manifest(
-        local_manifest,
-        wire_names=form.publish_new,
-        passphrase=passphrase,
-        memory_kb=memory_kb,
-        kept_wire_folders=kept_wire_folders,
-    )
-    mkey = manifest_key(device_id)
-    fresh_manifest = core._fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
-    if fresh_manifest.newer_version is not None:
-        core._error(core._newer_format_message(fresh_manifest.newer_version, "manifest"))
-    # Display-only facts for the attended outcome line; autopush/recapture skip
-    # the extra manifest passes.
-    published_content_files = (
-        sum(
-            len(diff.new) + len(diff.modified) + len(diff.deleted)
-            for name, _local, _remote, diff in core.iter_content_diffs(
-                local_manifest, remote_sources, skip_unchanged=True
+    with timer.measure("save_manifest", "Save manifest"):
+        unwritable_roots = core.publish_anchors(local_manifest, sources, nested_roots)
+        core.stamp_ancestry(local_manifest, remote_manifest, ledger)
+        kept_wire_folders: dict[str, str] = {}
+        if form.publish_new and guard.left_out.get("claude") and remote_manifest is not None:
+            dropped = {
+                parts[1]
+                for rel in guard.left_out["claude"]
+                if len(parts := rel.split("/", 2)) == 3 and parts[0] == "projects"
+            }
+            prior_folders = ((remote_manifest.get("sources") or {}).get("claude") or {}).get(
+                "wire_folders"
             )
-            if name not in MM_INTERNAL_SOURCE_NAMES
+            kept_wire_folders = {
+                wire: folder
+                for wire, folder in (
+                    prior_folders if isinstance(prior_folders, dict) else {}
+                ).items()
+                if folder in dropped
+            }
+        enc_manifest = core.encode_manifest(
+            local_manifest,
+            wire_names=form.publish_new,
+            passphrase=passphrase,
+            memory_kb=memory_kb,
+            kept_wire_folders=kept_wire_folders,
         )
-        if result_observer is not None
-        else None
-    )
-    # Independent content receipt at the actual acceptance boundary, even when
-    # capture was skipped or failed. Maintenance cannot revoke accepted content.
-    result = PushResult(
-        total_new=total_new,
-        total_modified=total_modified,
-        total_deleted=total_deleted,
-        bytes_transferred=total_bytes,
-        events_degradations=events_degradations,
-        content_changed=content_changed,
-        content_files=content_files,
-        content_accepted=False,
-        published_content_files=published_content_files,
-        metadata_updated=result_observer is not None
-        and not published_content_files
-        and any(
-            core._has_mtime_only_changes_vs_remote(
-                local_manifest, remote_sources, source_filter=name
+        mkey = manifest_key(device_id)
+        fresh_manifest = core._fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+        if fresh_manifest.newer_version is not None:
+            core._error(core._newer_format_message(fresh_manifest.newer_version, "manifest"))
+        # Display-only facts for the attended outcome line; autopush/recapture skip
+        # the extra manifest passes.
+        published_content_files = (
+            sum(
+                len(diff.new) + len(diff.modified) + len(diff.deleted)
+                for name, _local, _remote, diff in core.iter_content_diffs(
+                    local_manifest, remote_sources, skip_unchanged=True
+                )
+                if name not in MM_INTERNAL_SOURCE_NAMES
             )
-            for name in local_manifest["sources"]
-            if name not in MM_INTERNAL_SOURCE_NAMES
-        ),
-        selection_updated=bool(
-            (set(local_manifest["sources"]) ^ advertised_prior_sources) - MM_INTERNAL_SOURCE_NAMES
-        ),
-        manifest_repaired=recovering_from_corrupt,
-        held=_held_list(held_files),
-        wire_names_published=form.switch_due,
-        names_updated=(names_pending or form.republish_due) and not form.switch_held,
-        switch_held=form.switch_held,
-        anchor_updated=anchor_is_pending,
-        left_out_clause=guard.clause(),
-        left_out_files=guard.left_out_files,
-        unwritable_roots=unwritable_roots,
-    )
-    backend.put(mkey, enc_manifest)
+            if result_observer is not None
+            else None
+        )
+        # Independent content receipt at the actual acceptance boundary, even when
+        # capture was skipped or failed. Maintenance cannot revoke accepted content.
+        result = PushResult(
+            total_new=total_new,
+            total_modified=total_modified,
+            total_deleted=total_deleted,
+            bytes_transferred=total_bytes,
+            events_degradations=events_degradations,
+            content_changed=content_changed,
+            content_files=content_files,
+            content_accepted=False,
+            published_content_files=published_content_files,
+            metadata_updated=result_observer is not None
+            and not published_content_files
+            and any(
+                core._has_mtime_only_changes_vs_remote(
+                    local_manifest, remote_sources, source_filter=name
+                )
+                for name in local_manifest["sources"]
+                if name not in MM_INTERNAL_SOURCE_NAMES
+            ),
+            selection_updated=bool(
+                (set(local_manifest["sources"]) ^ advertised_prior_sources)
+                - MM_INTERNAL_SOURCE_NAMES
+            ),
+            manifest_repaired=recovering_from_corrupt,
+            held=_held_list(held_files),
+            wire_names_published=form.switch_due,
+            names_updated=(names_pending or form.republish_due) and not form.switch_held,
+            switch_held=form.switch_held,
+            anchor_updated=anchor_is_pending,
+            left_out_clause=guard.clause(),
+            left_out_files=guard.left_out_files,
+            unwritable_roots=unwritable_roots,
+        )
+        backend.put(mkey, enc_manifest)
+    result.phase_timings = timer.phases()
     result.content_accepted = True
     result.anchor_warnings = _record_push_anchor_observations(
         anchor_observations, attended=attended
@@ -4958,12 +4996,20 @@ def autopush() -> None:
             if not pullhistory.failed():
                 pullhistory.record_failure(statedb.recover_if_needed())
 
+            push_timer = pushtimings.PhaseTimer()
             with pullhistory.batch():
                 result = _push_core(
                     setup.config,
                     setup.passphrase,
                     setup.memory_kb,
                     quiet=True,
+                    phase_timer=push_timer,
+                )
+            if push_timer.phases():
+                pushtimings.record_push_timings(
+                    "autopush",
+                    push_timer.phases(),
+                    total_ms=push_timer.total_ms(),
                 )
 
             if diagnostics.total:

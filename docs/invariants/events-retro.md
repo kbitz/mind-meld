@@ -7,7 +7,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/statusflow.py` — `status` / `diag` / `_collect_diag_state`
 - `src/mind_meld/cli.py` — `PushResult.events_degradations`
 - `src/mind_meld/statusflow.py` — `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
-- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_identity_inputs_digest_for_push` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `resolve_attended_capture_cap` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `HOST_READER_GRACE_MS` / `HOST_READER_RESERVE_MS` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
+- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_identity_inputs_digest_for_push` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `resolve_attended_capture_cap` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS` / `phase_timer_scope`
+- `src/mind_meld/pushtimings.py` — `PhaseTiming` / `PhaseTimer` / `PUSH_TIMINGS_PATH` / `record_push_timings` / `read_push_timings` / `diag_timings_state` / `format_verbose_timings`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
@@ -201,17 +202,17 @@ threads). With only the legacy interactive key configured, host
 sweep/warm and tail budgets keep their legacy behavior unchanged; with
 no key set the 30000 ms attended cap partitions both phases on attended push (and 5000 ms on `mm init` backfill), so the attended
 session walk is no longer capped at the legacy 500 ms. Autopush uses separate
-walk and discovery budgets, defaults to a 750 ms host sweep, and never warms.
+walk and discovery budgets, gives each enabled host reader an equal 1,000 ms per-provider deadline concurrently, and never warms.
 Config validation checks an explicit `host_usage_autopush_budget_ms` against
 `capture_budget_ms` when set (never `attended_capture_cap_ms`) and against an explicitly set legacy interactive
 value (the legacy rule). When neither key is set, an explicit autopush budget still must not
 exceed the 3000 ms interactive default. When both ceilings apply, an explicit autopush budget
 must not exceed the smaller one. When `host_usage_autopush_budget_ms` is unset,
-`resolve_host_read_budget(config, interactive=False)` clamps the 750 ms default to
+`resolve_host_read_budget(config, interactive=False)` clamps the 1000 ms default to
 `min(HOST_USAGE_READ_BUDGET_AUTOPUSH_MS, ceiling)` against the active attended ceiling
 (`capture_budget_ms` and/or `host_usage_interactive_budget_ms`, else 3000 ms), returning
 `(clamped_ms, "default")` so configs that set `capture_budget_ms` or
-`host_usage_interactive_budget_ms` in `250..749` remain valid without an explicit
+`host_usage_interactive_budget_ms` in `250..999` remain valid without an explicit
 autopush key.
 
 `walk_session_metadata(..., persist=False)` is the legacy read-only walk.
@@ -1697,48 +1698,43 @@ ROW, over the sorted raw ids** — never per day off insertion order, which
 would let `a_b` mean `a/b` on Monday and `a?b` on Tuesday and read as per-day
 movement that never happened.
 
-**Its own deadline, started after `walk_done`.**
-`HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (750; 250 before Track 149A) / `_INTERACTIVE_MS` (3000) set the
-sweep deadline. The first reader receives it unchanged; each later reader
-receives `max(sweep_deadline, start_i + HOST_READER_GRACE_MS / 1000)`.
-**Attended sweeps hold a reserve (Track 101A).** `_capture_host_snapshot` passes
-`reserve_s = min(HOST_READER_RESERVE_MS (300), host_budget_ms // (2 * readers)) / 1000`
-to `_capture_host_usage` only when a warm callback is present and there are at
-least two readers. With `later = readers - i - 1`, reader `i` gets
-`sweep_deadline - reserve_s * later`, and a later reader never gets less than
-`max(sweep_deadline - reserve_s * later, start_i + max(HOST_READER_GRACE_MS / 1000, reserve_s))`.
-At `reserve_s == 0` (autopush, which never warms, and every caller that does not
-pass it) this is exactly the grace rule above. The index-0 veto stays keyed to
-the sweep deadline. Pinned by `test_host_usage_snapshot.py::TestHostDeadline`
-(`test_attended_reserve_*`) and `TestCaptureBudget85A`.
-`HOST_READER_GRACE_MS = 250` (50 before Track 149A): sized from measured warm
-reads (`mac-a` Codex 266 ms over 7,536 rollouts after Track 105A's settled-aggregate
-memoization and Antigravity 104 ms over 500 conversation DBs, `linux-a` Antigravity
-153 ms over 500 conversation DBs, and Grok Build 19–20 ms from Track 57A's E16
-probe). Together Codex + Antigravity cost 419 ms (439 ms with Grok), so 750 ms
-leaves 331 ms (311 ms) headroom while staying one quarter of the 3,000 ms attended
-sweep default, and 250 ms gives `linux-a`'s 153 ms Antigravity read 97 ms headroom
-even when an earlier reader exhausts the sweep while staying below
-`HOST_READER_RESERVE_MS` (300 ms). With multiple readers, each reader after the
-first can extend the unattended sweep by up to 250 ms, even with a smaller
-configured sweep budget. These deadlines are cooperative. Two halves remain load-bearing: capture begins
+**Equal per-provider deadlines, concurrent, started after `walk_done` (Track 165B).**
+`HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (1000; 750 in Track 149A; 250 before) / `_INTERACTIVE_MS` (3000) set each
+enabled reader's equal allowance (`allowance_s = deadline - initial_now`). Every
+reader gets its own `start_i + allowance_s` deadline; an early-finishing reader
+returns immediately without holding unused time, and a slow reader never shrinks
+a sibling's deadline. Production multi-reader sweeps (`now is time.monotonic`)
+run concurrently in a `ThreadPoolExecutor` because every enabled host reader
+uses an independent source tree and private `lockedjson` cache, with thread-safe
+depth-counted `host_usage._pause_gc()`, copied `contextvars` per worker,
+lock-guarded `events_tail.Degradations`, `BaseException` propagation, and
+canonical-order result merge. Synthetic-clock unit tests stay sequential unless
+they pass `concurrent=True`. Sequential attended warm retries inside
+`_capture_host_snapshot` keep an internal `_WARM_RETRY_RESERVE_MS` (300 ms, capped
+at `host_budget_ms // (2 * readers)`) per later retry under the shared host
+phase, and record the shared host-phase ceiling (`accumulate_budget=False`) into
+`pushtimings.PhaseTimer` rather than summing sweep and retry allowances (only
+legacy-only independent 5 s warm retries use `accumulate_budget=True`).
+`PhaseTimer` is the single timing record for host reads (no duplicate map on
+`HostUsageCapture`); `pushtimings.record_push_timings` persists `attended` and
+`autopush` runs to `push-timings.json` (never on `--dry-run`). These deadlines are cooperative. Two halves remain load-bearing: capture begins
 AFTER the `walk_done` snapshot (invariant 4) so host time can never trip or
 redefine the session-walk notice, and the deadline is FRESH rather than the
 walk's leftovers — reusing `deadline` would make the row vanish exactly on the
 busy machines where it is most interesting. No UNATTENDED caller may fall
-through to `host_usage.DEFAULT_READ_BUDGET_S` (5s), which is 6.7x an entire
-autopush host sweep budget (and 20x the 250 ms walk budget) spent on optional analytics. Track 63A's attended warm
+through to `host_usage.DEFAULT_READ_BUDGET_S` (5s), which is 5x a per-provider
+autopush allowance (and 20x the 250 ms walk budget) spent on optional analytics. Track 63A's attended warm
 publishes its own result through the same reader failure boundary.
 `resolve_host_read_budget` owns effective budgets and their `default`/`config`
-source: `[retro] host_usage_autopush_budget_ms` defaults to 750 (100–5000; 250 before Track 149A),
+source: `[retro] host_usage_autopush_budget_ms` defaults to 1000 (100–5000; 750 in Track 149A; 250 before),
 `host_usage_interactive_budget_ms` to 3000 (250–5000; 500 before Track 101A).
 Both reject bools,
 non-integers and out-of-range values; an explicit autopush budget cannot exceed the
 capture/legacy interactive ceilings (not the attended scan cap), and when
 `host_usage_autopush_budget_ms` is unset `resolve_host_read_budget` clamps the
 default to `min(HOST_USAGE_READ_BUDGET_AUTOPUSH_MS, ceiling)`. Capture defaults, tail, init and attended push all use this
-resolver. The independent 5-second warm and 250 ms later-reader grace remain
-constants when only the legacy interactive key is configured. Setting either
+resolver. The independent 5-second warm remains a constant when only the legacy
+interactive key is configured. Setting either
 capture key selects the partition (see "One capture budget" above), retaining
 the legacy value as the sweep preference within its host share. With no keys,
 attended push uses the 30,000 ms scan cap and init keeps the 5,000 ms capture budget.
@@ -1822,8 +1818,8 @@ tells the owner to run `mm push` to refresh usage and warm cold readers, and nam
 `[retro] attended_capture_cap_ms` (host capture and warm retries get three fifths
 of it, and it must be at least `capture_budget_ms`) when the last complete read is
 over what an attended push allows (without telling the owner to raise
-`host_usage_autopush_budget_ms`, because the 750 ms default and 250 ms grace floor
-cover ordinary warm reads). That deadline remedy links to
+`host_usage_autopush_budget_ms`, because the 1,000 ms per-provider concurrent
+default covers ordinary warm reads). That deadline remedy links to
 `HOST_USAGE_CAPTURE_URL`, and on diag it does not send the user back to `mm diag`.
 On status and plain-text diag, a ready capture with an unsupported reader
 replaces a non-permanent line, including a sibling deadline, with the
@@ -1958,22 +1954,18 @@ when a written root carries `deadline` from this pass, carries while that
 reason remains, and is removed when the reason clears. Millisecond fields
 accept only ints in 0–86,400,000. Date validation matches `last_reason_since`;
 invalid or absent values are unknown, never inferred from counts.
-A later reader's allowance is the sweep time remaining after earlier readers,
-floored at `HOST_READER_GRACE_MS` (250 ms; 50 ms before Track 149A) on autopush and at
-`max(HOST_READER_GRACE_MS, reserve)` (up to 300 ms) on an attended sweep; it
-varies with earlier read times,
-not merely entry-latency rounding. That variation could defeat the exact
-write-skip comparison if the later reader remains `deadline`-incomplete with
-no newly learned file and an unchanged blocker pair. No machine has shown that
-case: Grok warm reads measured about 20 ms (Track 57A E16) and Antigravity warm
-reads measured 104–153 ms over 500 conversation DBs (Track 149A), both below
-the 250 ms floor. `host_read_budgets` describes configured sweep budgets, not each
-reader's allowance. Complete passes still rewrite by design.
-Diag exposes them for both readers and a top-level `host_read_budgets` map.
-Its sweep sums the last complete reads of `_default_host_readers` for the
-resolved, consented source set only when config state is `ok`. This same set
+Each enabled reader receives the full configured per-provider allowance
+(`autopush_ms`, default 1,000 ms, or `interactive_ms`, default 3,000 ms) from
+its own start time concurrently, so one reader's elapsed time does not shrink
+another's allowance. `host_read_budgets` preserves `autopush_ms` for JSON
+readers and adds `mode: "per_provider_concurrent"`. Complete passes still rewrite by design.
+Diag exposes per-reader cache timings, top-level `host_read_budgets`, and
+top-level `push_timings`. Its sweep estimate evaluates `max(last_complete_ms)`
+across `_default_host_readers` for the resolved, consented source set (only when
+config state is `ok`) against the per-provider `autopush_ms` allowance and lists
+each provider's `<ms>/<budget> ms`. This same set
 already supplies `host_publication.readers`; only its keys are used, never
-coverage values. It excludes writes and grace and cannot prove publication.
+coverage values. It excludes cache writes and cannot prove publication.
 
 **Write failure is a separate observation.** `_write_json` returns an
 `OSError` in `locked.write_error`; it does not raise into the reader's
@@ -2458,7 +2450,9 @@ autopush stayed at 250 ms with 50 ms grace (never warming) because the pre-memoi
 settled-aggregate memoization cut warm Codex reads to 266 ms over 7,536 rollouts
 (with Antigravity at 104 ms on `mac-a` and 153 ms on `linux-a` over 500 conversation
 DBs), Track 149A raised the autopush sweep default to 750 ms and `HOST_READER_GRACE_MS`
-to 250 ms while keeping autopush no-warm.
+to 250 ms while keeping autopush no-warm; Track 165B replaced that shared sweep
+and grace floor with an equal 1,000 ms per-provider deadline run concurrently
+across enabled readers (still no-warm).
 
 *Missed days.* A later complete read republishes the days a `deadline` read
 missed: readers aggregate the whole local corpus, a row carries its last

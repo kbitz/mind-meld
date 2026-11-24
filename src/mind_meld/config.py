@@ -555,7 +555,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     return config
 
 
-DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS = 750
+DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS = 1000
 DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS = 3000
 HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS = 100
 HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS = 250
@@ -637,7 +637,7 @@ def _validate(config: dict[str, Any]) -> None:
         # user who pinned the attended sweep does not get a larger unattended
         # one. When host_usage_autopush_budget_ms is unset, resolve_host_read_budget
         # clamps the default to the active attended ceiling so configs that set
-        # capture_budget_ms or host_usage_interactive_budget_ms in 250..749
+        # capture_budget_ms or host_usage_interactive_budget_ms in 250..999
         # remain valid. Autopush otherwise keeps its fixed share (Track 85A d1).
         ceilings: list[tuple[int, str]] = []
         if "capture_budget_ms" in retro:

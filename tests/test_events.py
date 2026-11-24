@@ -4938,3 +4938,35 @@ def test_reconcile_uncommitted_push_cursors_without_journal_or_wire_paths_commit
     assert cache["last_committed_push_ts"] == ts.isoformat()
     assert cache["repo_cursors"] == {str(repo): existing_cursor}
     assert cache["uncommitted_push_roots"] == {}
+
+
+def test_discover_git_roots_and_walk_session_metadata_emit_monotonic_progress_165b(
+    tmp_path: Path,
+) -> None:
+    claude_dir = tmp_path / "claude"
+    for name in ("-Users-user-alpha", "-Users-user-beta"):
+        pdir = claude_dir / "projects" / name
+        pdir.mkdir(parents=True)
+        (pdir / "session.jsonl").write_text(
+            json.dumps({"cwd": str(tmp_path / name), "timestamp": "2026-08-15T12:00:00Z"}) + "\n",
+            encoding="utf-8",
+        )
+    session_progress: list[tuple[int, int]] = []
+    rows = events.walk_session_metadata(
+        claude_dir,
+        progress=lambda done, total: session_progress.append((done, total)),
+    )
+    assert len(rows) == 1
+    assert session_progress == [(0, 2), (1, 2), (2, 2)]
+
+    cfg = {"sync": {"sources": [{"name": "claude", "type": "claude", "path": str(claude_dir)}]}}
+    disc_progress: list[tuple[int, int]] = []
+    events.discover_git_roots(
+        cfg,
+        progress=lambda done, total: disc_progress.append((done, total)),
+    )
+    assert disc_progress[0][0] == 0
+    assert disc_progress[-1][0] == disc_progress[-1][1]
+    assert all(
+        disc_progress[i][0] <= disc_progress[i + 1][0] for i in range(len(disc_progress) - 1)
+    )

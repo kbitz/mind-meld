@@ -77,12 +77,13 @@ import os
 import pwd
 import re
 import stat
+import threading
 import time
 from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator, Literal, get_args
+from typing import Any, BinaryIO, Callable, Iterator, Literal, get_args
 
 from mind_meld import token_usage
 from mind_meld.lockedjson import (
@@ -328,16 +329,28 @@ def host_family(model: str) -> HostFamily:
     return "other"
 
 
+_GC_PAUSE_LOCK = threading.Lock()
+_GC_PAUSE_DEPTH = 0
+_GC_WAS_ENABLED = False
+
+
 @contextmanager
 def _pause_gc() -> Iterator[None]:
-    """Avoid repeated cyclic-GC scans of short-lived reader graphs."""
-    enabled = gc.isenabled()
-    gc.disable()
+    """Avoid repeated cyclic-GC scans of short-lived reader graphs (thread-safe)."""
+    global _GC_PAUSE_DEPTH, _GC_WAS_ENABLED
+    with _GC_PAUSE_LOCK:
+        if _GC_PAUSE_DEPTH == 0:
+            _GC_WAS_ENABLED = gc.isenabled()
+            if _GC_WAS_ENABLED:
+                gc.disable()
+        _GC_PAUSE_DEPTH += 1
     try:
         yield
     finally:
-        if enabled:
-            gc.enable()
+        with _GC_PAUSE_LOCK:
+            _GC_PAUSE_DEPTH = max(0, _GC_PAUSE_DEPTH - 1)
+            if _GC_PAUSE_DEPTH == 0 and _GC_WAS_ENABLED:
+                gc.enable()
 
 
 def _sqlite_error_name(exc: BaseException) -> str | None:
@@ -937,6 +950,7 @@ def read_muse_usage(
     *,
     deadline: float | None = None,
     consented: bool = False,
+    progress: Callable[[int, int], None] | None = None,
 ) -> HostUsageResult:
     """Read completed Muse model-step totals from ``session.jsonl`` logs.
 
@@ -983,7 +997,12 @@ def read_muse_usage(
                 )
             else:
                 result, staged_files, frozen, learned, saw_files = _scan_muse_root(
-                    source_root, cached_files, prior_frozen, read_deadline, scan_now
+                    source_root,
+                    cached_files,
+                    prior_frozen,
+                    read_deadline,
+                    scan_now,
+                    **({"progress": progress} if progress is not None else {}),
                 )
             ready = time.monotonic()
             over_budget = result.complete and _expired(read_deadline)
@@ -1037,6 +1056,8 @@ def _scan_muse_root(
     frozen: dict[str, dict[str, Any]],
     deadline: float,
     now: datetime,
+    *,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[HostUsageResult, dict[str, Any], dict[str, dict[str, Any]], bool, bool]:
     """Returns ``(result, live, frozen, learned, saw_files)``.
 
@@ -1067,9 +1088,20 @@ def _scan_muse_root(
     log_paths: dict[str, str] = {}
     learned = len(kept) != len(frozen)
     saw_files = any(record["logs"] for record in kept.values())
+    progress_completed = 0
+    progress_total = len(day_dirs)
+
+    def _report_progress() -> None:
+        if progress is not None and progress_total > 0:
+            try:
+                progress(progress_completed, progress_total)
+            except Exception:
+                pass
+
+    _report_progress()
 
     def read_live(rel: str, logs: list[tuple[str, os.stat_result]]) -> None:
-        nonlocal learned
+        nonlocal learned, progress_completed
         when = _muse_dir_date(rel) or today  # day_dirs keys are validated dates
         for log_rel, _ in logs:
             if _expired(deadline):
@@ -1091,6 +1123,8 @@ def _scan_muse_root(
             staged[key] = entry
             live_dirs.setdefault(rel, []).append(key)
             log_paths[key] = log_rel
+            progress_completed += 1
+            _report_progress()
 
     try:
         for rel, day in day_dirs.items():
@@ -1098,7 +1132,13 @@ def _scan_muse_root(
                 continue
             logs = _muse_day_logs(day, deadline)
             saw_files = saw_files or bool(logs)
-            read_live(rel, logs)
+            if logs:
+                progress_total += len(logs) - 1
+                _report_progress()
+                read_live(rel, logs)
+            else:
+                progress_completed += 1
+                _report_progress()
         # Least recently checked first (a just-frozen day is 0, so it is checked
         # on the next pass); newest first among equals, where resumes are likelier.
         stalest = sorted(
@@ -1111,6 +1151,8 @@ def _scan_muse_root(
         for rel in stalest:
             cost = kept[rel]["logs"] * _MUSE_VERIFY_LOG_COST_S
             if cost > budget:
+                progress_completed += 1
+                _report_progress()
                 continue
             budget -= cost
             try:
@@ -1125,12 +1167,20 @@ def _scan_muse_root(
             identities = {log_rel: _muse_identity(st) for log_rel, st in logs}
             if _muse_logs_digest(identities) == kept[rel]["digest"]:
                 kept[rel] = {**kept[rel], "check_seq": check_seq}
+                progress_completed += 1
+                _report_progress()
                 continue
             # A frozen day changed (a resumed session, a pruned or moved log):
             # drop its totals and read it as live again.
             del kept[rel]
             learned = True
-            read_live(rel, logs)
+            if logs:
+                progress_total += len(logs) - 1
+                _report_progress()
+                read_live(rel, logs)
+            else:
+                progress_completed += 1
+                _report_progress()
         # A live step whose key a frozen day still holds is a copy of that day's
         # history: unfreeze it so the dedup below sees both copies (once if
         # equal, refused if not).
@@ -2167,6 +2217,8 @@ def _scan_agy_root(
     root: Path,
     cached_files: dict[str, Any],
     deadline: float,
+    *,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[HostUsageResult, dict[str, Any], dict[str, str | None] | None, int]:
     if _expired(deadline):
         return (_incomplete("deadline"), {}, None, 0)
@@ -2184,13 +2236,25 @@ def _scan_agy_root(
         code = errno.errorcode.get(exc.errno or 0)
         return (_incomplete("io_error"), {}, {"cause": "cannot_open", "code": code}, 1)
 
+    total_dbs = len(db_paths)
+    if progress is not None and total_dbs > 0:
+        try:
+            progress(0, total_dbs)
+        except Exception:
+            pass
+
     staged_files: dict[str, Any] = {}
     try:
-        for db_path in db_paths:
+        for idx, db_path in enumerate(db_paths, 1):
             if _expired(deadline):
                 raise _ReadFailure("deadline")
             present = _lstat_agy_sqlite_files(db_path)
             if db_path.name not in present:
+                if progress is not None:
+                    try:
+                        progress(idx, total_dbs)
+                    except Exception:
+                        pass
                 continue
             journal_name = db_path.name + "-journal"
             if journal_name in present and present[journal_name].st_size > 0:
@@ -2202,6 +2266,11 @@ def _scan_agy_root(
             else:
                 entry = _read_single_agy_db(db_path, fp, deadline)
                 staged_files[db_path.name] = entry
+            if progress is not None:
+                try:
+                    progress(idx, total_dbs)
+                except Exception:
+                    pass
 
         unique: dict[str, dict[str, Any]] = {}
         for entry in staged_files.values():
@@ -2234,6 +2303,7 @@ def read_agy_usage(
     *,
     deadline: float | None = None,
     consented: bool = False,
+    progress: Callable[[int, int], None] | None = None,
 ) -> HostUsageResult:
     """Read completed Antigravity model-turn totals from conversation SQLite DBs."""
     started = time.monotonic()
@@ -2280,7 +2350,10 @@ def read_agy_usage(
                 )
             else:
                 result, staged_files, last_error_detail, error_db_count = _scan_agy_root(
-                    source_root, cached_files, read_deadline
+                    source_root,
+                    cached_files,
+                    read_deadline,
+                    **({"progress": progress} if progress is not None else {}),
                 )
             ready = time.monotonic()
             over_budget = result.complete and _expired(read_deadline)

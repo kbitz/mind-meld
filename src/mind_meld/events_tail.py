@@ -29,8 +29,11 @@ Each reader stays all-or-nothing internally.
 
 from __future__ import annotations
 
+import contextvars
 import inspect
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -45,6 +48,7 @@ from mind_meld import (
     host_usage,
     identity,
     lockedjson,
+    pushtimings,
     token_usage,
     upgrade,
 )
@@ -67,6 +71,7 @@ HostReader = Callable[..., host_usage.HostUsageResult]
 _PROGRESS: ContextVar[Callable[[str, int, int, str], None] | None] = ContextVar(
     "events_progress", default=None
 )
+_PHASE_TIMER: ContextVar[pushtimings.PhaseTimer | None] = ContextVar("phase_timer", default=None)
 
 
 @contextmanager
@@ -76,6 +81,43 @@ def progress_scope(sink: Callable[[str, int, int, str], None] | None):
         yield
     finally:
         _PROGRESS.reset(token)
+
+
+@contextmanager
+def phase_timer_scope(timer: pushtimings.PhaseTimer | None):
+    token = _PHASE_TIMER.set(timer)
+    try:
+        yield
+    finally:
+        _PHASE_TIMER.reset(token)
+
+
+def _record_phase(
+    phase: str,
+    label: str,
+    elapsed_ms: int,
+    *,
+    budget_ms: int | None = None,
+    completed: int | None = None,
+    total: int | None = None,
+    status: str = "ok",
+    accumulate: bool = False,
+    accumulate_budget: bool = False,
+) -> None:
+    timer = _PHASE_TIMER.get()
+    if timer is None:
+        return
+    timer.record(
+        phase,
+        label,
+        elapsed_ms,
+        budget_ms=budget_ms,
+        completed=completed,
+        total=total,
+        status=status,
+        accumulate=accumulate,
+        accumulate_budget=accumulate_budget,
+    )
 
 
 def _progress(phase: str, completed: int, total: int, unit: str) -> None:
@@ -103,10 +145,11 @@ class Degradations(list[str]):
 
     def __init__(self):
         super().__init__()
+        self._lock = threading.Lock()
         self.total = 0
         self.omitted = 0
 
-    def append(self, detail):
+    def _append_unlocked(self, detail):
         if isinstance(detail, str):
             detail = safe_terminal_str(detail)
         self.total = min(2**53, self.total + 1)
@@ -115,11 +158,16 @@ class Degradations(list[str]):
         else:
             self.omitted = min(2**53, self.omitted + 1)
 
+    def append(self, detail):
+        with self._lock:
+            self._append_unlocked(detail)
+
     def extend(self, details):
-        for detail in details:
-            self.append(detail)
-        self.total = min(2**53, self.total + getattr(details, "omitted", 0))
-        self.omitted = min(2**53, self.omitted + getattr(details, "omitted", 0))
+        with self._lock:
+            for detail in details:
+                self._append_unlocked(detail)
+            self.total = min(2**53, self.total + getattr(details, "omitted", 0))
+            self.omitted = min(2**53, self.omitted + getattr(details, "omitted", 0))
 
 
 HOST_USAGE_READ_BUDGET_INTERACTIVE_MS = DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS
@@ -282,27 +330,10 @@ def resolve_host_read_budget(
     return min(HOST_USAGE_READ_BUDGET_AUTOPUSH_MS, ceiling), "default"
 
 
-HOST_READER_GRACE_MS = 250
-"""Minimum time for each reader after the first, beyond the sweep deadline.
-Sized from measured warm reads: Codex 266 ms over 7,536 rollouts and
-Antigravity 104 ms over 500 conversation DBs on mac-a, Antigravity 153 ms over
-500 conversation DBs on linux-a, and Grok Build 19 to 20 ms (Track 57A E16).
-Together Codex + Antigravity cost 419 ms (439 ms with Grok), so the 750 ms
-autopush sweep default leaves 331 ms (311 ms) headroom while staying one
-quarter of the 3,000 ms interactive sweep default, and a 250 ms grace floor
-gives linux-a's 153 ms Antigravity read 97 ms headroom even when an earlier
-reader exhausts the sweep while staying below HOST_READER_RESERVE_MS (300 ms).
-Deadlines are cooperative, not filesystem-interrupt ceilings."""
-
-HOST_READER_RESERVE_MS = 300
-"""Attended sweep: time held back for EACH later reader (Track 101A), so one
-reader's overrun cannot take another's whole read. Sized from measured reads:
-Grok Build 19 to 20 ms warm (Track 57A E16), Antigravity 109 to 236 ms, Muse
-84 to 642 ms, and Codex 746 ms warm to 1,812 ms while learning new rollouts,
-which under the 3,000 ms attended default gets a 2,100 ms first share (three
-later readers: Grok Build, Muse and Antigravity). Capped per sweep at
-``sweep / (2 * readers)`` and floored per later reader at the reserve. The
-autopush sweep passes no reserve and keeps ``HOST_READER_GRACE_MS``."""
+_WARM_RETRY_RESERVE_MS = 300
+"""Internal reserve held per later sequential attended warm retry inside
+``_capture_host_snapshot``, so one slow cold warm retry cannot starve a sibling
+retry under the shared attended host phase."""
 
 _ROOT_DISCOVERY_DEGRADATION = (
     "git repository discovery hit its time budget: this push captured an incomplete "
@@ -610,23 +641,59 @@ def _default_host_readers(
         chosen.append(("codex", codex_host.read_codex_usage))
     if grok_consented:
 
-        def _read_grok(*, deadline: float) -> host_usage.HostUsageResult:
-            return grok_host.read_grok_usage(deadline=deadline, consented=True)
+        def _read_grok(
+            *, deadline: float, progress: Callable[[int, int], None] | None = None
+        ) -> host_usage.HostUsageResult:
+            extra = (
+                _accepted_kwargs(grok_host.read_grok_usage, progress=progress)
+                if progress is not None
+                else {}
+            )
+            return grok_host.read_grok_usage(deadline=deadline, consented=True, **extra)
 
         chosen.append(("grok", _read_grok))
     if HOST_READER_SOURCE_GATE["muse"] in enabled:
 
-        def _read_muse(*, deadline: float) -> host_usage.HostUsageResult:
-            return host_usage.read_muse_usage(deadline=deadline, consented=True)
+        def _read_muse(
+            *, deadline: float, progress: Callable[[int, int], None] | None = None
+        ) -> host_usage.HostUsageResult:
+            extra = (
+                _accepted_kwargs(host_usage.read_muse_usage, progress=progress)
+                if progress is not None
+                else {}
+            )
+            return host_usage.read_muse_usage(deadline=deadline, consented=True, **extra)
 
         chosen.append(("muse", _read_muse))
     if HOST_READER_SOURCE_GATE["agy"] in enabled:
 
-        def _read_agy(*, deadline: float) -> host_usage.HostUsageResult:
-            return host_usage.read_agy_usage(deadline=deadline, consented=True)
+        def _read_agy(
+            *, deadline: float, progress: Callable[[int, int], None] | None = None
+        ) -> host_usage.HostUsageResult:
+            extra = (
+                _accepted_kwargs(host_usage.read_agy_usage, progress=progress)
+                if progress is not None
+                else {}
+            )
+            return host_usage.read_agy_usage(deadline=deadline, consented=True, **extra)
 
         chosen.append(("agy", _read_agy))
     return tuple(chosen)
+
+
+_HOST_PROGRESS_LABELS: dict[str, str] = {
+    "codex": "Codex",
+    "grok": "Grok Build",
+    "muse": "Muse",
+    "agy": "Antigravity",
+}
+
+
+def _host_progress_label(name: str) -> str:
+    if name in _HOST_PROGRESS_LABELS:
+        return _HOST_PROGRESS_LABELS[name]
+    descriptor = host_registry.HOST_READER_DIAGS.get(name)
+    return descriptor.label if descriptor is not None else name
 
 
 def _capture_host_usage(
@@ -634,38 +701,30 @@ def _capture_host_usage(
     *,
     deadline: float,
     now: Callable[[], float] = time.monotonic,
-    reserve_s: float = 0.0,
+    concurrent: bool | None = None,
+    budget_ms_override: int | None = None,
+    accumulate_budget: bool = False,
 ) -> HostUsageCapture:
-    """Read consented hosts under a sweep deadline plus later-reader grace.
+    """Read consented hosts with an equal per-provider deadline, concurrently when safe.
 
-    ``reserve_s`` (Track 101A, attended sweeps only) holds that much of the
-    sweep back for each reader still to come: reader ``i`` of ``n`` gets
-    ``deadline - reserve_s * (n - i - 1)``, and a later reader never gets less
-    than ``max(HOST_READER_GRACE_MS, reserve_s)`` from its own start, so an
-    overrun by an earlier reader cannot take a later reader's whole read. At
-    ``0.0`` (autopush, and every caller that does not pass it) the rule is the
-    grace floor alone.
+    Every enabled reader receives its own ``allowance_s = deadline - initial_now``
+    deadline from its own start time; an early-finishing reader returns immediately
+    without holding unused time, and a slow reader never shrinks a sibling's
+    deadline. Production multi-reader sweeps (``now is time.monotonic``) run in a
+    thread pool with copied ``contextvars`` and canonical-order merging; synthetic
+    clocks stay sequential unless ``concurrent=True``.
 
     Reader-scoped for FAILURES (Track 31A): a file/record failure still fails
     that whole reader, but a reader failure no longer discards the others.
-    The original "partial totals are worse than no totals" argument predates
-    ``token_sources``; with per-reader coverage on the wire, deleting known
-    Codex tokens because Grok failed is the less truthful behaviour. Publish
-    no row only when no reader completed, or the sweep expired before any
+    Publish no row only when no reader completed, or the sweep expired before any
     reader was invoked.
 
     A source that can never hold a ledger is NOT a failure (see
     ``_HOST_ABSENT_REASONS``). It is omitted from ``token_sources`` and from
-    ``dropped`` — a standing property of the source, correctly silent.
+    ``dropped``.
 
-    A reader that RAISES is caught here rather than at the tail's outer guard,
-    because that guard would also discard the git and session rows already
-    captured and the terminal ``mm-push`` row with them — an unreadable host
-    store must not cost the retro its actual content. The raise is a reader
-    failure (``unavailable``) and the sweep continues.
-
-    ``readers`` and ``now`` are injected so ordering, isolation, gating and
-    deadline behavior are table-testable without touching a real host store.
+    A reader that raises ``Exception`` is caught here and normalized to
+    ``unavailable``; ``BaseException`` propagates to the caller.
     """
     merged: dict[str, dict[str, token_usage.Usage]] = {}
     merged_by_day: dict[str, token_usage.DayBucket] = {}
@@ -675,22 +734,85 @@ def _capture_host_usage(
     partial_days: dict[str, frozenset[str]] = {}
     names_in_order = tuple(name for name, _ in readers)
     total_readers = len(readers)
-    if total_readers:
+    if total_readers == 0:
+        return HostUsageCapture(
+            merged,
+            token_sources=(),
+            dropped=(),
+            tokens_by_day=merged_by_day,
+            partial_days={},
+            partial=False,
+            usage_days={},
+        )
+    initial_now = now()
+    if initial_now >= deadline:
+        return HostUsageCapture(None, names_in_order[0], "deadline", invoked=False)
+
+    allowance_s = deadline - initial_now
+    budget_ms = (
+        budget_ms_override if budget_ms_override is not None else max(0, round(allowance_s * 1000))
+    )
+    use_concurrent = (
+        (total_readers > 1 and now is time.monotonic)
+        if concurrent is None
+        else (bool(concurrent) and total_readers > 1)
+    )
+
+    progress_enabled = _PROGRESS.get() is not None
+    progress_lock = threading.Lock()
+    unfinished: list[str] = list(names_in_order)
+    latest_counts: dict[str, tuple[int, int]] = {}
+    completed_readers = 0
+    saw_item_progress = False
+    if progress_enabled:
         _progress("Capturing host usage", 0, total_readers, "readers")
-    for index, (name, read) in enumerate(readers):
+
+    def _make_item_progress(reader_name: str) -> Callable[[int, int], None]:
+        def _on_item(done: int, total: int) -> None:
+            nonlocal saw_item_progress
+            with progress_lock:
+                saw_item_progress = True
+                latest_counts[reader_name] = (done, total)
+                if unfinished and unfinished[0] == reader_name:
+                    _progress(
+                        f"Reading {_host_progress_label(reader_name)} usage",
+                        done,
+                        total,
+                        "",
+                    )
+
+        return _on_item
+
+    def _finish_progress(reader_name: str) -> None:
+        nonlocal completed_readers
+        if not progress_enabled:
+            return
+        with progress_lock:
+            completed_readers += 1
+            if reader_name in unfinished:
+                unfinished.remove(reader_name)
+            if saw_item_progress:
+                if unfinished:
+                    nxt = unfinished[0]
+                    done, total = latest_counts.get(nxt, (0, 0))
+                    _progress(f"Reading {_host_progress_label(nxt)} usage", done, total, "")
+            else:
+                _progress("Capturing host usage", completed_readers, total_readers, "readers")
+
+    def _run_one(
+        name: str, read: HostReader
+    ) -> tuple[host_usage.HostUsageResult | None, Exception | None, int]:
         start = now()
-        if index == 0 and start >= deadline:
-            return HostUsageCapture(None, name, "deadline", invoked=False)
-        later = total_readers - index - 1
-        held_back = deadline - reserve_s * later
-        reader_deadline = (
-            max(held_back, start + max(HOST_READER_GRACE_MS / 1000.0, reserve_s))
-            if index
-            else held_back
+        reader_deadline = start + allowance_s
+        call_kwargs = (
+            _accepted_kwargs(read, progress=_make_item_progress(name)) if progress_enabled else {}
         )
         try:
-            result = read(deadline=reader_deadline)
+            result = read(deadline=reader_deadline, **call_kwargs)
+            elapsed_ms = max(0, round((now() - start) * 1000))
+            return result, None, elapsed_ms
         except Exception as e:
+            elapsed_ms = max(0, round((now() - start) * 1000))
             # The breadcrumb reason stays a closed vocabulary, but the TYPE
             # goes to stderr like every other swallow in this module. Without
             # it a `TypeError` regression inside a reader is indistinguishable
@@ -699,25 +821,84 @@ def _capture_host_usage(
             token_usage._diagnostic(
                 f"mm: notice: host reader {name} raised: {_exception_detail(e)}\n"
             )
+            return None, e, elapsed_ms
+        finally:
+            _finish_progress(name)
+
+    if use_concurrent:
+        with ThreadPoolExecutor(max_workers=total_readers, thread_name_prefix="mm-host") as pool:
+            futures = [
+                (name, pool.submit(contextvars.copy_context().run, _run_one, name, read))
+                for name, read in readers
+            ]
+            raw_outcomes = [(name, fut.result()) for name, fut in futures]
+    else:
+        raw_outcomes = [(name, _run_one(name, read)) for name, read in readers]
+
+    for name, (result, exc, elapsed_ms) in raw_outcomes:
+        label = f"{_host_progress_label(name)} usage"
+        counts = latest_counts.get(name)
+        done, total = counts if counts is not None else (None, None)
+        if exc is not None or result is None:
             dropped.append((name, _HOST_UNKNOWN_REASON))
-            _progress("Capturing host usage", index + 1, total_readers, "readers")
+            _record_phase(
+                f"host:{name}",
+                label,
+                elapsed_ms,
+                budget_ms=budget_ms,
+                completed=done,
+                total=total,
+                status="error",
+                accumulate=True,
+                accumulate_budget=accumulate_budget,
+            )
             continue
         if not result.complete:
             reason = result.reason if result.reason in _HOST_READ_REASONS else _HOST_UNKNOWN_REASON
             if reason in _HOST_ABSENT_REASONS:
                 # Not installed, in effect. Drop it silently and keep going —
                 # the row will name only the sources that actually contributed.
-                _progress("Capturing host usage", index + 1, total_readers, "readers")
+                _record_phase(
+                    f"host:{name}",
+                    label,
+                    elapsed_ms,
+                    budget_ms=budget_ms,
+                    completed=done,
+                    total=total,
+                    status="skipped",
+                    accumulate=True,
+                    accumulate_budget=accumulate_budget,
+                )
                 continue
             dropped.append((name, reason))
-            _progress("Capturing host usage", index + 1, total_readers, "readers")
+            _record_phase(
+                f"host:{name}",
+                label,
+                elapsed_ms,
+                budget_ms=budget_ms,
+                completed=done,
+                total=total,
+                status="deadline" if reason == "deadline" else "error",
+                accumulate=True,
+                accumulate_budget=accumulate_budget,
+            )
             continue
         contributed.append(name)
         usage_days[name] = frozenset(day for days in result.hosts.values() for day in days)
         if result.partial_days:
             partial_days[name] = frozenset(result.partial_days)
         _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
-        _progress("Capturing host usage", index + 1, total_readers, "readers")
+        _record_phase(
+            f"host:{name}",
+            label,
+            elapsed_ms,
+            budget_ms=budget_ms,
+            completed=done,
+            total=total,
+            status="ok",
+            accumulate=True,
+            accumulate_budget=accumulate_budget,
+        )
     if contributed or not dropped:
         return HostUsageCapture(
             merged,
@@ -1328,14 +1509,8 @@ def _capture_host_snapshot(
     phase_deadline = (
         started + _host_phase_ms(capture_ms) / 1000.0 if capture_ms is not None else None
     )
-    reserve_s = (
-        min(HOST_READER_RESERVE_MS, host_budget_ms // (2 * len(host_readers))) / 1000.0
-        if warm_host_cache is not None and len(host_readers) >= 2
-        else 0.0
-    )
-    sweep_kwargs = _accepted_kwargs(_capture_host_usage, reserve_s=reserve_s) if reserve_s else {}
     host_capture = _capture_host_usage(
-        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0, **sweep_kwargs
+        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
     )
     if not host_capture.invoked and host_capture.reason == "deadline":
         # No reader ran: declare every omission so a failed warm cannot vanish
@@ -1356,24 +1531,48 @@ def _capture_host_snapshot(
             for name, _read in host_readers
             if name in deadline_names and name in WARMABLE_HOST_READERS
         ]
+        retry_reserve_s = (
+            min(_WARM_RETRY_RESERVE_MS, host_budget_ms // (2 * len(host_readers))) / 1000.0
+            if len(retry_names) >= 2 and len(host_readers) >= 2
+            else 0.0
+        )
         for position, name in enumerate(retry_names):
 
-            def warm_read(*, deadline: float) -> host_usage.HostUsageResult:
+            def warm_read(
+                *,
+                deadline: float,
+                progress: Callable[[int, int], None] | None = None,
+            ) -> host_usage.HostUsageResult:
                 warm_host_cache(name)
                 remaining = max(0.0, deadline - time.monotonic())
                 return host_registry.warm_host_cache_inline(
                     reader=name,
-                    **_accepted_kwargs(host_registry.warm_host_cache_inline, budget_s=remaining),
+                    **_accepted_kwargs(
+                        host_registry.warm_host_cache_inline,
+                        budget_s=remaining,
+                        **({"progress": progress} if progress is not None else {}),
+                    ),
                 )
 
+            retry_deadline = (
+                # Each retry holds a reserve for the retries after it.
+                phase_deadline - retry_reserve_s * (len(retry_names) - position - 1)
+                if phase_deadline is not None
+                else time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S
+            )
+            retry_kwargs = (
+                _accepted_kwargs(
+                    _capture_host_usage,
+                    budget_ms_override=max(0, round((retry_deadline - started) * 1000)),
+                    accumulate_budget=False,
+                )
+                if phase_deadline is not None
+                else _accepted_kwargs(_capture_host_usage, accumulate_budget=True)
+            )
             retry_capture = _capture_host_usage(
                 ((name, warm_read),),
-                deadline=(
-                    # Each retry holds a reserve for the retries after it.
-                    phase_deadline - reserve_s * (len(retry_names) - position - 1)
-                    if phase_deadline is not None
-                    else time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S
-                ),
+                deadline=retry_deadline,
+                **retry_kwargs,
             )
             host_capture = _merge_warm_retry_capture(
                 host_capture,
@@ -1519,19 +1718,35 @@ def _capture_event_snapshots(
     # git walk, token warm (in prepare) and this session walk, so the tail
     # share is spent once, not once per phase. Legacy callers keep the
     # fresh post-preparation deadline.
+    session_started = time.monotonic()
     deadline = (
-        session_deadline if session_deadline is not None else time.monotonic() + budget_ms / 1000.0
+        session_deadline if session_deadline is not None else session_started + budget_ms / 1000.0
+    )
+    session_budget_ms = (
+        max(0, round((deadline - session_started) * 1000))
+        if session_deadline is not None
+        else budget_ms
     )
     projects: list[dict] = []
     warn_lock_unavailable = False
 
     def walk_sessions(token_cache_files: dict | None) -> None:
+        progress_cb = (
+            (lambda done, total: _progress("Scanning sessions", done, total, ""))
+            if _PROGRESS.get() is not None
+            else None
+        )
         for claude_dir in claude_paths:
+            extra_kwargs = _accepted_kwargs(
+                events.walk_session_metadata,
+                persist=persist,
+                **({"progress": progress_cb} if progress_cb is not None else {}),
+            )
             for row in events.walk_session_metadata(
                 claude_dir,
                 deadline_monotonic=deadline,
                 token_cache_files=token_cache_files,
-                **_accepted_kwargs(events.walk_session_metadata, persist=persist),
+                **extra_kwargs,
             ):
                 projects.extend(row.get("projects", []))
 
@@ -1564,6 +1779,14 @@ def _capture_event_snapshots(
             except Exception:
                 events.discard_pending_session_state()
         raise
+    if claude_paths:
+        _record_phase(
+            "session_scan",
+            "Session scan",
+            max(0, round((walk_done - session_started) * 1000)),
+            budget_ms=session_budget_ms,
+            status="deadline" if walk_done > deadline else "ok",
+        )
     if persist:
         events.flush_pending_session_state()
     session_rows: list[dict] = []
@@ -1636,14 +1859,35 @@ def _capture_git_rows(
     from push counts. Only recapture passes ``per_repo_timeout_ms``; the
     other callers keep the walker's budget-derived, capped limit.
     """
-    discovery_deadline = time.monotonic() + root_discovery_budget_ms / 1000.0
+    discovery_started = time.monotonic()
+    discovery_deadline = discovery_started + root_discovery_budget_ms / 1000.0
     if deadline_monotonic is not None:
         discovery_deadline = min(discovery_deadline, deadline_monotonic)
+    discovery_budget_ms = max(0, round((discovery_deadline - discovery_started) * 1000))
+    discovery_progress = (
+        (lambda done, total: _progress("Discovering repositories", done, total, ""))
+        if _PROGRESS.get() is not None
+        else None
+    )
     root_discovery = events.discover_git_roots(
         config,
         deadline_monotonic=discovery_deadline,
         persist=persist,
         since=since,
+        **(
+            _accepted_kwargs(events.discover_git_roots, progress=discovery_progress)
+            if discovery_progress is not None
+            else {}
+        ),
+    )
+    _record_phase(
+        "git_discovery",
+        "Git discovery",
+        max(0, round((time.monotonic() - discovery_started) * 1000)),
+        budget_ms=discovery_budget_ms,
+        status=(
+            "deadline" if root_discovery.exceeded else "error" if root_discovery.errors else "ok"
+        ),
     )
     root_discovery = events.dedup_git_root_discovery(root_discovery)
     roots, _discovery_errors = root_discovery
@@ -1653,7 +1897,14 @@ def _capture_git_rows(
         {} if token_usage._DIAGNOSTIC.get() is None else {"diagnostic": token_usage._diagnostic}
     )
     if _PROGRESS.get() is not None:
-        walk_kwargs.update(_accepted_kwargs(events.walk_git_projects, progress=_progress))
+        walk_kwargs.update(
+            _accepted_kwargs(
+                events.walk_git_projects,
+                progress=lambda _phase, done, total, _unit: _progress(
+                    "Walking repositories", done, total, ""
+                ),
+            )
+        )
     if use_repo_cursors and roots:
         walk_kwargs["use_repo_cursors"] = True
     if per_repo_timeout_ms is not None:
@@ -1673,6 +1924,7 @@ def _capture_git_rows(
         walk_budget_ms = min(
             walk_budget_ms, max(0, int((deadline_monotonic - time.monotonic()) * 1000))
         )
+    walk_started = time.monotonic()
     git_rows = events.walk_git_projects(
         roots,
         since=since,
@@ -1681,6 +1933,13 @@ def _capture_git_rows(
     )
     skipped = git_rows[0].get("skipped") or [] if git_rows else []
     aborts, errs = events.walk_skip_counts(skipped)
+    _record_phase(
+        "git_walk",
+        "Git walk",
+        max(0, round((time.monotonic() - walk_started) * 1000)),
+        budget_ms=walk_budget_ms,
+        status="deadline" if aborts > 0 else "error" if errs > 0 else "ok",
+    )
     capture = events.make_git_capture(
         since=since,
         discovery=events.classify_discovery(root_discovery),

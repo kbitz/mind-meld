@@ -3844,3 +3844,204 @@ def test_codex_rollout_vanishing_between_iterdir_and_lstat_is_skipped(
 
     assert result.complete is True
     assert result.hosts["codex"]["2026-08-15"]["input"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Track 165B — PhaseTimer, pushtimings persistence, reader progress callbacks,
+# shared-phase warm-retry ceiling, and thread-safe _pause_gc().
+# ---------------------------------------------------------------------------
+
+
+def test_phase_timer_and_pushtimings_persistence_165b(tmp_path: Path, monkeypatch) -> None:
+    from mind_meld import events_tail, host_registry, pushtimings
+
+    timings_path = tmp_path / "push-timings.json"
+    monkeypatch.setattr(pushtimings, "PUSH_TIMINGS_PATH", timings_path)
+
+    # Read-only snapshot on missing file creates nothing.
+    assert pushtimings.read_push_timings() == {"latest": None, "by_kind": {}}
+    assert not timings_path.exists()
+
+    timer = pushtimings.PhaseTimer()
+    timer.record("host:codex", "Codex usage", 120, budget_ms=1000, completed=5, total=5)
+    # Shared-phase retry: accumulate_budget=False replaces with real ceiling, does NOT sum.
+    timer.record(
+        "host:codex",
+        "Codex usage",
+        230,
+        budget_ms=6000,
+        completed=5,
+        total=5,
+        accumulate=True,
+        accumulate_budget=False,
+    )
+    # Legacy-only retry: accumulate_budget=True sums independent allowances.
+    timer.record("host:muse", "Muse usage", 50, budget_ms=3000)
+    timer.record(
+        "host:muse",
+        "Muse usage",
+        75,
+        budget_ms=5000,
+        accumulate=True,
+        accumulate_budget=True,
+    )
+    with pytest.raises(RuntimeError):
+        with timer.measure("upload", "Upload"):
+            raise RuntimeError("boom")
+
+    by_phase = {p.phase: p for p in timer.phases()}
+    assert by_phase["host:codex"].elapsed_ms == 350
+    assert by_phase["host:codex"].budget_ms == 6000
+    assert by_phase["host:muse"].elapsed_ms == 125
+    assert by_phase["host:muse"].budget_ms == 8000
+    assert by_phase["upload"].status == "error"
+
+    lines = pushtimings.format_verbose_timings(timer.phases())
+    assert "  Codex usage: 350 ms / 6000 ms" in lines
+    assert any(line.startswith("  Upload: ") and line.endswith(" [error]") for line in lines)
+
+    # Unknown kind (e.g. "catchup") is ignored.
+    pushtimings.record_push_timings("catchup", timer.phases(), total_ms=500)
+    assert not timings_path.exists()
+
+    pushtimings.record_push_timings("attended", timer.phases(), total_ms=420)
+    pushtimings.record_push_timings(
+        "autopush",
+        [pushtimings.PhaseTiming("host:codex", "Codex usage", 88, budget_ms=1000)],
+        total_ms=95,
+    )
+    snap = pushtimings.read_push_timings()
+    assert snap["latest"]["kind"] == "autopush"
+    assert set(snap["by_kind"]) == {"attended", "autopush"}
+    assert snap["by_kind"]["attended"]["total_ms"] == 420
+    assert snap["by_kind"]["autopush"]["phases"][0]["elapsed_ms"] == 88
+
+    # Corrupt file returns empty without overwriting.
+    timings_path.write_text("{corrupt", encoding="utf-8")
+    assert pushtimings.read_push_timings() == {"latest": None, "by_kind": {}}
+    assert timings_path.read_text(encoding="utf-8") == "{corrupt"
+
+    # Shared-phase warm retry under _capture_host_snapshot never exceeds _host_phase_ms(capture_ms).
+    monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 10_000)
+    monkeypatch.setattr(
+        host_registry,
+        "warm_host_cache_inline",
+        lambda **kw: hu.HostUsageResult({}, complete=True),
+    )
+    shared_timer = pushtimings.PhaseTimer()
+    with events_tail.phase_timer_scope(shared_timer):
+        events_tail._capture_host_snapshot(
+            "dev-a",
+            (("codex", lambda *, deadline: hu._incomplete("deadline")),),
+            host_budget_ms=3000,
+            warm_host_cache=lambda _name: None,
+        )
+    codex_phase = next(p for p in shared_timer.phases() if p.phase == "host:codex")
+    assert codex_phase.budget_ms is not None
+    assert codex_phase.budget_ms <= events_tail._host_phase_ms(10_000)
+    assert not hasattr(events_tail.HostUsageCapture({}), "reader_timings")
+
+
+def test_host_readers_emit_monotonic_progress_165b(
+    isolated_cache: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from mind_meld.hosts import grok as grok_host
+
+    # 1. Codex progress
+    codex_root = tmp_path / "codex_sessions"
+    _write_rollout(codex_root, "rollout-a.jsonl", [_context(turn="t1"), _token(10, last=10)])
+    _write_rollout(codex_root, "rollout-b.jsonl", [_context(turn="t2"), _token(20, last=20)])
+    codex_events: list[tuple[int, int]] = []
+    res = codex_host.read_codex_usage(
+        codex_root, progress=lambda done, total: codex_events.append((done, total))
+    )
+    assert res.complete is True
+    assert codex_events[0] == (0, 2)
+    assert codex_events[-1] == (2, 2)
+    assert all(codex_events[i][0] <= codex_events[i + 1][0] for i in range(len(codex_events) - 1))
+
+    # 2. Grok progress
+    monkeypatch.setattr(grok_host, "CACHE_PATH", tmp_path / "grok-cache.json")
+    grok_root = tmp_path / "grok_sessions"
+    for name in ("s1", "s2"):
+        sdir = grok_root / "cwd1" / name
+        sdir.mkdir(parents=True)
+        (sdir / "usage.json").write_text(json.dumps({"turns": []}), encoding="utf-8")
+    grok_events: list[tuple[int, int]] = []
+    gres = grok_host.read_grok_usage(
+        grok_root,
+        consented=True,
+        progress=lambda done, total: grok_events.append((done, total)),
+    )
+    assert gres.complete is True
+    assert grok_events[-1] == (2, 2)
+    assert all(grok_events[i][0] <= grok_events[i + 1][0] for i in range(len(grok_events) - 1))
+
+    # 3. Muse progress
+    monkeypatch.setattr(hu, "MUSE_CACHE_PATH", tmp_path / "muse-cache.json")
+    muse_root = tmp_path / "muse_sessions"
+    day_dir = muse_root / "2026" / "08" / "15"
+    for sess in ("s1", "s2"):
+        sdir = day_dir / sess
+        sdir.mkdir(parents=True)
+        (sdir / "session.jsonl").write_text("", encoding="utf-8")
+    muse_events: list[tuple[int, int]] = []
+    mres = hu.read_muse_usage(
+        muse_root,
+        consented=True,
+        progress=lambda done, total: muse_events.append((done, total)),
+    )
+    assert mres.complete is True
+    assert muse_events[-1][0] == muse_events[-1][1]
+    assert all(muse_events[i][0] <= muse_events[i + 1][0] for i in range(len(muse_events) - 1))
+
+    # 4. Antigravity progress (empty/valid sqlite DBs)
+    import sqlite3
+
+    monkeypatch.setattr(hu, "AGY_CACHE_PATH", tmp_path / "agy-cache.json")
+    agy_root = tmp_path / "agy_convs"
+    agy_root.mkdir()
+    for name in ("a.db", "b.db"):
+        conn = sqlite3.connect(agy_root / name)
+        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER)")
+        conn.execute(
+            "CREATE TABLE steps ("
+            "idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB)"
+        )
+        conn.commit()
+        conn.close()
+    agy_events: list[tuple[int, int]] = []
+    ares = hu.read_agy_usage(
+        agy_root,
+        consented=True,
+        progress=lambda done, total: agy_events.append((done, total)),
+    )
+    assert ares.complete is True
+    assert agy_events == [(0, 2), (1, 2), (2, 2)]
+
+
+def test_pause_gc_thread_safe_under_overlapping_threads_and_exceptions_165b() -> None:
+    import gc
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    assert gc.isenabled() is True
+    barrier = threading.Barrier(4)
+
+    def worker(should_raise: bool) -> None:
+        with hu._pause_gc():
+            barrier.wait(timeout=5)
+            assert gc.isenabled() is False
+            if should_raise:
+                raise RuntimeError("worker failure")
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = [pool.submit(worker, i == 0) for i in range(4)]
+        errors = 0
+        for fut in futs:
+            try:
+                fut.result()
+            except RuntimeError:
+                errors += 1
+    assert errors == 1
+    assert gc.isenabled() is True

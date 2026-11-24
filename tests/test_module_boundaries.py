@@ -49,6 +49,7 @@ EXTRACTED = [
     "gcflow",
     "recaptureflow",
     "outputstyle",
+    "pushtimings",
     "host_registry",
     "rootprobes",
     "syncthing",
@@ -66,6 +67,7 @@ LEAVES = [
     "fsutil",
     "gitenv",
     "outputstyle",
+    "pushtimings",
     "updateprogress",
     "projectid",
     "rootprobes",
@@ -1097,6 +1099,7 @@ PULL_CORE_DEFINITIONS = frozenset(
     _stop_sync_progress
     _sync_diagnostic
     _sync_progress_advance
+    _sync_progress_count
     _sync_progress_ensure_batch
     _sync_progress_phase
     _sync_progress_start_batch

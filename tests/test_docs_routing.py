@@ -1127,6 +1127,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "fast_forward",
     "syncthing",
     "memory_index",
+    "push_timings",
 )
 _SKILL_LINKS_ROW_FIELDS = (
     "key",

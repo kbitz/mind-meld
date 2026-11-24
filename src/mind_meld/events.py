@@ -693,6 +693,7 @@ def discover_git_roots(
     deadline_monotonic: float | None = None,
     persist: bool = False,
     since: datetime | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> GitRootDiscovery:
     """Discover git roots with one cooperative, call-scoped deadline.
 
@@ -803,7 +804,13 @@ def discover_git_roots(
     if resume in ranks:
         cut = ranks[resume] + 1
         ordered_probers = probers[cut:] + probers[:cut]
-    for name, prober in ordered_probers:
+    total_probers = len(ordered_probers)
+    if progress is not None and total_probers > 0:
+        try:
+            progress(0, total_probers)
+        except Exception:
+            pass
+    for idx, (name, prober) in enumerate(ordered_probers, 1):
         if deadline_expired():
             mark_exceeded()
             break
@@ -911,7 +918,12 @@ def discover_git_roots(
                 errors.append(f"{name} prober: {type(e).__name__}")
             else:
                 errors.append(f"{name} prober: {type(e).__name__}: {e}")
-            continue
+        finally:
+            if progress is not None:
+                try:
+                    progress(idx, total_probers)
+                except Exception:
+                    pass
 
     if deadline_expired() and "claude" not in probers_ran:
         mark_exceeded()
@@ -2675,6 +2687,7 @@ def walk_session_metadata(
     deadline_monotonic: float | None = None,
     token_cache_files: dict | None = None,
     persist: bool = False,
+    progress: Callable[[int, int], None] | None = None,
 ) -> list[SessionsSnapshot]:
     """Walk ``<claude_dir>/projects/<encoded>/*.jsonl`` aggregating per-project
     session metadata. Returns one SessionsSnapshot row aggregating all
@@ -2755,6 +2768,12 @@ def walk_session_metadata(
         proj_dirs.sort(key=lambda p: (str(p) <= resume, str(p)))
     staged: dict[str, dict] = {}
     visited = 0
+    total_projects = len(proj_dirs)
+    if progress is not None and total_projects > 0:
+        try:
+            progress(0, total_projects)
+        except Exception:
+            pass
     last_done: str | None = None
     break_index: int | None = None
     for index, proj_path in enumerate(proj_dirs):
@@ -2828,6 +2847,11 @@ def walk_session_metadata(
         if meta is not None:
             out.append(meta)
         visited += 1
+        if progress is not None:
+            try:
+                progress(visited, total_projects)
+            except Exception:
+                pass
         if interrupted:
             break_index = index
             break
