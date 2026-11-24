@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.85] - 2026-11-24
+
+Attended `mm pull` now reports the content changes applied from each peer device on its outcome line.
+
+### Changed
+
+- Attended `mm pull` now lists applied content changes per peer device (`<n> content change(s) from <device>`) on its outcome line instead of a combined `files applied` total.
+- Attended `mm pull` reports how many content changes it applied from each peer.
+
 ## [1.12.84] - 2026-11-22
 
 Mind Meld now keeps agent memory in its own qmd index, refuses a bad qmd version before enabling that index, and explains how to update agent instructions.

@@ -1017,6 +1017,7 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
             parts.append(result.left_out_clause.rstrip("."))
         return [outputstyle._outcome_line(verb, part) for part in parts]
     assert isinstance(result, pullflow.PullResult)
+    applied = pullflow.applied_clause(result)
     deleted = pullflow.deleted_clause(result)
     retired = pullflow.retired_copies_clause(result)
     lead = (
@@ -1024,7 +1025,7 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
         if result.no_sources
         else "no peer devices"
         if result.no_peers
-        else f"{core._count(result.total_applied, 'file', 'files')} applied"
+        else (applied or f"{core._count(result.total_applied, 'file', 'files')} applied")
         if result.total_applied
         else deleted
         if deleted

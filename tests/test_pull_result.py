@@ -608,9 +608,16 @@ class TestSyncSuccessLine:
     def test_an_applied_file_leads_and_the_deletion_follows(self):
         from mind_meld.cli import _sync_success
 
-        lines = _sync_success("pull", _deleted(2, total_written=2))
+        lines = _sync_success(
+            "pull",
+            _deleted(
+                2,
+                total_written=2,
+                applied_by_device={"dev-a": pullflow.AppliedPeer("Mac A", 2)},
+            ),
+        )
         assert lines == [
-            "Pull: 2 files applied.",
+            "Pull: 2 content changes from Mac A.",
             f"Pull: 2 files deleted because Mac B deleted them; copies in "
             f"{FOLDER} for 30 days; see {URL}.",
         ]
@@ -687,3 +694,48 @@ class TestLedgerCauseInTheAutopullBreadcrumb:
     def test_a_healthy_ledger_adds_nothing(self, tmp_path, monkeypatch):
         _, crumb = self._crumb(tmp_path, monkeypatch, pullflow.PullResult(elapsed=0.1))
         assert crumb["outcome"] == "success" and "detail" not in crumb
+
+
+class TestAppliedClause:
+    def test_defaults_and_empty_clause(self):
+        result = pullflow.PullResult()
+        assert result.applied_by_device == {}
+        assert pullflow.applied_clause(result) == ""
+
+    def test_singular_plural_sorting_tie_breaking_and_zero_omission(self):
+        result = pullflow.PullResult(
+            total_written=8,
+            applied_by_device={
+                "dev-b": pullflow.AppliedPeer("mac-b", 2),
+                "dev-a2": pullflow.AppliedPeer("mac-a", 3),
+                "dev-a1": pullflow.AppliedPeer("Mac-a", 1),
+                "dev-a0": pullflow.AppliedPeer("mac-a", 2),
+                "dev-idle": pullflow.AppliedPeer("mac-z", 0),
+            },
+        )
+        assert pullflow.applied_clause(result) == (
+            "1 content change from Mac-a, "
+            "2 content changes from mac-a, "
+            "3 content changes from mac-a, "
+            "2 content changes from mac-b"
+        )
+
+    @pytest.mark.parametrize("name", ["", "  ", "\x1b[0m"])
+    def test_blank_display_name_falls_back_to_device_id(self, name):
+        result = pullflow.PullResult(
+            total_written=1,
+            applied_by_device={"dev-x": pullflow.AppliedPeer(name, 1)},
+        )
+        assert pullflow.applied_clause(result) == "1 content change from dev-x"
+
+    def test_sanitizes_control_sequences_and_preserves_brackets(self):
+        result = pullflow.PullResult(
+            total_written=2,
+            applied_by_device={
+                "dev-a": pullflow.AppliedPeer("\x1b[31mmac-[a]\x1b[0m\n\x1b]0;evil\x07", 2)
+            },
+        )
+        clause = pullflow.applied_clause(result)
+        assert clause == r"2 content changes from mac-[a]\n"
+        assert "\n" not in clause
+        assert "\x1b" not in clause

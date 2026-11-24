@@ -15899,8 +15899,14 @@ def test_sync78_failure_line_keeps_curated_remedy_and_known_effects(state, error
 
 
 def test_sync78_outcome_counts_are_singular_at_one(apply_failure_fleet):
-    pull = pullflow.PullResult(total_written=1)
-    assert cli_module._sync_success("pull", pull) == ["Pull: 1 file applied."]
+    pull = pullflow.PullResult(
+        total_written=1,
+        applied_by_device={"dev-a": pullflow.AppliedPeer("mac-a", 1)},
+    )
+    assert cli_module._sync_success("pull", pull) == ["Pull: 1 content change from mac-a."]
+    assert cli_module._sync_success("pull", pullflow.PullResult(total_written=1)) == [
+        "Pull: 1 file applied."
+    ]
     push = cli_module.PushResult(published_content_files=1)
     assert cli_module._sync_success("push", push) == ["Push: 1 content change published."]
     partial = pullflow.PullResult(total_written=1, total_failed=1)
@@ -15914,10 +15920,22 @@ def test_sync78_outcome_counts_are_singular_at_one(apply_failure_fleet):
     # fails_when=the conflict suffix or no_sources precedence is dropped, or skipped returns;
     # why_new=no test reached these _sync_success branches; seam=none;
     # no_claim=which pull paths set these counts (pure renderer + real CLI on apply_failure_fleet)
-    one = pullflow.PullResult(total_written=1, total_conflicted=1)
-    assert cli_module._sync_success("pull", one) == ["Pull: 2 files applied (1 conflict copy)."]
-    many = pullflow.PullResult(total_conflicted=2, total_skipped=1)
-    assert cli_module._sync_success("pull", many) == ["Pull: 2 files applied (2 conflict copies)."]
+    one = pullflow.PullResult(
+        total_written=1,
+        total_conflicted=1,
+        applied_by_device={"dev-a": pullflow.AppliedPeer("mac-a", 2)},
+    )
+    assert cli_module._sync_success("pull", one) == [
+        "Pull: 2 content changes from mac-a (1 conflict copy)."
+    ]
+    many = pullflow.PullResult(
+        total_conflicted=2,
+        total_skipped=1,
+        applied_by_device={"dev-a": pullflow.AppliedPeer("mac-a", 2)},
+    )
+    assert cli_module._sync_success("pull", many) == [
+        "Pull: 2 content changes from mac-a (2 conflict copies)."
+    ]
     empty = pullflow.PullResult(no_peers=True, no_sources=True)
     assert cli_module._sync_success("pull", empty) == ["Pull: no enabled sources."]
 
@@ -15926,7 +15944,7 @@ def test_sync78_outcome_counts_are_singular_at_one(apply_failure_fleet):
     fleet.publish({"apply.md": b"applied\n", "skip.md": b"older remote\n"})
     pulled = runner.invoke(app, ["pull"])
     assert pulled.exit_code == 0, pulled.output
-    assert pulled.stdout == "Pull: 1 file applied.\n"
+    assert pulled.stdout == "Pull: 1 content change from Mac A.\n"
     assert "skipped" not in pulled.output
     status = runner.invoke(app, ["status"])
     assert status.exit_code == 0, status.output
@@ -15937,7 +15955,7 @@ def test_sync78_outcome_counts_are_singular_at_one(apply_failure_fleet):
     verbose_pull = runner.invoke(app, ["pull", "-v"])
     assert verbose_pull.exit_code == 0, verbose_pull.output
     assert "1 skipped (local newer)" in verbose_pull.stdout
-    assert verbose_pull.stdout.splitlines()[-1] == "Pull: 1 file applied."
+    assert verbose_pull.stdout.splitlines()[-1] == "Pull: 1 content change from Mac A."
 
 
 @pytest.mark.parametrize("verb", ["push", "pull"])
@@ -16325,7 +16343,7 @@ def test_sync_progress_pull_renders_spinner_phases_and_counters_on_terminal(
     )
     result = runner.invoke(app, ["pull"])
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Pull: 2 files applied.\n"
+    assert result.stdout == "Pull: 2 content changes from Mac A.\n"
     assert result.stderr == ""
     output = terminal.getvalue()
     assert "⠋ Unlocking storage" in output
@@ -17401,3 +17419,106 @@ def test_recapture_machine_neutral_wording_pins(capture61, monkeypatch):
         "mm: notice: Recapture covers Git history only. "
         "Refresh host usage on this machine. Run: mm push" in res_recap.stderr
     )
+
+
+def test_pull_outcome_line_names_each_applying_peer_sorted(tmp_path, monkeypatch):
+    storage_dir = tmp_path / "storage"
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    # Storage enumerates device IDs in lexical order, so mac-b is visited first.
+    register_device(backend, "dev-1", "mac-b")
+    register_device(backend, "dev-2", "mac-a")
+    register_device(backend, "dev-c", "mac-c")
+    register_device(backend, "dev-local", "mac-d")
+
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+    def _config_for(dev_id: str, dev_name: str, notes_dir: Path) -> Path:
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        cfg_path = tmp_path / f"config_{dev_id}.toml"
+        save_config(
+            {
+                "device": {"id": dev_id, "name": dev_name},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [
+                        {
+                            "name": "notes",
+                            "path": str(notes_dir),
+                            "type": "generic",
+                            "include_dirs": ["."],
+                        }
+                    ],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            cfg_path,
+        )
+        return cfg_path
+
+    notes_b = tmp_path / "notes_b"
+    notes_a = tmp_path / "notes_a"
+    notes_c = tmp_path / "notes_c"
+    notes_local = tmp_path / "notes_local"
+    cfg_b = _config_for("dev-1", "mac-b", notes_b)
+    cfg_a = _config_for("dev-2", "mac-a", notes_a)
+    cfg_c = _config_for("dev-c", "mac-c", notes_c)
+    cfg_local = _config_for("dev-local", "mac-d", notes_local)
+
+    # mac-b publishes 2 changes: 1 new file + 1 conflicting with a local edit.
+    (notes_b / "from_b.md").write_bytes(b"peer b new\n")
+    (notes_b / "shared.md").write_bytes(b"peer b version\n")
+    os.utime(notes_b / "shared.md", (1_700_000_000, 1_700_000_000))
+    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_b)
+    assert runner.invoke(app, ["push"]).exit_code == 0
+
+    # mac-a publishes 1 new file.
+    (notes_a / "from_a.md").write_bytes(b"peer a new\n")
+    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_a)
+    assert runner.invoke(app, ["push"]).exit_code == 0
+
+    # mac-c publishes only an already-matching file so it applies 0 files.
+    (notes_c / "same.md").write_bytes(b"already identical\n")
+    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_c)
+    assert runner.invoke(app, ["push"]).exit_code == 0
+
+    # Local machine has matching same.md and an older conflicting shared.md.
+    (notes_local / "same.md").write_bytes(b"already identical\n")
+    (notes_local / "shared.md").write_bytes(b"local version\n")
+    os.utime(notes_local / "shared.md", (1_600_000_000, 1_600_000_000))
+    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_local)
+
+    dry = runner.invoke(app, ["pull", "--dry-run"])
+    assert dry.exit_code == 0, (dry.stdout, dry.stderr)
+    assert "Dry run complete." in dry.stdout
+    assert "Pull: 1 content change from mac-a" not in dry.stdout
+    assert not (notes_local / "from_a.md").exists()
+    assert not (notes_local / "from_b.md").exists()
+
+    pulled = runner.invoke(app, ["pull"])
+    assert pulled.exit_code == 0, (pulled.stdout, pulled.stderr)
+    assert (
+        pulled.stdout == "Pull: 1 content change from mac-a, 2 content changes from mac-b"
+        " (1 conflict copy).\n"
+    )
+    assert "mac-c" not in pulled.stdout
+    assert (notes_local / "from_a.md").read_bytes() == b"peer a new\n"
+    assert (notes_local / "from_b.md").read_bytes() == b"peer b new\n"
+    assert len(list(notes_local.glob("shared.sync-conflict-*.md"))) == 1
+
+    # Autopull stays quiet on a clean multi-peer pull.
+    (notes_a / "auto_a.md").write_bytes(b"auto a\n")
+    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_a)
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    (notes_b / "auto_b.md").write_bytes(b"auto b\n")
+    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_b)
+    assert runner.invoke(app, ["push"]).exit_code == 0
+
+    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_local)
+    auto = runner.invoke(app, ["autopull"])
+    assert auto.exit_code == 0, (auto.stdout, auto.stderr)
+    assert auto.stdout == ""
+    assert auto.stderr == ""
+    assert (notes_local / "auto_a.md").read_bytes() == b"auto a\n"
+    assert (notes_local / "auto_b.md").read_bytes() == b"auto b\n"
