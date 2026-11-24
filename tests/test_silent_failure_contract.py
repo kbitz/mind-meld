@@ -1879,13 +1879,18 @@ def test_autopush_breadcrumb_success_when_events_tail_is_healthy(tmp_path, monke
     assert payload["outcome"] == "success", payload
 
 
+# Value: protects=actual autopush reader elapsed time, allowance and status in diag;
+# fails_when=autopush drops the timer scope or misreports a reader deadline;
+# why_new=the diag rendering fixture seeds completed timing records itself;
+# seam=none; no_claim=real ledger speed or worker overlap (synthetic clock).
 def test_autopush_measured_warm_reads_record_success_breadcrumb_and_overrun_records_degraded(
     tmp_path, monkeypatch
 ):
-    """Track 149A: under the default autopush sweep and later-reader grace floor,
-    measured warm reads (Codex 266 ms, Antigravity 153 ms) complete with a
-    `success` breadcrumb; an overrunning reader (800 ms) still records `deadline`
-    and `degraded` while Antigravity finishes inside its grace window."""
+    """Measured warm reads fit their independent 1,000 ms autopush allowances.
+
+    When Codex needs 1,100 ms it records a deadline and a degraded breadcrumb.
+    Antigravity still finishes within its own allowance.
+    """
     from mind_meld import events_tail, host_usage, token_usage
 
     iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
@@ -1935,6 +1940,24 @@ def test_autopush_measured_warm_reads_record_success_breadcrumb_and_overrun_reco
     assert host_row_ok["token_sources"] == ["codex", "agy"]
     assert "degraded_sources" not in host_row_ok
 
+    def diag_reader_timings():
+        result = runner.invoke(app, ["diag", "--json"])
+        assert result.exit_code == 0, (result.stdout, result.stderr)
+        state = json.loads(result.stdout)
+        assert state["host_read_budgets"]["autopush_ms"] == 1000
+        run = state["push_timings"]["by_kind"]["autopush"]
+        assert state["push_timings"]["latest"] == run
+        return {
+            phase["phase"]: (phase["elapsed_ms"], phase["budget_ms"], phase["status"])
+            for phase in run["phases"]
+            if phase["phase"].startswith("host:")
+        }
+
+    assert diag_reader_timings() == {
+        "host:codex": (266, 1000, "ok"),
+        "host:agy": (153, 1000, "ok"),
+    }
+
     # Now make a substantive edit and make Codex overrun the 1000 ms per-provider default (1100 ms);
     # Antigravity still completes in its own 1000 ms window while Codex records deadline.
     (claude_root / "projects" / "-Users-user-myapp" / "memory" / "role.md").write_text("updated")
@@ -1953,6 +1976,10 @@ def test_autopush_measured_warm_reads_record_success_breadcrumb_and_overrun_reco
     host_row_over = [r for r in rows_over if r["type"] == "host-usage-snapshot"][-1]
     assert host_row_over["token_sources"] == ["agy"]
     assert host_row_over["degraded_sources"] == ["codex"]
+    assert diag_reader_timings() == {
+        "host:codex": (1000, 1000, "deadline"),
+        "host:agy": (153, 1000, "ok"),
+    }
 
 
 def test_autopush_breadcrumb_degraded_when_walk_budget_exceeded(tmp_path, monkeypatch):

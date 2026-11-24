@@ -3852,6 +3852,10 @@ def test_codex_rollout_vanishing_between_iterdir_and_lstat_is_skipped(
 # ---------------------------------------------------------------------------
 
 
+# Value: protects=timing cache normalization and the exact shared warm retry cap;
+# fails_when=invalid timing fields are retained or the retry reports a different allowance;
+# why_new=corrupt syntax and an upper bound alone miss those cases;
+# seam=none; no_claim=real cache or terminal timing.
 def test_phase_timer_and_pushtimings_persistence_165b(tmp_path: Path, monkeypatch) -> None:
     from mind_meld import events_tail, host_registry, pushtimings
 
@@ -3916,12 +3920,38 @@ def test_phase_timer_and_pushtimings_persistence_165b(tmp_path: Path, monkeypatc
     assert snap["by_kind"]["attended"]["total_ms"] == 420
     assert snap["by_kind"]["autopush"]["phases"][0]["elapsed_ms"] == 88
 
+    # A valid JSON document can still contain an unsupported version or malformed phases.
+    raw = json.loads(timings_path.read_text(encoding="utf-8"))
+    timings_path.write_text(json.dumps({**raw, "version": True}), encoding="utf-8")
+    assert pushtimings.read_push_timings() == {"latest": None, "by_kind": {}}
+
+    phase = raw["latest"]["phases"][0]
+    raw["latest"]["phases"] = [
+        {**phase, "elapsed_ms": -1},
+        {**phase, "elapsed_ms": True},
+        {**phase, "budget_ms": -1, "completed": True, "total": -1, "status": "invalid"},
+    ]
+    timings_path.write_text(json.dumps(raw), encoding="utf-8")
+    assert pushtimings.read_push_timings()["latest"]["phases"] == [
+        {**phase, "budget_ms": None},
+    ]
+
     # Corrupt file returns empty without overwriting.
     timings_path.write_text("{corrupt", encoding="utf-8")
     assert pushtimings.read_push_timings() == {"latest": None, "by_kind": {}}
     assert timings_path.read_text(encoding="utf-8") == "{corrupt"
 
-    # Shared-phase warm retry under _capture_host_snapshot never exceeds _host_phase_ms(capture_ms).
+    # An early sweep result still gives the retry the exact shared phase allowance.
+    real_capture = events_tail._capture_host_usage
+
+    def now():
+        return 100.0
+
+    def sweep(readers, *, deadline, **kwargs):
+        return real_capture(readers, deadline=deadline, now=now, **kwargs)
+
+    monkeypatch.setattr(events_tail.time, "monotonic", now)
+    monkeypatch.setattr(events_tail, "_capture_host_usage", sweep)
     monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 10_000)
     monkeypatch.setattr(
         host_registry,
@@ -3937,8 +3967,8 @@ def test_phase_timer_and_pushtimings_persistence_165b(tmp_path: Path, monkeypatc
             warm_host_cache=lambda _name: None,
         )
     codex_phase = next(p for p in shared_timer.phases() if p.phase == "host:codex")
-    assert codex_phase.budget_ms is not None
-    assert codex_phase.budget_ms <= events_tail._host_phase_ms(10_000)
+    assert codex_phase.budget_ms == 6000
+    assert codex_phase.status == "ok"
     assert not hasattr(events_tail.HostUsageCapture({}), "reader_timings")
 
 

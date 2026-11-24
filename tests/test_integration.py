@@ -17533,6 +17533,10 @@ def test_pull_outcome_line_names_each_applying_peer_sorted(tmp_path, monkeypatch
     assert (notes_local / "auto_b.md").read_bytes() == b"auto b\n"
 
 
+# Value: protects=no-op verbose detail and final outcome ordering;
+# fails_when=no-op emits only a timing header or differs from the saved phases;
+# why_new=only the content-changing run compared details to persisted phases;
+# seam=none; no_claim=terminal redraw.
 def test_push_verbose_timings_before_outcome_and_dry_run_write_free_165b(tmp_path, monkeypatch):
     from mind_meld import pushtimings
 
@@ -17590,7 +17594,11 @@ def test_push_verbose_timings_before_outcome_and_dry_run_write_free_165b(tmp_pat
     assert res_noop.exit_code == 0, res_noop.output
     noop_lines = [line for line in res_noop.stdout.splitlines() if line.strip()]
     assert noop_lines[-1].startswith("Push: ")
-    assert "Phase timings:" in noop_lines
+    noop_start = noop_lines.index("Phase timings:")
+    noop_timings = noop_lines[noop_start + 1 : -1]
+    assert noop_timings
+    noop_saved = pushtimings.read_push_timings()["by_kind"]["attended"]
+    assert noop_timings == pushtimings.format_verbose_timings(noop_saved["phases"])
 
     # 4. Autopush records autopush timings
     (notes / "b.md").write_text("world\n", encoding="utf-8")
