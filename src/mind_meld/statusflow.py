@@ -213,6 +213,8 @@ def _format_catchup_status_line(state: dict[str, Any], *, running: bool) -> str 
         return f"  Background capture catch-up: ok ({safe_str(age)}{pub})"
     detail = state.get("detail")
     suffix = f" — {safe_str(detail)}" if detail else ""
+    if result == "no-passphrase":
+        suffix += ". Run: mm push"
     return f"  Background capture catch-up: {safe_str(str(result))} ({safe_str(age)}){suffix}"
 
 
@@ -1054,15 +1056,21 @@ def status(
 
         verdict_projection = projection
         if (
-            projection["push"]["kind"] == "auto"
-            and projection["push"]["unresolved"]
+            catchup_covering_push
             and auto_push.get("outcome") == "degraded"
-            and catchup_covering_push
+            and projection["push"]["unknown_reason"] is None
         ):
-            verdict_projection = {
-                **projection,
-                "push": {**projection["push"], "unresolved": False},
+            # Catch-up covers the automatic deadline only. A separate attended
+            # push can still have an unresolved error that needs owner action.
+            remaining_auto = {
+                **auto_evidence,
+                "runs": {
+                    verb: run for verb, run in auto_evidence["runs"].items() if verb != "push"
+                },
             }
+            verdict_projection = attemptlog.project_runs(
+                remaining_auto, attended_evidence, mesh_waits_current=mesh_valid
+            )
 
         verdict = _status_verdict(
             source=source,
@@ -1223,7 +1231,7 @@ def status(
             catchup_covering=catchup_covering_git,
             catchup_running=catchup_running,
         )
-        if discovery_nag and not retro_nag and not catchup_covering_push:
+        if discovery_nag and not retro_nag:
             console.print(
                 "  [yellow]Git repository discovery incomplete:[/yellow] run [bold]mm diag[/bold]"
             )
@@ -2056,7 +2064,7 @@ def _print_retro_capture_status(
         or cache.get("incomplete_streak", 0) >= 3
     )
     if not recovery_required:
-        discovery_errors = (row or {}).get("discovery_errors")
+        discovery_errors = (row or {}).get("discovery_errors", [])
         deadline_only = (
             isinstance(discovery_errors, list)
             and all(error == events.GIT_ROOT_DISCOVERY_BUDGET_ERROR for error in discovery_errors)

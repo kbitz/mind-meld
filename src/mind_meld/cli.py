@@ -189,6 +189,7 @@ class PushResult:
     phase_timings: tuple[capturecatchup.PhaseTiming, ...] = ()
     capture_deadline_phases: tuple[str, ...] = ()
     prepared_tail_published: bool = False
+    prepared_tail_deferred: bool = False
 
 
 _USAGE_ERROR_CLS = next(cls for cls in typer.BadParameter.__mro__ if cls.__name__ == "UsageError")
@@ -2464,37 +2465,41 @@ def _push_core(
     # the tail's own writes; the re-walk reads existing on-disk state.
     # Skipped entirely when no mm-internal source is selected for this push.
     prepared_path = None
-    if any(src["name"] in MM_INTERNAL_SOURCE_NAMES for src in sources):
-        if prepared_tail is not None:
-            # Source configuration can change during the manifest scan without taking
-            # the sync lock. Reject the preparation before its first event write.
-            refreshed = load_config()
-            if any(
-                refreshed.get(k) != config.get(k) for k in ("device", "storage", "sync", "retro")
-            ):
-                return PushResult(events_degradations=events_degradations)
-            prepared_path, tail_degs = events_tail._commit_prepared_tail(
-                prepared_tail, config, device_id
+    prepared_source = None
+    if prepared_tail is not None:
+        prepared_source = next((src for src in sources if src["name"] == "mm-events"), None)
+        # Check direct config edits too. Source commands hold the sync lock
+        # when they commit their selection.
+        refreshed = load_config()
+        if prepared_source is None or any(
+            refreshed.get(k) != config.get(k) for k in ("device", "storage", "sync", "retro")
+        ):
+            return PushResult(prepared_tail_deferred=True)
+        prepared_path, tail_degs = events_tail._commit_prepared_tail(
+            prepared_tail, config, device_id
+        )
+        events_degradations.extend(tail_degs)
+        if prepared_path is None:
+            return PushResult(
+                events_degradations=events_degradations,
+                prepared_tail_deferred=not events_degradations,
             )
-            events_degradations.extend(tail_degs)
-            if prepared_path is None:
-                return PushResult(events_degradations=events_degradations)
-        else:
-            core._sync_progress_phase("Recording activity")
-            with events_tail.phase_timer_scope(timer):
-                events_degradations.extend(
-                    events_tail._run_events_tail(
-                        config,
-                        sources,
-                        device_id,
-                        dry_run=dry_run,
-                        quiet=quiet,
-                        suppress_host_capture=capture_attempted,
-                        capture_activity=(
-                            retro_catchup_pending or not host_row_appended or content_changed
-                        ),
-                    )
+    elif any(src["name"] in MM_INTERNAL_SOURCE_NAMES for src in sources):
+        core._sync_progress_phase("Recording activity")
+        with events_tail.phase_timer_scope(timer):
+            events_degradations.extend(
+                events_tail._run_events_tail(
+                    config,
+                    sources,
+                    device_id,
+                    dry_run=dry_run,
+                    quiet=quiet,
+                    suppress_host_capture=capture_attempted,
+                    capture_activity=(
+                        retro_catchup_pending or not host_row_appended or content_changed
+                    ),
                 )
+            )
     if not dry_run:
         mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
         if mm_internal_cfgs:
@@ -2797,10 +2802,9 @@ def _push_core(
     result.phase_timings = timer.phases()
     result.capture_deadline_phases = tuple(getattr(events_degradations, "deadline_phases", ()))
     result.content_accepted = True
-    if prepared_tail is not None and prepared_path is not None:
-        src = next(src for src in sources if src["name"] == "mm-events")
+    if prepared_tail is not None and prepared_path is not None and prepared_source is not None:
         outcome, cause = _usage_publication_verdict(
-            src, prepared_path, prepared_tail.mm_event, local_manifest
+            prepared_source, prepared_path, prepared_tail.mm_event, local_manifest
         )
         result.prepared_tail_published = outcome == "published"
         if not result.prepared_tail_published:
@@ -5064,7 +5068,9 @@ def _capture_catchup_work(timer: capturecatchup.PhaseTimer) -> tuple[str, bool, 
     if not published:
         if pushed.events_degradations:
             return "failed", False, pushed.events_degradations[0]
-        return "deferred", False, "capture inputs changed before publication; run mm push"
+        if pushed.prepared_tail_deferred:
+            return "deferred", False, "capture inputs changed before publication; run mm push"
+        return "failed", False, "event publication unavailable; run mm diag"
     if (
         pushed.held
         or pushed.ledger_cause
@@ -5080,7 +5086,10 @@ def _capture_catchup_work(timer: capturecatchup.PhaseTimer) -> tuple[str, bool, 
         or any(
             error != events.GIT_ROOT_DISCOVERY_BUDGET_ERROR for error in capture.discovery_errors
         )
+        or events.classify_discovery(capture.root_discovery) == "empty"
         or capture.warn_lock_unavailable
+        or (capture.session_rows and not capture.token_cache_requested)
+        or (not capture.host_capture.complete and capture.host_capture.reason != "deadline")
         or any(reason != "deadline" for _, reason in capture.host_capture.dropped)
     ):
         return "failed", True, "capture needs attention; run mm diag"

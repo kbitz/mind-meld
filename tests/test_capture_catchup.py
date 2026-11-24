@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mind_meld import (
+    attemptlog,
     capturecatchup,
     config,
     core,
@@ -27,6 +28,7 @@ from mind_meld import (
     host_usage,
     lockfile,
     manifest,
+    token_usage,
 )
 from mind_meld import cli as cli_module
 from mind_meld.cli import app
@@ -713,6 +715,101 @@ def test_running_catchup_does_not_hide_git_walk_errors(capture_store, monkeypatc
         lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
 
 
+def test_catchup_cannot_report_complete_if_claude_cache_is_unavailable(capture_store, monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise OSError("fixture cache unreadable")
+
+    monkeypatch.setattr(token_usage, "is_cache_cold", unavailable)
+    result = runner.invoke(app, ["autopush", "--catchup"])
+    assert result.exit_code == 0, result.output
+    state = capturecatchup.read_catchup_state()
+    assert state["published"] is True, state
+    assert state["result"] == "failed", state
+
+
+def test_catchup_does_not_clear_an_older_independent_attended_failure(capture_store):
+    now = datetime.now(timezone.utc)
+    attemptlog.write_run(
+        "push",
+        attemptlog.make_run(
+            outcome="degraded",
+            cause="result-degraded",
+            degradations=["event append skipped (max-file-size)"],
+            completed_at=(now - timedelta(seconds=2)).isoformat(),
+        ),
+    )
+    core._autorun_breadcrumb_path().write_text(
+        '{"push":{"outcome":"degraded","capture_deadline_only":true,"timestamp":"'
+        + (now - timedelta(seconds=1)).isoformat()
+        + '"}}'
+    )
+    lockfile.acquire_lock(capturecatchup.CATCHUP_LOCK_PATH)
+    try:
+        result = runner.invoke(app, ["status"])
+    finally:
+        lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
+    assert result.exit_code == 0, result.output
+    assert "Latest push needs attention" in result.output
+
+
+def test_catchup_and_source_revocation_cannot_commit_at_the_same_time(capture_store, monkeypatch):
+    read_newer = events_tail._newer_capture_recorded
+    changes = []
+
+    def interleave(*args):
+        changes.append(runner.invoke(app, ["disable-source", "codex"]))
+        return read_newer(*args)
+
+    monkeypatch.setattr(events_tail, "_newer_capture_recorded", interleave)
+    result = runner.invoke(app, ["autopush", "--catchup"])
+    assert result.exit_code == 0, result.output
+    assert changes and changes[0].exit_code == 1, changes[0].output
+    assert "codex" not in config.load_config()["sync"].get("disabled_sources", [])
+    assert runner.invoke(app, ["disable-source", "codex"]).exit_code == 0
+
+
+def test_phase_one_discovery_does_not_persist_shared_cursor_state(capture_store, monkeypatch):
+    persist_options = []
+
+    def probe(*args, persist, **kw):
+        persist_options.append(persist)
+        return events.GitRootDiscovery([], [])
+
+    monkeypatch.setattr(events, "discover_git_roots", probe)
+    cfg = config.load_config()
+    sources = list(config.resolve_sources(cfg, strict=True, bootstrap=False).available)
+    assert events_tail._prepare_events_tail(cfg, sources, cfg["device"]["id"]) is not None
+    assert persist_options == [False]
+
+
+def test_deferred_worker_preserves_warmed_provider_cache(tmp_path, monkeypatch):
+    env = _init_push_env(tmp_path, monkeypatch)
+    sessions = tmp_path / "codex-sessions" / "2026" / "11" / "24"
+    sessions.mkdir(parents=True)
+    (sessions / "rollout-2026-11-24T00-00-00-fixture.jsonl").write_text("")
+    original_read = codex_host.read_codex_usage
+    monkeypatch.setattr(
+        codex_host,
+        "read_codex_usage",
+        lambda **kw: original_read(tmp_path / "codex-sessions", **kw),
+    )
+    original_lock = cli_module._acquire_sync_lock_bounded
+    monkeypatch.setattr(
+        cli_module, "_acquire_sync_lock_bounded", lambda: original_lock(backoffs=())
+    )
+    lockfile.acquire_lock(config.LOCK_PATH)
+    try:
+        result = runner.invoke(app, ["autopush", "--catchup"])
+        assert result.exit_code == 0, result.output
+        assert lockfile.is_lock_held(config.LOCK_PATH)
+        assert capturecatchup.read_catchup_state()["result"] == "deferred"
+        warmed = json.loads(codex_host.CACHE_PATH.read_bytes())
+        assert warmed["files"]
+        assert not env["backend"].exists(storage_keys.manifest_key("dev-165a"))
+    finally:
+        lockfile.release_lock(config.LOCK_PATH)
+
+
 # ── T4: Status suppression & read-only guarantees ─────────────────────────
 
 
@@ -861,6 +958,20 @@ def test_t4_status_suppresses_deadline_nags_and_surfaces_catchup_failures(tmp_pa
         "Latest push needs attention" in r_fail.output
         or "Background capture catch-up failed" in r_fail.output
     )
+
+    capturecatchup.record_catchup_state(
+        state="finished",
+        result="no-passphrase",
+        started_at=crumb_ts.isoformat(),
+        finished_at=finish_ts.isoformat(),
+        detail="passphrase unavailable in keyring",
+    )
+    no_passphrase = runner.invoke(app, ["status"])
+    assert no_passphrase.exit_code == 0, no_passphrase.output
+    assert "passphrase unavailable in keyring. Run: mm push" in " ".join(
+        no_passphrase.output.split()
+    )
+    assert "Latest push needs attention" in no_passphrase.output
 
     # 4. Non-deadline degradation (unsupported) still surfaces even while catch-up is running
     (env["cfg_dir"] / "host-tokens.json").write_text(

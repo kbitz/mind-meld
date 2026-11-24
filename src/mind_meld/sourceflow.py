@@ -29,7 +29,7 @@ import typer
 from rich.table import Table
 
 from mind_meld import config as _config_module
-from mind_meld import core, outputstyle, seen_sources
+from mind_meld import core, lockfile, outputstyle, seen_sources
 from mind_meld.config import (
     DEFAULT_SOURCES,
     get_default_source,
@@ -37,7 +37,7 @@ from mind_meld.config import (
     patch_config_on_disk,
 )
 from mind_meld.consoles import console
-from mind_meld.errors import ConfigError
+from mind_meld.errors import ConfigError, LockError
 from mind_meld.manifest import CODEX_MEMORY_SOURCE_NAME, walk_source
 from mind_meld.manifest import _is_excluded as _manifest_is_excluded
 from mind_meld.safety import safe_str, safe_terminal_str
@@ -172,6 +172,21 @@ def _record_seen(names: list[str]) -> None:
     seen_sources.acknowledge(names, initial=currently_resolved)
 
 
+def _patch_sync_sources(config: dict, updates: dict[str, Any], *, retry: str) -> None:
+    """Serialize consent changes with sync publication after prompts have returned."""
+    try:
+        lockfile.acquire_lock()
+    except LockError as exc:
+        core._error(str(exc))
+        raise
+    try:
+        if _config_module.load_config().get("sync") != config.get("sync"):
+            core._error("source configuration changed while this command was running.", fix=retry)
+        patch_config_on_disk({"sync": updates})
+    finally:
+        lockfile.release_lock()
+
+
 def disable_source(name: str, *, force: bool = False) -> None:
     """Disable a sync source on this device only."""
     config = core._get_config(read_only=name == CODEX_MEMORY_SOURCE_NAME)
@@ -197,8 +212,11 @@ def disable_source(name: str, *, force: bool = False) -> None:
         return
 
     disabled.append(name)
-    updates: dict[str, dict[str, Any]] = {"sync": {"disabled_sources": sorted(disabled)}}
-    patch_config_on_disk(updates)
+    _patch_sync_sources(
+        config,
+        {"disabled_sources": sorted(disabled)},
+        retry=f"mm disable-source {safe_terminal_str(name)}",
+    )
     _record_seen([name])
 
     core._print_outcome(
@@ -301,8 +319,7 @@ def enable_source(name: str, *, force: bool = False) -> None:
             return
 
     if updates:
-        config_updates: dict[str, dict[str, Any]] = {"sync": updates}
-        patch_config_on_disk(config_updates)
+        _patch_sync_sources(config, updates, retry=f"mm enable-source {safe_terminal_str(name)}")
 
     _record_seen([name])
     core._print_outcome(
@@ -438,7 +455,7 @@ def reconfigure_sources() -> None:
     if memory_exclusions := _config_module._codex_memory_exclude_patterns(sync):
         updates["codex_memory_exclude_patterns"] = memory_exclusions
 
-    patch_config_on_disk({"sync": updates})
+    _patch_sync_sources(config, updates, retry="mm reconfigure-sources")
 
     # Mark every name as seen — reconfigure is the explicit acknowledgment
     # surface, so even sources the user re-confirmed should not surface as

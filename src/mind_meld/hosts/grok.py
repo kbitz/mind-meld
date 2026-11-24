@@ -394,7 +394,7 @@ def _scan_grok_root(
         total = len(cwd_dirs)
 
         def report() -> None:
-            if progress is not None and total > 0:
+            if progress is not None:
                 try:
                     progress(completed, total)
                 except Exception:

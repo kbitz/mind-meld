@@ -511,6 +511,9 @@ def catchup_observation() -> tuple[dict[str, Any], bool]:
             recorded = read_catchup_state()
             if recorded["state"] == "running":
                 recorded.update(state="finished", result="failed", detail="worker interrupted")
+    elif running and recorded["state"] != "running":
+        running = is_catchup_running()
+        recorded = _empty_catchup_state() if running else read_catchup_state()
     return recorded, running
 
 

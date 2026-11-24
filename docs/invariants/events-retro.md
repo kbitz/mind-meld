@@ -1731,7 +1731,9 @@ When `mm autopush` stops any capture phase at its deadline with work left
 changes autopush's exit code. Previews (`--dry-run`) never start one.
 Lock hierarchy is strictly `L1` (`capture-catchup.lock`) → `L2`
 (`mind-meld.lock`) → `L3` (`lockedjson` caches): Phase 1 runs attended-budget
-capture outside `L2` (`_prepare_events_tail`), warming caches on disk; Phase 2
+capture outside `L2` (`_prepare_events_tail`), warming host usage and session caches
+on disk. Git discovery reads the cached index during detached capture. It leaves
+index writes and cursor pruning to the ordinary sync path. Phase 2
 acquires `L2` with a bounded 2 s retry and revalidates configuration and
 source consent. A newer recorded capture defers the prepared batch and retains
 warmed caches, including when the newer capture is partial. Otherwise the

@@ -1601,7 +1601,9 @@ to its current active state (or to detected on a legacy config without explicit
 `[[sync.sources]]`). CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
 `mm reconfigure-sources` (top-level kebab-case to match `mm migrate-config`
 pattern). Strict by default; `--force` accepts unknown names for forward-compat
-(pre-disable codex before it ships).
+(pre-disable codex before it ships). Source changes take the sync lock only
+when committing the configuration patch. This orders consent changes with
+encrypted publication and leaves source-picker prompts outside the lock.
 
 `_push_core` uses `_filter_unselected_sources` on the prior manifest BEFORE
 `generate_tombstones`, covering ok-fetch / sidecar / peer-fallback uniformly.

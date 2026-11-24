@@ -1625,6 +1625,7 @@ def _capture_event_snapshots(
     suppress_host_capture: bool = False,
     origin: str | None = None,
     persist: bool = False,
+    persist_git_discovery: bool = True,
     use_repo_cursors: bool = False,
     session_deadline: float | None = None,
     per_repo_cap_ms: int | None = None,
@@ -1674,7 +1675,7 @@ def _capture_event_snapshots(
             config,
             device_id,
             since=since,
-            persist=persist,
+            persist=persist and persist_git_discovery,
             use_repo_cursors=use_repo_cursors,
             walk_budget_ms=git_walk_budget_ms,
             root_discovery_budget_ms=root_discovery_budget_ms,
@@ -2430,6 +2431,7 @@ def _prepare_events_tail(
         budget_ms=budget_ms,
         git_budget_ms=git_budget_ms,
         persist=True,
+        persist_git_discovery=False,
         use_repo_cursors=True,
         root_discovery_budget_ms=(
             events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS + extension_ms
@@ -2514,6 +2516,8 @@ def _newer_capture_recorded(prepared: PreparedEventsTail, device_id: str) -> boo
         device_id,
         {"mm-push", "host-usage-snapshot", "sessions-snapshot"},
     )
+    if scan.uncertain_types:
+        return True
     for row in scan.rows.values():
         stamp = events.parse_aware_ts(row.get("ts"))
         if stamp is not None and stamp >= prepared.started_at:
