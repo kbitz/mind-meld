@@ -1732,13 +1732,15 @@ changes autopush's exit code. Previews (`--dry-run`) never start one.
 Lock hierarchy is strictly `L1` (`capture-catchup.lock`) → `L2`
 (`mind-meld.lock`) → `L3` (`lockedjson` caches): Phase 1 runs attended-budget
 capture outside `L2` (`_prepare_events_tail`), warming host usage and token
-caches on disk. The worker checks its configuration before starting each
-provider read or warm retry and defers if the configuration has changed.
+caches on disk. Before each provider prober, usage read, warm retry, or
+Claude root walk, the worker checks its configuration. A change defers the
+batch. A cold session warm repeats this check after taking the token-cache lock.
 Git discovery and session walking stage their shared activity index in
 memory. Git walking uses the staged repository cutoffs. Phase 2 acquires `L2` with a bounded 2 s retry and revalidates configuration and source
 consent. It replays any interrupted cursor commits before comparing the
 staged index with the input snapshot. A changed index defers publication,
-including when journal replay restores an older repository cutoff.
+including when journal replay restores an older repository cutoff. A replay
+read or write error that leaves capture uncertain stops publication.
 A newer recorded capture defers the prepared batch and retains
 warmed caches, including when the newer capture is partial. An unreadable
 day file defers the batch only if its date could contain a newer capture.

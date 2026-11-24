@@ -8,6 +8,7 @@ import json
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from mind_meld import (
     events_tail,
     host_registry,
     host_usage,
+    lockedjson,
     lockfile,
     manifest,
     memoryindex,
@@ -33,7 +35,7 @@ from mind_meld import (
 )
 from mind_meld import cli as cli_module
 from mind_meld.cli import app
-from mind_meld.errors import CryptoError
+from mind_meld.errors import ConfigError, CryptoError
 from mind_meld.hosts import codex as codex_host
 from mind_meld.hosts import grok as grok_host
 from mind_meld.storage import keys as storage_keys
@@ -1121,7 +1123,10 @@ def test_detached_staleness_only_considers_day_files_that_could_be_newer(
     assert events_tail._newer_capture_recorded(prepared, device) is (days_ago == 0)
 
 
-def test_detached_replays_failed_cursor_before_accepting_prepared_scan(tmp_path, monkeypatch):
+@pytest.mark.parametrize("recovery_write_fails", [False, True])
+def test_detached_replays_failed_cursor_before_accepting_prepared_scan(
+    recovery_write_fails, tmp_path, monkeypatch
+):
     env = _init_push_env(tmp_path, monkeypatch)
     cfg = config.load_config()
     device = cfg["device"]["id"]
@@ -1164,13 +1169,33 @@ def test_detached_replays_failed_cursor_before_accepting_prepared_scan(tmp_path,
     prepared = events_tail._prepare_events_tail(cfg, sources, device)
     assert prepared is not None
     assert observed == [row_time]
+    write_attempts = 0
+    write_json = lockedjson._write_json
+
+    def fail_first_write(*args, **kwargs):
+        nonlocal write_attempts
+        write_attempts += 1
+        if write_attempts == 1:
+            return OSError("fixture recovery write failed")
+        return write_json(*args, **kwargs)
+
     lockfile.acquire_lock(config.LOCK_PATH)
     try:
-        path, problems = events_tail._commit_prepared_tail(prepared, cfg, device)
+        with monkeypatch.context() as active:
+            if recovery_write_fails:
+                active.setattr(lockedjson, "_write_json", fail_first_write)
+            path, problems = events_tail._commit_prepared_tail(prepared, cfg, device)
     finally:
         lockfile.release_lock(config.LOCK_PATH)
-    assert path is None and not problems
+    assert path is None
     assert events.latest_mm_push_row(directory, device) == prior
+    if recovery_write_fails:
+        assert problems == ["could not recover Git capture cursors"]
+        cache = events.read_git_capture_cache()
+        assert str(repo) not in cache["repo_cursors"]
+        assert prior["ts"] in cache["uncommitted_push_roots"]
+        return
+    assert not problems
     assert events.read_git_capture_cache()["repo_cursors"][str(repo)] == since.isoformat()
     again = events_tail._prepare_events_tail(cfg, sources, device)
     assert again is not None
@@ -1283,6 +1308,84 @@ def test_catchup_publication_does_not_cover_a_later_hook(capture_store, monkeypa
     assert not capturecatchup.covers_deadline_backlog(state, running=False, backlog_at=backlog)
 
 
+@pytest.mark.parametrize("command", ["autopush", "autopull"])
+def test_auto_hook_handles_config_error_before_yield(command, capture_store, monkeypatch):
+    original = cli_module.load_config
+    calls = 0
+
+    def read_config():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original()
+        raise ConfigError("fixture config became invalid")
+
+    monkeypatch.setattr(cli_module, "load_config", read_config)
+    ran = runner.invoke(app, [command])
+
+    assert ran.exit_code == 0, repr(ran.exception)
+    assert ran.stdout == ""
+    assert ran.stderr.strip().endswith("fixture config became invalid")
+    assert len(ran.stderr.splitlines()) == 1
+    assert not lockfile.is_lock_held(config.LOCK_PATH)
+    verb = command.removeprefix("auto")
+    crumb = json.loads(core._autorun_breadcrumb_path().read_bytes())[verb]
+    assert crumb["outcome"] == "config-error"
+
+
+def test_detached_discovery_rechecks_before_each_prober(tmp_path, monkeypatch):
+    _init_push_env(tmp_path, monkeypatch)
+    probes = []
+
+    def revoke_during_claude_probe(**kwargs):
+        disabled = runner.invoke(app, ["disable-source", "codex", "--force"])
+        assert disabled.exit_code == 0, disabled.output
+        return []
+
+    def read_host_records(prober, **kwargs):
+        probes.append(prober.name)
+        return []
+
+    codex = next(prober for prober in events.rootprobes.PROBERS if prober.name == "codex")
+    monkeypatch.setattr(events, "_enabled_root_probers", lambda *_: [codex])
+    monkeypatch.setattr(events, "_probe_claude", revoke_during_claude_probe)
+    monkeypatch.setattr(events, "_probe_host_records", read_host_records)
+
+    outcome, published, detail, _ = cli_module._capture_catchup_work(capturecatchup.PhaseTimer())
+
+    assert outcome == "deferred" and not published, detail
+    assert probes == []
+
+
+def test_detached_token_warm_rechecks_after_lock_wait(capture_store, monkeypatch):
+    reads = []
+    real_lock = token_usage.lock_and_get_files
+    revoked = False
+
+    @contextmanager
+    def lock_with_revocation(mode):
+        nonlocal revoked
+        if mode == "block" and not revoked:
+            revoked = True
+            disabled = runner.invoke(app, ["disable-source", "claude", "--force"])
+            assert disabled.exit_code == 0, disabled.output
+        with real_lock(mode) as files:
+            yield files
+
+    def read_jsonls(root):
+        reads.append(root)
+        return iter(())
+
+    monkeypatch.setattr(token_usage, "is_cache_cold", lambda: True)
+    monkeypatch.setattr(token_usage, "lock_and_get_files", lock_with_revocation)
+    monkeypatch.setattr(token_usage, "_iter_all_jsonls", read_jsonls)
+
+    outcome, published, detail, _ = cli_module._capture_catchup_work(capturecatchup.PhaseTimer())
+
+    assert revoked and outcome == "deferred" and not published, detail
+    assert reads == []
+
+
 # ── T5: No stale 750 ms shared sweep / 250 ms grace claims in docs ────────
 
 
@@ -1294,3 +1397,25 @@ def test_t5_no_stale_shared_sweep_or_grace_claims_in_docs():
     assert "250 ms later-reader grace" not in readme
     assert "HOST_READER_GRACE_MS" not in invariants
     assert "HOST_READER_RESERVE_MS" not in invariants
+
+
+def test_retired_source_migration_preserves_a_disable_during_confirmation(tmp_path, monkeypatch):
+    _init_push_env(tmp_path, monkeypatch)
+    cfg = config.load_config()
+    retired = tmp_path / "retired"
+    retired.mkdir()
+    cfg["sync"]["sources"].append({"name": "opencode", "path": str(retired), "type": "generic"})
+    config.save_config(cfg)
+
+    def confirm(*args, **kwargs):
+        disabled = runner.invoke(app, ["disable-source", "codex", "--force"])
+        assert disabled.exit_code == 0, disabled.output
+        return True
+
+    monkeypatch.setattr(core, "ask_yes_no", confirm)
+    migrated = runner.invoke(app, ["migrate-config"])
+
+    assert migrated.exit_code == 0, migrated.output
+    sync = config.load_config()["sync"]
+    assert "opencode" not in {source["name"] for source in sync["sources"]}
+    assert {"opencode", "codex"} <= set(sync["disabled_sources"])

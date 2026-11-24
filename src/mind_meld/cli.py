@@ -4685,36 +4685,8 @@ def _print_auto_typed_error(verb: str, verb_action: str, exc: BaseException) -> 
     )
 
 
-def _auto_command_setup(verb: str) -> tuple[dict, str] | None:
-    """Load config and a noninteractive passphrase before taking the sync lock.
-
-    Returns None when the caller should exit (silent or after a typed error).
-    Logging policy:
-      - Typed error with no __cause__ (pure validation): stderr only, no log.
-        Expected conditions (missing passphrase, missing field) don't need
-        a traceback to diagnose.
-      - Typed error WITH __cause__ (wrapped OSError / TOMLDecodeError / etc.):
-        stderr + log. The wrapper message drops the underlying traceback +
-        errno, so the log is the only forensic artifact.
-      - Unexpected (non-MindMeldError) exception: always stderr + log.
-
-    Semantics:
-      - config missing          -> silent return (not initialized)
-      - config typed no-cause   -> typed one-line stderr (no log)
-      - config typed w/cause    -> typed one-line stderr + full chain to log
-      - config unexpected error -> one-line stderr + traceback to log
-      - keyring cannot answer   -> remedy one-line stderr + keyring-locked /
-        without a prompt           keyring-no-collection breadcrumb (no log)
-      - keyring + env empty     -> typed one-line stderr (no log)
-      - crypto typed no-cause   -> typed one-line stderr (no log)
-      - crypto typed w/cause    -> typed one-line stderr + full chain to log
-      - crypto unexpected error -> one-line stderr + traceback to log
-
-    Does NOT acquire the lockfile; caller owns that and decides lock-policy.
-
-    Writes a breadcrumb (`last-autorun.json`) on every early-exit path so
-    `mm status` can surface silent-skip history.
-    """
+def _load_auto_config(verb: str) -> dict | None:
+    """Read hook configuration with the normal quiet skip and typed error paths."""
     # All CONFIG_PATH access goes through `_config_module.CONFIG_PATH` so
     # `monkeypatch.setattr("mind_meld.config.CONFIG_PATH", ...)` propagates.
     # `load_config()` already resolves through the module attribute; a
@@ -4740,6 +4712,39 @@ def _auto_command_setup(verb: str) -> tuple[dict, str] | None:
         )
         _log_unexpected(verb, e)
         _write_autorun_breadcrumb(verb, "config-error", type(e).__name__)
+        return None
+
+    return config
+
+
+def _auto_command_setup(verb: str) -> tuple[dict, str] | None:
+    """Load config and a noninteractive passphrase before taking the sync lock.
+
+    Returns None when the caller should exit (silent or after a typed error).
+    Logging policy:
+      - Typed error with no __cause__ (pure validation): stderr only, no log.
+        Expected conditions (missing passphrase, missing field) don't need
+        a traceback to diagnose.
+      - Typed error WITH __cause__ (wrapped OSError / TOMLDecodeError / etc.):
+        stderr + log. The wrapper message drops the underlying traceback +
+        errno, so the log is the only forensic artifact.
+      - Unexpected (non-MindMeldError) exception: always stderr + log.
+
+    Semantics:
+      - config missing          -> silent return (not initialized)
+      - config typed no-cause   -> typed one-line stderr (no log)
+      - config typed w/cause    -> typed one-line stderr + full chain to log
+      - config unexpected error -> one-line stderr + traceback to log
+      - keyring cannot answer   -> remedy one-line stderr + keyring-locked /
+        without a prompt           keyring-no-collection breadcrumb (no log)
+      - keyring + env empty     -> typed one-line stderr (no log)
+    The caller acquires the sync lock before opening storage.
+
+    Writes a breadcrumb (`last-autorun.json`) on every early-exit path so
+    `mm status` can surface silent-skip history.
+    """
+    config = _load_auto_config(verb)
+    if config is None:
         return None
 
     # Seam 1 — transition detection on the silent autopull/autopush path.
@@ -4791,7 +4796,11 @@ def _auto_command_setup(verb: str) -> tuple[dict, str] | None:
 
 
 def _init_auto_command_crypto(verb: str, config: dict, passphrase: str) -> int | None:
-    """Open unattended storage and serialize any config backfill with source changes."""
+    """Open unattended storage and serialize any config backfill with source changes.
+
+    Typed failures give a one-line diagnostic. Wrapped or unexpected failures
+    also retain their cause in the hook log.
+    """
     # get_backend() can still raise on malformed config["storage"]["path"]
     # (load_config validates presence, not types). Guard it the same way
     # as the crypto-session call so the hook contract holds end-to-end.
@@ -4854,7 +4863,10 @@ def _auto_command_scope(
         return
 
     try:
-        config = load_config()
+        config = _load_auto_config(verb)
+        if config is None:
+            yield None
+            return
         memory_kb = _init_auto_command_crypto(verb, config, passphrase)
         yield _AutoSetup(config, passphrase, memory_kb) if memory_kb is not None else None
     except typer.Exit:

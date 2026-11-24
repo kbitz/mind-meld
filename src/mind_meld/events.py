@@ -676,14 +676,21 @@ def _normalize_git_capture_cache(cache: dict) -> None:
     cache["probe_index"] = _normalize_probe_index(cache.get("probe_index"))
 
 
-def read_git_capture_cache() -> dict:
-    """Diagnostics and previews never create a cache or its lock."""
+_READABLE_GIT_CACHE_STATES = {"valid", "missing", "empty"}
+
+
+def read_git_capture_cache(*, strict: bool = False) -> dict:
+    """Read the cache without creating it or its lock."""
     try:
         with lockedjson.locked_json_snapshot(mm_config.GIT_CAPTURE_CACHE_PATH) as snapshot:
+            if strict and snapshot.state not in _READABLE_GIT_CACHE_STATES:
+                raise OSError("could not read the Git capture index")
             cache = snapshot.data if snapshot.state == "valid" else {}
             _normalize_git_capture_cache(cache)
             return cache
     except OSError:
+        if strict:
+            raise
         return _default_git_capture_cache()
 
 
@@ -696,7 +703,7 @@ class GitDiscoveryStage:
 
     @classmethod
     def read(cls) -> GitDiscoveryStage:
-        before = read_git_capture_cache()
+        before = read_git_capture_cache(strict=True)
         return cls(before, copy.deepcopy(before))
 
     def commit(self) -> bool:
@@ -712,6 +719,7 @@ def discover_git_roots(
     since: datetime | None = None,
     progress: Callable[[int, int], None] | None = None,
     stage: GitDiscoveryStage | None = None,
+    before_read: Callable[[], None] | None = None,
 ) -> GitRootDiscovery:
     """Discover git roots with one cooperative, call-scoped deadline.
 
@@ -832,6 +840,8 @@ def discover_git_roots(
         if deadline_expired():
             mark_exceeded()
             break
+        if before_read is not None:
+            before_read()
         cache["prober_resume_after"] = name
         cache.pop("_probe_validated", None)
         try:
@@ -1021,6 +1031,8 @@ def _persist_discovery_cache(
         ) as locked:
             _normalize_git_capture_cache(locked.data)
             if require_current:
+                if locked.read_state not in _READABLE_GIT_CACHE_STATES:
+                    raise OSError("could not read the Git capture index")
                 if locked.data != original_cache:
                     locked.write_on_exit = False
                     return False
@@ -3504,14 +3516,28 @@ def commit_repo_cursors(
         pass  # The event log remains authoritative; reconciliation retries later.
 
 
-def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None:
+def reconcile_uncommitted_push_cursors(
+    events_dir: Path, device_id: str, *, strict: bool = False
+) -> None:
     """Replay retained push batches missing their local cursor-cache commit.
 
     Replay oldest first: reconciling only the latest row would lose a skipped
     interval when several appends succeeded while the cache was unwritable.
     Only git snapshots preceding a terminal mm-push belong to its batch.
+    Detached publication requires successful recovery before accepting its scan.
     """
-    marker = parse_aware_ts(read_git_capture_cache().get("last_committed_push_ts"))
+    index = read_git_capture_cache(strict=True) if strict else read_git_capture_cache()
+    journal_day = None
+    if strict:
+        journal_day = min(
+            (
+                ts.astimezone(timezone.utc).date()
+                for key in index["uncommitted_push_roots"]
+                if (ts := parse_aware_ts(key)) is not None
+            ),
+            default=None,
+        )
+    marker = parse_aware_ts(index.get("last_committed_push_ts"))
     marker_day = marker.astimezone(timezone.utc).date() if marker is not None else None
     now = datetime.now(timezone.utc)
     batches: list[tuple[datetime, dict, list[dict]]] = []
@@ -3521,7 +3547,8 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
             break
         path = events_dir / f"{_safe_device_filename(device_id)}-{day.isoformat()}.jsonl"
         pending: list[dict] = []
-        for row in _iter_typed_objs(path, {"mm-push", "git-snapshot"}, EventScan(), {}):
+        scan = EventScan()
+        for row in _iter_typed_objs(path, {"mm-push", "git-snapshot"}, scan, {}):
             if row.get("type") == "git-snapshot":
                 if row.get("origin") not in (
                     GIT_SNAPSHOT_ORIGIN_INIT,
@@ -3533,6 +3560,8 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
             if ts is not None and ts <= now and (marker is None or ts > marker):
                 batches.append((ts, row, pending))
             pending = []
+        if journal_day is not None and day >= journal_day and scan.errors:
+            raise OSError("could not read events needed for cursor journal recovery")
     if not batches:
         return
     ordered = sorted(batches, key=lambda batch: batch[0])
@@ -3540,6 +3569,8 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
         with lockedjson.locked_json_rmw(mm_config.GIT_CAPTURE_CACHE_PATH) as state:
             cache = state.data
             _normalize_git_capture_cache(cache)
+            if strict and state.read_state not in _READABLE_GIT_CACHE_STATES:
+                raise OSError("could not read the Git capture index")
             mutated = False
             uncommitted = cache.get("uncommitted_push_roots")
             if not isinstance(uncommitted, dict):
@@ -3577,8 +3608,11 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
                 _prune_invalid_repo_cursors(cache["repo_cursors"], cache.get("repo_cursor_stores"))
             else:
                 state.write_on_exit = False
+        if strict and state.write_error is not None:
+            raise state.write_error
     except OSError:
-        pass
+        if strict:
+            raise
 
 
 def resolve_push_cursor(

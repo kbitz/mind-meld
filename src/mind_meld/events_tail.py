@@ -568,6 +568,7 @@ def _decide_token_walk_policy(
     *,
     quiet: bool,
     warm_deadline_s: float | None = None,
+    before_read: Callable[[], None] | None = None,
 ) -> bool:
     """Return True if the events tail should aggregate token data this push.
 
@@ -616,7 +617,13 @@ def _decide_token_walk_policy(
             if warm_deadline_s is not None
             else {}
         )
+        if before_read is not None:
+            warm_kwargs.update(
+                _accepted_kwargs(token_usage.warm_token_cache_inline, before_read=before_read)
+            )
         token_usage.warm_token_cache_inline(claude_paths, **warm_kwargs)
+    except CaptureConfigChanged:
+        raise
     except Exception as e:
         token_usage._diagnostic(f"mm: notice: token cache warm failed: {_exception_detail(e)}\n")
         return False
@@ -712,9 +719,8 @@ def _capture_host_usage(
 
     When ``concurrent`` is True (default when multiple readers run against the
     real monotonic clock), readers execute concurrently in a ``ThreadPoolExecutor``
-    with copied ``contextvars`` and strict canonical-order merging. ``Exception``
-    is caught per reader for failure isolation while ``BaseException`` (including
-    test write-guard errors) propagates to the caller.
+    with copied ``contextvars`` and strict canonical-order merging. Reader exceptions
+    are isolated. The pre-read check and base exceptions propagate to the caller.
     """
     merged: dict[str, dict[str, token_usage.Usage]] = {}
     merged_by_day: dict[str, token_usage.DayBucket] = {}
@@ -1686,6 +1692,7 @@ def _capture_event_snapshots(
             since=since,
             persist=persist and git_discovery_stage is None,
             **({"discovery_stage": git_discovery_stage} if git_discovery_stage is not None else {}),
+            **({"before_read": before_read} if before_read is not None else {}),
             use_repo_cursors=use_repo_cursors,
             walk_budget_ms=git_walk_budget_ms,
             root_discovery_budget_ms=root_discovery_budget_ms,
@@ -1851,6 +1858,7 @@ def _capture_git_rows(
     per_repo_timeout_ms: int | None = None,
     per_repo_cap_ms: int | None = None,
     discovery_stage: events.GitDiscoveryStage | None = None,
+    before_read: Callable[[], None] | None = None,
 ) -> tuple[list[dict], events.GitRootDiscovery, int, int]:
     """Discover roots and walk git, optionally persisting the local project index.
 
@@ -1875,6 +1883,8 @@ def _capture_git_rows(
     )
     if discovery_stage is not None:
         discovery_extra.update(_accepted_kwargs(events.discover_git_roots, stage=discovery_stage))
+    if before_read is not None:
+        discovery_extra.update(_accepted_kwargs(events.discover_git_roots, before_read=before_read))
     root_discovery = events.discover_git_roots(
         config,
         deadline_monotonic=discovery_deadline,
@@ -1892,6 +1902,8 @@ def _capture_git_rows(
             "deadline" if root_discovery.exceeded else "error" if root_discovery.errors else "ok"
         ),
     )
+    if before_read is not None:
+        before_read()
     root_discovery = events.dedup_git_root_discovery(root_discovery)
     roots, _discovery_errors = root_discovery
     if use_repo_cursors:
@@ -2469,6 +2481,9 @@ def _prepare_events_tail(
             if tail_deadline is not None
             else {}
         )
+        warm_kwargs.update(
+            _accepted_kwargs(_decide_token_walk_policy, before_read=check_capture_config)
+        )
         do_token_walk = _decide_token_walk_policy(claude_paths, quiet=False, **warm_kwargs)
         return "block" if do_token_walk else None
 
@@ -2592,7 +2607,11 @@ def _commit_prepared_tail(
     if _newer_capture_recorded(prepared, device_id):
         return None, degradations
     # Recovery can restore cutoffs older than those used by the prepared walk.
-    events.reconcile_uncommitted_push_cursors(prepared.events_dir, device_id)
+    try:
+        events.reconcile_uncommitted_push_cursors(prepared.events_dir, device_id, strict=True)
+    except OSError:
+        degradations.append("could not recover Git capture cursors")
+        return None, degradations
     stage = prepared.git_discovery_stage
     if stage is not None and not stage.commit():
         return None, degradations

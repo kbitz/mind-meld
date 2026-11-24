@@ -3348,14 +3348,15 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         _error(str(e))
 
     try:
-        if has_codex_memory_fold:
-            current_sync = _get_config(read_only=True)["sync"]
-            if current_sync.get("sources") != sources or current_sync.get(
-                "codex_memory_exclude_patterns"
-            ) != sync.get("codex_memory_exclude_patterns"):
-                _error("source configuration changed during migration.", fix="mm migrate-config")
-            # Keep toggles completed while the migration prompt was open.
-            disabled_sources = list(current_sync.get("disabled_sources", []) or [])
+        current_sync = _get_config(read_only=True).get("sync", {})
+        if current_sync.get("sources") != sources or (
+            has_codex_memory_fold
+            and current_sync.get("codex_memory_exclude_patterns")
+            != sync.get("codex_memory_exclude_patterns")
+        ):
+            _error("source configuration changed during migration.", fix="mm migrate-config")
+        # Keep toggles completed while the migration prompt was open.
+        disabled_sources = list(current_sync.get("disabled_sources", []) or [])
         diff_map = {name: missing for name, missing, _current in diffs}
         include_map_new = {name: patterns for name, patterns, _replaced in include_diffs}
         sync_updates: dict[str, Any] = {}

@@ -1606,7 +1606,8 @@ when committing the configuration patch. This orders consent changes with
 encrypted publication and leaves source-picker prompts outside the lock.
 Push, pull and recapture read current source settings again after acquiring
 the lock. Auto commands also open storage and backfill configuration while
-holding the lock.
+holding the lock. Migration rechecks the source list under the lock and
+retains source toggles completed while its confirmation was open.
 
 `_push_core` uses `_filter_unselected_sources` on the prior manifest BEFORE
 `generate_tombstones`, covering ok-fetch / sidecar / peer-fallback uniformly.
