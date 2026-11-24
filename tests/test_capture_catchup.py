@@ -1419,3 +1419,74 @@ def test_retired_source_migration_preserves_a_disable_during_confirmation(tmp_pa
     sync = config.load_config()["sync"]
     assert "opencode" not in {source["name"] for source in sync["sources"]}
     assert {"opencode", "codex"} <= set(sync["disabled_sources"])
+
+
+def test_detached_first_use_commits_a_readable_index(tmp_path, monkeypatch):
+    _init_push_env(tmp_path, monkeypatch)
+    assert not config.GIT_CAPTURE_CACHE_PATH.exists()
+
+    stage = events.GitDiscoveryStage.read()
+    lockfile.acquire_lock(config.LOCK_PATH)
+    try:
+        assert stage.commit()
+    finally:
+        lockfile.release_lock(config.LOCK_PATH)
+
+    assert events.GitDiscoveryStage.read().before == stage.before
+
+
+def test_torn_capture_index_cannot_advance_a_missed_interval(tmp_path, monkeypatch):
+    env = _init_push_env(tmp_path, monkeypatch)
+    cfg = config.load_config()
+    monkeypatch.setattr(events_tail.identity, "gather_local_identities", lambda **kw: [])
+    monkeypatch.setattr(events, "configured_author_emails", lambda *a: [])
+    dev = cfg["device"]["id"]
+    sources = list(config.resolve_sources(cfg, strict=True, bootstrap=False).available)
+    repo = tmp_path / "fixture-repository"
+    _init_git_repo(repo)
+    monkeypatch.setattr(
+        events, "discover_git_roots", lambda *a, **kw: events.GitRootDiscovery((repo,), ())
+    )
+    older = datetime.now(timezone.utc) - timedelta(days=1)
+    cutoff = older - timedelta(days=2)
+    skipped = {
+        "v": events.EVENTS_SCHEMA_VERSION,
+        "type": "git-snapshot",
+        "device": dev,
+        "ts": older.isoformat(),
+        "projects": [],
+        "skipped": [{"path": str(repo), "reason": events.WALK_SKIP_BUDGET_ABORT}],
+    }
+    prior = events.make_mm_push_event(
+        device=dev,
+        mm_version="1.12.85",
+        ts=older,
+        git_capture=events.make_git_capture(
+            since=cutoff, discovery="complete", walk_budget_aborts=1, walk_errors=0
+        ),
+    )
+    directory = env["events_root"] / "events"
+    events.record_uncommitted_push_roots([skipped], push_ts=prior["ts"])
+    events.write_push_event(directory, dev, [skipped, prior])
+    config.GIT_CAPTURE_CACHE_PATH.write_bytes(b"")
+
+    walks = []
+
+    def walk(root, since_iso, timeout_ms, author_emails=None):
+        walks.append(events.parse_aware_ts(since_iso))
+        return {"local_path": str(root), "remote": "example.com/user/repo", "commits": []}, None
+
+    monkeypatch.setattr(events, "_walk_one_repo", walk)
+    for _ in range(2):
+        try:
+            prepared = events_tail._prepare_events_tail(cfg, sources, dev)
+        except OSError:
+            break
+        assert prepared is not None
+        lockfile.acquire_lock(config.LOCK_PATH)
+        try:
+            events_tail._commit_prepared_tail(prepared, cfg, dev)
+        finally:
+            lockfile.release_lock(config.LOCK_PATH)
+    latest = events.latest_mm_push_row(directory, dev)
+    assert latest == prior or walks[-1] <= cutoff, (latest["ts"], walks, cutoff)

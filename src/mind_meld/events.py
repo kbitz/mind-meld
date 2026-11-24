@@ -683,7 +683,9 @@ def read_git_capture_cache(*, strict: bool = False) -> dict:
     """Read the cache without creating it or its lock."""
     try:
         with lockedjson.locked_json_snapshot(mm_config.GIT_CAPTURE_CACHE_PATH) as snapshot:
-            if strict and snapshot.state not in _READABLE_GIT_CACHE_STATES:
+            # A pre-existing empty file may be a truncated cursor journal.
+            # An absent file is the normal first-use case.
+            if strict and snapshot.state not in {"valid", "missing"}:
                 raise OSError("could not read the Git capture index")
             cache = snapshot.data if snapshot.state == "valid" else {}
             _normalize_git_capture_cache(cache)
@@ -1036,7 +1038,7 @@ def _persist_discovery_cache(
                 if locked.data != original_cache:
                     locked.write_on_exit = False
                     return False
-                if cache == original_cache:
+                if cache == original_cache and locked.read_state == "valid":
                     locked.write_on_exit = False
                     return True
                 locked.data["session_resume_after"] = cache["session_resume_after"]

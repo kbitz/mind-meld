@@ -1741,6 +1741,8 @@ consent. It replays any interrupted cursor commits before comparing the
 staged index with the input snapshot. A changed index defers publication,
 including when journal replay restores an older repository cutoff. A replay
 read or write error that leaves capture uncertain stops publication.
+An existing empty index may be the result of an interrupted write and stops
+detached capture. A missing index can be initialized on first use.
 A newer recorded capture defers the prepared batch and retains
 warmed caches, including when the newer capture is partial. An unreadable
 day file defers the batch only if its date could contain a newer capture.
