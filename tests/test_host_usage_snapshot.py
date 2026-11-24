@@ -561,6 +561,37 @@ class TestHostDeadline:
         assert capture.dropped == ()
         assert log == []
 
+    def test_attended_cap_reports_the_readers_actual_budget_after_a_delayed_start(self):
+        from mind_meld import pushtimings
+
+        current_time = 100.0
+
+        def clock():
+            return current_time
+
+        def progress(phase, completed, _total, _unit):
+            nonlocal current_time
+            if phase == "Capturing host usage" and completed == 0:
+                current_time += 1.0
+
+        def codex(*, deadline):
+            nonlocal current_time
+            assert current_time == 101.0
+            assert deadline == 103.0
+            current_time = deadline
+            return _incomplete("deadline")
+
+        timer = pushtimings.PhaseTimer()
+        with events_tail.progress_scope(progress), events_tail.phase_timer_scope(timer):
+            capture = events_tail._capture_host_usage(
+                (("codex", codex),), deadline=103.0, now=clock, phase_deadline=103.0
+            )
+
+        assert capture.dropped == (("codex", "deadline"),)
+        assert pushtimings.format_verbose_timings(timer.phases()) == [
+            "  Codex usage: 2000 ms / 2000 ms [deadline]"
+        ]
+
     def test_each_reader_gets_its_own_equal_allowance_independently(self):
         """Track 165B: every enabled reader gets the full per-provider allowance
         from its own start, even if an earlier reader spends its entire budget."""

@@ -759,9 +759,6 @@ def _capture_host_usage(
         return HostUsageCapture(None, names_in_order[0], "deadline", invoked=False)
 
     allowance_s = deadline - initial_now
-    budget_ms = (
-        budget_ms_override if budget_ms_override is not None else max(0, round(allowance_s * 1000))
-    )
     use_concurrent = (
         (total_readers > 1 and now is time.monotonic)
         if concurrent is None
@@ -816,7 +813,7 @@ def _capture_host_usage(
 
     def _run_one(
         name: str, read: HostReader
-    ) -> tuple[host_usage.HostUsageResult | None, int, bool]:
+    ) -> tuple[host_usage.HostUsageResult | None, int, int, bool]:
         call_kwargs = (
             _accepted_kwargs(read, progress=_make_item_progress(name)) if progress_enabled else {}
         )
@@ -829,12 +826,17 @@ def _capture_host_usage(
         reader_deadline = start + allowance_s
         if phase_deadline is not None:
             reader_deadline = min(reader_deadline, phase_deadline)
+        budget_ms = (
+            budget_ms_override
+            if budget_ms_override is not None
+            else max(0, round((reader_deadline - start) * 1000))
+        )
         try:
             if start >= reader_deadline:
-                return None, 0, False
+                return None, 0, budget_ms, False
             result = read(deadline=reader_deadline, **call_kwargs)
             elapsed_ms = max(0, round((now() - start) * 1000))
-            return result, elapsed_ms, True
+            return result, elapsed_ms, budget_ms, True
         except Exception as e:
             elapsed_ms = max(0, round((now() - start) * 1000))
             # The breadcrumb reason stays a closed vocabulary, but the TYPE
@@ -845,7 +847,7 @@ def _capture_host_usage(
             token_usage._diagnostic(
                 f"mm: notice: host reader {name} raised: {_exception_detail(e)}\n"
             )
-            return None, elapsed_ms, True
+            return None, elapsed_ms, budget_ms, True
         finally:
             _finish_progress(name)
 
@@ -860,7 +862,7 @@ def _capture_host_usage(
         raw_outcomes = [(name, _run_one(name, read)) for name, read in readers]
 
     invoked = False
-    for name, (result, elapsed_ms, ran) in raw_outcomes:
+    for name, (result, elapsed_ms, budget_ms, ran) in raw_outcomes:
         invoked |= ran
         label = f"{_host_progress_label(name)} usage"
         counts = latest_counts.get(name)
