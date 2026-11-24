@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import gc
 import json
-import sqlite3
 import sys
 import threading
 import time
@@ -37,6 +36,8 @@ from mind_meld.hosts import codex as codex_host
 from mind_meld.hosts import grok as grok_host
 from mind_meld.storage import keys as storage_keys
 from mind_meld.storage.local import LocalBackend
+from tests.test_agy_usage import _create_agy_db
+from tests.test_events import _init_git_repo
 
 runner = CliRunner()
 
@@ -185,20 +186,17 @@ def test_t1_per_item_progress_callbacks_for_all_readers_and_walkers(tmp_path, mo
     agy_root = tmp_path / "agy_convs"
     agy_root.mkdir()
     for i in range(2):
-        db = agy_root / f"conv-{i}.db"
-        conn = sqlite3.connect(db)
-        conn.execute("CREATE TABLE steps (id INTEGER PRIMARY KEY)")
-        conn.close()
+        _create_agy_db(agy_root / f"conv-{i}.db", {}, [])
     monkeypatch.setattr(host_usage, "AGY_CACHE_PATH", tmp_path / "agy-cache.json")
     agy_calls: list[tuple[int, int]] = []
-    host_usage.read_agy_usage(
+    agy = host_usage.read_agy_usage(
         agy_root,
         deadline=time.monotonic() + 5.0,
         consented=True,
         progress=lambda done, total: agy_calls.append((done, total)),
     )
-    assert agy_calls[0] == (0, 2)
-    assert len(agy_calls) >= 1
+    assert agy.complete
+    assert agy_calls == [(0, 2), (1, 2), (2, 2)]
 
     # 5. discover_git_roots
     disc_calls: list[tuple[int, int]] = []
@@ -284,27 +282,29 @@ def test_t1_verbose_timings_and_diag_persistence(tmp_path, monkeypatch):
 
 
 def test_t2_four_readers_run_concurrently_and_merge_in_canonical_order():
-    def slow_reader(name: str, sleep_s: float):
+    rendezvous = threading.Barrier(4)
+    clock = threading.local()
+
+    def now() -> float:
+        return getattr(clock, "value", 10.0)
+
+    def slow_reader(name: str):
         def _read(*, deadline: float):
-            assert deadline - time.monotonic() == pytest.approx(1.0, abs=0.15)
-            time.sleep(sleep_s)
+            assert deadline - now() == pytest.approx(1.0)
+            rendezvous.wait(timeout=4)
+            clock.value = now() + 0.12
             return _complete({name: {"2026-11-24": _make_usage(1)}})
 
         return _read
 
-    readers = (
-        ("codex", slow_reader("codex", 0.12)),
-        ("grok", slow_reader("grok", 0.12)),
-        ("muse", slow_reader("muse", 0.12)),
-        ("agy", slow_reader("agy", 0.12)),
-    )
-    t0 = time.monotonic()
-    cap = events_tail._capture_host_usage(readers, deadline=t0 + 1.0, concurrent=True)
-    elapsed = time.monotonic() - t0
+    names = ("codex", "grok", "muse", "agy")
+    readers = tuple((name, slow_reader(name)) for name in names)
+    cap = events_tail._capture_host_usage(readers, deadline=now() + 1, now=now, concurrent=True)
 
     assert cap.complete is True
-    assert cap.token_sources == ("codex", "grok", "muse", "agy")
-    assert elapsed < 0.35, f"expected concurrent execution (<0.35s), took {elapsed:.3f}s"
+    assert cap.token_sources == names
+    assert {sample.elapsed_ms for sample in cap.reader_timings.values()} == {120}
+    assert {sample.budget_ms for sample in cap.reader_timings.values()} == {1000}
 
 
 def test_t2_early_finishing_reader_returns_immediately_without_holding_sweep():
@@ -984,6 +984,127 @@ def test_t4_status_suppresses_deadline_nags_and_surfaces_catchup_failures(tmp_pa
         assert "needs a newer mm" in r_unsup.output or "Usage not captured" in r_unsup.output
     finally:
         lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
+
+
+@pytest.mark.parametrize("phase", ["git_discovery", "git_walk"])
+def test_running_catchup_handles_only_the_git_deadline(phase, capture_store, monkeypatch):
+    monkeypatch.setattr(events_tail, "_decide_token_walk_policy", lambda *a, **k: True)
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    real_capture = events_tail._capture_event_snapshots
+
+    def with_deadline(*args, **kwargs):
+        capture = real_capture(*args, **kwargs)
+        if phase == "git_walk":
+            return replace(capture, walk_budget_aborts=1)
+        errors = [events.GIT_ROOT_DISCOVERY_BUDGET_ERROR]
+        return replace(
+            capture,
+            root_discovery=events.GitRootDiscovery([], errors, exceeded=True),
+            discovery_errors=errors,
+        )
+
+    monkeypatch.setattr(events_tail, "_capture_event_snapshots", with_deadline)
+    note = next(capture_store["claude_dir"].rglob("note.md"))
+    note.write_text("updated fixture")
+    assert runner.invoke(app, ["autopush"]).exit_code == 0
+    crumb = json.loads(core._autorun_breadcrumb_path().read_bytes())["push"]
+    assert crumb.get("capture_deadline_only") is True, crumb
+    lockfile.acquire_lock(capturecatchup.CATCHUP_LOCK_PATH)
+    try:
+        status = runner.invoke(app, ["status"])
+    finally:
+        lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
+    assert status.exit_code == 0, status.output
+    assert "Latest push needs attention" not in status.output
+    assert "Continue capture on this machine" not in status.output
+    assert "Background capture catch-up: running" in status.output
+
+
+@pytest.mark.parametrize("index_changed", [False, True])
+def test_detached_discovery_keeps_and_commits_the_pinned_refresh_window(
+    index_changed, tmp_path, monkeypatch
+):
+    capture_store = _init_push_env(tmp_path, monkeypatch)
+    projects = capture_store["claude_dir"] / "projects"
+    monkeypatch.setattr(events, "_claude_projects_dir", lambda: projects)
+    original_root = tmp_path / "first-repository"
+    refreshed_root = tmp_path / "refreshed-repository"
+    _init_git_repo(original_root)
+    _init_git_repo(refreshed_root)
+    session = next(projects.iterdir()) / "session.jsonl"
+    session.write_text(json.dumps({"cwd": str(original_root)}))
+
+    cfg = config.load_config()
+    device = cfg["device"]["id"]
+    sources = list(config.resolve_sources(cfg, strict=True, bootstrap=False).available)
+    now = datetime.now(timezone.utc)
+    pinned = now - timedelta(days=20)
+    assert original_root in events.discover_git_roots(cfg, persist=True, since=pinned).roots
+
+    cache = events.read_git_capture_cache()
+    cache["pending_refresh_since"] = pinned.isoformat()
+    config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+    session.write_text(json.dumps({"cwd": str(refreshed_root)}))
+    directory = capture_store["events_root"] / "events"
+    prior = events.make_mm_push_event(
+        device=device, mm_version="1.12.85", ts=now - timedelta(days=1)
+    )
+    events.write_push_event(directory, device, [prior])
+
+    observed = {}
+
+    def capture_repo(root, since_iso, timeout_ms, author_emails=None):
+        observed[root] = events.parse_aware_ts(since_iso)
+        return {
+            "project": root.name,
+            "local_path": str(root),
+            "remote_url": None,
+            "commits": [],
+            "branches": ["main"],
+        }, None
+
+    monkeypatch.setattr(events, "_walk_one_repo", capture_repo)
+    prepared = events_tail._prepare_events_tail(cfg, sources, device)
+    assert prepared is not None
+    unchanged = events.read_git_capture_cache()
+    assert unchanged["pending_refresh_since"] == pinned.isoformat()
+    assert unchanged["projects"][str(session.parent)]["git_root"] == str(original_root)
+    if index_changed:
+        cache["discovery_resume_after"] = str(projects)
+        config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+    lockfile.acquire_lock(config.LOCK_PATH)
+    try:
+        path, problems = events_tail._commit_prepared_tail(prepared, cfg, device)
+    finally:
+        lockfile.release_lock(config.LOCK_PATH)
+    committed = events.read_git_capture_cache()
+    if index_changed:
+        assert path is None and not problems
+        assert committed["pending_refresh_since"] == pinned.isoformat()
+        assert committed["discovery_resume_after"] == str(projects)
+        assert events.latest_mm_push_row(directory, device) == prior
+    else:
+        assert path is not None, problems
+        assert committed["pending_refresh_since"] is None
+        assert committed["projects"][str(session.parent)]["git_root"] == str(refreshed_root)
+        assert "session_meta" in committed["projects"][str(session.parent)]
+    assert observed[refreshed_root] <= pinned
+
+
+@pytest.mark.parametrize("days_ago", [0, 1])
+def test_detached_staleness_only_considers_day_files_that_could_be_newer(
+    days_ago, capture_store, monkeypatch
+):
+    device = "dev-165a"
+    directory = capture_store["events_root"] / "events"
+    directory.mkdir()
+    now = datetime.now(timezone.utc)
+    day = (now - timedelta(days=days_ago)).date().isoformat()
+    (directory / f"{device}-{day}.jsonl").write_bytes(b"x" * 8192 + b"\n")
+    monkeypatch.setattr(token_usage, "MAX_JSONL_LINE_BYTES", 4096)
+    prepared = SimpleNamespace(started_at=now, events_dir=directory)
+
+    assert events_tail._newer_capture_recorded(prepared, device) is (days_ago == 0)
 
 
 # ── T5: No stale 750 ms shared sweep / 250 ms grace claims in docs ────────

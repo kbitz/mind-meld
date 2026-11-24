@@ -1731,13 +1731,16 @@ When `mm autopush` stops any capture phase at its deadline with work left
 changes autopush's exit code. Previews (`--dry-run`) never start one.
 Lock hierarchy is strictly `L1` (`capture-catchup.lock`) → `L2`
 (`mind-meld.lock`) → `L3` (`lockedjson` caches): Phase 1 runs attended-budget
-capture outside `L2` (`_prepare_events_tail`), warming host usage and session caches
-on disk. Git discovery reads the cached index during detached capture. It leaves
-index writes and cursor pruning to the ordinary sync path. Phase 2
-acquires `L2` with a bounded 2 s retry and revalidates configuration and
-source consent. A newer recorded capture defers the prepared batch and retains
-warmed caches, including when the newer capture is partial. Otherwise the
-worker commits prepared rows with a conservative scan-start cursor and checks
+capture outside `L2` (`_prepare_events_tail`), warming host usage and token
+caches on disk. Git discovery and session walking stage their shared activity
+index in memory. Git walking uses the staged repository cutoffs. Phase 2
+acquires `L2` with a bounded 2 s retry and revalidates configuration and source
+consent. It applies the staged index only if the on-disk index still matches
+the input snapshot. A changed index defers publication.
+A newer recorded capture defers the prepared batch and retains
+warmed caches, including when the newer capture is partial. An unreadable
+day file defers the batch only if its date could contain a newer capture.
+Otherwise the worker commits prepared rows with a conservative scan-start cursor and checks
 that the terminal row is in the accepted day-file revision. A worker that
 publishes partial capture records `"deferred"` while more work remains.
 A busy lock or missing passphrase records `"deferred"` or

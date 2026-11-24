@@ -1625,7 +1625,7 @@ def _capture_event_snapshots(
     suppress_host_capture: bool = False,
     origin: str | None = None,
     persist: bool = False,
-    persist_git_discovery: bool = True,
+    git_discovery_stage: events.GitDiscoveryStage | None = None,
     use_repo_cursors: bool = False,
     session_deadline: float | None = None,
     per_repo_cap_ms: int | None = None,
@@ -1675,7 +1675,8 @@ def _capture_event_snapshots(
             config,
             device_id,
             since=since,
-            persist=persist and persist_git_discovery,
+            persist=persist and git_discovery_stage is None,
+            **({"discovery_stage": git_discovery_stage} if git_discovery_stage is not None else {}),
             use_repo_cursors=use_repo_cursors,
             walk_budget_ms=git_walk_budget_ms,
             root_discovery_budget_ms=root_discovery_budget_ms,
@@ -1715,6 +1716,12 @@ def _capture_event_snapshots(
                 persist=persist,
                 **({"progress": session_progress} if session_progress is not None else {}),
             )
+            if git_discovery_stage is not None:
+                extra_session.update(
+                    _accepted_kwargs(
+                        events.walk_session_metadata, discovery_stage=git_discovery_stage
+                    )
+                )
             for row in events.walk_session_metadata(
                 claude_dir,
                 deadline_monotonic=deadline,
@@ -1747,7 +1754,9 @@ def _capture_event_snapshots(
         # flush them (the token lock has unwound by here) instead of
         # discarding earlier roots' finished work.
         _pending_capture_budget_ms = None
-        if persist:
+        if git_discovery_stage is not None:
+            events.discard_pending_session_state()
+        elif persist:
             try:
                 events.flush_pending_session_state()
             except Exception:
@@ -1763,7 +1772,9 @@ def _capture_event_snapshots(
             else budget_ms,
             status="deadline" if walk_done > deadline else "ok",
         )
-    if persist:
+    if git_discovery_stage is not None:
+        events.flush_pending_session_state(discovery_stage=git_discovery_stage)
+    elif persist:
         events.flush_pending_session_state()
     session_rows: list[dict] = []
     if claude_paths:
@@ -1827,6 +1838,7 @@ def _capture_git_rows(
     deadline_monotonic: float | None = None,
     per_repo_timeout_ms: int | None = None,
     per_repo_cap_ms: int | None = None,
+    discovery_stage: events.GitDiscoveryStage | None = None,
 ) -> tuple[list[dict], events.GitRootDiscovery, int, int]:
     """Discover roots and walk git, optionally persisting the local project index.
 
@@ -1849,6 +1861,8 @@ def _capture_git_rows(
         if discovery_progress is not None
         else {}
     )
+    if discovery_stage is not None:
+        discovery_extra.update(_accepted_kwargs(events.discover_git_roots, stage=discovery_stage))
     root_discovery = events.discover_git_roots(
         config,
         deadline_monotonic=discovery_deadline,
@@ -1869,7 +1883,11 @@ def _capture_git_rows(
     root_discovery = events.dedup_git_root_discovery(root_discovery)
     roots, _discovery_errors = root_discovery
     if use_repo_cursors:
-        since = events.effective_capture_since(roots, since)
+        since = events.effective_capture_since(
+            roots,
+            since,
+            **({"cursor_cache": discovery_stage.cache} if discovery_stage is not None else {}),
+        )
     walk_kwargs = (
         {} if token_usage._DIAGNOSTIC.get() is None else {"diagnostic": token_usage._diagnostic}
     )
@@ -1884,6 +1902,10 @@ def _capture_git_rows(
         )
     if use_repo_cursors and roots:
         walk_kwargs["use_repo_cursors"] = True
+        if discovery_stage is not None:
+            walk_kwargs.update(
+                _accepted_kwargs(events.walk_git_projects, cursor_cache=discovery_stage.cache)
+            )
     if per_repo_timeout_ms is not None:
         walk_kwargs["per_repo_timeout_ms"] = per_repo_timeout_ms
     if per_repo_cap_ms is not None:
@@ -2369,6 +2391,7 @@ class PreparedEventsTail:
     capture: CaptureResult
     mm_event: dict
     published_git_left: int | None = None
+    git_discovery_stage: events.GitDiscoveryStage | None = None
 
 
 def _prepare_events_tail(
@@ -2382,8 +2405,9 @@ def _prepare_events_tail(
         return None
     started_at = datetime.now(timezone.utc)
     events_dir = Path(mm_events_src["path"]).expanduser() / "events"
+    discovery_stage = events.GitDiscoveryStage.read()
     cursor = events.resolve_push_cursor(events_dir, device_id)
-    since = events.effective_capture_since([], cursor.since)
+    since = events.effective_capture_since([], cursor.since, cursor_cache=discovery_stage.cache)
 
     retro = config.get("retro")
     legacy_only = (
@@ -2431,7 +2455,7 @@ def _prepare_events_tail(
         budget_ms=budget_ms,
         git_budget_ms=git_budget_ms,
         persist=True,
-        persist_git_discovery=False,
+        git_discovery_stage=discovery_stage,
         use_repo_cursors=True,
         root_discovery_budget_ms=(
             events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS + extension_ms
@@ -2506,6 +2530,7 @@ def _prepare_events_tail(
         capture=capture,
         mm_event=mm_event,
         published_git_left=published_git_left,
+        git_discovery_stage=discovery_stage,
     )
 
 
@@ -2515,8 +2540,9 @@ def _newer_capture_recorded(prepared: PreparedEventsTail, device_id: str) -> boo
         prepared.events_dir,
         device_id,
         {"mm-push", "host-usage-snapshot", "sessions-snapshot"},
+        earliest_day=prepared.started_at.astimezone(timezone.utc).date(),
     )
-    if scan.uncertain_types:
+    if scan.errors:
         return True
     for row in scan.rows.values():
         stamp = events.parse_aware_ts(row.get("ts"))
@@ -2536,6 +2562,9 @@ def _commit_prepared_tail(
     """
     degradations = Degradations()
     if _newer_capture_recorded(prepared, device_id):
+        return None, degradations
+    stage = prepared.git_discovery_stage
+    if stage is not None and not stage.commit():
         return None, degradations
     events.reconcile_uncommitted_push_cursors(prepared.events_dir, device_id)
     capture = prepared.capture

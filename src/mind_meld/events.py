@@ -62,7 +62,7 @@ from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
 )
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypedDict
 
@@ -687,6 +687,23 @@ def read_git_capture_cache() -> dict:
         return _default_git_capture_cache()
 
 
+@dataclass
+class GitDiscoveryStage:
+    """Private working copy of the Git and session index for detached capture."""
+
+    before: dict
+    cache: dict
+
+    @classmethod
+    def read(cls) -> GitDiscoveryStage:
+        before = read_git_capture_cache()
+        return cls(before, copy.deepcopy(before))
+
+    def commit(self) -> bool:
+        """Publish while holding the sync lock, provided the cache still matches."""
+        return _persist_discovery_cache(self.cache, self.before, require_current=True)
+
+
 def discover_git_roots(
     config: dict,
     *,
@@ -694,6 +711,7 @@ def discover_git_roots(
     persist: bool = False,
     since: datetime | None = None,
     progress: Callable[[int, int], None] | None = None,
+    stage: GitDiscoveryStage | None = None,
 ) -> GitRootDiscovery:
     """Discover git roots with one cooperative, call-scoped deadline.
 
@@ -710,8 +728,8 @@ def discover_git_roots(
     if deadline_monotonic is None:
         deadline_monotonic = time.monotonic() + ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS / 1000.0
 
-    cache = read_git_capture_cache()
-    original_cache = json.loads(json.dumps(cache))
+    cache = stage.cache if stage is not None else read_git_capture_cache()
+    original_cache = json.loads(json.dumps(cache)) if persist else None
     errors: list[str] = []
     roots: list[Path] = []
     seen: set[Path] = set()
@@ -976,43 +994,8 @@ def discover_git_roots(
             for key, value in stores.items()
             if key in retained and isinstance(value, str) and value
         }
-    if persist:
-        try:
-            with lockedjson.locked_json_rmw(
-                mm_config.GIT_CAPTURE_CACHE_PATH,
-                default_factory=_default_git_capture_cache,
-                on_contention="raise",
-            ) as locked:
-                _normalize_git_capture_cache(locked.data)
-                # Merge only discovery-owned fields; cursor commits have their own lock interval.
-                for key in (
-                    "projects",
-                    "discovery_resume_after",
-                    "prober_resume_after",
-                    "pending_refresh_since",
-                    "probe_index",
-                ):
-                    locked.data[key] = cache[key]
-                for root, ts in cache["repo_cursors"].items():
-                    if original_cache["repo_cursors"].get(root) != ts:
-                        previous = locked.data["repo_cursors"].get(root)
-                        locked.data["repo_cursors"][root] = min(previous, ts) if previous else ts
-                for root in original_cache["repo_cursors"].keys() - cache["repo_cursors"].keys():
-                    locked.data["repo_cursors"].pop(root, None)
-                locked_stores = locked.data.get("repo_cursor_stores")
-                if not isinstance(locked_stores, dict):
-                    locked_stores = {}
-                    locked.data["repo_cursor_stores"] = locked_stores
-                for key in list(locked_stores):
-                    if key not in locked.data["repo_cursors"]:
-                        locked_stores.pop(key, None)
-                remembered = cache.get("repo_cursor_stores")
-                if isinstance(remembered, dict):
-                    for key, value in remembered.items():
-                        if key in locked.data["repo_cursors"] and isinstance(value, str) and value:
-                            locked_stores.setdefault(key, value)
-        except OSError:
-            pass
+    if original_cache is not None:
+        _persist_discovery_cache(cache, original_cache)
     if exceeded:
         errors.append(GIT_ROOT_DISCOVERY_BUDGET_ERROR)
     return GitRootDiscovery(
@@ -1024,6 +1007,61 @@ def discover_git_roots(
         tuple(sorted(reject_tally.items())),
         tuple(probers_ran),
     )
+
+
+def _persist_discovery_cache(
+    cache: dict, original_cache: dict, *, require_current: bool = False
+) -> bool:
+    """Apply discovery index and cursor updates without replacing the push journal."""
+    try:
+        with lockedjson.locked_json_rmw(
+            mm_config.GIT_CAPTURE_CACHE_PATH,
+            default_factory=_default_git_capture_cache,
+            on_contention="raise",
+        ) as locked:
+            _normalize_git_capture_cache(locked.data)
+            if require_current:
+                if locked.data != original_cache:
+                    locked.write_on_exit = False
+                    return False
+                if cache == original_cache:
+                    locked.write_on_exit = False
+                    return True
+                locked.data["session_resume_after"] = cache["session_resume_after"]
+            # Cursor commits and their journal have their own lock interval.
+            for key in (
+                "projects",
+                "discovery_resume_after",
+                "prober_resume_after",
+                "pending_refresh_since",
+                "probe_index",
+            ):
+                locked.data[key] = cache[key]
+            for root, ts in cache["repo_cursors"].items():
+                if original_cache["repo_cursors"].get(root) != ts:
+                    previous = locked.data["repo_cursors"].get(root)
+                    locked.data["repo_cursors"][root] = min(previous, ts) if previous else ts
+            for root in original_cache["repo_cursors"].keys() - cache["repo_cursors"].keys():
+                locked.data["repo_cursors"].pop(root, None)
+            locked_stores = locked.data.get("repo_cursor_stores")
+            if not isinstance(locked_stores, dict):
+                locked_stores = {}
+                locked.data["repo_cursor_stores"] = locked_stores
+            for key in list(locked_stores):
+                if key not in locked.data["repo_cursors"]:
+                    locked_stores.pop(key, None)
+            remembered = cache.get("repo_cursor_stores")
+            if isinstance(remembered, dict):
+                for key, value in remembered.items():
+                    if key in locked.data["repo_cursors"] and isinstance(value, str) and value:
+                        locked_stores.setdefault(key, value)
+    except OSError:
+        if require_current:
+            raise
+        return False
+    if require_current and locked.write_error is not None:
+        raise locked.write_error
+    return True
 
 
 def _enabled_source_names(config: dict) -> set[str]:
@@ -2157,6 +2195,7 @@ def walk_git_projects(
     author_emails: Sequence[str] | None = None,
     per_repo_timeout_ms: int | None = None,
     per_repo_cap_ms: int | None = None,
+    cursor_cache: dict | None = None,
 ) -> list[GitSnapshot]:
     """Capture commits since `since` across `roots`. Returns one
     GitSnapshot per push (a SINGLE row aggregating all projects), so the
@@ -2180,7 +2219,9 @@ def walk_git_projects(
     Per-repo failures fold into the row's `skipped` field (A5). Whole-walk
     failure surfaces as `mm: notice:` and we return an empty/partial row.
     """
-    cache = read_git_capture_cache() if use_repo_cursors else {}
+    cache = {}
+    if use_repo_cursors:
+        cache = cursor_cache if cursor_cache is not None else read_git_capture_cache()
     root_cursors = cache.get("repo_cursors", {})
     stores = cache.get("repo_cursor_stores", {})
     if not isinstance(stores, Mapping):
@@ -2644,8 +2685,10 @@ def _reuse_session_meta(
     return meta
 
 
-def flush_pending_session_state() -> None:
-    """Write staged session-walk state to ``GIT_CAPTURE_CACHE_PATH``.
+def flush_pending_session_state(*, discovery_stage: GitDiscoveryStage | None = None) -> None:
+    """Save staged session-walk state, optionally in the detached capture's private cache.
+
+    With no stage, write to ``GIT_CAPTURE_CACHE_PATH``.
 
     No-op when nothing was staged or when the walk visited zero projects
     (an already-expired deadline must not save state). Staged records are
@@ -2656,23 +2699,29 @@ def flush_pending_session_state() -> None:
     pending, _pending_session_state = _pending_session_state, None
     if not pending or pending.get("visited", 0) <= 0:
         return
+    if discovery_stage is not None:
+        _apply_session_state(discovery_stage.cache, pending)
+        return
     try:
         with lockedjson.locked_json_rmw(mm_config.GIT_CAPTURE_CACHE_PATH) as state:
-            cache = state.data
-            _normalize_git_capture_cache(cache)
-            projects = cache["projects"]
-            for key, record in pending["projects"].items():
-                entry = dict(projects.get(key) or {})
-                entry["session_meta"] = record
-                projects[key] = entry
-            resume_map = cache["session_resume_after"]
-            for root, cursor in pending["session_resume_after"].items():
-                if cursor is None:
-                    resume_map.pop(root, None)
-                else:
-                    resume_map[root] = cursor
+            _normalize_git_capture_cache(state.data)
+            _apply_session_state(state.data, pending)
     except (OSError, lockedjson.LockContended):
         return
+
+
+def _apply_session_state(cache: dict, pending: dict) -> None:
+    projects = cache["projects"]
+    for key, record in pending["projects"].items():
+        entry = dict(projects.get(key) or {})
+        entry["session_meta"] = record
+        projects[key] = entry
+    resume_map = cache["session_resume_after"]
+    for root, cursor in pending["session_resume_after"].items():
+        if cursor is None:
+            resume_map.pop(root, None)
+        else:
+            resume_map[root] = cursor
 
 
 def discard_pending_session_state() -> None:
@@ -2688,6 +2737,7 @@ def walk_session_metadata(
     token_cache_files: dict | None = None,
     persist: bool = False,
     progress: Callable[[int, int], None] | None = None,
+    discovery_stage: GitDiscoveryStage | None = None,
 ) -> list[SessionsSnapshot]:
     """Walk ``<claude_dir>/projects/<encoded>/*.jsonl`` aggregating per-project
     session metadata. Returns one SessionsSnapshot row aggregating all
@@ -2761,7 +2811,7 @@ def walk_session_metadata(
     cache_projects: dict = {}
     resume = ""
     if persist:
-        cache = read_git_capture_cache()
+        cache = discovery_stage.cache if discovery_stage is not None else read_git_capture_cache()
         cache_projects = cache["projects"]
         resume_map = cache.get("session_resume_after")
         resume = resume_map.get(source_root, "") if isinstance(resume_map, dict) else ""
@@ -3167,9 +3217,11 @@ def window_syntax_error(s: str) -> str:
     return f"window must be of the form Nd (e.g. '7d', '30d'); got {s!r}{hint}"
 
 
-def effective_capture_since(roots: Sequence[Path | str], since: datetime) -> datetime:
+def effective_capture_since(
+    roots: Sequence[Path | str], since: datetime, *, cursor_cache: dict | None = None
+) -> datetime:
     """Oldest retained repository interval, also used for budget escalation."""
-    cache = read_git_capture_cache()
+    cache = cursor_cache if cursor_cache is not None else read_git_capture_cache()
     cursors = cache["repo_cursors"]
     stores = cache.get("repo_cursor_stores", {})
     if not isinstance(stores, Mapping):
@@ -3668,6 +3720,7 @@ def latest_event_rows(
     selectors: Mapping[str, Callable[[dict], tuple[tuple, dict] | None]] | None = None,
     day_margins: Mapping[str, timedelta] | None = None,
     now: datetime | None = None,
+    earliest_day: date | None = None,
 ) -> EventScan:
     """Newest of each requested type in one pass per retained day file.
 
@@ -3679,6 +3732,7 @@ def latest_event_rows(
     Types opting into a day margin must project an aware ``ts``. Their keys
     remain opaque: uncertainty uses that timestamp and the writer's contract
     that a row never lands in a file dated before its own UTC date.
+    A caller checking for newer rows can skip file dates before its UTC cutoff.
     """
     scan = EventScan()
     selectors = selectors or {}
@@ -3724,6 +3778,8 @@ def latest_event_rows(
     )
     for delta in range(-forward_days, CURSOR_SCAN_DAYS + 1):
         day = now.date() - timedelta(days=delta)
+        if earliest_day is not None and day < earliest_day:
+            break
         path = events_dir / f"{safe_device}-{day.isoformat()}.jsonl"
         try:
             skip_non_file = path.exists() and not path.is_file()
