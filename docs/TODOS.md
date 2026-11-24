@@ -56,6 +56,48 @@ here by hand, use the H3 form.
 - **Context:** Track 163A testing and coverage audits. Bare inspection already pins the named `collection show` argv.
 - **Revisit when:** The next Track changes qmd preflight or read-only inspection. Exercise the observed version banner and pin the JSON diagnostic's `collection show` calls with `INDEX_PATH=:memory:`.
 
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Attribute files from a peer with an empty registered name
+
+- **Test gap:** No demonstrated defect. The formatter fixture covers display fallback.
+- **Description:** A pull fixture with an empty registered name could verify that the accounting result uses the device ID as the label.
+- **Evidence:** Track 164A coverage audit of `_pull_core` and `TestAppliedClause`.
+- **Revisit when:** A Track changes peer registration or the per-peer accounting result.
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pull_result.py] Test gap: Sort pull labels whose order changes after sanitization
+
+- **Test gap:** No demonstrated defect. Current tests exercise sorting and sanitization separately.
+- **Description:** Add two labels whose order differs before and after sanitization to the existing formatter fixture.
+- **Evidence:** Track 164A coverage audit of `applied_clause`.
+- **Revisit when:** A Track changes peer label formatting or sorting.
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_integration.py] Test gap: Attribute LCS merges in the per-peer pull result
+
+- **Test gap:** No demonstrated defect. Current tests assert LCS history and aggregate counts.
+- **Description:** Inspect the peer count for an LCS merge through the existing pull result observer.
+- **Evidence:** Track 164A coverage audit of `_account_source` and the post-LCS fixture.
+- **Revisit when:** A Track changes inline merges or per-peer accounting.
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_integration.py] Test gap: Preserve peer counts when a pull is interrupted
+
+- **Test gap:** No demonstrated defect. Existing interruption checks assert aggregate counts and retained history.
+- **Description:** Extend the in-flight result observer check to assert the device and count for a write that completed before interruption.
+- **Evidence:** Track 164A coverage audit of `_pull_core` recovery and the post-LCS fixture.
+- **Revisit when:** A Track changes interrupted pull accounting or reads per-peer counts from partial results.
+
+### [review:files=src/mind_meld/cli.py|tests/test_codex_memory_source.py] Test gap: Report retired-copy cleanup alongside an applying peer
+
+- **Test gap:** No demonstrated defect. The mixed fixture checks the result and disk state.
+- **Description:** Assert the cleanup line follows the applying peer's line when both outcomes occur.
+- **Evidence:** Track 164A coverage audit of `_sync_success` and Codex memory copy removal.
+- **Revisit when:** A Track changes retired-copy cleanup or attended pull line ordering.
+
+### [review:files=src/mind_meld/cli.py|tests/test_pull_result.py] Test gap: Report old-form delivery alongside an applying peer
+
+- **Test gap:** No demonstrated defect. Existing tests cover the old-form clause on its own.
+- **Description:** Assert the old-form line follows the applied lead when a pull sees both outcomes.
+- **Evidence:** Track 164A coverage audit of `_sync_success` and the old-form result fixture.
+- **Revisit when:** A Track changes old-form reporting or attended pull line ordering.
+
 ## Drain records
 
 ### Targeted roadmap regeneration of qmd isolation (2026-11-22)

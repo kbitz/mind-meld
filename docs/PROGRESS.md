@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.85 | 2026-11-24 | Attended `mm pull` now reports the content changes applied from each peer device on its outcome line. |
 | 1.12.84 | 2026-11-22 | Mind Meld now keeps agent memory in its own qmd index, refuses a bad qmd version before enabling that index, and explains how to update agent instructions. |
 | 1.12.83 | 2026-11-22 | Enabling the memory index now prints a copyable command to install or upgrade qmd when it is missing or older than 2.8.3. |
 | 1.12.82 | 2026-11-22 | This release does not change anything people see or do in mind-meld. |

@@ -692,7 +692,7 @@ def test_pull_warns_on_unknown_source(tmp_path, monkeypatch):
     assert r.exit_code == 0, (r.stdout, r.stderr)
     # Warning prints regardless of --verbose (the whole point of the fix).
     assert "unknown source 'gstack'" in (r.stdout + (r.stderr or ""))
-    assert r.stdout == "Pull: 1 file applied.\n"
+    assert r.stdout == "Pull: 1 content change from Mac A.\n"
 
 
 # ─── --conflict-mode fail preflight ──────────────────────────────────────

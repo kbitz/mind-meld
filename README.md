@@ -275,14 +275,14 @@ the default `gstack` source, so check `mm sources` shows `gstack` enabled on bot
 ```bash
 # On Mac A, then Mac B (once each, in order)
 mm update && mm push           # Push: metadata updated.     (the new .mind-meld-anchor tokens; or N content changes published)
-mm pull                        # Pull: no changes.           (or N files applied)
+mm pull                        # Pull: no changes.           (or N content changes from Mac A)
 
 # On Mac A: create a file and share it
 mkdir -p ~/.gstack/analytics && echo "recipe v1" > ~/.gstack/analytics/mm-recipe.md
 mm push                        # Push: 1 content change published.
 
 # On Mac B: receive it
-mm pull --verbose              # Includes "flushed N files in X.XXs", then Pull: 1 file applied.
+mm pull --verbose              # Includes "flushed N files in X.XXs", then Pull: 1 content change from Mac A.
 cat ~/.gstack/analytics/mm-recipe.md   # recipe v1
 
 # On Mac A: delete it, preview, publish
@@ -303,7 +303,7 @@ cp -n /tmp/mm-recipe.md ~/.gstack/analytics/mm-recipe.md
 mm push                        # Push: 1 content change published.
 
 # On Mac B: the file comes back
-mm pull                        # Pull: 1 file applied.
+mm pull                        # Pull: 1 content change from Mac A.
 ```
 
 Repeat the recipe with the Macs' roles reversed, and note the verbose flush time on each receiving Mac.
@@ -1147,7 +1147,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm push --dry-run` | Preview publication and deletions (files a recreated scan folder hides are not counted as deletions); changes nothing except the local lock file |
 | `mm pull --dry-run` | Preview what a pull would write, merge, conflict, delete or hold back as `older` (add `--verbose` for why a file with a deletion record is kept: `keep (<reason>)`); changes nothing except the local lock file |
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`) and end with one `Recapture: ... .` outcome line (`--verbose` / `-v` adds the window, repository, record-count and size breakdown, plus the inner push's own progress and detail). When the oldest recovered commit falls outside a 7-day retro window, an `mm: notice:` line names the `mm retro-fleet <N>d` window that covers it. Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Any other held file adds a `Push: N files held.` line (paths with `-v`) and goes with a later push. Retros window by the COMMIT's date, not by when mm captured it |
-| `mm pull` | Pull context; one final line per outcome. Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)). On a machine where `mm` manages Syncthing, adds knocking fleet devices vouched by a peer's encrypted `syncthing/<id>.enc` record (and finishes half-finished adds), removes disconnected retired devices (`retired/<id>.enc`), keeps Syncthing device names current, and reports any [unvouched pending join requests](#syncthing-folder-options) during an attended pull. Knocking devices whose sanitized name matches an unpublished registered fleet machine report `Run: mm update` (and `mm push` on that machine); superseded old registrations appear alongside join requests with `Run: mm devices retire <old-id>`; other pending join requests end with `Run: mm devices approve` |
+| `mm pull` | Pull context; one final line per outcome, reporting applied content changes per peer device (`<n> content change(s) from <device>`). Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)). On a machine where `mm` manages Syncthing, adds knocking fleet devices vouched by a peer's encrypted `syncthing/<id>.enc` record (and finishes half-finished adds), removes disconnected retired devices (`retired/<id>.enc`), keeps Syncthing device names current, and reports any [unvouched pending join requests](#syncthing-folder-options) during an attended pull. Knocking devices whose sanitized name matches an unpublished registered fleet machine report `Run: mm update` (and `mm push` on that machine); superseded old registrations appear alongside join requests with `Run: mm devices retire <old-id>`; other pending join requests end with `Run: mm devices approve` |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Open with a scoped verdict comparing local context with this device's last push, then show Syncthing state (including knocking unpublished fleet machines with `Run: mm update`, superseded old registrations alongside join requests with `Run: mm devices retire <old-id>`, and a count-only `Run: mm devices approve` line for other pending join requests on a machine where `mm` manages Syncthing), each peer's last push and applied state, the latest auto or attended run per verb, and current diagnostics. Peer pushes overdue by more than 24 h warn in every mode. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
@@ -1178,7 +1178,7 @@ Push/pull, setup, device approval, source toggles, resolution, empty conflict
 listings, status, gc, diff, log, recapture, update notices and the shared error
 helpers use them:
 
-- **Outcome:** `<Verb>: <what happened>.` on stdout, one line per thing that happened (`Push: 3 content changes published.`, `Push: 1 file held.`, `Pull: 3 files applied (1 conflict copy).`, `Gc: 2 orphaned blobs deleted.`, `Recapture: 14 commit records captured and published across 3 repositories (2026-10-14 → 2026-11-13).`).
+- **Outcome:** `<Verb>: <what happened>.` on stdout, one line per thing that happened (`Push: 3 content changes published.`, `Push: 1 file held.`, `Pull: 1 content change from mac-a, 2 content changes from mac-b (1 conflict copy).`, `Gc: 2 orphaned blobs deleted.`, `Recapture: 14 commit records captured and published across 3 repositories (2026-10-14 → 2026-11-13).`).
 - **Error:** `mm: error: <what broke>` on stderr, followed by `Run: <command>` on its own last line when a fix command is supplied.
 - **Warning:** `mm: warning: <what is wrong>` on stderr (one line; data-at-risk warnings are never quiet-gated).
 - **Notice:** `mm: notice: <what changed or was skipped>` on stderr (one line).
@@ -1212,7 +1212,7 @@ Push: 1 file held.
 $ mm pull
 mm: warning: ... — 1 conflicts: ...
 mm: 1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner
-Pull: 3 files applied (1 conflict copy).
+Pull: 1 content change from mac-a, 2 content changes from mac-b (1 conflict copy).
 ```
 
 Push counts accepted user-file changes, excluding captured usage rows and held
@@ -1239,7 +1239,11 @@ the default output shows the first remedy as an `mm: notice:` line on stderr
 before `Push:`. Automatically continuing Git catch-up stays quiet.
 
 Pull counts applications across selected peers/sources, not guaranteed unique
-paths. Skipped newer local files are omitted from the default `mm pull` outcome
+paths. On a successful pull, the lead clause lists applied content changes per
+peer device (`<n> content change(s) from <device>`, sorted by display name,
+omitting peers with zero applied files, with any `(N conflict copy/copies)`
+suffix kept on the same line); `Pull incomplete [...]` failure lines keep their
+combined `N files applied, M failed` counts. Skipped newer local files are omitted from the default `mm pull` outcome
 line (a pull that only skips newer local files prints `Pull: no changes.`);
 `mm pull --verbose` (`N skipped (local newer)`), `mm status`, and `mm diag`
 show the skipped count. A deletion a peer made prints its own outcome line
