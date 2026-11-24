@@ -1732,11 +1732,13 @@ changes autopush's exit code. Previews (`--dry-run`) never start one.
 Lock hierarchy is strictly `L1` (`capture-catchup.lock`) → `L2`
 (`mind-meld.lock`) → `L3` (`lockedjson` caches): Phase 1 runs attended-budget
 capture outside `L2` (`_prepare_events_tail`), warming host usage and token
-caches on disk. Git discovery and session walking stage their shared activity
-index in memory. Git walking uses the staged repository cutoffs. Phase 2
-acquires `L2` with a bounded 2 s retry and revalidates configuration and source
-consent. It applies the staged index only if the on-disk index still matches
-the input snapshot. A changed index defers publication.
+caches on disk. The worker checks its configuration before starting each
+provider read or warm retry and defers if the configuration has changed.
+Git discovery and session walking stage their shared activity index in
+memory. Git walking uses the staged repository cutoffs. Phase 2 acquires `L2` with a bounded 2 s retry and revalidates configuration and source
+consent. It replays any interrupted cursor commits before comparing the
+staged index with the input snapshot. A changed index defers publication,
+including when journal replay restores an older repository cutoff.
 A newer recorded capture defers the prepared batch and retains
 warmed caches, including when the newer capture is partial. An unreadable
 day file defers the batch only if its date could contain a newer capture.
@@ -1750,6 +1752,8 @@ to the next push.
 and suppresses manual `mm push` nags solely for deadline backlogs covered by a
 running or recently published (`< 24h`, at or after backlog timestamp) catch-up,
 while still surfacing catch-up failures and all non-deadline O8 degradations.
+The publication completion timestamp is taken before releasing the sync lock,
+so a later hook's backlog stays visible after the worker exits.
 Per-phase timings from attended pushes, autopushes, and catch-ups persist to
 `push-timings.json` (`capturecatchup.record_push_timings`) and appear in
 `mm push --verbose` and `mm diag`.

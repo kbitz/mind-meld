@@ -107,8 +107,6 @@ def recapture(
         days = _parse_recapture_window(window)
         config = core._get_config(read_only=dry_run)
         core._maybe_prompt_migration(config, read_only=dry_run)
-        if not dry_run:
-            config = core._get_config(read_only=False)
         refusal_suffix = core.DRY_RUN_REFUSAL if dry_run else ""
         passphrase = core._get_passphrase_or_exit()
 
@@ -118,6 +116,7 @@ def recapture(
             core._error(str(e))
 
         try:
+            config = core._get_config(read_only=dry_run)
             if not dry_run and not pullhistory.failed():
                 pullhistory.record_failure(statedb.recover_if_needed())
             backend = get_backend(config)

@@ -24,9 +24,11 @@ from mind_meld import (
     crypto,
     events,
     events_tail,
+    host_registry,
     host_usage,
     lockfile,
     manifest,
+    memoryindex,
     token_usage,
 )
 from mind_meld import cli as cli_module
@@ -415,6 +417,14 @@ def test_t3_autopush_triggers_catchup_only_on_deadline_stop_and_dry_run_never(
 
 def test_t3_single_flight_lock_and_end_to_end_catchup(tmp_path, monkeypatch):
     env = _init_push_env(tmp_path, monkeypatch)
+    cfg = config.load_config()
+    cfg.setdefault("retro", {}).update(
+        capture_budget_ms=5000,
+        attended_capture_cap_ms=12000,
+        host_usage_interactive_budget_ms=4200,
+        host_usage_autopush_budget_ms=1000,
+    )
+    config.save_config(cfg)
     monkeypatch.setattr(
         codex_host,
         "read_codex_usage",
@@ -484,7 +494,11 @@ def test_t3_single_flight_lock_and_end_to_end_catchup(tmp_path, monkeypatch):
     ]
     assert {"host-usage-snapshot", "mm-push"} <= {row["type"] for row in rows}
     assert rows[-1]["type"] == "mm-push"
-    assert "catchup" in capturecatchup.read_push_timings()["by_kind"]
+    phases = capturecatchup.read_push_timings()["by_kind"]["catchup"]["phases"]
+    budgets = {phase["phase"]: phase["budget_ms"] for phase in phases}
+    assert 3800 <= budgets["host:codex"] <= 4200
+    assert budgets["git_discovery"] > events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
+    assert budgets["git_walk"] > events.WALK_TIME_BUDGET_AUTOPUSH_MS
 
     # 3. Missing passphrase records no-passphrase without prompting
     def unavailable(*, non_interactive):
@@ -1105,6 +1119,168 @@ def test_detached_staleness_only_considers_day_files_that_could_be_newer(
     prepared = SimpleNamespace(started_at=now, events_dir=directory)
 
     assert events_tail._newer_capture_recorded(prepared, device) is (days_ago == 0)
+
+
+def test_detached_replays_failed_cursor_before_accepting_prepared_scan(tmp_path, monkeypatch):
+    env = _init_push_env(tmp_path, monkeypatch)
+    cfg = config.load_config()
+    device = cfg["device"]["id"]
+    sources = list(config.resolve_sources(cfg, strict=True, bootstrap=False).available)
+    repo = tmp_path / "journal-repository"
+    _init_git_repo(repo)
+    monkeypatch.setattr(
+        events, "discover_git_roots", lambda *a, **k: events.GitRootDiscovery((repo,), ())
+    )
+    directory = env["events_root"] / "events"
+    row_time = datetime.now(timezone.utc) - timedelta(days=1)
+    since = row_time - timedelta(days=2)
+    prior = events.make_mm_push_event(
+        device=device,
+        mm_version="1.12.85",
+        ts=row_time,
+        git_capture=events.make_git_capture(
+            since=since, discovery="complete", walk_budget_aborts=1, walk_errors=0
+        ),
+    )
+    skipped = {
+        "v": events.EVENTS_SCHEMA_VERSION,
+        "type": "git-snapshot",
+        "ts": row_time.isoformat(),
+        "device": device,
+        "projects": [],
+        "skipped": [{"path": str(repo), "reason": events.WALK_SKIP_BUDGET_ABORT}],
+    }
+    events.record_uncommitted_push_roots([skipped], push_ts=prior["ts"])
+    events.write_push_event(directory, device, [skipped, prior])
+    assert str(repo) not in events.read_git_capture_cache()["repo_cursors"]
+
+    observed = []
+
+    def walk(root, since_iso, timeout_ms, author_emails=None):
+        observed.append(events.parse_aware_ts(since_iso))
+        return {"local_path": str(root), "remote": "example.com/user/repo", "commits": []}, None
+
+    monkeypatch.setattr(events, "_walk_one_repo", walk)
+    prepared = events_tail._prepare_events_tail(cfg, sources, device)
+    assert prepared is not None
+    assert observed == [row_time]
+    lockfile.acquire_lock(config.LOCK_PATH)
+    try:
+        path, problems = events_tail._commit_prepared_tail(prepared, cfg, device)
+    finally:
+        lockfile.release_lock(config.LOCK_PATH)
+    assert path is None and not problems
+    assert events.latest_mm_push_row(directory, device) == prior
+    assert events.read_git_capture_cache()["repo_cursors"][str(repo)] == since.isoformat()
+    again = events_tail._prepare_events_tail(cfg, sources, device)
+    assert again is not None
+    assert observed[-1] == since
+
+
+@pytest.mark.parametrize("during", ["session", "warm"])
+def test_detached_reader_does_not_begin_after_revocation(during, capture_store, monkeypatch):
+    cfg = config.load_config()
+    cfg.setdefault("retro", {})["grok_host_usage"] = True
+    config.save_config(cfg)
+    reads = []
+    real_walk = events.walk_session_metadata
+
+    def revoke():
+        stopped = runner.invoke(app, ["disable-source", "grok", "--force"])
+        assert stopped.exit_code == 0, stopped.output
+        assert not config.grok_usage_consented(config.load_config())
+
+    def walk_and_revoke(*args, **kwargs):
+        if during == "session":
+            revoke()
+        return real_walk(*args, **kwargs)
+
+    def read_grok(**kwargs):
+        reads.append("initial")
+        if during == "warm":
+            revoke()
+        return _incomplete("deadline")
+
+    def warm_reader(**kwargs):
+        reads.append("warm")
+        return _incomplete("deadline")
+
+    monkeypatch.setattr(events, "walk_session_metadata", walk_and_revoke)
+    monkeypatch.setattr(grok_host, "read_grok_usage", read_grok)
+    monkeypatch.setattr(host_registry, "warm_host_cache_inline", warm_reader)
+
+    outcome, published, detail, _ = cli_module._capture_catchup_work(capturecatchup.PhaseTimer())
+
+    assert outcome == "deferred" and not published, detail
+    assert reads == (["initial"] if during == "warm" else [])
+    directory = capture_store["events_root"] / "events"
+    assert events.latest_mm_push_row(directory, cfg["device"]["id"]) is None
+
+
+@pytest.mark.parametrize("command", ["push", "autopush"])
+def test_push_refreshes_source_consent_after_unlocking(command, capture_store, monkeypatch):
+    cfg = config.load_config()
+    cfg.setdefault("retro", {})["grok_host_usage"] = True
+    config.save_config(cfg)
+    reads = []
+
+    def revoke_during_unlock(**kwargs):
+        stopped = runner.invoke(app, ["disable-source", "grok", "--force"])
+        assert stopped.exit_code == 0, stopped.output
+        assert not config.grok_usage_consented(config.load_config())
+        return "test-pass"
+
+    def read_grok(**kwargs):
+        reads.append("grok")
+        return _complete({"grok": {"2026-11-24": _make_usage(1)}})
+
+    if command == "push":
+        monkeypatch.setattr(core, "_get_passphrase_or_exit", revoke_during_unlock)
+    else:
+        monkeypatch.setattr(cli_module, "get_passphrase", revoke_during_unlock)
+    monkeypatch.setattr(grok_host, "read_grok_usage", read_grok)
+
+    pushed = runner.invoke(app, [command])
+
+    assert pushed.exit_code == 0, pushed.output
+    assert reads == []
+
+
+def test_autopush_crypto_backfill_holds_sync_lock(capture_store, monkeypatch):
+    checked = []
+    patch_config = core.patch_config_on_disk
+
+    def observe(updates):
+        checked.append(lockfile.is_lock_held(config.LOCK_PATH))
+        patch_config(updates)
+
+    monkeypatch.setattr(core, "patch_config_on_disk", observe)
+
+    pushed = runner.invoke(app, ["autopush"])
+
+    assert pushed.exit_code == 0, pushed.output
+    assert checked == [True]
+
+
+def test_catchup_publication_does_not_cover_a_later_hook(capture_store, monkeypatch):
+    def newer_deadline(_cfg):
+        assert not lockfile.is_lock_held(config.LOCK_PATH)
+        assert capturecatchup.is_catchup_running()
+        cli_module._write_autorun_breadcrumb(
+            "push", "degraded", "Git walk deadline", capture_deadline_only=True
+        )
+
+    monkeypatch.setattr(memoryindex, "start_detached_refresh", newer_deadline)
+    ran = runner.invoke(app, ["autopush", "--catchup"])
+
+    assert ran.exit_code == 0, ran.output
+    state = capturecatchup.read_catchup_state()
+    assert state["result"] == "ok" and state["published"]
+    crumb = json.loads(core._autorun_breadcrumb_path().read_bytes())["push"]
+    started = events.parse_aware_ts(state["started_at"])
+    backlog = events.parse_aware_ts(crumb["timestamp"])
+    assert backlog > started
+    assert not capturecatchup.covers_deadline_backlog(state, running=False, backlog_at=backlog)
 
 
 # ── T5: No stale 750 ms shared sweep / 250 ms grace claims in docs ────────

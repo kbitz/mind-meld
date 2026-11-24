@@ -701,6 +701,7 @@ def _capture_host_usage(
     deadline: float,
     now: Callable[[], float] = time.monotonic,
     concurrent: bool | None = None,
+    before_read: Callable[[], None] | None = None,
 ) -> HostUsageCapture:
     """Read consented hosts with equal per-provider deadlines and concurrent execution.
 
@@ -785,6 +786,8 @@ def _capture_host_usage(
         reader_deadline = start_i + allowance_s
         cb = _make_reader_progress(name)
         extra = _accepted_kwargs(read, progress=cb) if cb is not None else {}
+        if before_read is not None:
+            before_read()
         try:
             res = read(deadline=reader_deadline, **extra)
             elapsed_ms = max(0, round((now() - start_i) * 1000))
@@ -1474,6 +1477,7 @@ def _capture_host_snapshot(
     *,
     host_budget_ms: int,
     warm_host_cache: Callable[[str], None] | None = None,
+    before_read: Callable[[], None] | None = None,
 ) -> tuple[HostUsageCapture, list[dict]]:
     """One bounded sweep, one warm/retry, at most one row. No writes.
 
@@ -1497,8 +1501,9 @@ def _capture_host_snapshot(
     phase_deadline = (
         started + _host_phase_ms(capture_ms) / 1000.0 if capture_ms is not None else None
     )
+    read_check = {"before_read": before_read} if before_read is not None else {}
     host_capture = _capture_host_usage(
-        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
+        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0, **read_check
     )
     if not host_capture.invoked and host_capture.reason == "deadline":
         # No reader ran: declare every omission so a failed warm cannot vanish
@@ -1550,6 +1555,7 @@ def _capture_host_snapshot(
             retry_capture = _capture_host_usage(
                 ((name, warm_read),),
                 deadline=retry_deadline,
+                **read_check,
             )
             host_capture = _merge_warm_retry_capture(
                 host_capture,
@@ -1562,6 +1568,8 @@ def _capture_host_snapshot(
         deadline_evidence: dict[str, HostReadEvidence] = {}
         for name, reason in host_capture.dropped:
             if reason == "deadline" and name in HOST_READER_SOURCE_GATE:
+                if before_read is not None:
+                    before_read()
                 evidence = _deadline_read_evidence(name)
                 deadline_evidence[name] = evidence
                 left = _evidence_left(evidence)
@@ -1626,6 +1634,7 @@ def _capture_event_snapshots(
     origin: str | None = None,
     persist: bool = False,
     git_discovery_stage: events.GitDiscoveryStage | None = None,
+    before_read: Callable[[], None] | None = None,
     use_repo_cursors: bool = False,
     session_deadline: float | None = None,
     per_repo_cap_ms: int | None = None,
@@ -1711,6 +1720,8 @@ def _capture_event_snapshots(
             else None
         )
         for claude_dir in claude_paths:
+            if before_read is not None:
+                before_read()
             extra_session = _accepted_kwargs(
                 events.walk_session_metadata,
                 persist=persist,
@@ -1802,6 +1813,7 @@ def _capture_event_snapshots(
             host_readers,
             host_budget_ms=host_budget_ms,
             warm_host_cache=warm_host_cache,
+            **({"before_read": before_read} if before_read is not None else {}),
         )
         if persist:
             _record_host_progress(
@@ -2381,6 +2393,10 @@ def deadline_stopped_phases(capture: CaptureResult) -> tuple[str, ...]:
     return tuple(stopped)
 
 
+class CaptureConfigChanged(RuntimeError):
+    """Detached capture inputs changed before a new provider read."""
+
+
 @dataclass
 class PreparedEventsTail:
     """Lock-free Phase-1 capture payload committed in Phase 2 under mind-meld.lock."""
@@ -2403,6 +2419,15 @@ def _prepare_events_tail(
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
         return None
+
+    def check_capture_config() -> None:
+        current = mm_config.load_config()
+        if any(
+            current.get(key) != config.get(key) for key in ("device", "storage", "sync", "retro")
+        ):
+            raise CaptureConfigChanged
+
+    check_capture_config()
     started_at = datetime.now(timezone.utc)
     events_dir = Path(mm_events_src["path"]).expanduser() / "events"
     discovery_stage = events.GitDiscoveryStage.read()
@@ -2435,6 +2460,7 @@ def _prepare_events_tail(
     claude_paths = _enabled_claude_paths(sources)
 
     def prepare_catchup_token_cache() -> CacheLockMode:
+        check_capture_config()
         warm_kwargs = (
             _accepted_kwargs(
                 _decide_token_walk_policy,
@@ -2456,6 +2482,7 @@ def _prepare_events_tail(
         git_budget_ms=git_budget_ms,
         persist=True,
         git_discovery_stage=discovery_stage,
+        before_read=check_capture_config,
         use_repo_cursors=True,
         root_discovery_budget_ms=(
             events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS + extension_ms
@@ -2475,6 +2502,7 @@ def _prepare_events_tail(
             grok_consented=mm_config.grok_usage_consented(config),
         ),
     )
+    check_capture_config()
     if capture.git_rows:
         since = datetime.fromisoformat(capture.git_rows[0]["git_capture"]["since"])
     source_names = [s["name"] for s in sources if isinstance(s.get("name"), str)]
@@ -2558,15 +2586,16 @@ def _commit_prepared_tail(
 ) -> tuple[Path | None, list[str]]:
     """Commit prepared rows under mind-meld.lock and return the appended day path.
 
-    An empty result without degradations means a newer capture superseded this one.
+    An empty result without degradations defers publication after a capture or index change.
     """
     degradations = Degradations()
     if _newer_capture_recorded(prepared, device_id):
         return None, degradations
+    # Recovery can restore cutoffs older than those used by the prepared walk.
+    events.reconcile_uncommitted_push_cursors(prepared.events_dir, device_id)
     stage = prepared.git_discovery_stage
     if stage is not None and not stage.commit():
         return None, degradations
-    events.reconcile_uncommitted_push_cursors(prepared.events_dir, device_id)
     capture = prepared.capture
     mm_event = prepared.mm_event
     mm_event_ts = datetime.fromisoformat(mm_event["ts"])

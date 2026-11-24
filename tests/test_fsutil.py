@@ -2161,7 +2161,9 @@ def test_log_unexpected_refusal_releases_held_auto_command_lock(
 
     root = synthetic_account_home / ".config/mind-meld"
     monkeypatch.setattr(sidecar, "SIDECAR_DIR", root)
-    monkeypatch.setattr(cli, "_auto_command_setup", lambda verb: SimpleNamespace(config={}))
+    monkeypatch.setattr(cli, "_auto_command_setup", lambda verb: ({}, "test-pass"))
+    monkeypatch.setattr(cli, "load_config", dict)
+    monkeypatch.setattr(cli, "_init_auto_command_crypto", lambda *a: 1024)
     monkeypatch.setattr(cli, "_write_migration_breadcrumb", lambda missing: None)
     monkeypatch.setattr(cli.core, "_config_missing_recommended_excludes", lambda config: [])
     lock_path = tmp_path / "safe-lock"

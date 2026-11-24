@@ -1496,10 +1496,6 @@ def push(
         ):
             config = core._get_config(read_only=dry_run)
             core._maybe_prompt_migration(config, read_only=dry_run)
-            # Re-load in case the migration prompt mutated config on disk so the
-            # current command sees the new exclude_patterns.
-            if not dry_run:
-                config = core._get_config(read_only=False)
             run["stage"] = "authentication-error"
             passphrase = core._get_passphrase_or_exit()
             run["stage"] = "command-refused"
@@ -1518,6 +1514,9 @@ def push(
                 core._error(str(e))
 
             try:
+                # The migration prompt and source commands can update config
+                # before the passphrase lookup and sync lock finish.
+                config = core._get_config(read_only=dry_run)
                 core._start_sync_progress("Unlocking storage")
                 if not dry_run and not pullhistory.failed():
                     pullhistory.record_failure(statedb.recover_if_needed())
@@ -2999,10 +2998,6 @@ def _attended_pull(
         ):
             config = core._get_config(read_only=dry_run)
             core._maybe_prompt_migration(config, read_only=dry_run)
-            # Re-load in case the migration prompt mutated config on disk so this
-            # pull sees the new exclude_patterns.
-            if not dry_run:
-                config = core._get_config(read_only=False)
             refusal_suffix = core.DRY_RUN_REFUSAL if dry_run else ""
             run["stage"] = "authentication-error"
             if passphrase is None:
@@ -3017,6 +3012,7 @@ def _attended_pull(
                 core._error(str(e))
 
             try:
+                config = core._get_config(read_only=dry_run)
                 core._start_sync_progress("Unlocking storage")
                 if not dry_run and not pullhistory.failed():
                     pullhistory.record_failure(statedb.recover_if_needed())
@@ -4689,8 +4685,8 @@ def _print_auto_typed_error(verb: str, verb_action: str, exc: BaseException) -> 
     )
 
 
-def _auto_command_setup(verb: str) -> _AutoSetup | None:
-    """Load config + passphrase + crypto session for autopull/autopush.
+def _auto_command_setup(verb: str) -> tuple[dict, str] | None:
+    """Load config and a noninteractive passphrase before taking the sync lock.
 
     Returns None when the caller should exit (silent or after a typed error).
     Logging policy:
@@ -4791,6 +4787,11 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
         _write_autorun_breadcrumb(verb, "keyring-error", type(e).__name__)
         return None
 
+    return config, passphrase
+
+
+def _init_auto_command_crypto(verb: str, config: dict, passphrase: str) -> int | None:
+    """Open unattended storage and serialize any config backfill with source changes."""
     # get_backend() can still raise on malformed config["storage"]["path"]
     # (load_config validates presence, not types). Guard it the same way
     # as the crypto-session call so the hook contract holds end-to-end.
@@ -4822,7 +4823,7 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
         _write_autorun_breadcrumb(verb, "crypto-error", type(e).__name__)
         return None
 
-    return _AutoSetup(config=config, passphrase=passphrase, memory_kb=memory_kb)
+    return memory_kb
 
 
 @contextmanager
@@ -4837,12 +4838,13 @@ def _auto_command_scope(
     mappings. This scope owns only the shared setup, migration breadcrumb,
     lock lifecycle, and common exception-to-breadcrumb policy.
     """
-    setup = _auto_command_setup(verb)
-    if setup is None:
+    login = _auto_command_setup(verb)
+    if login is None:
         yield None
         return
+    config, passphrase = login
 
-    _write_migration_breadcrumb(core._config_missing_recommended_excludes(setup.config))
+    _write_migration_breadcrumb(core._config_missing_recommended_excludes(config))
 
     try:
         acquire_lock()
@@ -4852,7 +4854,9 @@ def _auto_command_scope(
         return
 
     try:
-        yield setup
+        config = load_config()
+        memory_kb = _init_auto_command_crypto(verb, config, passphrase)
+        yield _AutoSetup(config, passphrase, memory_kb) if memory_kb is not None else None
     except typer.Exit:
         _write_autorun_breadcrumb(verb, typer_exit_outcome)
     except MindMeldError as e:
@@ -5023,28 +5027,33 @@ def _acquire_sync_lock_bounded(backoffs: tuple[float, ...] = _CATCHUP_LOCK_BACKO
     return False
 
 
-def _capture_catchup_work(timer: capturecatchup.PhaseTimer) -> tuple[str, bool, str | None]:
+def _capture_catchup_work(
+    timer: capturecatchup.PhaseTimer,
+) -> tuple[str, bool, str | None, str | None]:
     cfg = load_config()
     sources = list(resolve_sources(cfg, strict=True, bootstrap=False).available)
-    with events_tail.phase_timer_scope(timer):
-        prepared = events_tail._prepare_events_tail(cfg, sources, cfg["device"]["id"])
+    try:
+        with events_tail.phase_timer_scope(timer):
+            prepared = events_tail._prepare_events_tail(cfg, sources, cfg["device"]["id"])
+    except events_tail.CaptureConfigChanged:
+        return "deferred", False, "capture configuration changed; run mm push", None
     if prepared is None:
-        return "no-sources", False, "no mm-events source available"
+        return "no-sources", False, "no mm-events source available", None
     if not _acquire_sync_lock_bounded():
-        return "deferred", False, "sync lock busy; caches warmed for next push"
+        return "deferred", False, "sync lock busy; caches warmed for next push", None
     try:
         current = load_config()
         if (
             current != cfg
             or list(resolve_sources(current, strict=True, bootstrap=False).available) != sources
         ):
-            return "deferred", False, "capture configuration changed; run mm push"
+            return "deferred", False, "capture configuration changed; run mm push", None
         try:
             passphrase = get_passphrase(non_interactive=True)
         except CryptoError:
             passphrase = None
         if not passphrase:
-            return "no-passphrase", False, "passphrase unavailable in keyring"
+            return "no-passphrase", False, "passphrase unavailable in keyring", None
         backend = get_backend(cfg)
         memory_kb = core._init_crypto_session(backend, passphrase, cfg, read_only=False)
         with pullhistory.command_scope(attended=False), pullhistory.batch():
@@ -5056,21 +5065,22 @@ def _capture_catchup_work(timer: capturecatchup.PhaseTimer) -> tuple[str, bool, 
                 prepared_tail=prepared,
                 phase_timer=timer,
             )
+        finished_at = datetime.now(timezone.utc).isoformat()
     finally:
         core._release_sync_lock()
 
     if pushed is None or pushed.no_sources:
-        return "failed", False, "event publication unavailable"
+        return "failed", False, "event publication unavailable", None
     if pushed.content_accepted and pushed.content_changed:
         with suppress(Exception):
             memoryindex.start_detached_refresh(cfg)
     published = pushed.prepared_tail_published
     if not published:
         if pushed.events_degradations:
-            return "failed", False, pushed.events_degradations[0]
+            return "failed", False, pushed.events_degradations[0], None
         if pushed.prepared_tail_deferred:
-            return "deferred", False, "capture inputs changed before publication; run mm push"
-        return "failed", False, "event publication unavailable; run mm diag"
+            return "deferred", False, "capture inputs changed before publication; run mm push", None
+        return "failed", False, "event publication unavailable; run mm diag", None
     if (
         pushed.held
         or pushed.ledger_cause
@@ -5079,7 +5089,7 @@ def _capture_catchup_work(timer: capturecatchup.PhaseTimer) -> tuple[str, bool, 
         or pushed.left_out_files
         or pushed.anchor_warnings
     ):
-        return "failed", True, "sync needs attention; run mm push"
+        return "failed", True, "sync needs attention; run mm push", finished_at
     capture = prepared.capture
     if (
         capture.walk_errors
@@ -5092,10 +5102,10 @@ def _capture_catchup_work(timer: capturecatchup.PhaseTimer) -> tuple[str, bool, 
         or (not capture.host_capture.complete and capture.host_capture.reason != "deadline")
         or any(reason != "deadline" for _, reason in capture.host_capture.dropped)
     ):
-        return "failed", True, "capture needs attention; run mm diag"
+        return "failed", True, "capture needs attention; run mm diag", finished_at
     if stopped := events_tail.deadline_stopped_phases(capture):
-        return "deferred", True, "capture deadline reached: " + ", ".join(stopped)
-    return "ok", True, None
+        return "deferred", True, "capture deadline reached: " + ", ".join(stopped), finished_at
+    return "ok", True, None, finished_at
 
 
 def _run_capture_catchup(trigger_phases: list[str]) -> None:
@@ -5116,13 +5126,13 @@ def _run_capture_catchup(trigger_phases: list[str]) -> None:
 
     started_at = datetime.now(timezone.utc).isoformat()
     timer = capturecatchup.PhaseTimer()
-    result, published, detail = "failed", False, None
+    result, published, detail, finished_at = "failed", False, None, None
     try:
         capturecatchup.record_catchup_state(
             state="running", started_at=started_at, trigger_phases=trigger_phases
         )
         with token_usage.diagnostic_scope(lambda *a, **k: None):
-            result, published, detail = _capture_catchup_work(timer)
+            result, published, detail, finished_at = _capture_catchup_work(timer)
     except (Exception, SystemExit) as exc:
         detail = type(exc).__name__
     finally:
@@ -5133,7 +5143,7 @@ def _run_capture_catchup(trigger_phases: list[str]) -> None:
                 result=result,
                 published=published,
                 started_at=started_at,
-                finished_at=datetime.now(timezone.utc).isoformat(),
+                finished_at=finished_at or datetime.now(timezone.utc).isoformat(),
                 trigger_phases=trigger_phases,
                 detail=detail,
             )
