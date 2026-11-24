@@ -127,7 +127,14 @@ checkpoint stays for a 1.x release that lands O9 before 2.0.0's other
 conditions. The selected target line, the MVP-1 row, the 2.0.0 stage
 version, the O9 non-goal, the supported conditions, the accepted manual
 steps and the checkpoint's criteria list follow. Audience, O1 to O8 and the
-other release rules are unchanged.
+other release rules are unchanged. Amended 2026-11-24 by `/project-spec` to
+clarify O9.2's index scope after owner-fleet acceptance observed that Claude
+project memory for a project with no checkout on a machine stays off that
+machine and is not searchable there (developer, 2026-11-24: "I think B is
+expected behavior", and "1 - yes" to adding this line): cross-machine search
+on a machine covers memory from projects present on that machine plus each
+agent's machine-wide memory. Audience, target, release policy and the other
+outcomes are unchanged.
 Earlier text lives in
 `git log -- docs/SPEC.md`.
 
@@ -429,12 +436,16 @@ index. mm never copies a memory into another agent's store. Design:
    folder.
 2. **One local index.** Each machine where the owner turns it on keeps one
    qmd index over every enabled provider's memory folders and the Codex
-   copies. The markdown stays the truth; the index is derived, never synced,
-   and refreshed after each `mm push` and `mm pull`, so synced additions and
-   deletions reach search. The agent hooks start the refresh in the
-   background and never wait; a failed refresh never changes a sync's outcome
-   and `mm status` reports it with its fix. mm manages only its own qmd
-   collections.
+   copies. Cross-machine search on a machine covers memory from projects
+   present on that machine plus each agent's machine-wide memory (Codex
+   memories, Grok global topics, Muse personal memory); Claude project memory
+   from a project with no checkout on that machine stays off it and is not
+   searchable there, by design. The markdown stays the truth; the index is
+   derived, never synced, and refreshed after each `mm push` and `mm pull`,
+   so synced additions and deletions reach search. The agent hooks start the
+   refresh in the background and never wait; a failed refresh never changes a
+   sync's outcome and `mm status` reports it with its fix. mm manages only
+   its own qmd collections.
 3. **Search and the pointer line.** Agents search with `qmd --index mind-meld search`
    (keyword, no models) or qmd's MCP server on the `mind-meld` index, and every
    hit names its provider and, for Codex, its machine. With the owner's approval,
