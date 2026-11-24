@@ -2773,7 +2773,9 @@ class _SyncProgress:
     before warnings, prompts, or the final outcome line.
     """
 
-    def __init__(self, *, enabled: bool, delay: float | None = None) -> None:
+    def __init__(
+        self, *, enabled: bool, delay: float | None = None, include_elapsed: bool = False
+    ) -> None:
         self._enabled = enabled
         self._delay = delay
         self._lock = threading.RLock()
@@ -2791,6 +2793,7 @@ class _SyncProgress:
         self._started_at: float | None = None
         self._phase_started_at = time.monotonic()
         self._show_percent = True
+        self._include_elapsed = include_elapsed
         self._last_render_at = 0.0
 
     def _can_draw(self) -> bool:
@@ -2803,15 +2806,17 @@ class _SyncProgress:
         return self._started_at is not None and time.monotonic() - self._started_at >= delay
 
     def _format_detail_locked(self, state: updateprogress.UpdateProgress, now: float) -> str:
+        base = ""
+        if state.total and state.completed is not None:
+            base = (
+                f"{100 * state.completed / state.total:.1f}% {state.detail}".rstrip()
+                if self._show_percent
+                else state.detail.rstrip()
+            )
+        if not self._include_elapsed:
+            return base
         elapsed = max(0.0, now - self._phase_started_at)
-        measured = state.total is not None and state.total > 0 and state.completed is not None
-        if measured:
-            if self._show_percent:
-                base = f"{100 * state.completed / state.total:.1f}% {state.detail}".rstrip()
-            else:
-                base = state.detail.rstrip()
-            return f"{base} · {elapsed:.1f}s" if base else f"· {elapsed:.1f}s"
-        return f"· {elapsed:.1f}s"
+        return f"{base} · {elapsed:.1f}s" if base else f"· {elapsed:.1f}s"
 
     def _start_progress_locked(self) -> bool:
         if self._progress is not None:

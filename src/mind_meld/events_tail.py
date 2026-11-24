@@ -146,6 +146,7 @@ class Degradations(list[str]):
         self.total = 0
         self.omitted = 0
         self.deadline_phases: tuple[str, ...] = ()
+        self.deadline_notices = 0
 
     def _append_unlocked(self, detail):
         if isinstance(detail, str):
@@ -166,6 +167,7 @@ class Degradations(list[str]):
                 self._append_unlocked(detail)
             self.total = min(2**53, self.total + getattr(details, "omitted", 0))
             self.omitted = min(2**53, self.omitted + getattr(details, "omitted", 0))
+            self.deadline_notices += getattr(details, "deadline_notices", 0)
             extra_phases = getattr(details, "deadline_phases", ())
             if extra_phases:
                 merged = list(self.deadline_phases)
@@ -762,14 +764,14 @@ def _capture_host_usage(
             _progress(f"Reading {label} usage", done, total, "")
 
     def _make_reader_progress(reader_name: str) -> Callable[[int, int], None] | None:
-        if progress_sink is None:
+        if progress_sink is None and _PHASE_TIMER.get() is None:
             return None
 
         def _cb(completed: int, total: int) -> None:
             with progress_lock:
                 readers_with_item_progress.add(reader_name)
                 reader_counts[reader_name] = (completed, total)
-                if unfinished and unfinished[0] == reader_name:
+                if progress_sink is not None and unfinished and unfinished[0] == reader_name:
                     label = _HOST_DISPLAY_NAMES.get(reader_name, reader_name)
                     _progress(f"Reading {label} usage", completed, total, "")
 
@@ -818,91 +820,52 @@ def _capture_host_usage(
             res, exc, elapsed_ms = _run_one(name, read)
             raw_outcomes.append((name, res, exc, elapsed_ms))
 
+    def record_reader_timing(name: str, elapsed_ms: int, status: str) -> None:
+        completed, total = reader_counts.get(name, (None, None))
+        timing = capturecatchup.PhaseTiming(
+            phase=f"host:{name}",
+            label=f"{_HOST_DISPLAY_NAMES.get(name, name)} usage",
+            elapsed_ms=elapsed_ms,
+            budget_ms=budget_ms,
+            completed=completed,
+            total=total,
+            status=status,
+        )
+        reader_timings[name] = timing
+        _record_phase(
+            timing.phase,
+            timing.label,
+            elapsed_ms,
+            budget_ms=budget_ms,
+            completed=completed,
+            total=total,
+            status=status,
+            accumulate=True,
+        )
+
     for name, result, exc, elapsed_ms in raw_outcomes:
-        label = f"{_HOST_DISPLAY_NAMES.get(name, name)} usage"
         if exc is not None:
             token_usage._diagnostic(
                 f"mm: notice: host reader {name} raised: {_exception_detail(exc)}\n"
             )
             dropped.append((name, _HOST_UNKNOWN_REASON))
-            timing = capturecatchup.PhaseTiming(
-                phase=f"host:{name}",
-                label=label,
-                elapsed_ms=elapsed_ms,
-                budget_ms=budget_ms,
-                status="error",
-            )
-            reader_timings[name] = timing
-            _record_phase(
-                timing.phase,
-                timing.label,
-                timing.elapsed_ms,
-                budget_ms=timing.budget_ms,
-                status=timing.status,
-                accumulate=True,
-            )
+            record_reader_timing(name, elapsed_ms, "error")
             continue
         assert result is not None
         if not result.complete:
             reason = result.reason if result.reason in _HOST_READ_REASONS else _HOST_UNKNOWN_REASON
             if reason in _HOST_ABSENT_REASONS:
-                timing = capturecatchup.PhaseTiming(
-                    phase=f"host:{name}",
-                    label=label,
-                    elapsed_ms=elapsed_ms,
-                    budget_ms=budget_ms,
-                    status="skipped",
-                )
-                reader_timings[name] = timing
-                _record_phase(
-                    timing.phase,
-                    timing.label,
-                    timing.elapsed_ms,
-                    budget_ms=timing.budget_ms,
-                    status=timing.status,
-                    accumulate=True,
-                )
+                record_reader_timing(name, elapsed_ms, "skipped")
                 continue
             dropped.append((name, reason))
-            status = "deadline" if reason == "deadline" else "error"
-            timing = capturecatchup.PhaseTiming(
-                phase=f"host:{name}",
-                label=label,
-                elapsed_ms=elapsed_ms,
-                budget_ms=budget_ms,
-                status=status,
-            )
-            reader_timings[name] = timing
-            _record_phase(
-                timing.phase,
-                timing.label,
-                timing.elapsed_ms,
-                budget_ms=timing.budget_ms,
-                status=timing.status,
-                accumulate=True,
-            )
+            record_reader_timing(name, elapsed_ms, "deadline" if reason == "deadline" else "error")
             continue
         contributed.append(name)
         usage_days[name] = frozenset(day for days in result.hosts.values() for day in days)
         if result.partial_days:
             partial_days[name] = frozenset(result.partial_days)
         _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
-        timing = capturecatchup.PhaseTiming(
-            phase=f"host:{name}",
-            label=label,
-            elapsed_ms=elapsed_ms,
-            budget_ms=budget_ms,
-            status="ok",
-        )
-        reader_timings[name] = timing
-        _record_phase(
-            timing.phase,
-            timing.label,
-            timing.elapsed_ms,
-            budget_ms=timing.budget_ms,
-            status=timing.status,
-            accumulate=True,
-        )
+        record_reader_timing(name, elapsed_ms, "ok")
 
     if contributed or not dropped:
         return HostUsageCapture(
@@ -1524,9 +1487,7 @@ def _capture_host_snapshot(
     attended scan cap, or the capture budget for init. Sweep + inline warm
     share one phase deadline of at most three fifths of that total;
     legacy-key-only configs instead keep a fresh allowance per warm retry.
-    Attended callers (a warm callback) also hold a reserve for each
-    later reader, in the sweep and across the warm retries. Elapsed attended
-    time is recorded for the events tail.
+    Elapsed attended time is recorded for the events tail.
     """
     global _attended_host_elapsed_s, _pending_capture_budget_ms
     started = time.monotonic()
@@ -1558,6 +1519,12 @@ def _capture_host_snapshot(
             for name, _read in host_readers
             if name in deadline_names and name in WARMABLE_HOST_READERS
         ]
+        # Each sequential warm retry leaves a small reserve for later readers.
+        reserve_s = (
+            min(300, host_budget_ms // (2 * len(host_readers))) / 1000.0
+            if len(retry_names) > 1
+            else 0.0
+        )
         for position, name in enumerate(retry_names):
 
             def warm_read(
@@ -1576,7 +1543,7 @@ def _capture_host_snapshot(
                 )
 
             retry_deadline = (
-                phase_deadline
+                phase_deadline - reserve_s * (len(retry_names) - position - 1)
                 if phase_deadline is not None
                 else time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S
             )
@@ -1893,7 +1860,7 @@ def _capture_git_rows(
         "git_discovery",
         "Git discovery",
         discovery_elapsed_ms,
-        budget_ms=root_discovery_budget_ms,
+        budget_ms=max(0, round((discovery_deadline - discovery_started) * 1000)),
         status=(
             "deadline" if root_discovery.exceeded else "error" if root_discovery.errors else "ok"
         ),
@@ -2281,6 +2248,11 @@ def _run_events_tail(
             token_usage._diagnostic(f"mm: notice: {_CURSOR_COVERAGE_DEGRADATION}\n")
         if capture.root_discovery.exceeded:
             degradations.append(_ROOT_DISCOVERY_DEGRADATION)
+            if all(
+                error == events.GIT_ROOT_DISCOVERY_BUDGET_ERROR
+                for error in capture.root_discovery.errors
+            ):
+                degradations.deadline_notices += 1
             token_usage._diagnostic(f"mm: notice: {_ROOT_DISCOVERY_DEGRADATION}\n")
         elif capture.root_discovery.errors:
             degradations.append(_ROOT_DISCOVERY_ERROR_DEGRADATION)
@@ -2306,9 +2278,12 @@ def _run_events_tail(
         )
         if walk_phrase is not None:
             degradations.append(walk_phrase)
+            if not capture.walk_errors:
+                degradations.deadline_notices += 1
             token_usage._diagnostic(f"mm: notice: {walk_phrase}\n")
         if capture.session_walk_exceeded_budget:
             degradations.append(f"events walk exceeded its {budget_ms}ms budget")
+            degradations.deadline_notices += 1
             token_usage._diagnostic("mm: notice: events tail budget exceeded\n")
         if capture.warn_lock_unavailable:
             degradations.append("token cache was locked, so tokens and skills are missing")
@@ -2341,6 +2316,8 @@ def _run_events_tail(
                     config=config,
                 )
                 degradations.append(phrase)
+                if dropped_reason == "deadline":
+                    degradations.deadline_notices += 1
                 token_usage._diagnostic(f"mm: notice: {phrase}\n")
         elif not capture.host_capture.complete:
             phrase = _capture_skip_phrase(
@@ -2351,6 +2328,8 @@ def _run_events_tail(
                 config=config,
             )
             degradations.append(phrase)
+            if capture.host_capture.reason == "deadline":
+                degradations.deadline_notices += 1
             token_usage._diagnostic(f"mm: notice: {phrase}\n")
         degradations.deadline_phases = deadline_stopped_phases(capture)
     except Exception as e:
@@ -2402,7 +2381,6 @@ def _prepare_events_tail(
         return None
     started_at = datetime.now(timezone.utc)
     events_dir = Path(mm_events_src["path"]).expanduser() / "events"
-    events.reconcile_uncommitted_push_cursors(events_dir, device_id)
     cursor = events.resolve_push_cursor(events_dir, device_id)
     since = events.effective_capture_since([], cursor.since)
 
@@ -2443,7 +2421,7 @@ def _prepare_events_tail(
         do_token_walk = _decide_token_walk_policy(claude_paths, quiet=False, **warm_kwargs)
         return "block" if do_token_walk else None
 
-    host_budget_ms = resolve_host_read_budget(config, interactive=True)[0]
+    host_budget_ms = resolve_host_read_budget(config, interactive=True, scan_cap=True)[0]
     capture = _capture_event_snapshots(
         config,
         claude_paths,
@@ -2497,6 +2475,7 @@ def _prepare_events_tail(
         sources=source_names,
         discovery_errors=capture.discovery_errors,
         local_emails=local_emails,
+        ts=started_at,
         git_capture=events.make_git_capture(
             since=since,
             discovery=events.classify_discovery(capture.root_discovery),
@@ -2528,64 +2507,33 @@ def _prepare_events_tail(
     )
 
 
-def _is_superseded_by_newer_complete_capture(
-    prepared: PreparedEventsTail,
-    device_id: str,
-) -> bool:
-    """True when a newer complete capture already landed after Phase 1 started."""
+def _newer_capture_recorded(prepared: PreparedEventsTail, device_id: str) -> bool:
+    """Prevent a detached payload from replacing any newer recorded capture."""
     scan = events.latest_event_rows(
         prepared.events_dir,
         device_id,
-        {"mm-push", "host-usage-snapshot"},
+        {"mm-push", "host-usage-snapshot", "sessions-snapshot"},
     )
-    latest_push = scan.rows.get("mm-push")
-    if not isinstance(latest_push, Mapping):
-        return False
-    raw_ts = latest_push.get("ts")
-    if not isinstance(raw_ts, str):
-        return False
-    try:
-        push_ts = datetime.fromisoformat(raw_ts)
-    except ValueError:
-        return False
-    if push_ts.tzinfo is None or push_ts <= prepared.started_at:
-        return False
-    projected = events.project_recorded_capture(dict(latest_push))
-    if projected is None or not projected.get("advances_cursor"):
-        return False
-    if (projected.get("walk_budget_aborts") or 0) > 0 or (projected.get("walk_errors") or 0) > 0:
-        return False
-    if prepared.capture.host_rows:
-        latest_host = scan.rows.get("host-usage-snapshot")
-        if not isinstance(latest_host, Mapping):
-            return False
-        raw_host_ts = latest_host.get("ts")
-        if not isinstance(raw_host_ts, str):
-            return False
-        try:
-            host_ts = datetime.fromisoformat(raw_host_ts)
-        except ValueError:
-            return False
-        if host_ts.tzinfo is None or host_ts <= prepared.started_at:
-            return False
-        if latest_host.get("degraded_sources"):
-            return False
-    return True
+    for row in scan.rows.values():
+        stamp = events.parse_aware_ts(row.get("ts"))
+        if stamp is not None and stamp >= prepared.started_at:
+            return True
+    return False
 
 
 def _commit_prepared_tail(
     prepared: PreparedEventsTail,
     config: dict,
     device_id: str,
-) -> tuple[bool, list[str]]:
-    """Phase 2 of background catch-up: commit prepared rows under mind-meld.lock.
+) -> tuple[Path | None, list[str]]:
+    """Commit prepared rows under mind-meld.lock and return the appended day path.
 
-    Returns ``(committed, degradations)``. Skips writing if a newer complete
-    capture already landed while Phase 1 ran.
+    An empty result without degradations means a newer capture superseded this one.
     """
-    degradations: list[str] = Degradations()
-    if _is_superseded_by_newer_complete_capture(prepared, device_id):
-        return False, degradations
+    degradations = Degradations()
+    if _newer_capture_recorded(prepared, device_id):
+        return None, degradations
+    events.reconcile_uncommitted_push_cursors(prepared.events_dir, device_id)
     capture = prepared.capture
     mm_event = prepared.mm_event
     mm_event_ts = datetime.fromisoformat(mm_event["ts"])
@@ -2600,11 +2548,15 @@ def _commit_prepared_tail(
             *capture.host_rows,
             mm_event,
         ],
+        strict=True,
         max_file_size=config.get("sync", {}).get("max_file_size", mm_config.DEFAULT_MAX_FILE_SIZE),
     )
     if isinstance(append_result, events.EventAppendSkipped):
         degradations.append("event append skipped (max-file-size)")
-        return False, degradations
+        return None, degradations
+    if append_result is None:
+        degradations.append("event append did not return its day file")
+        return None, degradations
     if events.latest_mm_push_row(prepared.events_dir, device_id) == mm_event:
         events.commit_repo_cursors(
             capture.git_rows,
@@ -2623,7 +2575,7 @@ def _commit_prepared_tail(
             clear=prepared.published_git_left is None,
             now=mm_event_ts,
         )
-    return True, degradations
+    return append_result, degradations
 
 
 def _run_events_backfill(

@@ -186,9 +186,9 @@ host reads (sweep plus inline warm) get up to three fifths of the attended scan 
 (`capture_budget_ms` before Track 124A; half before Track 101A), and each later attended reader keeps a reserve of up to 300 ms, so a
 slow Codex read can no longer take Antigravity's or Muse's. Autopush stayed
 at 250 ms in Track 101A before settled-aggregate memoization; after Track 105A cut
-warm Codex reads to 266 ms over 7,536 rollouts, Track 149A raised the autopush sweep
-default (`host_usage_autopush_budget_ms`) to 1,000 ms per provider concurrently
-(Track 165A; previously a 750 ms shared sweep in Track 149A; autopush still never warms). If you pinned `host_usage_interactive_budget_ms`
+warm Codex reads to 266 ms over 7,536 rollouts, Track 149A raised the shared
+sweep to 750 ms. Track 165A gives each enabled provider a concurrent 1,000 ms
+autopush deadline (`host_usage_autopush_budget_ms`). Autopush still never warms. If you pinned `host_usage_interactive_budget_ms`
 in `~/.config/mind-meld/config.toml` as a workaround, remove that line and run
 `mm push`; the measured reader timings fit the new default. Live verification
 across up to three attended pushes follows release installation. Codex also

@@ -1732,11 +1732,15 @@ changes autopush's exit code. Previews (`--dry-run`) never start one.
 Lock hierarchy is strictly `L1` (`capture-catchup.lock`) → `L2`
 (`mind-meld.lock`) → `L3` (`lockedjson` caches): Phase 1 runs attended-budget
 capture outside `L2` (`_prepare_events_tail`), warming caches on disk; Phase 2
-briefly acquires `L2` (bounded 2 s retry), skips writing if a newer complete
-capture landed during Phase 1, commits prepared rows, and publishes via
-`_push_core(..., quiet=True, prepared_tail=..., force_events_publish=True)`.
-If `L2` stays busy or passphrase is absent, catch-up records `"deferred"` or
-`"no-passphrase"` in `capture-catchup.json` while keeping warmed caches.
+acquires `L2` with a bounded 2 s retry and revalidates configuration and
+source consent. A newer recorded capture defers the prepared batch and retains
+warmed caches, including when the newer capture is partial. Otherwise the
+worker commits prepared rows with a conservative scan-start cursor and checks
+that the terminal row is in the accepted day-file revision. A worker that
+publishes partial capture records `"deferred"` while more work remains.
+A busy lock or missing passphrase records `"deferred"` or
+`"no-passphrase"` in `capture-catchup.json`. Warmed caches remain available
+to the next push.
 `mm status` inspects `capture-catchup.lock` via read-only `lockfile.is_lock_held`
 and suppresses manual `mm push` nags solely for deadline backlogs covered by a
 running or recently published (`< 24h`, at or after backlog timestamp) catch-up,

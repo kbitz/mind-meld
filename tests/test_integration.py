@@ -16888,10 +16888,17 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
         (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
 
     monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
+
+    def discover(*args, progress=None, **kwargs):
+        if progress:
+            progress(0, 2)
+            progress(2, 2)
+        return _mm_events.GitRootDiscovery([repo_a.resolve(), repo_b.resolve()], ())
+
     monkeypatch.setattr(
         _mm_events,
         "discover_git_roots",
-        lambda *a, **k: _mm_events.GitRootDiscovery([repo_a.resolve(), repo_b.resolve()], ()),
+        discover,
     )
     monkeypatch.setattr(
         _mm_events,
@@ -16902,10 +16909,17 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
 
     # 1. Force the pre-delay case without depending on machine speed.
     monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 1e6)
+
+    def read_codex(*, progress=None, **kwargs):
+        if progress:
+            progress(0, 3)
+            progress(3, 3)
+        return _mm_host_usage.HostUsageResult({}, complete=True)
+
     monkeypatch.setattr(
         _mm_codex_host,
         "read_codex_usage",
-        lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
+        read_codex,
     )
     monkeypatch.setattr(
         _mm_events,
@@ -16953,6 +16967,8 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
     term_out = slow_terminal.getvalue()
     assert "Capturing host usage" in term_out
     assert "Recording activity" in term_out
+    assert "Reading Codex usage 3/3 · " in term_out
+    assert "Discovering repositories 2/2 · " in term_out
     assert "Walking repositories" in term_out
     assert "2/2 ·" in term_out
     assert "\x1b[?25h" in term_out
@@ -16982,7 +16998,7 @@ def test_track_125a_attended_push_progress_delay_gate_and_capture_counts(capture
     verbose_res = runner.invoke(app, ["push", "--verbose"])
     assert verbose_res.exit_code == 0, verbose_res.output
     assert "\x1b[?25l" not in verbose_terminal.getvalue()
-    assert "1/1 readers" not in verbose_terminal.getvalue()
+    assert "Reading Codex usage" not in verbose_terminal.getvalue()
 
 
 def test_sync_progress_delayed_start_finishing_after_shutdown_restores_terminal(monkeypatch):

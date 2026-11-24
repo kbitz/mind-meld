@@ -389,26 +389,30 @@ def _scan_grok_root(
         canonical_root = root
     staged: dict[str, dict[str, Any]] = {}
     try:
-        session_paths: list[Path] = []
-        for _cwd_name, cwd_path in _child_dirs(root, deadline=deadline):
-            for _session_name, session_path in _child_dirs(cwd_path, deadline=deadline):
-                session_paths.append(session_path)
-        total = len(session_paths)
-        if progress is not None and total > 0:
-            try:
-                progress(0, total)
-            except Exception:
-                pass
-        for idx, session_path in enumerate(session_paths, 1):
-            if host_usage._expired(deadline):
-                raise host_usage._ReadFailure("deadline")
-            key = host_usage._cache_key(session_path, root=root, canonical_root=canonical_root)
-            staged[key] = _session_entry(session_path / "usage.json", cached_files.get(key))
+        cwd_dirs = _child_dirs(root, deadline=deadline)
+        completed = 0
+        total = len(cwd_dirs)
+
+        def report() -> None:
             if progress is not None and total > 0:
                 try:
-                    progress(idx, total)
+                    progress(completed, total)
                 except Exception:
                     pass
+
+        for _cwd_name, cwd_path in cwd_dirs:
+            sessions = _child_dirs(cwd_path, deadline=deadline)
+            # Count each unvisited directory as one item until its sessions are known.
+            # Read entries before enumerating the next directory so deadlines retain progress.
+            total += len(sessions) - 1
+            report()
+            for _session_name, session_path in sessions:
+                if host_usage._expired(deadline):
+                    raise host_usage._ReadFailure("deadline")
+                key = host_usage._cache_key(session_path, root=root, canonical_root=canonical_root)
+                staged[key] = _session_entry(session_path / "usage.json", cached_files.get(key))
+                completed += 1
+                report()
         return _aggregate_files(staged), staged
     except host_usage._ReadFailure as failure:
         return host_usage._incomplete(failure.reason), staged

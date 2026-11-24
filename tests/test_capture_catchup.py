@@ -4,13 +4,15 @@ detached single-flight background catch-up, status suppression, and doc pins."""
 from __future__ import annotations
 
 import gc
-import io
 import json
 import sqlite3
+import sys
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -24,19 +26,20 @@ from mind_meld import (
     events_tail,
     host_usage,
     lockfile,
+    manifest,
 )
 from mind_meld import cli as cli_module
 from mind_meld.cli import app
+from mind_meld.errors import CryptoError
 from mind_meld.hosts import codex as codex_host
 from mind_meld.hosts import grok as grok_host
+from mind_meld.storage import keys as storage_keys
 from mind_meld.storage.local import LocalBackend
 
 runner = CliRunner()
 
 
-class _TerminalBuf(io.StringIO):
-    def isatty(self) -> bool:
-        return True
+real_launcher = capturecatchup.start_detached_catchup
 
 
 def _make_usage(n: int = 1) -> dict[str, int]:
@@ -105,7 +108,12 @@ def _init_push_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "sources": [
                 {"name": "claude", "path": str(claude_dir), "type": "claude"},
                 {"name": "codex", "path": str(codex_dir), "type": "generic"},
-                {"name": "mm-events", "path": str(events_root), "type": "generic"},
+                {
+                    "name": "mm-events",
+                    "path": str(events_root),
+                    "type": "generic",
+                    "include_dirs": ["events"],
+                },
             ]
         },
     }
@@ -243,7 +251,11 @@ def test_t1_verbose_timings_and_diag_persistence(tmp_path, monkeypatch):
 
     # 2. push-timings.json records attended run, exposed in mm diag (text + JSON)
     timings = capturecatchup.read_push_timings()
-    assert "attended" in timings["by_kind"]
+    phases = timings["by_kind"]["attended"]["phases"]
+    host_phase = next(phase for phase in phases if phase["phase"] == "host:codex")
+    assert host_phase["budget_ms"] == 3000
+    assert (host_phase["completed"], host_phase["total"]) == (3, 3)
+    assert f"Codex usage: {host_phase['elapsed_ms']} ms / 3000 ms" in res.stdout
     assert timings["latest"]["kind"] == "attended"
 
     # 3. Autopush records autopush timings
@@ -400,7 +412,7 @@ def test_t3_autopush_triggers_catchup_only_on_deadline_stop_and_dry_run_never(
 
 
 def test_t3_single_flight_lock_and_end_to_end_catchup(tmp_path, monkeypatch):
-    _init_push_env(tmp_path, monkeypatch)
+    env = _init_push_env(tmp_path, monkeypatch)
     monkeypatch.setattr(
         codex_host,
         "read_codex_usage",
@@ -415,11 +427,19 @@ def test_t3_single_flight_lock_and_end_to_end_catchup(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(events, "walk_git_projects", lambda *a, **kw: [])
 
+    launched = []
+    proc = capturecatchup.subprocess
+    monkeypatch.setattr(
+        capturecatchup,
+        "subprocess",
+        SimpleNamespace(DEVNULL=proc.DEVNULL, Popen=lambda *a, **k: launched.append((a, k))),
+    )
     # 1. Holding CATCHUP_LOCK_PATH makes start_detached_catchup and autopush --catchup no-op
     lockfile.acquire_lock(capturecatchup.CATCHUP_LOCK_PATH)
     try:
         assert capturecatchup.is_catchup_running() is True
-        assert capturecatchup.start_detached_catchup(("host:codex",)) is False
+        assert real_launcher(("host:codex",)) is False
+        assert launched == []
         r_busy = runner.invoke(app, ["autopush", "--catchup"])
         assert r_busy.exit_code == 0
         assert r_busy.stdout == ""
@@ -428,17 +448,48 @@ def test_t3_single_flight_lock_and_end_to_end_catchup(tmp_path, monkeypatch):
         lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
 
     # 2. End-to-end autopush --catchup publishes encrypted host row + records timings & ok state
-    r_run = runner.invoke(app, ["autopush", "--catchup"])
+    assert real_launcher(("host:codex", "git_walk")) is True
+    (argv,), options = launched[0]
+    assert argv[:4] == [sys.executable, "-P", "-m", "mind_meld.cli"]
+    assert options == {
+        "cwd": "/",
+        "stdin": capturecatchup.subprocess.DEVNULL,
+        "stdout": capturecatchup.subprocess.DEVNULL,
+        "stderr": capturecatchup.subprocess.DEVNULL,
+        "start_new_session": True,
+    }
+    r_run = runner.invoke(app, argv[4:])
     assert r_run.exit_code == 0, r_run.output
     assert r_run.stdout == "" and r_run.stderr == ""
     st = capturecatchup.read_catchup_state()
     assert st["state"] == "finished"
-    assert st["result"] == "ok"
+    assert st["result"] == "ok", st
     assert st["published"] is True
+    assert st["trigger_phases"] == ["host:codex", "git_walk"]
+    diag = runner.invoke(app, ["diag", "--json"])
+    assert diag.exit_code == 0, diag.output
+    assert json.loads(diag.stdout)["capture_catchup"]["trigger_phases"] == st["trigger_phases"]
+
+    device = env["config"]["device"]["id"]
+    backend = env["backend"]
+    cipher = backend.get(storage_keys.manifest_key(device))
+    accepted = manifest.load_manifest(crypto.decrypt_manifest(cipher, "test-pass", memory_kb=1024))
+    (event_file,) = accepted["sources"]["mm-events"]["files"].values()
+    payload = backend.get(storage_keys.blob_key(device, event_file["sha256"]))
+    rows = [
+        json.loads(line)
+        for line in crypto.decrypt(payload, "test-pass", memory_kb=1024).splitlines()
+    ]
+    assert {"host-usage-snapshot", "mm-push"} <= {row["type"] for row in rows}
+    assert rows[-1]["type"] == "mm-push"
     assert "catchup" in capturecatchup.read_push_timings()["by_kind"]
 
     # 3. Missing passphrase records no-passphrase without prompting
-    monkeypatch.setattr(cli_module, "get_passphrase", lambda **kw: None)
+    def unavailable(*, non_interactive):
+        assert non_interactive
+        raise CryptoError("fixture keyring empty")
+
+    monkeypatch.setattr(cli_module, "get_passphrase", unavailable)
     r_np = runner.invoke(app, ["autopush", "--catchup"])
     assert r_np.exit_code == 0
     assert r_np.stdout == ""
@@ -503,7 +554,163 @@ def test_t3_newer_complete_push_not_overwritten_by_stale_prepared_tail(tmp_path)
         mm_event={**newer_push, "ts": t0.isoformat()},
     )
     committed, _degs = events_tail._commit_prepared_tail(prepared, {}, "dev-165a")
-    assert committed is False
+    assert committed is None
+
+
+@pytest.mark.parametrize("phase", ["git_discovery", "git_walk", "session_scan"])
+def test_autopush_defers_each_deadline_after_releasing_sync_lock(tmp_path, monkeypatch, phase):
+    _init_push_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(codex_host, "read_codex_usage", lambda **kw: _complete())
+    monkeypatch.setattr(
+        events, "discover_git_roots", lambda *a, **kw: events.GitRootDiscovery([], [])
+    )
+    real_capture = events_tail._capture_event_snapshots
+
+    def run_capture(*args, **kwargs):
+        captured = real_capture(*args, **kwargs)
+        if phase == "git_discovery":
+            return replace(captured, root_discovery=events.GitRootDiscovery([], [], exceeded=True))
+        if phase == "git_walk":
+            return replace(captured, walk_budget_aborts=1)
+        return replace(captured, session_walk_exceeded_budget=True)
+
+    launched = []
+
+    def launcher(phases):
+        assert not lockfile.is_lock_held(config.LOCK_PATH)
+        launched.append(tuple(phases))
+        return True
+
+    monkeypatch.setattr(events_tail, "_capture_event_snapshots", run_capture)
+    monkeypatch.setattr(capturecatchup, "start_detached_catchup", launcher)
+    result = runner.invoke(app, ["autopush"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == result.stderr == ""
+    assert launched == [(phase,)]
+
+
+@pytest.fixture
+def capture_store(tmp_path, monkeypatch):
+    setup = _init_push_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        codex_host,
+        "read_codex_usage",
+        lambda **kw: _complete(
+            {"codex": {datetime.now(timezone.utc).date().isoformat(): _make_usage(5)}}
+        ),
+    )
+    monkeypatch.setattr(
+        events, "discover_git_roots", lambda *a, **kw: events.GitRootDiscovery([], [])
+    )
+    monkeypatch.setattr(events, "walk_git_projects", lambda *a, **kw: [])
+    return setup
+
+
+def test_skipped_catchup_append_is_not_publication(capture_store, monkeypatch):
+    monkeypatch.setattr(
+        events,
+        "write_push_event",
+        lambda directory, *a, **k: events.EventAppendSkipped(directory / "fixture.jsonl"),
+    )
+    result = runner.invoke(app, ["autopush", "--catchup"])
+    assert result.exit_code == 0
+    assert result.stdout == result.stderr == ""
+    assert capturecatchup.read_catchup_state()["published"] is False
+
+
+def test_catchup_respects_consent_changed_during_preparation(capture_store, monkeypatch):
+    prepare = events_tail._prepare_events_tail
+
+    def prepare_then_disable(*args):
+        prepared = prepare(*args)
+        updated = config.load_config()
+        updated["sync"]["disabled_sources"] = ["codex"]
+        config.save_config(updated)
+        return prepared
+
+    monkeypatch.setattr(events_tail, "_prepare_events_tail", prepare_then_disable)
+    result = runner.invoke(app, ["autopush", "--catchup"])
+    assert result.exit_code == 0
+    events_dir = capture_store["events_root"] / "events"
+    rows = events.latest_event_rows(events_dir, "dev-165a", {"host-usage-snapshot"}).rows
+    assert "host-usage-snapshot" not in rows
+
+
+def test_unchanged_autopush_records_manifest_scan(capture_store):
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    result = runner.invoke(app, ["autopush"])
+    assert result.exit_code == 0
+    timings = capturecatchup.read_push_timings()["by_kind"].get("autopush", {})
+    assert any(phase["phase"] == "manifest_scan" for phase in timings.get("phases", []))
+
+
+def test_concurrent_partial_push_does_not_rewind_cursor(capture_store):
+    started = datetime.now(timezone.utc) - timedelta(seconds=3)
+    later = started + timedelta(seconds=2)
+    device = "dev-165a"
+    directory = capture_store["events_root"] / "events"
+    partial = events.make_mm_push_event(
+        device=device,
+        mm_version="1.12.84",
+        ts=later,
+        git_capture=events.make_git_capture(
+            since=started, discovery="complete", walk_budget_aborts=1, walk_errors=0
+        ),
+    )
+    events.write_push_event(directory, device, [partial])
+    prepared = events_tail.PreparedEventsTail(
+        started_at=started,
+        events_dir=directory,
+        since=started,
+        capture=events_tail.CaptureResult(
+            git_rows=[],
+            session_rows=[],
+            host_rows=[],
+            host_capture=events_tail.HostUsageCapture({}),
+            root_discovery=events.GitRootDiscovery(roots=[], errors=[]),
+            discovery_errors=[],
+            session_walk_exceeded_budget=False,
+            warn_lock_unavailable=False,
+            token_cache_requested=False,
+        ),
+        mm_event={**partial, "ts": started.isoformat()},
+    )
+    before = events.resolve_push_cursor(directory, device)
+    events_tail._commit_prepared_tail(prepared, capture_store["config"], device)
+    assert events.resolve_push_cursor(directory, device).since >= before.since
+
+
+def test_interrupted_catchup_is_reported_read_only(capture_store):
+    capturecatchup.record_catchup_state(
+        state="running",
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    original = capturecatchup.CATCHUP_STATE_PATH.read_bytes()
+    diag = runner.invoke(app, ["diag", "--json"])
+    assert diag.exit_code == 0, diag.output
+    state = json.loads(diag.stdout)["capture_catchup"]
+    assert state["running"] is False
+    assert state["result"] == "failed"
+    assert state["detail"] == "worker interrupted"
+    assert capturecatchup.CATCHUP_STATE_PATH.read_bytes() == original
+
+
+def test_running_catchup_does_not_hide_git_walk_errors(capture_store, monkeypatch):
+    real_capture = events_tail._capture_event_snapshots
+
+    def mixed_capture(*args, **kwargs):
+        return replace(real_capture(*args, **kwargs), walk_budget_aborts=1, walk_errors=1)
+
+    monkeypatch.setattr(events_tail, "_capture_event_snapshots", mixed_capture)
+    assert runner.invoke(app, ["autopush"]).exit_code == 0
+    lockfile.acquire_lock(capturecatchup.CATCHUP_LOCK_PATH)
+    try:
+        status = runner.invoke(app, ["status"])
+        assert status.exit_code == 0, status.output
+        assert "Latest push needs attention" in status.output
+        assert "git walk dropped 2 repositories" in " ".join(status.output.split())
+    finally:
+        lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
 
 
 # ── T4: Status suppression & read-only guarantees ─────────────────────────
@@ -592,16 +799,15 @@ def test_t4_status_suppresses_deadline_nags_and_surfaces_catchup_failures(tmp_pa
     now = datetime.now(timezone.utc)
     crumb_ts = now
     finish_ts = now
-    (env["cfg_dir"] / "host-tokens.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "last_reason": "deadline",
-                "last_deadline_allotted_ms": 1000,
-                "files": {},
-            }
-        )
-    )
+    reader_cache = env["cfg_dir"] / "host-tokens.json"
+    reader_state = {
+        "version": 1,
+        "last_reason": "deadline",
+        "last_reason_since": crumb_ts.isoformat(),
+        "last_deadline_allotted_ms": 1000,
+        "files": {},
+    }
+    reader_cache.write_text(json.dumps(reader_state))
 
     # 1. Running catch-up suppresses manual push nag and shows running line
     capturecatchup.record_catchup_state(
@@ -615,6 +821,7 @@ def test_t4_status_suppresses_deadline_nags_and_surfaces_catchup_failures(tmp_pa
         assert "Background capture catch-up: running" in r_run.output
         assert "Latest push needs attention" not in r_run.output
         assert "Usage capture needs attention" not in r_run.output
+        assert "An attended mm push can warm cold readers" not in " ".join(r_run.output.split())
     finally:
         lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
 
@@ -631,6 +838,12 @@ def test_t4_status_suppresses_deadline_nags_and_surfaces_catchup_failures(tmp_pa
     assert "Background capture catch-up: ok" in r_ok.output
     assert "published" in r_ok.output
     assert "Latest push needs attention" not in r_ok.output
+
+    reader_state["last_reason_since"] = (finish_ts + timedelta(seconds=1)).isoformat()
+    reader_cache.write_text(json.dumps(reader_state))
+    newer = runner.invoke(app, ["status"])
+    assert newer.exit_code == 0, newer.output
+    assert "Usage capture needs attention" in newer.output
 
     # 3. Failed catch-up surfaces owner-action degradation and does NOT suppress
     capturecatchup.record_catchup_state(

@@ -17,9 +17,10 @@ import time
 import traceback
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -187,6 +188,7 @@ class PushResult:
     anchor_warnings: list[str] = field(default_factory=list)
     phase_timings: tuple[capturecatchup.PhaseTiming, ...] = ()
     capture_deadline_phases: tuple[str, ...] = ()
+    prepared_tail_published: bool = False
 
 
 _USAGE_ERROR_CLS = next(cls for cls in typer.BadParameter.__mro__ if cls.__name__ == "UsageError")
@@ -1245,7 +1247,7 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     if dry_run:
         yield
         return
-    progress = core._SyncProgress(enabled=not verbose)
+    progress = core._SyncProgress(enabled=not verbose, include_elapsed=verb == "push")
     state = {"verbose": verbose, "diagnostics": events_tail.Degradations(), "progress": progress}
     token = core._SYNC_OUTPUT.set(state)
     error = None
@@ -1279,7 +1281,7 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
         if verb == "push" and verbose and isinstance(result, PushResult) and result.phase_timings:
             console.print("Phase timings:")
             for timing_line in capturecatchup.format_verbose_timings(result.phase_timings):
-                console.print(timing_line)
+                console.print(timing_line, markup=False)
         lines = _sync_success(verb, result)
         mesh_outcomes = state.get("mesh_outcomes")
         if mesh_outcomes:
@@ -2001,7 +2003,6 @@ def _push_core(
     result_observer: Callable[[PushResult], None] | None = None,
     report_nested_repositories: bool = True,
     prepared_tail: events_tail.PreparedEventsTail | None = None,
-    force_events_publish: bool = False,
     phase_timer: capturecatchup.PhaseTimer | None = None,
 ) -> PushResult | None:
     """Core push logic shared by push, autopush, and recapture.
@@ -2389,7 +2390,7 @@ def _push_core(
         and not form.due
         and not names_pending
         and not anchor_is_pending
-        and not force_events_publish
+        and prepared_tail is None
     ):
         scan_held = _held_list(held_files)
         anchor_warnings = (
@@ -2462,12 +2463,22 @@ def _push_core(
     # the just-written event row into local_manifest. dry_run still gates
     # the tail's own writes; the re-walk reads existing on-disk state.
     # Skipped entirely when no mm-internal source is selected for this push.
+    prepared_path = None
     if any(src["name"] in MM_INTERNAL_SOURCE_NAMES for src in sources):
         if prepared_tail is not None:
-            _committed, tail_degs = events_tail._commit_prepared_tail(
+            # Source configuration can change during the manifest scan without taking
+            # the sync lock. Reject the preparation before its first event write.
+            refreshed = load_config()
+            if any(
+                refreshed.get(k) != config.get(k) for k in ("device", "storage", "sync", "retro")
+            ):
+                return PushResult(events_degradations=events_degradations)
+            prepared_path, tail_degs = events_tail._commit_prepared_tail(
                 prepared_tail, config, device_id
             )
             events_degradations.extend(tail_degs)
+            if prepared_path is None:
+                return PushResult(events_degradations=events_degradations)
         else:
             core._sync_progress_phase("Recording activity")
             with events_tail.phase_timer_scope(timer):
@@ -2786,6 +2797,14 @@ def _push_core(
     result.phase_timings = timer.phases()
     result.capture_deadline_phases = tuple(getattr(events_degradations, "deadline_phases", ()))
     result.content_accepted = True
+    if prepared_tail is not None and prepared_path is not None:
+        src = next(src for src in sources if src["name"] == "mm-events")
+        outcome, cause = _usage_publication_verdict(
+            src, prepared_path, prepared_tail.mm_event, local_manifest
+        )
+        result.prepared_tail_published = outcome == "published"
+        if not result.prepared_tail_published:
+            events_degradations.append(f"event publication {outcome} ({cause})")
     result.anchor_warnings = _record_push_anchor_observations(
         anchor_observations, attended=attended
     )
@@ -4524,7 +4543,12 @@ def _write_migration_breadcrumb(missing: list[str]) -> None:
 
 
 def _write_autorun_breadcrumb(
-    verb: str, outcome: str, detail: str = "", *, removal_wait_only: bool = False
+    verb: str,
+    outcome: str,
+    detail: str = "",
+    *,
+    removal_wait_only: bool = False,
+    capture_deadline_only: bool = False,
 ) -> None:
     """Record the last autopull/autopush attempt for forensic observability.
 
@@ -4548,6 +4572,8 @@ def _write_autorun_breadcrumb(
         entry["detail"] = detail
     if removal_wait_only:
         entry["removal_wait_only"] = True
+    if capture_deadline_only:
+        entry["capture_deadline_only"] = True
     try:
         with locked_json_rmw(core._autorun_breadcrumb_path()) as ljson:
             if not ljson.is_locked:
@@ -4993,127 +5019,123 @@ def _acquire_sync_lock_bounded(backoffs: tuple[float, ...] = _CATCHUP_LOCK_BACKO
     return False
 
 
-def _run_capture_catchup() -> None:
-    """Detached single-flight background catch-up: Phase 1 lock-free, Phase 2 brief lock."""
+def _capture_catchup_work(timer: capturecatchup.PhaseTimer) -> tuple[str, bool, str | None]:
+    cfg = load_config()
+    sources = list(resolve_sources(cfg, strict=True, bootstrap=False).available)
+    with events_tail.phase_timer_scope(timer):
+        prepared = events_tail._prepare_events_tail(cfg, sources, cfg["device"]["id"])
+    if prepared is None:
+        return "no-sources", False, "no mm-events source available"
+    if not _acquire_sync_lock_bounded():
+        return "deferred", False, "sync lock busy; caches warmed for next push"
     try:
-        lockfile.acquire_lock(capturecatchup.CATCHUP_LOCK_PATH)
-    except LockError:
-        return
-    started_at = datetime.now(timezone.utc).isoformat()
-    timer = capturecatchup.PhaseTimer()
-    capturecatchup.record_catchup_state(
-        state="running",
-        result=None,
-        published=False,
-        started_at=started_at,
-        finished_at=None,
-    )
-    try:
-        try:
-            cfg = load_config()
-        except Exception as exc:
-            capturecatchup.record_catchup_state(
-                state="finished",
-                result="failed",
-                published=False,
-                started_at=started_at,
-                finished_at=datetime.now(timezone.utc).isoformat(),
-                detail=f"config unavailable ({type(exc).__name__})",
-            )
-            return
-        resolution = resolve_sources(cfg, strict=True, bootstrap=False)
-        sources = list(resolution.available)
-        if not sources or not any(s.get("name") == "mm-events" for s in sources):
-            capturecatchup.record_catchup_state(
-                state="finished",
-                result="no-sources",
-                published=False,
-                started_at=started_at,
-                finished_at=datetime.now(timezone.utc).isoformat(),
-                detail="no mm-events source available",
-            )
-            return
-
-        with (
-            events_tail.phase_timer_scope(timer),
-            token_usage.diagnostic_scope(lambda *a, **k: None),
+        current = load_config()
+        if (
+            current != cfg
+            or list(resolve_sources(current, strict=True, bootstrap=False).available) != sources
         ):
-            prepared = events_tail._prepare_events_tail(cfg, sources, cfg["device"]["id"])
-        if prepared is None:
-            capturecatchup.record_catchup_state(
-                state="finished",
-                result="no-sources",
-                published=False,
-                started_at=started_at,
-                finished_at=datetime.now(timezone.utc).isoformat(),
-                detail="no mm-events source available",
-            )
-            return
-
-        if not _acquire_sync_lock_bounded():
-            capturecatchup.record_catchup_state(
-                state="finished",
-                result="deferred",
-                published=False,
-                started_at=started_at,
-                finished_at=datetime.now(timezone.utc).isoformat(),
-                detail="sync lock busy; caches warmed for next push",
-            )
-            return
+            return "deferred", False, "capture configuration changed; run mm push"
         try:
             passphrase = get_passphrase(non_interactive=True)
-            if not passphrase:
-                capturecatchup.record_catchup_state(
-                    state="finished",
-                    result="no-passphrase",
-                    published=False,
-                    started_at=started_at,
-                    finished_at=datetime.now(timezone.utc).isoformat(),
-                    detail="passphrase unavailable in keyring",
-                )
+        except CryptoError:
+            passphrase = None
+        if not passphrase:
+            return "no-passphrase", False, "passphrase unavailable in keyring"
+        backend = get_backend(cfg)
+        memory_kb = core._init_crypto_session(backend, passphrase, cfg, read_only=False)
+        with pullhistory.command_scope(attended=False), pullhistory.batch():
+            pushed = _push_core(
+                cfg,
+                passphrase,
+                memory_kb,
+                quiet=True,
+                prepared_tail=prepared,
+                phase_timer=timer,
+            )
+    finally:
+        core._release_sync_lock()
+
+    if pushed is None or pushed.no_sources:
+        return "failed", False, "event publication unavailable"
+    if pushed.content_accepted and pushed.content_changed:
+        with suppress(Exception):
+            memoryindex.start_detached_refresh(cfg)
+    published = pushed.prepared_tail_published
+    if not published:
+        if pushed.events_degradations:
+            return "failed", False, pushed.events_degradations[0]
+        return "deferred", False, "capture inputs changed before publication; run mm push"
+    if (
+        pushed.held
+        or pushed.ledger_cause
+        or pushed.maintenance_failures
+        or pushed.unwritable_roots
+        or pushed.left_out_files
+        or pushed.anchor_warnings
+    ):
+        return "failed", True, "sync needs attention; run mm push"
+    capture = prepared.capture
+    if (
+        capture.walk_errors
+        or any(
+            error != events.GIT_ROOT_DISCOVERY_BUDGET_ERROR for error in capture.discovery_errors
+        )
+        or capture.warn_lock_unavailable
+        or any(reason != "deadline" for _, reason in capture.host_capture.dropped)
+    ):
+        return "failed", True, "capture needs attention; run mm diag"
+    if stopped := events_tail.deadline_stopped_phases(capture):
+        return "deferred", True, "capture deadline reached: " + ", ".join(stopped)
+    return "ok", True, None
+
+
+def _run_capture_catchup(trigger_phases: list[str]) -> None:
+    """Run one detached attempt, retaining no sync lock during its capture scans."""
+    for delay in (0, 0.005, 0.01):
+        if delay:
+            time.sleep(delay)
+        try:
+            lockfile.acquire_lock(capturecatchup.CATCHUP_LOCK_PATH)
+            break
+        except LockError:
+            if capturecatchup.is_catchup_running():
                 return
-            backend = get_backend(cfg)
-            memory_kb = core._init_crypto_session(backend, passphrase, cfg, read_only=False)
-            with (
-                token_usage.diagnostic_scope(lambda *a, **k: None),
-                pullhistory.command_scope(attended=False),
-                pullhistory.batch(),
-            ):
-                _push_core(
-                    cfg,
-                    passphrase,
-                    memory_kb,
-                    quiet=True,
-                    prepared_tail=prepared,
-                    force_events_publish=True,
-                    phase_timer=timer,
-                )
+        except OSError:
+            return
+    else:
+        return
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    timer = capturecatchup.PhaseTimer()
+    result, published, detail = "failed", False, None
+    try:
+        capturecatchup.record_catchup_state(
+            state="running", started_at=started_at, trigger_phases=trigger_phases
+        )
+        with token_usage.diagnostic_scope(lambda *a, **k: None):
+            result, published, detail = _capture_catchup_work(timer)
+    except (Exception, SystemExit) as exc:
+        detail = type(exc).__name__
+    finally:
+        try:
+            capturecatchup.record_push_timings("catchup", timer.phases(), total_ms=timer.total_ms())
             capturecatchup.record_catchup_state(
                 state="finished",
-                result="ok",
-                published=True,
+                result=result,
+                published=published,
                 started_at=started_at,
                 finished_at=datetime.now(timezone.utc).isoformat(),
+                trigger_phases=trigger_phases,
+                detail=detail,
             )
         finally:
-            core._release_sync_lock()
-    except Exception as exc:
-        capturecatchup.record_catchup_state(
-            state="finished",
-            result="failed",
-            published=False,
-            started_at=started_at,
-            finished_at=datetime.now(timezone.utc).isoformat(),
-            detail=type(exc).__name__,
-        )
-    finally:
-        capturecatchup.record_push_timings("catchup", timer.phases(), total_ms=timer.total_ms())
-        lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
+            lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
 
 
 @app.command()
 def autopush(
     catchup: bool = typer.Option(False, "--catchup", hidden=True),
+    catchup_phase: list[str] | None = typer.Option(None, "--catchup-phase", hidden=True),
 ) -> None:
     """Push changes silently. Designed for Claude Code -- no prompts, minimal output.
 
@@ -5124,7 +5146,8 @@ def autopush(
     auto-GC on autopush (prevents blob-deletion hole).
     """
     if catchup:
-        _run_capture_catchup()
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            _run_capture_catchup(catchup_phase or [])
         return
 
     diagnostics = events_tail.Degradations()
@@ -5156,12 +5179,12 @@ def autopush(
                     phase_timer=push_timer,
                 )
 
+            capturecatchup.record_push_timings(
+                "autopush",
+                push_timer.phases(),
+                total_ms=push_timer.total_ms(),
+            )
             if result is not None:
-                capturecatchup.record_push_timings(
-                    "autopush",
-                    push_timer.phases(),
-                    total_ms=push_timer.total_ms(),
-                )
                 trigger_phases = result.capture_deadline_phases
 
             if diagnostics.total:
@@ -5228,6 +5251,13 @@ def autopush(
                 details.append(result.left_out_clause.rstrip("."))
             if result and result.anchor_warnings:
                 details.extend(result.anchor_warnings)
+            capture_deadline_only = (
+                bool(trigger_phases)
+                and not held
+                and not mesh_res.degradations
+                and len(details) == getattr(events_degradations, "deadline_notices", 0)
+                and getattr(events_degradations, "total", 0) == len(details)
+            )
             # The first publish in the shared form leaves a trail (O8.3).
             switched = bool(result and result.wire_names_published)
             has_push_degradations = bool(details or held or mesh_res.degradations)
@@ -5246,6 +5276,7 @@ def autopush(
                 outcome,
                 crumb_detail,
                 removal_wait_only=mesh_res.removal_wait_only(details),
+                capture_deadline_only=capture_deadline_only,
             )
             detached_config = setup.config
 

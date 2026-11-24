@@ -84,7 +84,10 @@ class PhaseTimer:
             if existing_idx is not None:
                 prev = self._entries[existing_idx]
                 merged_ms = prev.elapsed_ms + clean_ms if accumulate else clean_ms
-                merged_budget = budget_ms if budget_ms is not None else prev.budget_ms
+                if accumulate and budget_ms is not None and prev.budget_ms is not None:
+                    merged_budget = prev.budget_ms + budget_ms
+                else:
+                    merged_budget = budget_ms if budget_ms is not None else prev.budget_ms
                 merged_completed = completed if completed is not None else prev.completed
                 merged_total = total if total is not None else prev.total
                 entry = PhaseTiming(
@@ -337,7 +340,15 @@ def start_detached_catchup(trigger_phases: Sequence[str]) -> bool:
         return False
     try:
         subprocess.Popen(
-            [sys.executable, "-P", "-m", "mind_meld.cli", "autopush", "--catchup"],
+            [
+                sys.executable,
+                "-P",
+                "-m",
+                "mind_meld.cli",
+                "autopush",
+                "--catchup",
+                *(f"--catchup-phase={phase}" for phase in phases),
+            ],
             cwd="/",
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -433,7 +444,7 @@ def record_catchup_state(
             CATCHUP_STATE_PATH,
             mode=0o600,
             compact=True,
-            retry_intervals=(),
+            retry_intervals=(0.005, 0.01, 0.025),
             on_contention="raise",
         ) as ljson:
             ljson.data = {
@@ -450,12 +461,12 @@ def record_catchup_state(
         pass
 
 
-def _parse_aware_iso(value: object) -> datetime | None:
+def parse_aware_iso(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
@@ -476,7 +487,7 @@ def covers_deadline_backlog(
         return False
     if state.get("result") != "ok" or state.get("published") is not True:
         return False
-    finished = _parse_aware_iso(state.get("finished_at"))
+    finished = parse_aware_iso(state.get("finished_at"))
     if finished is None:
         return False
     current = now or datetime.now(timezone.utc)
@@ -489,10 +500,23 @@ def covers_deadline_backlog(
     return True
 
 
-def diag_catchup_state() -> dict[str, Any]:
-    """Read-only background catch-up state for `mm diag`."""
+def catchup_observation() -> tuple[dict[str, Any], bool]:
+    """Read the recorded result and verify any running state against its lock."""
     running = is_catchup_running()
     recorded = read_catchup_state()
+    if recorded["state"] == "running" and not running:
+        # The worker could have started between the probe and the read.
+        running = is_catchup_running()
+        if not running:
+            recorded = read_catchup_state()
+            if recorded["state"] == "running":
+                recorded.update(state="finished", result="failed", detail="worker interrupted")
+    return recorded, running
+
+
+def diag_catchup_state() -> dict[str, Any]:
+    """Read-only background catch-up state for `mm diag`."""
+    recorded, running = catchup_observation()
     return {
         "running": running,
         "state": "running" if running else recorded["state"],

@@ -2876,7 +2876,7 @@ class TestCaptureBudget85A:
         sweep, first, second = calls
         assert sweep["names"] == ("codex", "muse")
         assert (first["names"], second["names"]) == (("codex",), ("muse",))
-        assert before + 6.0 <= first["deadline"] <= after + 6.0
+        assert second["deadline"] - first["deadline"] == pytest.approx(0.3)
         assert before + 6.0 <= second["deadline"] <= after + 6.0
 
     def test_expired_retry_does_not_announce_a_read(self, monkeypatch):
