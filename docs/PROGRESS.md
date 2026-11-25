@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.87 | 2026-11-25 | Deadline-stopped `mm autopush` capture now finishes unfinished usage and Git work in a background catch-up, and `mm status` and `mm diag` show that work. |
 | 1.12.86 | 2026-11-24 | Attended push now shows phase progress and timings, and `mm autopush` reads enabled host usage providers concurrently. |
 | 1.12.85 | 2026-11-24 | Attended `mm pull` now reports the content changes applied from each peer device on its outcome line. |
 | 1.12.84 | 2026-11-22 | Mind Meld now keeps agent memory in its own qmd index, refuses a bad qmd version before enabling that index, and explains how to update agent instructions. |
