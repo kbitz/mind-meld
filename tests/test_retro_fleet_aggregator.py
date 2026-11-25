@@ -9494,21 +9494,30 @@ class TestSupersededRegistrationFolding:
             "historical host reader was catching up" in cause for cause in codex.floor_causes
         )
 
+    @pytest.mark.parametrize("current_shares_project", [False, True])
     def test_registration_folding_discloses_historical_claude_gaps(
-        self, tmp_path: Path, monkeypatch
+        self, tmp_path: Path, monkeypatch, current_shares_project
     ):
         registered = [{"device_id": "dev-cur", "device_name": "mac-a"}]
         monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered))
         monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
-        old = self._session_row(
-            "dev-old-1",
-            f"{self.D2}T12:00:00+00:00",
-            days={},
-            device_name="mac-a",
-        )
+        ts = f"{self.D2}T12:00:00+00:00"
+        old = self._session_row("dev-old-1", ts, days={}, device_name="mac-a")
         del old["projects"][0]["tokens_by_day"]
         del old["projects"][0]["skills_by_day"]
-        self._write_events(tmp_path, f"fleet-{self.D2}.jsonl", [old])
+        rows = [old]
+        if current_shares_project:
+            # The current registration reports the same project and wins its
+            # session dedup; the superseded project's missing detail still counts.
+            rows.append(
+                self._session_row(
+                    "dev-cur",
+                    ts,
+                    days={self.D1: {"claude-sonnet-4-5": self._bucket(200)}},
+                    device_name="mac-a",
+                )
+            )
+        self._write_events(tmp_path, f"fleet-{self.D2}.jsonl", rows)
         data = aggregator.aggregate(
             events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
         )
@@ -9551,7 +9560,9 @@ class TestSupersededRegistrationFolding:
             snap["lifetime_by_family"]["codex"][self.D1]["input"] for snap in snapshots.values()
         } == {100, 200}
 
-    def test_registration_folding_requires_a_usable_registry(self, tmp_path: Path, monkeypatch):
+    def test_registration_folding_refuses_folds_while_the_registry_is_incomplete(
+        self, tmp_path: Path, monkeypatch
+    ):
         from types import SimpleNamespace
 
         monkeypatch.setattr(
@@ -9560,30 +9571,155 @@ class TestSupersededRegistrationFolding:
             lambda *args, **kwargs: SimpleNamespace(
                 returncode=0,
                 stdout=json.dumps([{"device_id": "dev-cur", "device_name": "mac-a"}]),
-                stderr="mm: warning: dropped device entry dev-old-1 — unreadable\n",
+                stderr="mm: warning: dropped device entry devices/dev-old-1.json — unreadable\n",
             ),
         )
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
         ts = f"{self.D2}T12:00:00+00:00"
-        self._write_events(
-            tmp_path,
-            f"fleet-{self.D2}.jsonl",
-            [
-                self._session_row(
-                    device,
-                    ts,
-                    days={self.D1: {"claude-sonnet-4-5": self._bucket(amount)}},
-                    device_name="mac-a",
-                )
-                for device, amount in [("dev-old-1", 100), ("dev-cur", 200)]
-            ],
-        )
+        bucket = self._bucket(1_000)
+        rows = [
+            self._session_row(
+                device,
+                ts,
+                days={self.D1: {"claude-sonnet-4-5": self._bucket(amount)}},
+                device_name="mac-a",
+            )
+            for device, amount in [("dev-old-1", 100), ("dev-cur", 200)]
+        ]
+        rows += [
+            self._host_row(
+                device,
+                ts,
+                hosts={"codex": {self.D1: bucket}},
+                by_day_models={self.D1: {"gpt-5.4": bucket}},
+                device_name="mac-a",
+            )
+            for device in ("dev-old-1", "dev-cur")
+        ]
+        self._write_events(tmp_path, f"fleet-{self.D2}.jsonl", rows)
         data = aggregator.aggregate(
             events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
         )
-        assert data.fleet.devices_known is None
+        # The readable entries still scope the retro. Only name folding stops,
+        # because a dropped entry could share the matched name.
+        assert data.fleet.devices_known == 1
         assert data.fleet.folded_registrations == ()
+        assert data.fleet.devices_in_events == {"dev-cur"}
+        assert set(data.host_inventory.by_device) == {"dev-cur"}
+        assert data.host_inventory.superseded_by_device == {}
         assert data.sessions.tokens_input == 300
-        assert _health_entry(aggregator.format_retro(data), "registry_unavailable") is not None
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        assert {row.key: row.tokens for row in usage.rows}["codex"] == 1_000
+        rendered = aggregator.format_retro(data)
+        assert _health_entry(rendered, "registry_unavailable") is None
+        entry = _health_entry(rendered, "unregistered_devices")
+        assert entry is not None and entry["unregistered_ids"] == ["dev-old-1"]
+        assert "registry is incomplete" in entry["detail"]
+
+    def _storage_fleet(
+        self, tmp_path: Path, monkeypatch, *, retired_name: str, passphrase_set: bool
+    ):
+        """Real encrypted storage with one retirement record for dev-old-1."""
+        from mind_meld import config as mm_config
+        from mind_meld import crypto as mm_crypto
+        from mind_meld import devices as mm_devices
+        from mind_meld.storage import LocalBackend
+
+        storage_dir = tmp_path / "storage"
+        storage_dir.mkdir()
+        cfg_path = tmp_path / "config.toml"
+        passphrase = "test-passphrase-folding"
+        monkeypatch.setattr(mm_config, "CONFIG_PATH", cfg_path)
+        mm_config.save_config(
+            {
+                "device": {"id": "dev-cur", "name": "mac-a"},
+                "storage": {"backend": "local", "path": str(storage_dir)},
+                "crypto": {"argon2_memory_kb": 16_384},
+            },
+            cfg_path,
+        )
+        backend = LocalBackend(storage_dir)
+        hdr = mm_crypto.bootstrap_crypto_init(backend, passphrase, 16_384)
+        mm_crypto.set_crypto_session(hdr.root_salt, 16_384)
+        try:
+            mm_devices.write_retirement_record(
+                backend, "dev-old-1", retired_name, None, passphrase, memory_kb=16_384
+            )
+        finally:
+            mm_crypto.clear_crypto_session()
+        if passphrase_set:
+            monkeypatch.setenv(mm_crypto.ENV_VAR, passphrase)
+        else:
+            monkeypatch.delenv(mm_crypto.ENV_VAR, raising=False)
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered))
+
+    def test_unreadable_stored_names_explain_unfolded_registrations(
+        self, tmp_path: Path, monkeypatch
+    ):
+        self._storage_fleet(tmp_path, monkeypatch, retired_name="mac-a", passphrase_set=False)
+        events_dir = tmp_path / "events"
+        self._write_events(
+            events_dir,
+            f"storage-{self.D4}.jsonl",
+            [
+                # An older row without device_name: only storage can name it.
+                self._push_row("dev-old-1", f"{self.D3}T12:00:00+00:00"),
+                self._push_row("dev-cur", f"{self.D4}T12:00:00+00:00", device_name="mac-a"),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.fleet.folded_registrations == ()
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        assert entry is not None and entry["unregistered_ids"] == ["dev-old-1"]
+        assert entry.get("names_unavailable") == "passphrase"
+        assert "MINDMELD_PASSPHRASE" in entry.get("remedy", "")
+
+    def test_nameless_retirement_record_defers_to_event_names(self, tmp_path: Path, monkeypatch):
+        # A record written without a name stores the device ID instead.
+        self._storage_fleet(tmp_path, monkeypatch, retired_name="", passphrase_set=True)
+        events_dir = tmp_path / "events"
+        self._write_events(
+            events_dir,
+            f"storage-{self.D4}.jsonl",
+            [
+                self._push_row("dev-old-1", f"{self.D3}T12:00:00+00:00", device_name="mac-a"),
+                self._push_row("dev-cur", f"{self.D4}T12:00:00+00:00", device_name="mac-a"),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert [group.folded_ids for group in data.fleet.folded_registrations] == [("dev-old-1",)]
+        assert data.fleet.unregistered_details == ()
+
+    def test_unregistered_disclosure_lists_stay_bounded(self, tmp_path: Path, monkeypatch):
+        registered = [
+            {"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"},
+            {"device_id": "dev-dup-1", "device_name": "mac-dup", "mm_version": "1.12.0"},
+            {"device_id": "dev-dup-2", "device_name": "mac-dup", "mm_version": "1.12.0"},
+        ]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (3, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+        ts = f"{self.D4}T12:00:00+00:00"
+        rows = [self._push_row(f"dev-ghost-{index:02d}", ts) for index in range(15)]
+        rows += [
+            self._push_row(f"dev-ambig-{index}", ts, device_name="mac-dup") for index in range(7)
+        ]
+        rows.append(self._push_row("dev-cur", ts, device_name="mac-a"))
+        self._write_events(tmp_path, f"ghosts-{self.D4}.jsonl", rows)
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert len(data.fleet.unregistered_details) == 22
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        cap = aggregator.MAX_TOKEN_COVERAGE_PEER_NAMES
+        assert len(entry["unregistered_ids"]) == cap
+        assert entry["unregistered_omitted"] == 22 - cap
+        assert len(entry["ambiguous_devices"]) == cap
+        assert entry["ambiguous_omitted"] == 7 - cap
 
     def test_unmatched_and_missing_name_unregistered_devices_never_fold(
         self, tmp_path: Path, monkeypatch
@@ -9737,8 +9873,8 @@ class TestSupersededRegistrationFolding:
         from mind_meld import crypto as mm_crypto
         from mind_meld import devices as mm_devices
         from mind_meld.errors import StorageError
+        from mind_meld.storage import LocalBackend
         from mind_meld.storage.keys import manifest_key
-        from mind_meld.storage.local import LocalBackend
 
         storage_dir = tmp_path / "storage"
         storage_dir.mkdir()
@@ -9820,7 +9956,11 @@ class TestSupersededRegistrationFolding:
             # A different configured lineage leaves only event-name evidence.
             cfg["crypto"]["root_salt_fp"] = mm_crypto.root_salt_fingerprint(incumbent_salt)
             mm_config.save_config(cfg, cfg_path)
-            assert aggregator.get_unregistered_device_names(["dev-old-1", "dev-old-2"]) == ({}, {})
+            assert aggregator.get_unregistered_device_names(["dev-old-1", "dev-old-2"]) == (
+                {},
+                {},
+                "storage",
+            )
         finally:
             mm_crypto.clear_crypto_session()
         assert storage_bytes() == before_files

@@ -61,9 +61,11 @@ aggregator folds that superseded registration into the registered machine per
 (agent family, day) — keeping the registered machine on overlapping days and
 preserving non-overlapping historical days — and discloses each fold under
 `folded_registrations` in `MM_HEALTH`. Unmatched or ambiguous unregistered IDs
-are never folded; historical Claude usage can remain after deregistration,
-explained by `unregistered_devices` in `MM_HEALTH`. If the registry is
-unavailable, the card counts all observed machines and omits the denominator.
+are never folded, and nothing folds while `mm devices` reports a dropped
+entry; historical Claude usage can remain after deregistration, explained by
+`unregistered_devices` in `MM_HEALTH` (its `remedy`, when present, says how to
+let stored names fold). If the registry is unavailable, the card counts all
+observed machines and omits the denominator.
 
 Comparing the rows is the point. They share a unit (tokens), a window, and a
 counter basis (input + cache write + cache read + output, disjoint counters

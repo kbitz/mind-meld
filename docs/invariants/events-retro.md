@@ -1235,14 +1235,25 @@ Name-source precedence is deterministic:
 fleet fingerprint before decryption. Retirement and manifest reads use
 `LocalBackend.get_bounded` with validated storage keys. The read stays inside
 the storage directory and enforces its byte limit on the opened regular file.
-If `mm devices --format=json` reports a dropped registration, treat the
-registry as unavailable for the retro. A partial registry cannot prove a
-unique match. When the name is missing, matches zero
+A retirement record written without a name stores the device ID; that
+placeholder is not a name, so the event-row and manifest sources still apply.
+The lookup reports why stored names were unreadable (`passphrase` or
+`storage`); when that leaves an unfolded ID with no name, `unregistered_devices`
+says so and names the fix (unlock the keyring or set `MINDMELD_PASSPHRASE`, or
+check storage with `mm status`).
+If `mm devices --format=json` warns that it dropped a registration (unreadable,
+or vanished while being read), the readable entries still scope the retro:
+counts, host `by_device` and the denominator are unchanged. Nothing folds,
+because a partial registry cannot prove a unique match; each name match is
+listed under `unregistered_devices`, which says the registry is incomplete.
+When the name is missing, matches zero
 registered devices, or matches more than one registered device (ambiguous),
 nothing folds for that ID: Claude retains its usage as today, host `by_device`
 keeps it excluded as today, registered-machine counts exclude it, and
 `unregistered_devices` in `MM_HEALTH` (plus `unregistered_devices` in
-`--dump-host-usage`) names it explicitly.
+`--dump-host-usage`) names it explicitly. The `MM_HEALTH` lists
+(`unregistered_ids`, `ambiguous_devices`) stop at five entries and carry an
+omitted count; the forensic dump keeps every ID.
 
 For every `(agent family, day)` on which both a superseded ID and its registered
 target report, only the registered device counts (registry rule, never

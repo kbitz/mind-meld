@@ -498,10 +498,14 @@ class FoldedGroup:
 
 @dataclass(frozen=True)
 class UnregisteredDevice:
-    """An unregistered device ID that was NOT folded (unmatched or ambiguous)."""
+    """An unregistered device ID that was NOT folded.
+
+    ``registry_incomplete`` marks a unique name match that could not fold because
+    ``mm devices`` dropped an entry that might share the name.
+    """
 
     device_id: str
-    status: Literal["unregistered", "ambiguous"]
+    status: Literal["unregistered", "ambiguous", "registry_incomplete"]
     device_name: str | None = None
     matching_registered_ids: tuple[str, ...] = ()
 
@@ -513,6 +517,9 @@ class RegistrationResolution:
     fold_map: dict[str, str] = field(default_factory=dict)
     folds: tuple[FoldedGroup, ...] = ()
     unfolded: tuple[UnregisteredDevice, ...] = ()
+    # Why stored names were unreadable ("passphrase" or "storage") when an
+    # unfolded ID was left without any name; None otherwise.
+    names_unavailable: str | None = None
 
 
 @dataclass
@@ -531,6 +538,7 @@ class FleetState:
     unregistered_event_devices: int = 0
     folded_registrations: tuple[FoldedGroup, ...] = ()
     unregistered_details: tuple[UnregisteredDevice, ...] = ()
+    names_unavailable: str | None = None
 
 
 # Skip-counter category key. Kept as a constant so call-sites stay
@@ -966,10 +974,10 @@ def aggregate_agent_usage(
                     continue
                 if not contributes_in_window(day, bounds):
                     continue
-                claim_key = (effective_device, family, day)
-                if claim_key in claimed:
+                claim = (effective_device, family, day)
+                if claim in claimed:
                     continue
-                claimed.add(claim_key)
+                claimed.add(claim)
                 contributed_pairs.add((family, day))
                 day_union.setdefault(family, set()).add(day)
                 fam_tokens[family] = fam_tokens.get(family, 0) + token_usage.sum_bucket(bucket)
@@ -3129,15 +3137,23 @@ def aggregate_sessions(
 
         canonical = fold.get(device, device)
         is_registered = device == canonical
-        proj_key = (canonical, source_root, claude_dir)
-        existing_proj = dedup_projects.get(proj_key)
+        proj_slot = (canonical, source_root, claude_dir)
+        existing_proj = dedup_projects.get(proj_slot)
         candidate_rank = (is_registered, ts_dt, device)
         if existing_proj is None or candidate_rank > (
             existing_proj[0],
             existing_proj[1],
             existing_proj[2],
         ):
-            dedup_projects[proj_key] = (is_registered, ts_dt, device, proj)
+            dedup_projects[proj_slot] = (is_registered, ts_dt, device, proj)
+        if not is_registered and _safe_int(proj.get("sessions")) > 0:
+            # Every folded project counts, including one whose registered twin
+            # wins the session dedup: that twin does not prove the superseded
+            # registration's missing detail was ever recovered.
+            if not isinstance(proj.get("tokens_by_day"), dict):
+                out.historical_token_gaps.add(canonical)
+            if "skills_by_day" not in proj:
+                skills.historical_gaps.add(canonical)
 
         # Token accumulation per raw device and UTC day.
         tokens_by_day = proj.get("tokens_by_day")
@@ -3201,7 +3217,7 @@ def aggregate_sessions(
                         day_skills = dev_skill_days.setdefault(day_key, {})
                         day_skills[skill] = day_skills.get(skill, 0) + n
 
-    for (canonical, _, _), (is_registered, _ts_dt, _raw_dev, proj) in dedup_projects.items():
+    for *_slot, proj in dedup_projects.values():
         sessions = _safe_int(proj.get("sessions"))
         ephemeral = bool(proj.get("ephemeral", False))
         out.total_sessions += sessions
@@ -3209,11 +3225,6 @@ def aggregate_sessions(
         if ephemeral:
             out.ephemeral_sessions += sessions
             out.ephemeral_projects += 1
-        if not is_registered and sessions > 0:
-            if not isinstance(proj.get("tokens_by_day"), dict):
-                out.historical_token_gaps.add(canonical)
-            if "skills_by_day" not in proj:
-                skills.historical_gaps.add(canonical)
 
     # Group raw devices by canonical device ID and rank registered first,
     # then newest (device_max_ts[device], device) descending.
@@ -3439,11 +3450,16 @@ def aggregate_pushes(
 # ---------------------------------------------------------------------------
 
 
-def get_known_devices() -> tuple[int | None, list[dict]]:
+def get_known_devices() -> tuple[int | None, list[dict], bool]:
     """Invoke mm via ``python -m mind_meld.cli devices --format=json``.
-    Degrade to (None, []) on ANY failure (not initialized, JSON parse
+    Degrade to (None, [], False) on ANY failure (not initialized, JSON parse
     error, etc.). The retro renders "events from N devices" without the
     "of M" tail when the count is None.
+
+    The third value is True when ``mm devices`` warned that it dropped an
+    entry (unreadable, or vanished while being read). The readable entries
+    still scope the retro; an incomplete registry only stops name folding,
+    because it cannot prove that a name match is unique.
 
     Adversarial-review fix: invoke via ``sys.executable -m mind_meld.cli``
     instead of bare ``["mm", ...]``. This binds the subprocess to the SAME
@@ -3460,22 +3476,20 @@ def get_known_devices() -> tuple[int | None, list[dict]]:
             timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None, []
+        return None, [], False
     if result.returncode != 0:
-        return None, []
-    if any(
+        return None, [], False
+    incomplete = any(
         line.startswith("mm: warning: dropped device entry ")
         for line in (getattr(result, "stderr", "") or "").splitlines()
-    ):
-        # An omitted registration can turn a shared name into a false match.
-        return None, []
+    )
     try:
         records = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return None, []
+        return None, [], False
     if not isinstance(records, list):
-        return None, []
-    return len(records), records
+        return None, [], False
+    return len(records), records, incomplete
 
 
 # ---------------------------------------------------------------------------
@@ -3572,17 +3586,23 @@ def get_unregistered_device_names(
     device_ids: Iterable[str],
     *,
     skip_manifest_for: frozenset[str] = frozenset(),
-) -> tuple[dict[str, str], dict[str, str]]:
+) -> tuple[dict[str, str], dict[str, str], str | None]:
     """Read authenticated device names for unregistered IDs from local storage.
 
-    Returns ``(retired_names, manifest_names)``. Strictly read-only,
-    non-interactive, never raises, never writes or touches locks/caches, and
-    never imports ``mind_meld.cli``. Saves and restores ``crypto``'s
-    process-global session state in ``finally``.
+    Returns ``(retired_names, manifest_names, unavailable)``. ``unavailable``
+    is None when the stored records could be read, ``"passphrase"`` when no
+    passphrase was available or it did not verify, and ``"storage"`` when this
+    device's storage could not be read or trusted (no usable config or key
+    header, or a different fleet lineage). A retirement record written without
+    a name stores the device ID instead; that placeholder is not a name.
+
+    Strictly read-only, non-interactive, never raises, never writes or touches
+    locks/caches, and never imports ``mind_meld.cli``. Saves and restores
+    ``crypto``'s process-global session state in ``finally``.
     """
     wanted = frozenset(d for d in device_ids if isinstance(d, str) and d)
     if not wanted:
-        return {}, {}
+        return {}, {}, None
     try:
         from mind_meld import config as mm_config
         from mind_meld import crypto as mm_crypto
@@ -3599,19 +3619,25 @@ def get_unregistered_device_names(
             or hdr.argon2_memory_kb is None
             or hdr.keycheck_blob is None
         ):
-            return {}, {}
+            return {}, {}, "storage"
         local_fp = cfg.get("crypto", {}).get("root_salt_fp")
         if local_fp and local_fp != mm_crypto.root_salt_fingerprint(hdr.root_salt):
-            return {}, {}
+            return {}, {}, "storage"
+    except Exception:
+        return {}, {}, "storage"
+    try:
         passphrase = mm_crypto.get_passphrase(non_interactive=True)
     except Exception:
-        return {}, {}
+        return {}, {}, "passphrase"
 
     prev_session = dict(mm_crypto._SESSION)
     prev_cache = dict(mm_crypto._MASTER_KEY_CACHE)
     try:
         master_key = mm_crypto.load_master_key(passphrase, hdr.root_salt, hdr.argon2_memory_kb)
-        mm_crypto.verify_passphrase(master_key, hdr.keycheck_blob)
+        try:
+            mm_crypto.verify_passphrase(master_key, hdr.keycheck_blob)
+        except Exception:
+            return {}, {}, "passphrase"
         mm_crypto.set_crypto_session(hdr.root_salt, hdr.argon2_memory_kb)
 
         retired_names: dict[str, str] = {}
@@ -3623,7 +3649,8 @@ def get_unregistered_device_names(
                 rec = retirements.records.get(cid)
                 if rec is not None and isinstance(rec.device_name, str):
                     cleaned = rec.device_name.strip()
-                    if _normalize_device_name(cleaned):
+                    normalized = _normalize_device_name(cleaned)
+                    if normalized and normalized != _normalize_device_name(cid):
                         retired_names[cid] = cleaned
         except Exception:
             retired_names = {}
@@ -3644,9 +3671,9 @@ def get_unregistered_device_names(
                     manifest_names[cid] = raw_name.strip()
             except Exception:
                 continue
-        return retired_names, manifest_names
+        return retired_names, manifest_names, None
     except Exception:
-        return {}, {}
+        return {}, {}, "storage"
     finally:
         mm_crypto._SESSION.clear()
         mm_crypto._SESSION.update(prev_session)
@@ -3662,13 +3689,16 @@ def _resolve_unregistered_registrations(
     active_unregistered: frozenset[str],
     earliest_ts_by_device: Mapping[str, datetime],
     comparison_unregistered: frozenset[str] = frozenset(),
+    registry_incomplete: bool = False,
 ) -> RegistrationResolution:
     """Match active unregistered device IDs against the current device registry.
 
     Name-source precedence: (1) authenticated ``retired/<id>.enc``, (2) latest
     event-row ``device_name``, (3) authenticated ``manifests/<id>/manifest.json.enc``.
-    Folds only when the normalized name uniquely matches one registered device.
-    Missing, unmatched, or ambiguous names fold nothing and are disclosed.
+    Folds only when the normalized name uniquely matches one registered device
+    and the registry is complete. Missing, unmatched, or ambiguous names, and
+    any match while ``mm devices`` dropped an entry, fold nothing and are
+    disclosed.
     """
     candidates = active_unregistered | comparison_unregistered
     if devices_known is None or not candidates:
@@ -3687,10 +3717,12 @@ def _resolve_unregistered_registrations(
     registered_by_name = {norm: sorted(ids) for norm, ids in by_norm_name.items()}
 
     event_names = _event_device_names(events, candidates)
-    retired_names, manifest_names = get_unregistered_device_names(
+    # Test doubles may still return the older two-value form.
+    retired_names, manifest_names, *lookup = get_unregistered_device_names(
         candidates,
         skip_manifest_for=frozenset(event_names),
     )
+    lookup_unavailable = lookup[0] if lookup else None
 
     fold_map: dict[str, str] = {}
     grouped_folds: dict[str, list[str]] = {}
@@ -3700,7 +3732,7 @@ def _resolve_unregistered_registrations(
         raw_name = retired_names.get(cid) or event_names.get(cid) or manifest_names.get(cid)
         norm = _normalize_device_name(raw_name) if raw_name else ""
         matches = registered_by_name.get(norm, []) if norm else []
-        if len(matches) == 1:
+        if len(matches) == 1 and not registry_incomplete:
             target_id = matches[0]
             fold_map[cid] = target_id
             if cid in active_unregistered:
@@ -3708,23 +3740,21 @@ def _resolve_unregistered_registrations(
             continue
         if cid not in active_unregistered:
             continue
+        shown_name = (_safe_short(raw_name).strip() or None) if raw_name else None
         if len(matches) > 1:
-            unfolded.append(
-                UnregisteredDevice(
-                    device_id=cid,
-                    status="ambiguous",
-                    device_name=_safe_short(raw_name).strip() or None if raw_name else None,
-                    matching_registered_ids=tuple(matches),
-                )
-            )
+            status: Literal["unregistered", "ambiguous", "registry_incomplete"] = "ambiguous"
+        elif matches:
+            status = "registry_incomplete"
         else:
-            unfolded.append(
-                UnregisteredDevice(
-                    device_id=cid,
-                    status="unregistered",
-                    device_name=(_safe_short(raw_name).strip() or None) if raw_name else None,
-                )
+            status = "unregistered"
+        unfolded.append(
+            UnregisteredDevice(
+                device_id=cid,
+                status=status,
+                device_name=shown_name,
+                matching_registered_ids=tuple(matches),
             )
+        )
 
     labels = device_labels(
         FleetState(devices_known=devices_known, devices_known_list=devices_known_list)
@@ -3749,10 +3779,16 @@ def _resolve_unregistered_registrations(
             )
         )
 
+    names_unavailable = (
+        lookup_unavailable
+        if lookup_unavailable and any(item.device_name is None for item in unfolded)
+        else None
+    )
     return RegistrationResolution(
         fold_map=fold_map,
         folds=tuple(folds),
         unfolded=tuple(unfolded),
+        names_unavailable=names_unavailable,
     )
 
 
@@ -3814,7 +3850,9 @@ def aggregate(
         fleet_emails = aggregate_local_emails_from_events(events)
         effective_emails = frozenset(author_emails | fleet_emails)
 
-    devices_known, devices_known_list = get_known_devices()
+    # Test doubles may still return the older (count, records) pair.
+    devices_known, devices_known_list, *registry_state = get_known_devices()
+    registry_incomplete = bool(registry_state and registry_state[0])
 
     # Collect in-window event-producing devices, earliest timestamp per device,
     # and non-stale accepted host-snapshot devices (including near-future skew
@@ -3870,6 +3908,7 @@ def aggregate(
             active_unregistered=active_unregistered,
             earliest_ts_by_device=earliest_ts_by_device,
             comparison_unregistered=frozenset(prior_push_devices - registered_ids),
+            registry_incomplete=registry_incomplete,
         )
         active_fold_map = {
             old_id: target_id
@@ -3945,6 +3984,7 @@ def aggregate(
             unregistered_event_devices=unregistered,
             folded_registrations=resolution.folds,
             unregistered_details=resolution.unfolded,
+            names_unavailable=resolution.names_unavailable,
         ),
         skipped_per_source=dict(skip_counter),
         skipped_lines=sum(skip_counter.values()),
@@ -5838,12 +5878,17 @@ def format_retro(
     if data.fleet.unregistered_details:
         unreg_entries: list[str] = []
         ambiguous_payload: list[dict[str, object]] = []
+        registry_incomplete = False
         for item in data.fleet.unregistered_details:
             safe_id = _safe_short(item.device_id)
-            if item.status == "ambiguous":
+            if item.status in ("ambiguous", "registry_incomplete"):
                 safe_name = _safe_short(item.device_name or "")
                 matches = [_safe_short(m) for m in item.matching_registered_ids]
                 matches_txt = ", ".join(matches)
+                if item.status == "registry_incomplete":
+                    registry_incomplete = True
+                    unreg_entries.append(f"{safe_id} ('{safe_name}' matches {matches_txt})")
+                    continue
                 unreg_entries.append(
                     f"{safe_id} (ambiguous name '{safe_name}' matches {matches_txt} — not folded)"
                 )
@@ -5863,19 +5908,50 @@ def format_retro(
         named_unreg = ", ".join(shown_unreg) + (
             f" (+{extra_unreg} more)" if extra_unreg > 0 else ""
         )
+        # Lists stay bounded: the skill reads this payload, so it never grows
+        # one entry per device.
+        listed_ids = [_safe_short(i.device_id) for i in data.fleet.unregistered_details]
         unreg_extra: dict[str, object] = {
-            "unregistered_ids": [_safe_short(i.device_id) for i in data.fleet.unregistered_details],
+            "unregistered_ids": listed_ids[:MAX_TOKEN_COVERAGE_PEER_NAMES],
         }
+        if len(listed_ids) > MAX_TOKEN_COVERAGE_PEER_NAMES:
+            unreg_extra["unregistered_omitted"] = len(listed_ids) - MAX_TOKEN_COVERAGE_PEER_NAMES
         if ambiguous_payload:
-            unreg_extra["ambiguous_devices"] = ambiguous_payload
-        note(
-            "unregistered_devices",
+            unreg_extra["ambiguous_devices"] = ambiguous_payload[:MAX_TOKEN_COVERAGE_PEER_NAMES]
+            if len(ambiguous_payload) > MAX_TOKEN_COVERAGE_PEER_NAMES:
+                unreg_extra["ambiguous_omitted"] = (
+                    len(ambiguous_payload) - MAX_TOKEN_COVERAGE_PEER_NAMES
+                )
+        unreg_detail = (
             f"{len(data.fleet.unregistered_details)} unregistered device id(s) had events "
             f"in this window ({named_unreg}) and were filtered from registered-machine counts. "
             "Retained Claude token and skill data may still contribute to the report. "
-            f"Stale files reap after {EVENTS_RETENTION_DAYS} days.",
-            **unreg_extra,
+            f"Stale files reap after {EVENTS_RETENTION_DAYS} days."
         )
+        unreg_remedy: str | None = None
+        if registry_incomplete:
+            unreg_detail += (
+                " Matching names were not folded because the device registry is incomplete"
+                " (`mm devices` dropped an entry)."
+            )
+            unreg_remedy = "Run `mm devices` to see the dropped entry, then re-run the retro."
+        if data.fleet.names_unavailable == "passphrase":
+            unreg_extra["names_unavailable"] = "passphrase"
+            unreg_detail += (
+                " Names stored for earlier registrations could not be read because no"
+                " passphrase was available, so unnamed IDs could not fold."
+            )
+            unreg_remedy = "Unlock the keyring or set `MINDMELD_PASSPHRASE`, then re-run the retro."
+        elif data.fleet.names_unavailable == "storage":
+            unreg_extra["names_unavailable"] = "storage"
+            unreg_detail += (
+                " Names stored for earlier registrations could not be read from this"
+                " device's storage, so unnamed IDs could not fold."
+            )
+            unreg_remedy = "Run `mm status` to check this device's storage, then re-run the retro."
+        if unreg_remedy is not None:
+            unreg_extra["remedy"] = unreg_remedy
+        note("unregistered_devices", unreg_detail, **unreg_extra)
     elif data.fleet.unregistered_event_devices:
         note(
             "unregistered_devices",
