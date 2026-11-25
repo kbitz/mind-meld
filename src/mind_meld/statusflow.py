@@ -899,8 +899,7 @@ def status(
                     catchup_state, running=catchup_running, backlog_at=reason_at
                 ):
                     covered_readers.add(name)
-        mm_push_row = capture_rows.rows.get("mm-push")
-        mm_push_ts = events.parse_aware_ts((mm_push_row or {}).get("ts"))
+        mm_push_ts = events.parse_aware_ts((capture_rows.rows.get("mm-push") or {}).get("ts"))
         git_snapshot_ts = events.parse_aware_ts(
             (capture_rows.rows.get("git-snapshot") or {}).get("ts")
         )
@@ -910,16 +909,8 @@ def status(
         catchup_covering_git = capturecatchup.covers_deadline_backlog(
             catchup_state, running=catchup_running, backlog_at=latest_git_at
         )
-        catchup_superseded = (
-            not catchup_running
-            and catchup_state.get("result") in {"failed", "partial", "deferred"}
-            and _catchup_failure_superseded(
-                catchup_state,
-                auto_push,
-                attended_evidence,
-                mm_push_ts=mm_push_ts,
-                mm_push_row=mm_push_row,
-            )
+        catchup_superseded = not catchup_running and capturecatchup.is_failure_resolved(
+            catchup_state
         )
         only_catchup_event_pending = _is_only_catchup_event_pending(
             source_diffs,
@@ -1931,74 +1922,6 @@ def _is_only_catchup_event_pending(
             return False
         matched_mm_events = True
     return matched_mm_events
-
-
-def _mm_push_completed_git_capture(mm_push_row: object) -> bool:
-    if not isinstance(mm_push_row, dict):
-        return False
-    projected = events.project_recorded_capture(mm_push_row)
-    if projected is None:
-        return False
-    return bool(
-        projected.get("advances_cursor")
-        and not (projected.get("walk_budget_aborts") or 0)
-        and not (projected.get("walk_errors") or 0)
-        and not mm_push_row.get("discovery_errors")
-    )
-
-
-def _catchup_failure_superseded(
-    catchup_state: dict,
-    auto_push: object,
-    attended_evidence: dict,
-    *,
-    mm_push_ts: datetime | None,
-    mm_push_row: object = None,
-) -> bool:
-    """Return True if a newer healthy push superseded a failed catch-up."""
-    catchup_at = events.parse_aware_ts(catchup_state.get("finished_at")) or events.parse_aware_ts(
-        catchup_state.get("started_at")
-    )
-    if isinstance(auto_push, dict):
-        auto_at = events.parse_aware_ts(auto_push.get("timestamp"))
-        capture_at = events.parse_aware_ts(auto_push.get("last_capture_at"))
-        # Later attempts carry the last verified capture timestamp forward.
-        if (
-            auto_at is not None
-            and capture_at is not None
-            and mm_push_ts is not None
-            and capture_at <= min(auto_at, mm_push_ts)
-            and (catchup_at is None or capture_at > catchup_at)
-        ):
-            return True
-    if attended_evidence.get("state") == "valid":
-        att_runs = attended_evidence.get("runs")
-        att_push = att_runs.get("push") if isinstance(att_runs, dict) else None
-        if isinstance(att_push, dict) and att_push.get("outcome") == "success":
-            att_at = events.parse_aware_ts(att_push.get("completed_at"))
-            auto_at = (
-                events.parse_aware_ts(auto_push.get("timestamp"))
-                if isinstance(auto_push, dict)
-                else None
-            )
-            borrowed_from_degraded_auto = bool(
-                isinstance(auto_push, dict)
-                and auto_push.get("outcome") == "degraded"
-                and auto_at is not None
-                and att_at is not None
-                and mm_push_ts is not None
-                and mm_push_ts <= auto_at <= att_at
-            )
-            if (
-                att_at is not None
-                and mm_push_ts is not None
-                and mm_push_ts <= att_at
-                and (catchup_at is None or mm_push_ts > catchup_at)
-                and not borrowed_from_degraded_auto
-                and _mm_push_completed_git_capture(mm_push_row)
-            ):
-                return True
-    return False
 
 
 def _print_host_publication(
@@ -3442,6 +3365,12 @@ def diag(
     )
     if catchup_diag.get("detail"):
         console.print(f"  detail:              {safe_str(str(catchup_diag['detail']))}")
+    if catchup_diag.get("resolved_at"):
+        resolved_by = catchup_diag.get("resolved_by") or "unknown"
+        console.print(
+            f"  resolved:            {safe_str(str(catchup_diag['resolved_at']))} "
+            f"({safe_str(str(resolved_by))})"
+        )
 
     timings_state = state.get("push_timings") or {}
     by_kind = timings_state.get("by_kind") or {}

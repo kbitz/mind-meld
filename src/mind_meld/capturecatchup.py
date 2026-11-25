@@ -51,6 +51,7 @@ CATCHUP_STATE_PATH = config.CONFIG_DIR / "capture-catchup.json"
 CATCHUP_RECENT_WINDOW = timedelta(hours=24)
 VALID_CATCHUP_STATES = frozenset({"idle", "running", "finished"})
 VALID_CATCHUP_RESULTS = frozenset({"ok", "partial", "deferred", "no-sources", "failed"})
+VALID_CATCHUP_RESOLVERS = frozenset({"attended", "autopush", "catchup"})
 _SYNC_LOCK_BACKOFFS_S = (0.05, 0.1, 0.2, 0.4, 0.6, 0.65)
 _STATE_LOCK_BACKOFFS_S = (0.005, 0.01, 0.02, 0.05)
 _FUTURE_SKEW_WINDOW = timedelta(seconds=60)
@@ -80,6 +81,8 @@ def _empty_state() -> dict[str, Any]:
         "event_file": None,
         "event_sha256": None,
         "detail": None,
+        "resolved_at": None,
+        "resolved_by": None,
     }
 
 
@@ -120,6 +123,11 @@ def _normalize_state(raw: object) -> dict[str, Any]:
     result = raw.get("result")
     if result is not None and (not isinstance(result, str) or result not in VALID_CATCHUP_RESULTS):
         result = None
+    resolved_by = raw.get("resolved_by")
+    if resolved_by is not None and (
+        not isinstance(resolved_by, str) or resolved_by not in VALID_CATCHUP_RESOLVERS
+    ):
+        resolved_by = None
     out: dict[str, Any] = {
         "version": 1,
         "state": state,
@@ -132,6 +140,8 @@ def _normalize_state(raw: object) -> dict[str, Any]:
         "event_file": _clean_opt_str(raw.get("event_file")),
         "event_sha256": _clean_opt_str(raw.get("event_sha256")),
         "detail": _clean_opt_str(raw.get("detail")),
+        "resolved_at": _clean_opt_str(raw.get("resolved_at")),
+        "resolved_by": resolved_by,
     }
     retrigger_at = _clean_opt_str(raw.get("retrigger_at"))
     if retrigger_at is not None:
@@ -170,11 +180,14 @@ def record_catchup_state(
     event_file: str | None = None,
     event_sha256: str | None = None,
     detail: str | None = None,
+    resolved_at: str | None = None,
+    resolved_by: str | None = None,
     consumed_retrigger_at: datetime | None = None,
 ) -> None:
     """Persist catch-up state atomically under L3. Best-effort."""
     clean_state = state if state in VALID_CATCHUP_STATES else "finished"
     clean_result = result if result in VALID_CATCHUP_RESULTS else None
+    clean_resolved_by = resolved_by if resolved_by in VALID_CATCHUP_RESOLVERS else None
     payload: dict[str, Any] = {
         "version": 1,
         "state": clean_state,
@@ -185,6 +198,8 @@ def record_catchup_state(
         "event_file": _clean_opt_str(event_file),
         "event_sha256": _clean_opt_str(event_sha256),
         "detail": _clean_opt_str(detail),
+        "resolved_at": _clean_opt_str(resolved_at),
+        "resolved_by": clean_resolved_by,
     }
     try:
         with lockedjson.locked_json_rmw(
@@ -328,6 +343,106 @@ def covers_deadline_backlog(
     return True
 
 
+def is_failure_resolved(state: Mapping[str, Any]) -> bool:
+    """Return True iff the recorded failed/partial/deferred catch-up has a valid resolution."""
+    if state.get("result") not in {"failed", "partial", "deferred"}:
+        return False
+    resolved_at = events.parse_aware_ts(state.get("resolved_at"))
+    if resolved_at is None or state.get("resolved_by") not in VALID_CATCHUP_RESOLVERS:
+        return False
+    failure_at = events.parse_aware_ts(state.get("finished_at")) or events.parse_aware_ts(
+        state.get("started_at")
+    )
+    return failure_at is None or resolved_at >= failure_at
+
+
+def _is_host_only_catchup_failure(state: Mapping[str, Any]) -> bool:
+    detail = str(state.get("detail") or "").strip().lower()
+    if detail == "host usage reader failed":
+        return True
+    triggers = state.get("trigger_phases") or []
+    if not triggers or not all(isinstance(p, str) and p.startswith("host:") for p in triggers):
+        return False
+    if not detail:
+        return True
+    non_host_markers = ("git", "session", "claude", "token", "index", "append", "interrupted")
+    return not any(marker in detail for marker in non_host_markers)
+
+
+def record_capture_resolution(
+    resolved_by: str,
+    *,
+    resolved_at: datetime | None = None,
+    host_only: bool = False,
+) -> bool:
+    """Record that a complete capture run resolved the latest catch-up failure.
+
+    Never creates ``capture-catchup.json`` when no unresolved catch-up failure
+    exists. Best-effort under L3; never raises.
+    """
+    if resolved_by not in VALID_CATCHUP_RESOLVERS:
+        return False
+    try:
+        with lockedjson.locked_json_snapshot(CATCHUP_STATE_PATH, blocking=False) as snap:
+            if snap.state != "valid":
+                return False
+            current = _normalize_state(snap.data)
+            if current["result"] not in {"failed", "partial", "deferred"}:
+                return False
+            if is_failure_resolved(current):
+                return False
+            if host_only and not _is_host_only_catchup_failure(current):
+                return False
+    except Exception:
+        return False
+
+    ts = resolved_at or datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = datetime(
+            ts.year,
+            ts.month,
+            ts.day,
+            ts.hour,
+            ts.minute,
+            ts.second,
+            ts.microsecond,
+            tzinfo=timezone.utc,
+        )
+    try:
+        with lockedjson.locked_json_rmw(
+            CATCHUP_STATE_PATH,
+            mode=0o600,
+            compact=True,
+            retry_intervals=_STATE_LOCK_BACKOFFS_S,
+            on_contention="raise",
+        ) as ljson:
+            if ljson.read_state != "valid":
+                ljson.write_on_exit = False
+                return False
+            existing = _normalize_state(ljson.data)
+            if existing["result"] not in {"failed", "partial", "deferred"} or is_failure_resolved(
+                existing
+            ):
+                ljson.write_on_exit = False
+                return False
+            if host_only and not _is_host_only_catchup_failure(existing):
+                ljson.write_on_exit = False
+                return False
+            failure_at = events.parse_aware_ts(
+                existing.get("finished_at")
+            ) or events.parse_aware_ts(existing.get("started_at"))
+            if failure_at is not None and ts < failure_at:
+                ljson.write_on_exit = False
+                return False
+            existing["resolved_at"] = ts.isoformat()
+            existing["resolved_by"] = resolved_by
+            ljson.data.clear()
+            ljson.data.update(existing)
+            return True
+    except Exception:
+        return False
+
+
 def diag_catchup_state() -> dict[str, Any]:
     """Read-only non-secret catch-up state for ``mm diag``."""
     state, running = catchup_observation()
@@ -341,6 +456,8 @@ def diag_catchup_state() -> dict[str, Any]:
         "event_file": state["event_file"],
         "event_sha256": state["event_sha256"],
         "detail": state["detail"],
+        "resolved_at": state["resolved_at"],
+        "resolved_by": state["resolved_by"],
     }
 
 
@@ -853,6 +970,8 @@ def run_catchup(
                     event_file=final_res["event_file"],
                     event_sha256=final_res["event_sha256"],
                     detail=final_res["detail"],
+                    resolved_at=(final_res["finished_at"] if final_res["result"] == "ok" else None),
+                    resolved_by="catchup" if final_res["result"] == "ok" else None,
                     consumed_retrigger_at=consumed_retrigger_at,
                 )
             finally:

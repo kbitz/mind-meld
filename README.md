@@ -2828,7 +2828,9 @@ next `mm autopush` or `mm push`. Previews (`--dry-run`) never trigger catch-up.
 `mm status` suppresses manual `mm push` advice while catch-up is running or has
 just covered a deadline-only backlog (without hiding any other degradation or
 user edits), shows a `Background capture catch-up:` status line, and surfaces
-un-superseded catch-up failures with `Run: mm diag`. `mm diag` (plain text and
+unresolved catch-up failures with `Run: mm diag` until a complete capture
+(`mm push`, `mm autopush`, or a later catch-up with nothing left over) records
+resolution in `capture-catchup.json`. `mm diag` (plain text and
 `--json`) exposes read-only `capture_catchup` state without creating state files.
 
 A `mm: notice: host token cache write failed: <ErrnoName>` means the read's

@@ -1461,6 +1461,38 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
                     )
 
 
+def _record_attended_catchup_resolution(
+    result: PushResult | None,
+    *,
+    attempt: attemptlog.CaptureAttempt | None,
+    diagnostics_total: int,
+) -> None:
+    """Record catch-up failure resolution only when attended capture finished cleanly."""
+    events_degradations = result.events_degradations if result is not None else ()
+    tail_total = getattr(events_degradations, "total", len(events_degradations))
+    deadline_phases = result.capture_deadline_phases if result is not None else ()
+    if tail_total or diagnostics_total or deadline_phases:
+        return
+    capture = attempt.outcome if attempt is not None else None
+    host_degraded = capture is not None and (
+        capture.kind not in ("published", "no-row")
+        and not (capture.kind == "prerequisites" and capture.cause == "no-reader")
+        or any(v not in ("contributed", "empty", "absent") for v in capture.readers.values())
+    )
+    if host_degraded:
+        return
+    recorded_push_at = getattr(events_degradations, "recorded_push_at", None)
+    if recorded_push_at is not None:
+        capturecatchup.record_capture_resolution(
+            "attended", resolved_at=recorded_push_at, host_only=False
+        )
+        return
+    if capture is not None and capture.kind in ("published", "no-row") and capture.readers:
+        capturecatchup.record_capture_resolution(
+            "attended", resolved_at=datetime.now(timezone.utc), host_only=True
+        )
+
+
 @app.command()
 def push(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output"),
@@ -1555,6 +1587,14 @@ def push(
                         )
                     run["result"] = result
                     core_finished = True
+                    if not dry_run and (result is None or not result.no_sources):
+                        _record_attended_catchup_resolution(
+                            result,
+                            attempt=attempt,
+                            diagnostics_total=(
+                                sync_state["diagnostics"].total if sync_state is not None else 0
+                            ),
+                        )
                 except SnapshotError as e:
                     stop_cause = "snapshot-refused"
                     run["cause"] = stop_cause
@@ -5126,17 +5166,18 @@ def autopush() -> None:
                 details,
                 extra_success=("published under shared names",) if switched else (),
             )
+            recorded_push_at = getattr(events_degradations, "recorded_push_at", None)
+            if recorded_push_at is not None and events_total == 0 and not trigger_phases:
+                capturecatchup.record_capture_resolution(
+                    "autopush", resolved_at=recorded_push_at, host_only=False
+                )
             _write_autorun_breadcrumb(
                 "push",
                 outcome,
                 crumb_detail,
                 removal_wait_only=mesh_res.removal_wait_only(details),
                 capture_deadline_only=capture_deadline_only,
-                capture_at=(
-                    getattr(events_degradations, "recorded_push_at", None)
-                    if outcome == "success"
-                    else None
-                ),
+                capture_at=(recorded_push_at if outcome == "success" else None),
             )
             detached_config = setup.config
 

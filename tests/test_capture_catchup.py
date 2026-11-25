@@ -1784,6 +1784,7 @@ def test_diag_plain_text_and_json_render_catchup_and_timings(tmp_path, monkeypat
 def test_attended_push_skipping_git_capture_does_not_supersede_failed_catchup(
     tmp_path, monkeypatch
 ):
+    """Verify an attended push that skips Git capture does not resolve a failed catch-up."""
     env = _setup_fleet(tmp_path, monkeypatch)
     repo = _make_git_repo(tmp_path / "repo-attended-skip")
     env["cfg"]["retro"]["repo_roots"] = [str(repo)]
@@ -1854,3 +1855,195 @@ def test_no_change_attended_push_preserves_catchup_recovery(tmp_path, monkeypatc
     res_after_noop = runner.invoke(cli.app, ["status"])
     assert res_after_noop.exit_code == 0
     assert "Background capture catch-up failed. Run: mm diag" not in res_after_noop.stdout
+
+
+def test_push_timing_out_on_sessions_does_not_resolve_catchup_failure(tmp_path, monkeypatch):
+    """Verify a push that completes Git capture but hits the session deadline does not resolve."""
+    env = _setup_fleet(tmp_path, monkeypatch)
+    repo = _make_git_repo(tmp_path / "repo-session-timeout")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    now = datetime.now(timezone.utc)
+    capturecatchup.record_catchup_state(
+        state="finished",
+        result="failed",
+        started_at=(now - timedelta(seconds=1)).isoformat(),
+        finished_at=now.isoformat(),
+        trigger_phases=["session_scan"],
+        detail="Claude token cache unavailable",
+    )
+
+    real_capture = events_tail._capture_event_snapshots
+
+    def timeout_sessions(*args, **kwargs):
+        return replace(real_capture(*args, **kwargs), session_walk_exceeded_budget=True)
+
+    (env["notes_dir"] / "hello.md").write_text("git ok but session deadline\n")
+    with monkeypatch.context() as patch:
+        patch.setattr(events_tail, "_capture_event_snapshots", timeout_sessions)
+        assert runner.invoke(cli.app, ["push"]).exit_code == 0
+
+    # Even after a subsequent no-change attended push, the session catch-up failure stays visible.
+    assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    res = runner.invoke(cli.app, ["status"])
+    assert res.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" in res.stdout
+    state = capturecatchup.read_catchup_state()
+    assert state["resolved_at"] is None
+    assert state["resolved_by"] is None
+
+
+def test_successful_later_catchup_resolves_prior_failure(tmp_path, monkeypatch):
+    """Verify a subsequent successful catch-up run resolves an earlier catch-up failure."""
+    env = _setup_fleet(tmp_path, monkeypatch)
+    repo = _make_git_repo(tmp_path / "repo-catchup-resolves")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    now = datetime.now(timezone.utc)
+    capturecatchup.record_catchup_state(
+        state="finished",
+        result="failed",
+        started_at=(now - timedelta(seconds=1)).isoformat(),
+        finished_at=now.isoformat(),
+        trigger_phases=["git_walk"],
+        detail="Git capture index unreadable; run mm diag",
+    )
+    assert (
+        "Background capture catch-up failed. Run: mm diag"
+        in runner.invoke(cli.app, ["status"]).stdout
+    )
+
+    res_catchup = capturecatchup.run_catchup(["git_walk"])
+    assert res_catchup is not None
+    assert res_catchup["result"] == "ok"
+    state = capturecatchup.read_catchup_state()
+    assert state["resolved_by"] == "catchup"
+    assert state["resolved_at"] == res_catchup["finished_at"]
+    res_status = runner.invoke(cli.app, ["status"])
+    assert res_status.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" not in res_status.stdout
+
+
+def test_host_only_catchup_failure_resolves_only_on_complete_host_read(tmp_path, monkeypatch):
+    """Verify a host-only catch-up failure resolves only after a complete host read."""
+    _setup_fleet(tmp_path, monkeypatch, include_codex=True)
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    monkeypatch.setattr(
+        codex_host,
+        "read_codex_usage",
+        lambda *a, **k: host_usage.HostUsageResult(hosts={}, complete=False, reason="deadline"),
+    )
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    now = datetime.now(timezone.utc)
+    capturecatchup.record_catchup_state(
+        state="finished",
+        result="failed",
+        started_at=(now - timedelta(seconds=1)).isoformat(),
+        finished_at=now.isoformat(),
+        trigger_phases=["host:codex"],
+        detail="host usage reader failed",
+    )
+
+    # Incomplete host read on attended push must NOT resolve the failure.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            host_registry,
+            "warm_host_cache_inline",
+            lambda *a, **k: host_usage.HostUsageResult(hosts={}, complete=False, reason="deadline"),
+        )
+        assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    assert capturecatchup.read_catchup_state()["resolved_at"] is None
+    res_degraded = runner.invoke(cli.app, ["status"])
+    assert res_degraded.exit_code == 0
+    assert "Background capture catch-up: failed" in res_degraded.stdout
+
+    # Complete host read on attended push resolves the host-usage-only failure.
+    monkeypatch.setattr(
+        codex_host,
+        "read_codex_usage",
+        lambda *a, **k: host_usage.HostUsageResult(hosts={}, complete=True),
+    )
+    assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    state = capturecatchup.read_catchup_state()
+    assert state["resolved_by"] == "attended"
+    assert state["resolved_at"] is not None
+    res_ok = runner.invoke(cli.app, ["status"])
+    assert res_ok.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" not in res_ok.stdout
+    assert "Background capture catch-up: failed" not in res_ok.stdout
+
+
+def test_new_catchup_failure_after_resolution_shows_again(tmp_path, monkeypatch):
+    """Verify a new catch-up failure after resolution makes the warning show again."""
+    env = _setup_fleet(tmp_path, monkeypatch)
+    repo = _make_git_repo(tmp_path / "repo-new-failure")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    t1 = datetime.now(timezone.utc)
+    capturecatchup.record_catchup_state(
+        state="finished",
+        result="failed",
+        started_at=(t1 - timedelta(seconds=1)).isoformat(),
+        finished_at=t1.isoformat(),
+        trigger_phases=["git_walk"],
+        detail="Git capture index unreadable; run mm diag",
+    )
+    (env["notes_dir"] / "hello.md").write_text("resolve first failure\n")
+    assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    assert capturecatchup.read_catchup_state()["resolved_by"] == "attended"
+    assert (
+        "Background capture catch-up failed. Run: mm diag"
+        not in runner.invoke(cli.app, ["status"]).stdout
+    )
+
+    # Record a newer failure after resolution -> warning must show again.
+    t2 = datetime.now(timezone.utc) + timedelta(seconds=2)
+    capturecatchup.record_catchup_state(
+        state="finished",
+        result="failed",
+        started_at=(t2 - timedelta(seconds=1)).isoformat(),
+        finished_at=t2.isoformat(),
+        trigger_phases=["git_walk"],
+        detail="Git capture index unreadable; run mm diag",
+    )
+    state = capturecatchup.read_catchup_state()
+    assert state["resolved_at"] is None
+    assert state["resolved_by"] is None
+    res = runner.invoke(cli.app, ["status"])
+    assert res.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" in res.stdout
+
+
+def test_status_and_diag_never_write_catchup_resolution(tmp_path, monkeypatch):
+    """Verify read-only status, diag, and push --dry-run never modify catch-up state."""
+    env = _setup_fleet(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    now = datetime.now(timezone.utc)
+    capturecatchup.record_catchup_state(
+        state="finished",
+        result="failed",
+        started_at=(now - timedelta(seconds=1)).isoformat(),
+        finished_at=now.isoformat(),
+        trigger_phases=["git_walk"],
+        detail="Git capture index unreadable; run mm diag",
+    )
+    state_path = env["cfg_dir"] / "capture-catchup.json"
+    before_bytes = state_path.read_bytes()
+
+    assert runner.invoke(cli.app, ["status"]).exit_code == 0
+    assert runner.invoke(cli.app, ["diag"]).exit_code == 0
+    assert runner.invoke(cli.app, ["diag", "--json"]).exit_code == 0
+    assert runner.invoke(cli.app, ["push", "--dry-run"]).exit_code == 0
+    assert state_path.read_bytes() == before_bytes
