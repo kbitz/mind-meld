@@ -154,9 +154,14 @@ def _normalize_state(raw: object) -> dict[str, Any]:
     return out
 
 
+def catchup_lock_state() -> str:
+    """Return ``"held"``, ``"not_held"``, or ``"unknown"`` for the catch-up lock L1."""
+    return lockfile.probe_lock(CATCHUP_LOCK_PATH)
+
+
 def is_catchup_running() -> bool:
     """Return True if a background catch-up worker currently holds L1."""
-    return lockfile.is_lock_held(CATCHUP_LOCK_PATH)
+    return catchup_lock_state() == "held"
 
 
 def read_catchup_state() -> dict[str, Any]:
@@ -302,12 +307,12 @@ def start_detached_catchup(trigger_phases: Sequence[str]) -> bool:
 def catchup_observation() -> tuple[dict[str, Any], bool]:
     """Return ``(state, running)`` with crash/SIGKILL detection. Read-only."""
     state = read_catchup_state()
-    running = is_catchup_running()
-    if state["state"] == "running" and not running:
+    lock_state = catchup_lock_state()
+    if state["state"] == "running" and lock_state == "not_held":
         # Recheck once to avoid racing a worker that just finished and released L1.
         state = read_catchup_state()
-        running = is_catchup_running()
-        if state["state"] == "running" and not running:
+        lock_state = catchup_lock_state()
+        if state["state"] == "running" and lock_state == "not_held":
             state = {
                 **state,
                 "state": "finished",
@@ -315,7 +320,10 @@ def catchup_observation() -> tuple[dict[str, Any], bool]:
                 "detail": "worker interrupted",
             }
     # The child can still hold L1 while unfinished Git calls unwind.
-    return state, running and state["state"] != "finished"
+    running = (
+        lock_state == "held" or (lock_state == "unknown" and state["state"] == "running")
+    ) and state["state"] != "finished"
+    return state, running
 
 
 def covers_deadline_backlog(
@@ -388,7 +396,7 @@ def record_capture_resolution(
         return False
 
     # Probe L1 outside L3 so lock order stays L1 -> L2 -> L3.
-    if interrupted_checked and is_catchup_running():
+    if interrupted_checked and catchup_lock_state() != "not_held":
         return False
 
     ts = resolved_at or datetime.now(timezone.utc)

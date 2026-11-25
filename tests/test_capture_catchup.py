@@ -2194,3 +2194,72 @@ def test_interrupted_catchup_worker_resolved_only_by_complete_push(tmp_path, mon
     assert res_again.exit_code == 0
     assert "Background capture catch-up failed. Run: mm diag" in res_again.stdout
     assert "worker interrupted" in res_again.stdout
+
+
+def test_unreadable_lock_never_finalizes_a_live_catchup_worker(tmp_path, monkeypatch):
+    """Verify an unreadable lock file never finalizes a live catch-up worker on push."""
+    env = _setup_fleet(tmp_path, monkeypatch, include_codex=True)
+    repo = _make_git_repo(tmp_path / "repo-unreadable-lock")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    monkeypatch.setattr(
+        codex_host,
+        "read_codex_usage",
+        lambda *a, **k: host_usage.HostUsageResult(hosts={}, complete=True),
+    )
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    lock_path = capturecatchup.CATCHUP_LOCK_PATH
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, sys; "
+                f"fp = open({str(lock_path)!r}, 'a+'); "
+                "fcntl.flock(fp.fileno(), fcntl.LOCK_EX); "
+                "print('locked', flush=True); "
+                "sys.stdin.readline()"
+            ),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "locked"
+        assert lockfile.probe_lock(lock_path) == "held"
+
+        capturecatchup.record_catchup_state(
+            state="running",
+            result=None,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            finished_at=None,
+            trigger_phases=["git_walk"],
+        )
+        state_path = env["cfg_dir"] / "capture-catchup.json"
+        before_bytes = state_path.read_bytes()
+
+        os.chmod(lock_path, 0o000)
+        assert lockfile.probe_lock(lock_path) == "unknown"
+
+        # A fully complete push must leave the live worker's state untouched.
+        (env["notes_dir"] / "hello.md").write_text("complete push while lock is unreadable\n")
+        assert runner.invoke(cli.app, ["push"]).exit_code == 0
+        assert state_path.read_bytes() == before_bytes
+
+        res_status = runner.invoke(cli.app, ["status"])
+        assert res_status.exit_code == 0
+        assert "Background capture catch-up: running" in res_status.stdout
+        assert "worker interrupted" not in res_status.stdout
+        assert "Background capture catch-up failed. Run: mm diag" not in res_status.stdout
+    finally:
+        if lock_path.exists():
+            os.chmod(lock_path, 0o644)
+        if holder.stdin is not None:
+            holder.stdin.write("\n")
+            holder.stdin.flush()
+            holder.stdin.close()
+        holder.wait(timeout=5)

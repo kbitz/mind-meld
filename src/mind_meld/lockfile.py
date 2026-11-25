@@ -183,21 +183,25 @@ def release_lock(path: Path | None = None, *, unlock: bool = True) -> None:
         pass
 
 
-def is_lock_held(path: Path | None = None) -> bool:
-    """Return True if `path` (default LOCK_PATH) is currently locked.
+def probe_lock(path: Path | None = None) -> str:
+    """Return ``"held"``, ``"not_held"``, or ``"unknown"`` for `path` (default LOCK_PATH).
 
     Read-only probe: never creates or modifies `path`. Checks this process's
     own held-lock table first, then probes a shared non-blocking flock on an
-    existing file. Missing or unreadable files return False.
+    existing file. A missing lock file is ``"not_held"``; any other open or
+    flock error is ``"unknown"`` so callers never mistake an unreadable lock
+    for an idle or interrupted worker.
     """
     lock_path = path or LOCK_PATH
     key = _resolve_key(lock_path)
     if key in _LOCK_FDS:
-        return True
+        return "held"
     try:
         fd = os.open(str(lock_path), os.O_RDONLY)
+    except FileNotFoundError:
+        return "not_held"
     except OSError:
-        return False
+        return "unknown"
     try:
         for attempt in (1, 2):
             try:
@@ -206,18 +210,23 @@ def is_lock_held(path: Path | None = None) -> bool:
                     fcntl.flock(fd, fcntl.LOCK_UN)
                 except OSError:
                     pass
-                return False
+                return "not_held"
             except InterruptedError:
                 if attempt == 2:
-                    return False
+                    return "unknown"
                 continue
             except BlockingIOError:
-                return True
+                return "held"
             except OSError:
-                return False
-        return False
+                return "unknown"
+        return "unknown"
     finally:
         try:
             os.close(fd)
         except OSError:
             pass
+
+
+def is_lock_held(path: Path | None = None) -> bool:
+    """Return True if `path` (default LOCK_PATH) is currently locked."""
+    return probe_lock(path) == "held"

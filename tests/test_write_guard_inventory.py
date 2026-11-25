@@ -605,7 +605,7 @@ REVIEWED = {
             "os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 420)",
         ],
     ),
-    "lockfile.py:is_lock_held": (
+    "lockfile.py:probe_lock": (
         *_READ_ONLY,
         [
             "os.open(str(lock_path), os.O_RDONLY)",
