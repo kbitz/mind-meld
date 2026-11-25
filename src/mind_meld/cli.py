@@ -127,6 +127,7 @@ from mind_meld.storage import get_backend
 from mind_meld.storage.keys import (
     blob_key,
     device_key,
+    is_content_hash,
     manifest_key,
 )
 from mind_meld.storage.local import LocalBackend
@@ -839,6 +840,21 @@ def _stored_event_key(files: dict, rel: str) -> str | None:
     if len(matches) == 1:
         return matches[0]
     return None
+
+
+def _has_new_event_bytes(files: dict, prior: dict, unverified_host_path: str | None) -> bool:
+    """Compare accepted event files against the prior, including recovery sidecars."""
+    for rel, info in files.items():
+        if rel == unverified_host_path:
+            continue
+        if rel not in prior:
+            return True
+        previous = prior[rel]
+        digest = previous.get("sha256") if isinstance(previous, dict) else None
+        # Missing recovery evidence cannot prove that an accepted file changed.
+        if is_content_hash(digest) and digest != info["sha256"]:
+            return True
+    return False
 
 
 def _casefold_selected(rel: str, src: dict) -> bool:
@@ -2787,17 +2803,13 @@ def _push_core(
         usage_published = False
         if result_observer is not None:
             event_files = _mm_events_files(local_manifest)
-            # A repaired snapshot can restore event files already accepted in the sidecar.
-            event_diff = manifest.diff_files(event_files, _mm_events_files(remote_manifest))
             unverified_host_path = (
                 _stored_event_key(event_files, f"events/{captured.appended[0].name}")
                 if captured is not None and captured.appended is not None
                 else None
             )
-            usage_published = any(
-                rel != unverified_host_path
-                for changed in (event_diff.new, event_diff.modified)
-                for rel in changed
+            usage_published = _has_new_event_bytes(
+                event_files, _mm_events_files(remote_manifest), unverified_host_path
             )
         # Independent content receipt at the actual acceptance boundary, even when
         # capture was skipped or failed. Maintenance cannot revoke accepted content.

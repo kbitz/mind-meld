@@ -6956,7 +6956,10 @@ def test_capture_publication_does_not_count_unverified_case_variant_167a(capture
     assert result.stdout.splitlines()[-1] == "Push: no content changes; no new usage."
 
 
-def test_conflict_only_repair_does_not_count_restored_usage_167a(capture61, monkeypatch):
+@pytest.mark.parametrize("missing_digest", [False, True])
+def test_conflict_only_repair_does_not_count_restored_usage_167a(
+    capture61, monkeypatch, missing_digest
+):
     backend = capture61["backend"]
     key = storage_keys.manifest_key("dev-a")
     stale_copy = backend.get(key)
@@ -6969,6 +6972,12 @@ def test_conflict_only_repair_does_not_count_restored_usage_167a(capture61, monk
     fetched = core._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
     assert fetched.conflict_copies_only
     assert cli_module._mm_events_files(fetched.manifest) != prior
+    if missing_digest:
+        sidecar = cli_module.sidecar.read("dev-a")
+        rel = f"events/{capture61['dayfile'].name}"
+        cli_module._mm_events_files(sidecar)[rel].pop("sha256")
+        sidecar["timestamp"] = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        cli_module.sidecar.write(sidecar)
     monkeypatch.setattr(cli_module, "_capture_attended_usage", lambda *a, outcome, **kw: outcome)
     monkeypatch.setattr(events_tail, "_run_events_tail", lambda *a, **k: events_tail.Degradations())
 
@@ -17902,15 +17911,21 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
         multiple.stdout == "Push: no content changes; usage published (Codex, Grok catching up).\n"
     )
 
-    # 3. All readers hit deadline (no-row) -> canonical order (Codex, Grok catching up).
+    # 3. All readers hit deadline (no-row) -> canonical order, with Antigravity last.
     monkeypatch.setattr(
         events_tail,
         "_default_host_readers",
-        lambda *a, **k: (("codex", codex_deadline), ("grok", grok_deadline)),
+        lambda *a, **k: (
+            ("agy", grok_deadline),
+            ("codex", codex_deadline),
+            ("grok", grok_deadline),
+        ),
     )
     r3 = runner.invoke(app, ["push"])
     assert r3.exit_code == 0, r3.output
-    assert r3.stdout == "Push: no content changes; no new usage (Codex, Grok catching up).\n"
+    assert r3.stdout == (
+        "Push: no content changes; no new usage (Codex, Grok, Antigravity catching up).\n"
+    )
 
     # 4. Non-deadline reader failure does not emit catching up.
     monkeypatch.setattr(
@@ -17925,15 +17940,14 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
 
 def test_autopush_stays_quiet_with_and_without_usage_167a(capture61):
     path = capture61["dayfile"]
-    rel = f"events/{path.name}"
     before = path.read_bytes()
-    prior = cli_module._mm_events_files(_accepted(capture61))[rel]
+    prior = cli_module._mm_events_files(_accepted(capture61))
     # Healthy autopush with nothing to publish: silent.
     r_noop = runner.invoke(app, ["autopush"])
     assert r_noop.exit_code == 0
     assert r_noop.stdout == ""
     assert r_noop.stderr == ""
-    assert cli_module._mm_events_files(_accepted(capture61))[rel] == prior
+    assert cli_module._mm_events_files(_accepted(capture61)) == prior
 
     # Healthy autopush with content + usage: still silent.
     memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
@@ -17942,11 +17956,14 @@ def test_autopush_stays_quiet_with_and_without_usage_167a(capture61):
     assert r_change.exit_code == 0
     assert r_change.stdout == ""
     assert r_change.stderr == ""
-    after = path.read_bytes()
-    assert after.startswith(before)
-    new_rows = [json.loads(line)["type"] for line in after[len(before) :].splitlines()]
+    accepted = cli_module._mm_events_files(_accepted(capture61))
+    (rel,) = [
+        rel for rel, info in accepted.items() if info["sha256"] != prior.get(rel, {}).get("sha256")
+    ]
+    updated_path = path.parent.parent / rel
+    previous_bytes = before if updated_path == path else b""
+    after = updated_path.read_bytes()
+    assert after.startswith(previous_bytes)
+    new_rows = [json.loads(line)["type"] for line in after[len(previous_bytes) :].splitlines()]
     assert "host-usage-snapshot" in new_rows
-    assert (
-        cli_module._mm_events_files(_accepted(capture61))[rel]["sha256"]
-        == hashlib.sha256(after).hexdigest()
-    )
+    assert accepted[rel]["sha256"] == hashlib.sha256(after).hexdigest()
