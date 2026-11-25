@@ -8417,10 +8417,12 @@ class TestPricingRefreshHealth:
     def test_refresh_age_uses_oldest_vendor_and_window_utc_date(self, monkeypatch, age, due):
         from mind_meld import token_usage as tu
 
+        oldest = datetime(2026, 10, 20, tzinfo=timezone.utc)
+        newer = (oldest + timedelta(days=7)).date().isoformat()
         for vendor in ("", "OPENAI_", "XAI_", "GOOGLE_", "MUSE_"):
-            monkeypatch.setattr(tu, "PRICING_" + vendor + "LAST_UPDATED", "2026-10-27")
-        monkeypatch.setattr(tu, "PRICING_XAI_LAST_UPDATED", "2026-10-20")
-        until = datetime(2026, 10, 20, tzinfo=timezone.utc) + timedelta(days=age)
+            monkeypatch.setattr(tu, "PRICING_" + vendor + "LAST_UPDATED", newer)
+        monkeypatch.setattr(tu, "PRICING_XAI_LAST_UPDATED", oldest.date().isoformat())
+        until = oldest + timedelta(days=age)
         data = aggregator.RetroData(window_days=7, since=until - timedelta(days=7), until=until)
         pricing = self._pricing(data)
         assert pricing["effective_verified_date"] == "2026-10-20"
@@ -8432,10 +8434,10 @@ class TestPricingRefreshHealth:
     def test_effective_date_is_min_over_all_five_vendors(self, monkeypatch, oldest):
         from mind_meld import token_usage as tu
 
-        for vendor in ("", "OPENAI_", "XAI_", "GOOGLE_", "MUSE_"):
-            monkeypatch.setattr(tu, "PRICING_" + vendor + "LAST_UPDATED", "2026-10-27")
-        monkeypatch.setattr(tu, "PRICING_" + oldest + "LAST_UPDATED", "2026-10-20")
         until = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        for vendor in ("", "OPENAI_", "XAI_", "GOOGLE_", "MUSE_"):
+            monkeypatch.setattr(tu, "PRICING_" + vendor + "LAST_UPDATED", until.date().isoformat())
+        monkeypatch.setattr(tu, "PRICING_" + oldest + "LAST_UPDATED", "2026-10-20")
         data = aggregator.RetroData(window_days=7, since=until - timedelta(days=7), until=until)
         assert self._pricing(data)["effective_verified_date"] == "2026-10-20"
 
@@ -8608,7 +8610,7 @@ class TestPeerRepositoryLocalIdentity:
         sources = _recapture_test_sources(tmp_path)
         _stub_discovery_to(monkeypatch, repo)
 
-        # This Mac's 2026-10-27 shape: a fresh cache that names only the global email.
+        # This Mac's October 27 shape: a fresh cache that names only the global email.
         identity.CACHE_PATH.write_text(
             json.dumps(
                 {

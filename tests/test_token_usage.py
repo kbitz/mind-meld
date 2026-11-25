@@ -2801,7 +2801,7 @@ def _write_pricing_cache(models, verified_date=None):
     tu.PRICING_CACHE_PATH.write_text(json.dumps(payload))
 
 
-def _pricing_card(verified_date="2026-10-27", **overrides):
+def _pricing_card(verified_date=date(2026, 10, 27).isoformat(), **overrides):
     return {
         "input": 1.0,
         "cache_read": 0.1,
