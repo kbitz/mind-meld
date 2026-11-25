@@ -183,25 +183,21 @@ def release_lock(path: Path | None = None, *, unlock: bool = True) -> None:
         pass
 
 
-def probe_lock(path: Path | None = None) -> str:
-    """Return ``"held"``, ``"not_held"``, or ``"unknown"`` for `path` (default LOCK_PATH).
+def is_lock_held(path: Path | None = None) -> bool:
+    """Return True if `path` (default LOCK_PATH) is currently locked.
 
     Read-only probe: never creates or modifies `path`. Checks this process's
     own held-lock table first, then probes a shared non-blocking flock on an
-    existing file. A missing lock file is ``"not_held"``; any other open or
-    flock error is ``"unknown"`` so callers never mistake an unreadable lock
-    for an idle or interrupted worker.
+    existing file. Missing or unreadable files return False.
     """
     lock_path = path or LOCK_PATH
     key = _resolve_key(lock_path)
     if key in _LOCK_FDS:
-        return "held"
+        return True
     try:
         fd = os.open(str(lock_path), os.O_RDONLY)
-    except FileNotFoundError:
-        return "not_held"
     except OSError:
-        return "unknown"
+        return False
     try:
         for attempt in (1, 2):
             try:
@@ -210,23 +206,18 @@ def probe_lock(path: Path | None = None) -> str:
                     fcntl.flock(fd, fcntl.LOCK_UN)
                 except OSError:
                     pass
-                return "not_held"
+                return False
             except InterruptedError:
                 if attempt == 2:
-                    return "unknown"
+                    return False
                 continue
             except BlockingIOError:
-                return "held"
+                return True
             except OSError:
-                return "unknown"
-        return "unknown"
+                return False
+        return False
     finally:
         try:
             os.close(fd)
         except OSError:
             pass
-
-
-def is_lock_held(path: Path | None = None) -> bool:
-    """Return True if `path` (default LOCK_PATH) is currently locked."""
-    return probe_lock(path) == "held"

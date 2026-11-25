@@ -9,7 +9,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/statusflow.py` — `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_identity_inputs_digest_for_push` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `resolve_attended_capture_cap` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS` / `phase_timer_scope`
 - `src/mind_meld/pushtimings.py` — `PhaseTiming` / `PhaseTimer` / `PUSH_TIMINGS_PATH` / `PUSH_KINDS` / `record_push_timings` / `read_push_timings` / `diag_timings_state` / `format_verbose_timings`
-- `src/mind_meld/capturecatchup.py` — `CATCHUP_LOCK_PATH` / `CATCHUP_STATE_PATH` / `is_catchup_running` / `start_detached_catchup` / `read_catchup_state` / `record_catchup_state` / `is_failure_resolved` / `record_capture_resolution` / `catchup_observation` / `covers_deadline_backlog` / `diag_catchup_state` / `run_catchup` / `_detached_main`
+- `src/mind_meld/capturecatchup.py` — `CATCHUP_LOCK_PATH` / `CATCHUP_STATE_PATH` / `is_catchup_running` / `start_detached_catchup` / `read_catchup_state` / `record_catchup_state` / `catchup_observation` / `covers_deadline_backlog` / `diag_catchup_state` / `run_catchup` / `_detached_main`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
@@ -4336,18 +4336,13 @@ never change.
   `partial`/`deferred` backlogs, user edits, or non-deadline degradations
   (`unsupported`, `errs > 0`, `incomplete_streak >= 3`, held files, independent
   attended push failures). A terminal result is visible while the worker
-  still holds the launch lock during Git cleanup. A failed catch-up (including
-  an interrupted worker whose `state` stayed `"running"` with `result=None`
-  after releasing `L1`) remains actionable until a newer complete capture
-  records resolution (`resolved_at`, `resolved_by` in `capture-catchup.json`,
-  written via `capturecatchup.record_capture_resolution` or `run_catchup` on
-  `ok`). Only a
-  capture run that finishes with nothing left over across every part (all host
-  readers, Git discovery, Git walk, and session scan) records resolution. A
-  later failure clears `resolved_at`/`resolved_by` so it surfaces again. `mm status` and `mm diag`
-  only read the recorded state (`capturecatchup.is_failure_resolved`) and never
-  infer recovery from push receipts or write `capture-catchup.json`.
-  An unresolved `failed` catch-up surfaces
-  `Background capture catch-up failed. Run: mm diag`. `mm diag` exposes
-  read-only `capture_catchup` (including `resolved_at` and `resolved_by`) and
-  `push_timings.by_kind.catchup` without creating files.
+  still holds the launch lock during Git cleanup. `mm status` never infers or
+  records catch-up resolution: while a part (host reader or Git capture) has a
+  live backlog from real caches/cursors, that part's backlog line appends the
+  last catch-up fact for that part (`background catch-up running`, or
+  `background catch-up failed at <local time> (<detail>). Run: mm diag` with
+  detail `interrupted` for an interrupted worker). If the last catch-up did not
+  cover that part, nothing is appended; when a part has no backlog, nothing
+  about catch-up is shown for it. `mm diag` exposes read-only `capture_catchup`
+  (when, trigger parts, ok/failed/interrupted, detail) and
+  `push_timings.by_kind.catchup` without creating or writing files.

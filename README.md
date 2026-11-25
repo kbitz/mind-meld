@@ -2827,11 +2827,11 @@ timings in `push-timings.json`. Encrypted publication to the fleet waits for the
 next `mm autopush` or `mm push`. Previews (`--dry-run`) never trigger catch-up.
 `mm status` suppresses manual `mm push` advice while catch-up is running or has
 just covered a deadline-only backlog (without hiding any other degradation or
-user edits), shows a `Background capture catch-up:` status line, and surfaces
-unresolved catch-up failures with `Run: mm diag` until a complete capture
-(`mm push`, `mm autopush`, or a later catch-up with nothing left over) records
-resolution in `capture-catchup.json`. `mm diag` (plain text and
-`--json`) exposes read-only `capture_catchup` state without creating state files.
+user edits). While a part (host reader or Git capture) still has a live backlog,
+that part's backlog line appends the last catch-up fact for that part (running,
+or failed/interrupted with `Run: mm diag`); when a part has no backlog, nothing
+about catch-up is shown for it. `mm diag` (plain text and `--json`) exposes
+read-only `capture_catchup` state without creating state files.
 
 A `mm: notice: host token cache write failed: <ErrnoName>` means the read's
 result still stands but its cache could not be saved. The write may leave an
