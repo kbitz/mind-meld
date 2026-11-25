@@ -356,24 +356,10 @@ def is_failure_resolved(state: Mapping[str, Any]) -> bool:
     return failure_at is None or resolved_at >= failure_at
 
 
-def _is_host_only_catchup_failure(state: Mapping[str, Any]) -> bool:
-    detail = str(state.get("detail") or "").strip().lower()
-    if detail == "host usage reader failed":
-        return True
-    triggers = state.get("trigger_phases") or []
-    if not triggers or not all(isinstance(p, str) and p.startswith("host:") for p in triggers):
-        return False
-    if not detail:
-        return True
-    non_host_markers = ("git", "session", "claude", "token", "index", "append", "interrupted")
-    return not any(marker in detail for marker in non_host_markers)
-
-
 def record_capture_resolution(
     resolved_by: str,
     *,
     resolved_at: datetime | None = None,
-    host_only: bool = False,
 ) -> bool:
     """Record that a complete capture run resolved the latest catch-up failure.
 
@@ -390,8 +376,6 @@ def record_capture_resolution(
             if current["result"] not in {"failed", "partial", "deferred"}:
                 return False
             if is_failure_resolved(current):
-                return False
-            if host_only and not _is_host_only_catchup_failure(current):
                 return False
     except Exception:
         return False
@@ -423,9 +407,6 @@ def record_capture_resolution(
             if existing["result"] not in {"failed", "partial", "deferred"} or is_failure_resolved(
                 existing
             ):
-                ljson.write_on_exit = False
-                return False
-            if host_only and not _is_host_only_catchup_failure(existing):
                 ljson.write_on_exit = False
                 return False
             failure_at = events.parse_aware_ts(

@@ -1462,16 +1462,15 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
 
 
 def _record_attended_catchup_resolution(
-    result: PushResult | None,
+    result: PushResult,
     *,
     attempt: attemptlog.CaptureAttempt | None,
     diagnostics_total: int,
 ) -> None:
     """Record catch-up failure resolution only when attended capture finished cleanly."""
-    events_degradations = result.events_degradations if result is not None else ()
+    events_degradations = result.events_degradations
     tail_total = getattr(events_degradations, "total", len(events_degradations))
-    deadline_phases = result.capture_deadline_phases if result is not None else ()
-    if tail_total or diagnostics_total or deadline_phases:
+    if tail_total or diagnostics_total or result.capture_deadline_phases:
         return
     capture = attempt.outcome if attempt is not None else None
     host_degraded = capture is not None and (
@@ -1483,14 +1482,7 @@ def _record_attended_catchup_resolution(
         return
     recorded_push_at = getattr(events_degradations, "recorded_push_at", None)
     if recorded_push_at is not None:
-        capturecatchup.record_capture_resolution(
-            "attended", resolved_at=recorded_push_at, host_only=False
-        )
-        return
-    if capture is not None and capture.kind in ("published", "no-row") and capture.readers:
-        capturecatchup.record_capture_resolution(
-            "attended", resolved_at=datetime.now(timezone.utc), host_only=True
-        )
+        capturecatchup.record_capture_resolution("attended", resolved_at=recorded_push_at)
 
 
 @app.command()
@@ -1587,7 +1579,7 @@ def push(
                         )
                     run["result"] = result
                     core_finished = True
-                    if not dry_run and (result is None or not result.no_sources):
+                    if not dry_run and result is not None and not result.no_sources:
                         _record_attended_catchup_resolution(
                             result,
                             attempt=attempt,
@@ -5168,9 +5160,7 @@ def autopush() -> None:
             )
             recorded_push_at = getattr(events_degradations, "recorded_push_at", None)
             if recorded_push_at is not None and events_total == 0 and not trigger_phases:
-                capturecatchup.record_capture_resolution(
-                    "autopush", resolved_at=recorded_push_at, host_only=False
-                )
+                capturecatchup.record_capture_resolution("autopush", resolved_at=recorded_push_at)
             _write_autorun_breadcrumb(
                 "push",
                 outcome,

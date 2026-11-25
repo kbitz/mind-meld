@@ -4340,11 +4340,9 @@ never change.
   actionable until a newer complete capture records resolution (`resolved_at`,
   `resolved_by` in `capture-catchup.json`, written via
   `capturecatchup.record_capture_resolution` or `run_catchup` on `ok`). Only a
-  capture run that finishes with nothing left over (no host reader, Git
-  discovery, Git walk, or session scan catching up, partial, deferred, or
-  failed) records resolution; a host-usage-only catch-up failure also resolves
-  on a complete attended host-usage capture. A later failure clears
-  `resolved_at`/`resolved_by` so it surfaces again. `mm status` and `mm diag`
+  capture run that finishes with nothing left over across every part (all host
+  readers, Git discovery, Git walk, and session scan) records resolution. A
+  later failure clears `resolved_at`/`resolved_by` so it surfaces again. `mm status` and `mm diag`
   only read the recorded state (`capturecatchup.is_failure_resolved`) and never
   infer recovery from push receipts or write `capture-catchup.json`.
   An unresolved `failed` catch-up surfaces

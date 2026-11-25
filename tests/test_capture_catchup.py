@@ -1903,6 +1903,9 @@ def test_successful_later_catchup_resolves_prior_failure(tmp_path, monkeypatch):
     env["cfg"]["retro"]["repo_roots"] = [str(repo)]
     config.save_config(env["cfg"])
     monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    monkeypatch.setattr(
+        identity, "_gather_gh_noreply_email", lambda: "5+user@users.noreply.github.com"
+    )
     assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
 
     now = datetime.now(timezone.utc)
@@ -1930,9 +1933,72 @@ def test_successful_later_catchup_resolves_prior_failure(tmp_path, monkeypatch):
     assert "Background capture catch-up failed. Run: mm diag" not in res_status.stdout
 
 
-def test_host_only_catchup_failure_resolves_only_on_complete_host_read(tmp_path, monkeypatch):
-    """Verify a host-only catch-up failure resolves only after a complete host read."""
-    _setup_fleet(tmp_path, monkeypatch, include_codex=True)
+def test_codex_failure_with_session_deadline_not_resolved_by_host_only_push(tmp_path, monkeypatch):
+    """Verify a host-only push does not resolve a Codex failure combined with a session deadline."""
+    env = _setup_fleet(tmp_path, monkeypatch, include_codex=True)
+    repo = _make_git_repo(tmp_path / "repo-codex-session-mixed")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    monkeypatch.setattr(
+        identity, "_gather_gh_noreply_email", lambda: "5+user@users.noreply.github.com"
+    )
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    real_capture = events_tail._capture_event_snapshots
+
+    def codex_fail_and_session_deadline(*args, **kwargs):
+        return replace(real_capture(*args, **kwargs), session_walk_exceeded_budget=True)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            codex_host,
+            "read_codex_usage",
+            lambda *a, **k: host_usage.HostUsageResult(hosts={}, complete=False, reason="error"),
+        )
+        patch.setattr(
+            host_registry,
+            "warm_host_cache_inline",
+            lambda *a, **k: host_usage.HostUsageResult(hosts={}, complete=False, reason="error"),
+        )
+        patch.setattr(events_tail, "_capture_event_snapshots", codex_fail_and_session_deadline)
+        res_catchup = capturecatchup.run_catchup(["host:codex", "session_scan"])
+    assert res_catchup is not None
+    assert res_catchup["result"] == "failed"
+    assert res_catchup["detail"] == "host usage reader failed"
+
+    # A later attended push with only a complete Codex read (no content change) must NOT resolve.
+    monkeypatch.setattr(
+        codex_host,
+        "read_codex_usage",
+        lambda *a, **k: host_usage.HostUsageResult(hosts={}, complete=True),
+    )
+    assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    state = capturecatchup.read_catchup_state()
+    assert state["resolved_at"] is None
+    assert state["resolved_by"] is None
+    res_status = runner.invoke(cli.app, ["status"])
+    assert res_status.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" in res_status.stdout
+
+    # Only a fully complete capture push resolves the failure.
+    (env["notes_dir"] / "hello.md").write_text("complete capture after mixed failure\n")
+    assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    resolved = capturecatchup.read_catchup_state()
+    assert resolved["resolved_by"] == "attended"
+    assert resolved["resolved_at"] is not None
+    assert (
+        "Background capture catch-up failed. Run: mm diag"
+        not in runner.invoke(cli.app, ["status"]).stdout
+    )
+
+
+def test_host_usage_catchup_failure_resolves_only_on_full_capture(tmp_path, monkeypatch):
+    """Verify a host-usage-only catch-up failure resolves only on a fully complete capture."""
+    env = _setup_fleet(tmp_path, monkeypatch, include_codex=True)
+    repo = _make_git_repo(tmp_path / "repo-host-only-full-capture")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
     monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
     monkeypatch.setattr(
         codex_host,
@@ -1951,25 +2017,20 @@ def test_host_only_catchup_failure_resolves_only_on_complete_host_read(tmp_path,
         detail="host usage reader failed",
     )
 
-    # Incomplete host read on attended push must NOT resolve the failure.
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            host_registry,
-            "warm_host_cache_inline",
-            lambda *a, **k: host_usage.HostUsageResult(hosts={}, complete=False, reason="deadline"),
-        )
-        assert runner.invoke(cli.app, ["push"]).exit_code == 0
-    assert capturecatchup.read_catchup_state()["resolved_at"] is None
-    res_degraded = runner.invoke(cli.app, ["status"])
-    assert res_degraded.exit_code == 0
-    assert "Background capture catch-up: failed" in res_degraded.stdout
-
-    # Complete host read on attended push resolves the host-usage-only failure.
+    # Complete Codex read alone (no-change push skipping Git/session capture) must NOT resolve.
     monkeypatch.setattr(
         codex_host,
         "read_codex_usage",
         lambda *a, **k: host_usage.HostUsageResult(hosts={}, complete=True),
     )
+    assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    assert capturecatchup.read_catchup_state()["resolved_at"] is None
+    res_still_failed = runner.invoke(cli.app, ["status"])
+    assert res_still_failed.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" in res_still_failed.stdout
+
+    # A fully complete capture push resolves the failure.
+    (env["notes_dir"] / "hello.md").write_text("full capture resolves host failure\n")
     assert runner.invoke(cli.app, ["push"]).exit_code == 0
     state = capturecatchup.read_catchup_state()
     assert state["resolved_by"] == "attended"
