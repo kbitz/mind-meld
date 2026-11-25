@@ -3770,10 +3770,10 @@ in **USD per million tokens**: `gpt-6.2-astra` `(8.00, 0.40, 10.00, 40.00)`,
 `grok-4.7-fast` `(4.00, 1.00, 0.00, 12.00)` (long `(6.00, 1.50, 0.00, 18.00)`),
 Muse Wonder/Wonder Full `(4.00, 0.20, 0.00, 20.00)`, and Muse Spark 1.3
 `(1.25, 0.15, 0.00, 4.25)`. For models with a scheduled vendor price change,
-the shipped table carries the rate in effect on the date checked, and the
-`/retro-fleet` skill applies the scheduled rate via `--set-model-price` once
-its effective date (UTC) has arrived or passed. The CLI fetches no rates; the
-skill can check official vendor docs before Pass 2 and pass local verified cards.
+the shipped table carries the rate in effect on the date checked. When
+`/retro-fleet` checks official vendor docs before Pass 2, it uses the run's
+UTC date to select the active rate and passes it via `--set-model-price`.
+The CLI fetches no rates.
 
 **Local pricing overlay.** `PRICING_CACHE_PATH` defaults to
 `~/.config/mind-meld/pricing-cache.json`, with `MM_PRICING_CACHE_PATH` as the

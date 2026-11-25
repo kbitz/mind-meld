@@ -938,9 +938,11 @@ def test_readme_prices_all_three_vendors_with_matching_provenance():
     assert "https://docs.x.ai/developers/pricing" in invariant
     assert "docs.x.ai/developers/models/grok-4." not in invariant
     skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text()
-    skill_flat = " ".join(skill.split())
-    assert "scheduled price change" in skill_flat
-    assert "--set-model-price" in skill_flat
+    scheduled = next(part for part in skill.split("\n\n") if "scheduled price change" in part)
+    scheduled = " ".join(scheduled.split())
+    assert "on the day `retro-fleet` runs (UTC date)" in scheduled
+    assert "has arrived or passed, apply the scheduled rate via `--set-model-price`" in scheduled
+    assert "before that date, keep the rate currently in effect" in scheduled
     assert "Every attended `mm push` refreshes and publishes consented host usage" in " ".join(
         readme.split()
     )

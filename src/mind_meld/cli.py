@@ -2784,26 +2784,21 @@ def _push_core(
             if result_observer is not None
             else None
         )
-        prior_events_sources = (
-            remote_sources if fetch.is_ok else (remote_manifest or {}).get("sources", {})
-        )
-        published_event_paths = (
-            {
-                rel
-                for name, _local, _remote, diff in core.iter_content_diffs(
-                    local_manifest, prior_events_sources, skip_unchanged=True
-                )
-                if name in MM_INTERNAL_SOURCE_NAMES
-                for rel in (*diff.new, *diff.modified)
-            }
-            if result_observer is not None
-            else set()
-        )
-        unverified_host_rel = (
-            {f"events/{captured.appended[0].name}"}
-            if captured is not None and captured.appended is not None
-            else set()
-        )
+        usage_published = False
+        if result_observer is not None:
+            event_files = _mm_events_files(local_manifest)
+            # A repaired snapshot can restore event files already accepted in the sidecar.
+            event_diff = manifest.diff_files(event_files, _mm_events_files(remote_manifest))
+            unverified_host_path = (
+                _stored_event_key(event_files, f"events/{captured.appended[0].name}")
+                if captured is not None and captured.appended is not None
+                else None
+            )
+            usage_published = any(
+                rel != unverified_host_path
+                for changed in (event_diff.new, event_diff.modified)
+                for rel in changed
+            )
         # Independent content receipt at the actual acceptance boundary, even when
         # capture was skipped or failed. Maintenance cannot revoke accepted content.
         result = PushResult(
@@ -2816,7 +2811,7 @@ def _push_core(
             content_files=content_files,
             content_accepted=False,
             published_content_files=published_content_files,
-            usage_published=bool(published_event_paths - unverified_host_rel),
+            usage_published=usage_published,
             catching_up_readers=catching_up,
             metadata_updated=result_observer is not None
             and not published_content_files

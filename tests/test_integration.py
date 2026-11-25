@@ -6921,6 +6921,65 @@ def test_capture_publication_reports_local_revision_evidence_loss(capture61, mon
     assert "#host-usage-capture" in flat
 
 
+def test_capture_publication_does_not_count_unverified_case_variant_167a(capture61, monkeypatch):
+    prior = capture61["dayfile"]
+    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+
+    class NextDay(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return tomorrow
+
+    monkeypatch.setattr(_mm_events, "datetime", NextDay)
+    prior.unlink()
+    path = prior.with_name(f"dev-a-{tomorrow.date()}.jsonl")
+    path.touch()
+    alias = path.parent.with_name("Events") / path.name
+    if not alias.exists():
+        # On a case-sensitive runner, give the walker the same inode under the include spelling.
+        alias.parent.mkdir()
+        alias.hardlink_to(path)
+    capture61["cfg"]["sync"]["sources"][1]["include_dirs"] = ["Events"]
+    save_config(capture61["cfg"], capture61["path"])
+    monkeypatch.setattr(events_tail, "_run_events_tail", lambda *a, **k: events_tail.Degradations())
+    monkeypatch.setattr(
+        _mm_events,
+        "recorded_row_revision",
+        lambda *_: _mm_events.RowRevision(False, None, "changed"),
+    )
+
+    result = runner.invoke(app, ["push", "--verbose"])
+
+    assert result.exit_code == 0, result.output
+    assert f"Events/{path.name}" in cli_module._mm_events_files(_accepted(capture61))
+    assert "(unverified: changed)" in result.stderr
+    assert result.stdout.splitlines()[-1] == "Push: no content changes; no new usage."
+
+
+def test_conflict_only_repair_does_not_count_restored_usage_167a(capture61, monkeypatch):
+    backend = capture61["backend"]
+    key = storage_keys.manifest_key("dev-a")
+    stale_copy = backend.get(key)
+    pushed = runner.invoke(app, ["push"])
+    assert pushed.exit_code == 0 and "usage published" in pushed.stdout, pushed.output
+    prior = cli_module._mm_events_files(_accepted(capture61))
+    conflict = backend.root / Path(key).with_name("manifest.json 2.enc")
+    conflict.write_bytes(stale_copy)
+    backend.delete(key)
+    fetched = core._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+    assert fetched.conflict_copies_only
+    assert cli_module._mm_events_files(fetched.manifest) != prior
+    monkeypatch.setattr(cli_module, "_capture_attended_usage", lambda *a, outcome, **kw: outcome)
+    monkeypatch.setattr(events_tail, "_run_events_tail", lambda *a, **k: events_tail.Degradations())
+
+    repaired = runner.invoke(app, ["push"])
+
+    assert repaired.exit_code == 0, repaired.output
+    assert not conflict.exists()
+    assert cli_module._mm_events_files(_accepted(capture61)) == prior
+    assert repaired.stdout == "Push: manifest repaired.\n"
+
+
 def test_mode_render_failure_cannot_undo_manifest_acceptance(capture61, monkeypatch):
     def fail(*args):
         raise OSError("mode output failed")
@@ -17757,18 +17816,35 @@ def test_attended_push_reports_queued_events_file_and_ignores_delete_only_events
         / "events"
     )
     events_dir.mkdir(parents=True, exist_ok=True)
-    queued = events_dir / "2026-11-20.jsonl"
-    queued.write_text('{"v":1,"type":"git-snapshot","device":"dev-a"}\n')
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    queued = events_dir / f"dev-a-{yesterday.date()}.jsonl"
+    queued.write_text(
+        json.dumps(
+            {
+                "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                "type": "git-snapshot",
+                "device": "dev-a",
+                "origin": _mm_events.GIT_SNAPSHOT_ORIGIN_CATCHUP,
+                "ts": yesterday.isoformat(),
+                "projects": [],
+            }
+        )
+        + "\n"
+    )
+    rel = f"events/{queued.name}"
+    sha = hashlib.sha256(queued.read_bytes()).hexdigest()
+    monkeypatch.setattr(events_tail, "_run_events_tail", lambda *a, **k: events_tail.Degradations())
     res_pub = runner.invoke(app, ["push"])
     assert res_pub.exit_code == 0, res_pub.output
     assert res_pub.stdout == "Push: no content changes; usage published.\n"
+    assert cli_module._mm_events_files(_accepted(status77))[rel]["sha256"] == sha
 
-    # Deleting an expired mm-events file (without new tail rows) is not publishing new rows.
-    monkeypatch.setattr(events_tail, "_run_events_tail", lambda *a, **k: events_tail.Degradations())
+    # Deleting a queued day file by itself leaves no new rows to report.
     queued.unlink()
     res_del = runner.invoke(app, ["push"])
     assert res_del.exit_code == 0, res_del.output
     assert res_del.stdout == "Push: no content changes; no new usage.\n"
+    assert rel not in cli_module._mm_events_files(_accepted(status77))
 
 
 def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monkeypatch):
@@ -17781,7 +17857,7 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
         lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
     )
 
-    def codex_ok(**_kw):
+    def reader_ok(**_kw):
         return _mm_host_usage.HostUsageResult({}, complete=True)
 
     def grok_deadline(**_kw):
@@ -17797,7 +17873,7 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
     monkeypatch.setattr(
         events_tail,
         "_default_host_readers",
-        lambda *a, **k: (("codex", codex_ok), ("grok", grok_deadline)),
+        lambda *a, **k: (("codex", reader_ok), ("grok", grok_deadline)),
     )
     r1 = runner.invoke(app, ["push"])
     assert r1.exit_code == 0, r1.output
@@ -17810,6 +17886,21 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
     r2 = runner.invoke(app, ["push"])
     assert r2.exit_code == 0, r2.output
     assert r2.stdout == "Push: 2 content changes published; usage published (Grok catching up).\n"
+
+    monkeypatch.setattr(
+        events_tail,
+        "_default_host_readers",
+        lambda *a, **k: (
+            ("grok", grok_deadline),
+            ("muse", reader_ok),
+            ("codex", codex_deadline),
+        ),
+    )
+    multiple = runner.invoke(app, ["push"])
+    assert multiple.exit_code == 0, multiple.output
+    assert (
+        multiple.stdout == "Push: no content changes; usage published (Codex, Grok catching up).\n"
+    )
 
     # 3. All readers hit deadline (no-row) -> canonical order (Codex, Grok catching up).
     monkeypatch.setattr(
@@ -17825,7 +17916,7 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
     monkeypatch.setattr(
         events_tail,
         "_default_host_readers",
-        lambda *a, **k: (("codex", codex_ok), ("grok", grok_unsupported)),
+        lambda *a, **k: (("codex", reader_ok), ("grok", grok_unsupported)),
     )
     r4 = runner.invoke(app, ["push"])
     assert r4.exit_code == 0, r4.output
@@ -17833,11 +17924,16 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
 
 
 def test_autopush_stays_quiet_with_and_without_usage_167a(capture61):
+    path = capture61["dayfile"]
+    rel = f"events/{path.name}"
+    before = path.read_bytes()
+    prior = cli_module._mm_events_files(_accepted(capture61))[rel]
     # Healthy autopush with nothing to publish: silent.
     r_noop = runner.invoke(app, ["autopush"])
     assert r_noop.exit_code == 0
     assert r_noop.stdout == ""
     assert r_noop.stderr == ""
+    assert cli_module._mm_events_files(_accepted(capture61))[rel] == prior
 
     # Healthy autopush with content + usage: still silent.
     memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
@@ -17846,3 +17942,11 @@ def test_autopush_stays_quiet_with_and_without_usage_167a(capture61):
     assert r_change.exit_code == 0
     assert r_change.stdout == ""
     assert r_change.stderr == ""
+    after = path.read_bytes()
+    assert after.startswith(before)
+    new_rows = [json.loads(line)["type"] for line in after[len(before) :].splitlines()]
+    assert "host-usage-snapshot" in new_rows
+    assert (
+        cli_module._mm_events_files(_accepted(capture61))[rel]["sha256"]
+        == hashlib.sha256(after).hexdigest()
+    )
