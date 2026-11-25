@@ -363,21 +363,32 @@ def record_capture_resolution(
 ) -> bool:
     """Record that a complete capture run resolved the latest catch-up failure.
 
-    Never creates ``capture-catchup.json`` when no unresolved catch-up failure
-    exists. Best-effort under L3; never raises.
+    Also resolves an interrupted worker (``state == "running"``, ``result is None``,
+    L1 lock not held). Never creates ``capture-catchup.json`` when no unresolved
+    catch-up failure exists. Best-effort under L3; never raises.
     """
     if resolved_by not in VALID_CATCHUP_RESOLVERS:
         return False
+    interrupted_checked = False
+    interrupted_started_at: str | None = None
     try:
         with lockedjson.locked_json_snapshot(CATCHUP_STATE_PATH, blocking=False) as snap:
             if snap.state != "valid":
                 return False
             current = _normalize_state(snap.data)
-            if current["result"] not in {"failed", "partial", "deferred"}:
-                return False
-            if is_failure_resolved(current):
+            if current["result"] in {"failed", "partial", "deferred"}:
+                if is_failure_resolved(current):
+                    return False
+            elif current["state"] == "running" and current["result"] is None:
+                interrupted_started_at = current["started_at"]
+                interrupted_checked = True
+            else:
                 return False
     except Exception:
+        return False
+
+    # Probe L1 outside L3 so lock order stays L1 -> L2 -> L3.
+    if interrupted_checked and is_catchup_running():
         return False
 
     ts = resolved_at or datetime.now(timezone.utc)
@@ -404,15 +415,30 @@ def record_capture_resolution(
                 ljson.write_on_exit = False
                 return False
             existing = _normalize_state(ljson.data)
-            if existing["result"] not in {"failed", "partial", "deferred"} or is_failure_resolved(
-                existing
+            is_interrupted = (
+                interrupted_checked
+                and existing["state"] == "running"
+                and existing["result"] is None
+                and existing["started_at"] == interrupted_started_at
+            )
+            if is_interrupted:
+                failure_at = events.parse_aware_ts(existing.get("started_at"))
+                if failure_at is not None and ts < failure_at:
+                    ljson.write_on_exit = False
+                    return False
+                existing["state"] = "finished"
+                existing["result"] = "failed"
+                existing["detail"] = existing["detail"] or "worker interrupted"
+            elif existing["result"] in {"failed", "partial", "deferred"} and not (
+                is_failure_resolved(existing)
             ):
-                ljson.write_on_exit = False
-                return False
-            failure_at = events.parse_aware_ts(
-                existing.get("finished_at")
-            ) or events.parse_aware_ts(existing.get("started_at"))
-            if failure_at is not None and ts < failure_at:
+                failure_at = events.parse_aware_ts(
+                    existing.get("finished_at")
+                ) or events.parse_aware_ts(existing.get("started_at"))
+                if failure_at is not None and ts < failure_at:
+                    ljson.write_on_exit = False
+                    return False
+            else:
                 ljson.write_on_exit = False
                 return False
             existing["resolved_at"] = ts.isoformat()

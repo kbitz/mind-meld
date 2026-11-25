@@ -4336,10 +4336,12 @@ never change.
   `partial`/`deferred` backlogs, user edits, or non-deadline degradations
   (`unsupported`, `errs > 0`, `incomplete_streak >= 3`, held files, independent
   attended push failures). A terminal result is visible while the worker
-  still holds the launch lock during Git cleanup. A failed catch-up remains
-  actionable until a newer complete capture records resolution (`resolved_at`,
-  `resolved_by` in `capture-catchup.json`, written via
-  `capturecatchup.record_capture_resolution` or `run_catchup` on `ok`). Only a
+  still holds the launch lock during Git cleanup. A failed catch-up (including
+  an interrupted worker whose `state` stayed `"running"` with `result=None`
+  after releasing `L1`) remains actionable until a newer complete capture
+  records resolution (`resolved_at`, `resolved_by` in `capture-catchup.json`,
+  written via `capturecatchup.record_capture_resolution` or `run_catchup` on
+  `ok`). Only a
   capture run that finishes with nothing left over across every part (all host
   readers, Git discovery, Git walk, and session scan) records resolution. A
   later failure clears `resolved_at`/`resolved_by` so it surfaces again. `mm status` and `mm diag`

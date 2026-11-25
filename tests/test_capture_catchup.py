@@ -2108,3 +2108,89 @@ def test_status_and_diag_never_write_catchup_resolution(tmp_path, monkeypatch):
     assert runner.invoke(cli.app, ["diag", "--json"]).exit_code == 0
     assert runner.invoke(cli.app, ["push", "--dry-run"]).exit_code == 0
     assert state_path.read_bytes() == before_bytes
+
+
+def test_interrupted_catchup_worker_resolved_only_by_complete_push(tmp_path, monkeypatch):
+    """Verify an interrupted catch-up worker resolves on a complete push, not a partial push."""
+    env = _setup_fleet(tmp_path, monkeypatch, include_codex=True)
+    repo = _make_git_repo(tmp_path / "repo-interrupted-worker")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    monkeypatch.setattr(
+        codex_host,
+        "read_codex_usage",
+        lambda *a, **k: host_usage.HostUsageResult(hosts={}, complete=True),
+    )
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    t1 = datetime.now(timezone.utc)
+    capturecatchup.record_catchup_state(
+        state="running",
+        result=None,
+        started_at=t1.isoformat(),
+        finished_at=None,
+        trigger_phases=["git_walk", "session_scan"],
+    )
+    state_path = env["cfg_dir"] / "capture-catchup.json"
+    before_bytes = state_path.read_bytes()
+
+    # Read-only commands surface the interrupted worker without writing state.
+    res_interrupted = runner.invoke(cli.app, ["status"])
+    assert res_interrupted.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" in res_interrupted.stdout
+    assert "worker interrupted" in res_interrupted.stdout
+    assert runner.invoke(cli.app, ["diag", "--json"]).exit_code == 0
+    assert runner.invoke(cli.app, ["push", "--dry-run"]).exit_code == 0
+    assert state_path.read_bytes() == before_bytes
+
+    # A partial push (session deadline hit) must NOT resolve the interrupted worker.
+    real_capture = events_tail._capture_event_snapshots
+
+    def timeout_sessions(*args, **kwargs):
+        return replace(real_capture(*args, **kwargs), session_walk_exceeded_budget=True)
+
+    (env["notes_dir"] / "hello.md").write_text("partial push after interrupted worker\n")
+    with monkeypatch.context() as patch:
+        patch.setattr(events_tail, "_capture_event_snapshots", timeout_sessions)
+        assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    assert state_path.read_bytes() == before_bytes
+    res_after_partial = runner.invoke(cli.app, ["status"])
+    assert res_after_partial.exit_code == 0
+    assert "Background capture catch-up: failed" in res_after_partial.stdout
+    assert "worker interrupted" in res_after_partial.stdout
+
+    # A no-change push (skipping Git/session capture) must NOT resolve it either.
+    assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    assert state_path.read_bytes() == before_bytes
+
+    # A fully complete push (Git + Claude session + Codex all clean) resolves it.
+    (env["notes_dir"] / "hello.md").write_text("complete push resolves interrupted worker\n")
+    assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    resolved = capturecatchup.read_catchup_state()
+    assert resolved["state"] == "finished"
+    assert resolved["result"] == "failed"
+    assert resolved["detail"] == "worker interrupted"
+    assert resolved["resolved_by"] == "attended"
+    assert resolved["resolved_at"] is not None
+    res_resolved = runner.invoke(cli.app, ["status"])
+    assert res_resolved.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" not in res_resolved.stdout
+    assert "worker interrupted" not in res_resolved.stdout
+
+    # A newer interrupted start supersedes the earlier resolution and shows again.
+    t2 = datetime.now(timezone.utc) + timedelta(seconds=2)
+    capturecatchup.record_catchup_state(
+        state="running",
+        result=None,
+        started_at=t2.isoformat(),
+        finished_at=None,
+        trigger_phases=["git_walk"],
+    )
+    reopened = capturecatchup.read_catchup_state()
+    assert reopened["resolved_at"] is None
+    assert reopened["resolved_by"] is None
+    res_again = runner.invoke(cli.app, ["status"])
+    assert res_again.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" in res_again.stdout
+    assert "worker interrupted" in res_again.stdout
