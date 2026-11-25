@@ -72,12 +72,13 @@ def _contention_message(pid: int | None) -> str:
     return f"Another mm operation is running (PID unknown). {advice}"
 
 
-def acquire_lock(path: Path | None = None) -> None:
+def acquire_lock(path: Path | None = None) -> int:
     """Acquire exclusive lock on `path` (default LOCK_PATH).
 
     Uses fcntl.flock for kernel-enforced, auto-released-on-process-exit
     locking. The lockfile body carries the owning PID for diagnostics
-    only; correctness is enforced by the kernel.
+    only; correctness is enforced by the kernel. The returned descriptor
+    remains owned by this module until release_lock closes it.
 
     Raises:
         LockError: if another process holds the lock, if this process
@@ -132,13 +133,30 @@ def acquire_lock(path: Path | None = None) -> None:
         raise LockError(f"flock acquired on {lock_path} but PID write failed: {e}") from e
 
     _LOCK_FDS[key] = fd
+    return fd
 
 
-def release_lock(path: Path | None = None) -> None:
+def adopt_lock(path: Path, fd: int) -> None:
+    """Register a lock descriptor inherited through subprocess pass_fds."""
+    key = _resolve_key(path)
+    if key in _LOCK_FDS or fd < 3:
+        raise LockError("Invalid inherited lock descriptor.")
+    try:
+        if not os.path.samestat(os.fstat(fd), path.stat()):
+            raise LockError("Inherited descriptor does not match the lockfile.")
+        os.set_inheritable(fd, False)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        raise LockError("Could not adopt the inherited lock.") from exc
+    _LOCK_FDS[key] = fd
+
+
+def release_lock(path: Path | None = None, *, unlock: bool = True) -> None:
     """Release the lock on `path` (default LOCK_PATH). No-op if not held.
 
-    Closing the fd implicitly releases the flock (kernel semantics); the
-    explicit LOCK_UN is defensive.
+    Closing the last descriptor for the open file description releases the
+    flock. Close without LOCK_UN after passing the descriptor to a child,
+    so the child keeps the same lock without an unlock/reacquire gap.
 
     IMPORTANT: we do NOT unlink the lockfile here. Unlinking creates the
     classic advisory-lock race: after release but before unlink, process B
@@ -154,11 +172,52 @@ def release_lock(path: Path | None = None) -> None:
     fd = _LOCK_FDS.pop(key, None)
     if fd is None:
         return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        pass
+    if unlock:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
     try:
         os.close(fd)
     except OSError:
         pass
+
+
+def is_lock_held(path: Path | None = None) -> bool:
+    """Return True if `path` (default LOCK_PATH) is currently locked.
+
+    Read-only probe: never creates or modifies `path`. Checks this process's
+    own held-lock table first, then probes a shared non-blocking flock on an
+    existing file. Missing or unreadable files return False.
+    """
+    lock_path = path or LOCK_PATH
+    key = _resolve_key(lock_path)
+    if key in _LOCK_FDS:
+        return True
+    try:
+        fd = os.open(str(lock_path), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        for attempt in (1, 2):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                return False
+            except InterruptedError:
+                if attempt == 2:
+                    return False
+                continue
+            except BlockingIOError:
+                return True
+            except OSError:
+                return False
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass

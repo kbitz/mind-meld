@@ -32,6 +32,7 @@ from typer.core import TyperGroup
 from mind_meld import (
     __version__,
     attemptlog,
+    capturecatchup,
     core,
     crypto,
     devicesflow,
@@ -185,6 +186,7 @@ class PushResult:
     ledger_cause: str | None = None
     anchor_warnings: list[str] = field(default_factory=list)
     phase_timings: tuple[pushtimings.PhaseTiming, ...] = ()
+    capture_deadline_phases: tuple[str, ...] = ()
 
 
 _USAGE_ERROR_CLS = next(cls for cls in typer.BadParameter.__mro__ if cls.__name__ == "UsageError")
@@ -1754,6 +1756,7 @@ def _push_result_or_none(
             left_out_clause=left_out_clause,
             left_out_files=left_out_files,
             anchor_warnings=list(anchor_warnings or []),
+            capture_deadline_phases=tuple(getattr(events_degradations, "deadline_phases", ())),
         )
     return None
 
@@ -2426,6 +2429,7 @@ def _push_core(
                 left_out_files=guard.left_out_files,
                 anchor_warnings=anchor_warnings,
                 phase_timings=timer.phases(),
+                capture_deadline_phases=tuple(getattr(events_degradations, "deadline_phases", ())),
             )
             if result_observer is not None:
                 result_observer(result)
@@ -2777,6 +2781,7 @@ def _push_core(
             left_out_clause=guard.clause(),
             left_out_files=guard.left_out_files,
             unwritable_roots=unwritable_roots,
+            capture_deadline_phases=tuple(getattr(events_degradations, "deadline_phases", ())),
         )
         backend.put(mkey, enc_manifest)
     result.phase_timings = timer.phases()
@@ -4519,7 +4524,13 @@ def _write_migration_breadcrumb(missing: list[str]) -> None:
 
 
 def _write_autorun_breadcrumb(
-    verb: str, outcome: str, detail: str = "", *, removal_wait_only: bool = False
+    verb: str,
+    outcome: str,
+    detail: str = "",
+    *,
+    removal_wait_only: bool = False,
+    capture_deadline_only: bool = False,
+    capture_at: datetime | None = None,
 ) -> None:
     """Record the last autopull/autopush attempt for forensic observability.
 
@@ -4536,18 +4547,29 @@ def _write_autorun_breadcrumb(
     swallowed -- a broken breadcrumb must never crash the hook.
     """
     entry: dict[str, str | bool] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
         "outcome": outcome,
     }
     if detail:
         entry["detail"] = detail
     if removal_wait_only:
         entry["removal_wait_only"] = True
+    if capture_deadline_only:
+        entry["capture_deadline_only"] = True
     try:
         with locked_json_rmw(core._autorun_breadcrumb_path()) as ljson:
             if not ljson.is_locked:
                 return
+            # Order breadcrumbs by their serialized writes so an overlapping
+            # hook cannot discard newer capture evidence.
+            recorded_at = datetime.now(timezone.utc)
+            entry["timestamp"] = recorded_at.isoformat()
             existing = core._normalize_autorun_breadcrumbs(ljson.data)
+            if verb == "push":
+                last_capture_at = capture_at or events.parse_aware_ts(
+                    existing.get(verb, {}).get("last_capture_at")
+                )
+                if last_capture_at is not None and last_capture_at <= recorded_at:
+                    entry["last_capture_at"] = last_capture_at.isoformat()
             existing[verb] = entry
             ljson.data.clear()
             ljson.data.update({k: existing[k] for k in core._AUTORUN_VERBS if k in existing})
@@ -4985,6 +5007,7 @@ def autopush() -> None:
             diagnostics.append(message.removeprefix("mm: notice: ").strip())
 
     detached_config: dict | None = None
+    trigger_phases: tuple[str, ...] = ()
     with (
         token_usage.diagnostic_scope(notice),
         pullhistory.command_scope(attended=False),
@@ -5076,6 +5099,20 @@ def autopush() -> None:
                 details.append(result.left_out_clause.rstrip("."))
             if result and result.anchor_warnings:
                 details.extend(result.anchor_warnings)
+            trigger_phases = result.capture_deadline_phases if result else ()
+            events_total = getattr(events_degradations, "total", len(events_degradations))
+            deadline_notices = getattr(events_degradations, "deadline_notices", 0)
+            capture_deadline_only = bool(
+                trigger_phases
+                and not held
+                and not mesh_res.degradations
+                and not (result and result.maintenance_failures)
+                and not (result and result.ledger_cause)
+                and not (result and result.unwritable_roots)
+                and not (result and result.left_out_clause)
+                and not (result and result.anchor_warnings)
+                and len(details) == deadline_notices == events_total
+            )
             # The first publish in the shared form leaves a trail (O8.3).
             switched = bool(result and result.wire_names_published)
             has_push_degradations = bool(details or held or mesh_res.degradations)
@@ -5089,11 +5126,14 @@ def autopush() -> None:
                 details,
                 extra_success=("published under shared names",) if switched else (),
             )
+            recorded_push_at = getattr(events_degradations, "recorded_push_at", None)
             _write_autorun_breadcrumb(
                 "push",
                 outcome,
                 crumb_detail,
                 removal_wait_only=mesh_res.removal_wait_only(details),
+                capture_deadline_only=capture_deadline_only,
+                capture_at=(recorded_push_at if outcome == "success" else None),
             )
             detached_config = setup.config
 
@@ -5103,6 +5143,11 @@ def autopush() -> None:
         if detached_config is not None:
             try:
                 memoryindex.start_detached_refresh(detached_config)
+            except Exception:
+                pass
+        if trigger_phases:
+            try:
+                capturecatchup.start_detached_catchup(trigger_phases)
             except Exception:
                 pass
 

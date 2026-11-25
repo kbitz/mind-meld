@@ -380,6 +380,30 @@ def read_cached_identities(*, require_refresh: bool = False) -> list[str] | None
     return None
 
 
+def read_catchup_identities() -> tuple[list[str] | None, bool]:
+    """Read the cached identities and whether the GitHub alias needs checking.
+
+    An absent baseline uses the ordinary first-capture policy. An unreadable
+    or outdated-format cache defers capture so it cannot use an open filter.
+    """
+    with lockedjson.locked_json_snapshot(CACHE_PATH, blocking=False) as snapshot:
+        if snapshot.state == "missing":
+            return None, False
+        cache = snapshot.data
+        if snapshot.state != "valid" or cache is None or not _is_valid_cache(cache):
+            return None, True
+        refreshed_at = cache.get("refreshed_at")
+        if refreshed_at is None:
+            return None, False
+        refreshed = _parse_cache_timestamp(refreshed_at)
+        if refreshed is None:
+            return None, True
+        # Full refresh can persist reachable sources after a failed GitHub
+        # lookup. Only a standalone check on this baseline carries that proof.
+        checked = _recent_github_noreply_check(cache, since=refreshed)
+        return list(cache["emails"]), not checked
+
+
 def _is_cache_stale(cache: dict, inputs_digest: str | None = None) -> bool:
     """True iff the cache must be refreshed for this caller.
 
@@ -647,21 +671,39 @@ def _coerce_gh_uid(raw: object) -> int | None:
     return None
 
 
-def _github_noreply_checked() -> bool:
-    """True when a completed cache already recorded a noreply lookup."""
+def _parse_cache_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo is not None else None
+
+
+def _recent_github_noreply_check(cache: dict, *, since: datetime | None = None) -> bool:
+    checked = _parse_cache_timestamp(cache.get("github_noreply_checked_at"))
+    if checked is None:
+        return False
+    now = datetime.now(timezone.utc)
+    if since is not None and not since <= checked <= now:
+        return False
+    return (now - checked).total_seconds() < TTL_SECONDS
+
+
+def has_github_noreply(emails: tuple[str, ...]) -> bool:
+    return any(email.endswith("@users.noreply.github.com") for email in emails)
+
+
+def github_noreply_check_due(emails: tuple[str, ...]) -> bool:
+    """Return whether a known author filter still needs a GitHub identity check."""
+    if not emails or has_github_noreply(emails):
+        return False
     with lockedjson.locked_json_snapshot(CACHE_PATH) as snapshot:
         if snapshot.state != "valid" or not isinstance(snapshot.data, dict):
-            return False
-        checked = snapshot.data.get("github_noreply_checked_at")
-        if not isinstance(checked, str) or not checked:
-            return False
-        try:
-            dt = datetime.fromisoformat(checked)
-        except ValueError:
-            return False
-        if dt.tzinfo is None:
-            return False
-        return (datetime.now(timezone.utc) - dt).total_seconds() < TTL_SECONDS
+            return True
+        refreshed = _parse_cache_timestamp(snapshot.data.get("refreshed_at"))
+        return not _recent_github_noreply_check(snapshot.data, since=refreshed)
 
 
 def _record_github_noreply(email: str | None) -> None:
@@ -696,16 +738,12 @@ def union_checked_github_noreply(emails: tuple[str, ...]) -> tuple[str, ...]:
     The capture filter runs before identity refresh. A completed cache that
     predates ``gh`` auth has no noreply entry, and ``git log --author`` then
     skips web-merge commits while the cursor advances. One bounded lookup
-    fills that hole; a failure is remembered for the cache TTL, including
-    when ``refreshed_at`` is already old, so autopush does not pay for
+    fills that hole. The attempt is remembered for the cache TTL or until
+    another full refresh replaces the baseline, so autopush does not pay for
     ``gh`` on every push. A never-refreshed cache is left untouched. Tests
     skip the lookup: the suite isolates identity and must not call the network.
     """
-    if not emails or any(email.endswith("@users.noreply.github.com") for email in emails):
-        return emails
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return emails
-    if _github_noreply_checked():
+    if os.environ.get("PYTEST_CURRENT_TEST") or not github_noreply_check_due(emails):
         return emails
     found = _gather_gh_noreply_email()
     _record_github_noreply(found)

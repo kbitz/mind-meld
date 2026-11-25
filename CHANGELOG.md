@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.87] - 2026-11-25
+
+Deadline-stopped `mm autopush` capture now finishes unfinished usage and Git work in a background catch-up, and `mm status` and `mm diag` show that work.
+
+### Changed
+
+- Deadline-stopped `mm autopush` capture now hands unfinished usage and Git work to a single-flight detached background catch-up that warms caches, records local activity and cursors for the next push, and reports its state in `mm status` and `mm diag`.
+- `mm status` and `mm diag` derive catch-up lines from the live backlog, keep a failure or a recorded recovery in place through a later no-change push or a push that skips Git capture, and clear a failure only after a fully complete capture.
+
 ## [1.12.86] - 2026-11-24
 
 Attended push now shows phase progress and timings, and `mm autopush` reads enabled host usage providers concurrently.

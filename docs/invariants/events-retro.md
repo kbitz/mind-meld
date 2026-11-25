@@ -8,7 +8,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/cli.py` — `PushResult.events_degradations`
 - `src/mind_meld/statusflow.py` — `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_identity_inputs_digest_for_push` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `resolve_attended_capture_cap` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS` / `phase_timer_scope`
-- `src/mind_meld/pushtimings.py` — `PhaseTiming` / `PhaseTimer` / `PUSH_TIMINGS_PATH` / `record_push_timings` / `read_push_timings` / `diag_timings_state` / `format_verbose_timings`
+- `src/mind_meld/pushtimings.py` — `PhaseTiming` / `PhaseTimer` / `PUSH_TIMINGS_PATH` / `PUSH_KINDS` / `record_push_timings` / `read_push_timings` / `diag_timings_state` / `format_verbose_timings`
+- `src/mind_meld/capturecatchup.py` — `CATCHUP_LOCK_PATH` / `CATCHUP_STATE_PATH` / `is_catchup_running` / `start_detached_catchup` / `read_catchup_state` / `record_catchup_state` / `catchup_observation` / `covers_deadline_backlog` / `diag_catchup_state` / `run_catchup` / `_detached_main`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
@@ -350,9 +351,9 @@ cache has a completed refresh, because capture runs before the tail's
 identity refresh and a partial or never-refreshed set would drop commits the
 cursor then passes. A completed cache that has no
 `<id>+<login>@users.noreply.github.com` address gets one bounded `gh api user`
-lookup, remembered for the cache TTL even when ``refreshed_at`` is already
-old. A never-refreshed cache is not created to store the check. A failed
-lookup does not fail open and is not repeated on every push.
+lookup, remembered for the cache TTL or until a full refresh replaces the
+identity baseline. A never-refreshed cache is not created to store the
+check. A failed lookup keeps the configured author filter.
 Push walks group representatives from their oldest effective per-group cursor
 — including an older cursor left by a sibling worktree this run did not
 discover, which discovery retirement folds into the retained representative
@@ -4249,3 +4250,99 @@ retired before v1.11.8; its record shapes, census and the reasons for the source
 - **Retro.** Grok Build tokens add to the Grok row (`grok-4.7-build` is
   in `token_usage.GROK_47_MODEL_IDS`, priced from the Grok 4.7 card; unknown ids remain an
   unpriced floor until a rate is available).
+
+---
+
+## Background capture catch-up (Track 165C)
+
+When `mm autopush` stops at a cooperative capture deadline (`host:<name>` / `host:all`,
+`git_discovery`, `git_walk`, or `session_scan`), `cli.autopush` records
+`capture_deadline_only = True` on its `push` breadcrumb only when every recorded
+degradation is a pure deadline notice (zero held files, mesh degradations,
+maintenance/ledger/anchor/unwritable-root warnings, or walk/discovery errors),
+exits `_auto_command_scope` (releasing `mind-meld.lock`), and calls
+`capturecatchup.start_detached_catchup(trigger_phases)`. Previews (`--dry-run`)
+never trigger catch-up, and `autopush`'s exit code and quiet output contract
+never change.
+
+- **Single-flight and lock hierarchy (`L1 < L2 < L3`).**
+  `L1` is `~/.config/mind-meld/capture-catchup.lock`, `L2` is `mind-meld.lock`,
+  and `L3` is individual `lockedjson` files (`capture-catchup.json`,
+  `push-timings.json`, `git-capture-cache.json`, `capture-progress.json`,
+  token/host caches). No command holding `L2` ever waits on `L1`, and no `L3`
+  lock is held while acquiring `L1` or `L2`. `lockfile.is_lock_held` is a
+  read-only probe (`O_RDONLY` + `LOCK_SH | LOCK_NB`) that never creates files.
+  The launcher takes `L1` before spawning and passes its locked descriptor
+  to the child. The parent closes its copy and the child holds the lock
+  through process exit. When an exclusive owner already holds `L1`, the hook
+  records a best-effort, nonblocking retrigger in `capture-catchup.json`.
+  If a read-only probe still holds a shared lock after the launch retry,
+  the hook saves the request for the next worker. A worker can run one
+  bounded follow-up when a hook arrives after Step 2 begins or when a
+  host warming request arrives during Step 1 and the first pass is
+  unfinished. Final state writes retry briefly on contention and retain
+  later retriggers for the next worker.
+- **Capture-only two-step execution.**
+  - **Step 1 (under `L1`, outside `L2`):** warms cold or deadline-stopped
+    private host caches (`_capture_host_snapshot` with
+    `warm_host_cache=_warm_host_cache_with_notice`) and cold Claude
+    `session-tokens.json` (`token_usage.warm_token_cache_inline`) using
+    attended budgets and per-reader/per-directory consent rechecks via
+    `before_read`. Never touches `git-capture-cache.json` or `events/*.jsonl`.
+  - **Step 2 (under `L1` -> `L2` with ~2 s bounded retry):** if `L2` stays
+    contended, returns `result="deferred"` while keeping Step 1's warmed caches.
+    Otherwise reloads `config.toml` fresh under `L2`, checks
+    `lockedjson.locked_json_snapshot(GIT_CAPTURE_CACHE_PATH)` and refuses any
+    state outside `{"valid", "missing"}` with `result="failed"` and
+    `detail="Git capture index unreadable; run mm diag"`, runs single-phase
+    attended capture (`origin=events.GIT_SNAPSHOT_ORIGIN_CATCHUP`, warm-only
+    token policy, the timed host set from Step 1, and `before_read` config checks).
+    Step 2 uses counts from Step 1 when the configuration still matches.
+    It retains valid saved counts for readers still at deadline if a fresh
+    count is unavailable. This avoids a second host-log inventory under
+    `L2`. Git attribution uses one read-only identity-cache snapshot for
+    both the author filter and its GitHub lookup evidence. A known noreply
+    address or a recent standalone GitHub check on that baseline allows
+    the walk. A full identity refresh can finish after a GitHub lookup
+    failure, so its timestamp alone cannot qualify a filtered walk. If the
+    cache is unreadable or the filter still needs a lookup, catch-up defers
+    Git work and leaves its cursors pending for a normal push. A missing or
+    never-refreshed cache follows the usual first-capture policy.
+    A first-use discovery cancelled after opening the index initializes only
+    its empty schema, so the worker can retry without carrying revoked roots.
+    The worker
+    appends `[git-snapshot(origin="catchup"), sessions-snapshot,
+    host-usage-snapshot]` (no `mm-push` row) via `events.write_push_event(...,
+    strict=True)`, confirms exact `git-snapshot` readback via
+    `events_tail._commit_recorded_git_rows` before advancing `repo_cursors`.
+    A failed cursor write remains a capture failure and preserves progress
+    evidence. The worker hashes the appended day file
+    (`event_file`, `event_sha256`), and stamps `finished_at` **before**
+    releasing `L2` so any later hook gets `auto_push_at > finished_at`.
+    Encrypted publication waits for the next push (auto or attended).
+- **Origin & timings.** `events.GIT_SNAPSHOT_ORIGIN_CATCHUP = "catchup"` is
+  excluded from push counts in `aggregator.py` and from push-batch cursor
+  replay in `events.reconcile_uncommitted_push_cursors`, while its commits and
+  coverage intervals count identically to `init` and `recapture`. Timings are
+  persisted under `pushtimings.PUSH_KINDS` kind `"catchup"` in
+  `push-timings.json`.
+- **Status & diag (O8).** `capturecatchup.catchup_observation()` verifies
+  `state == "running"` against `is_catchup_running()` (with one recheck) and
+  synthesizes `state="finished", result="failed", detail="worker interrupted"`
+  if a worker died without finalizing. `mm status` suppresses manual `mm push`
+  advice only when a running or recent (`<= 24h`, `finished_at >= backlog_at`)
+  `ok` catch-up covers a deadline-only backlog (including `mm-events`-only
+  local diffs matching exact `(event_file, event_sha256)`), never hiding
+  `partial`/`deferred` backlogs, user edits, or non-deadline degradations
+  (`unsupported`, `errs > 0`, `incomplete_streak >= 3`, held files, independent
+  attended push failures). A terminal result is visible while the worker
+  still holds the launch lock during Git cleanup. `mm status` never infers or
+  records catch-up resolution: while a part (host reader or Git capture) has a
+  live backlog from real caches/cursors, that part's backlog line appends the
+  last catch-up fact for that part (`background catch-up running`, or
+  `background catch-up failed at <local time> (<detail>). Run: mm diag` with
+  detail `interrupted` for an interrupted worker). If the last catch-up did not
+  cover that part, nothing is appended; when a part has no backlog, nothing
+  about catch-up is shown for it. `mm diag` exposes read-only `capture_catchup`
+  (when, trigger parts, ok/failed/interrupted, detail) and
+  `push_timings.by_kind.catchup` without creating or writing files.
