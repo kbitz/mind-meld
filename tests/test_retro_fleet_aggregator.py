@@ -9695,6 +9695,123 @@ class TestSupersededRegistrationFolding:
         assert [group.folded_ids for group in data.fleet.folded_registrations] == [("dev-old-1",)]
         assert data.fleet.unregistered_details == ()
 
+    def test_registry_remedy_survives_unreadable_stored_names(self, tmp_path: Path, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            aggregator.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"device_id": "dev-cur", "device_name": "mac-a"}]),
+                stderr="mm: warning: dropped device entry devices/dev-b.json — unreadable\n",
+            ),
+        )
+        monkeypatch.setattr(
+            aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}, "passphrase")
+        )
+        ts = f"{self.D3}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            f"fleet-{self.D3}.jsonl",
+            [
+                # A name match the dropped entry blocks, and an ID only storage could name.
+                self._push_row("dev-old-1", ts, device_name="mac-a"),
+                self._push_row("dev-old-2", ts),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        assert entry is not None and "registry is incomplete" in entry["detail"]
+        assert entry.get("names_unavailable") == "passphrase"
+        remedy = entry.get("remedy", "")
+        # Nothing folds until the registry is whole, so its step comes first.
+        assert "mm devices" in remedy and "MINDMELD_PASSPHRASE" in remedy
+        assert remedy.index("mm devices") < remedy.index("MINDMELD_PASSPHRASE")
+
+    def test_passphrase_remedy_leaves_the_passphrase_to_the_owner(
+        self, tmp_path: Path, monkeypatch
+    ):
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered, False))
+        monkeypatch.setattr(
+            aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}, "passphrase")
+        )
+        ts = f"{self.D3}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            f"fleet-{self.D3}.jsonl",
+            [self._push_row("dev-old-1", ts), self._push_row("dev-cur", ts, device_name="mac-a")],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        assert entry is not None
+        remedy = entry.get("remedy", "")
+        # The retro skill acts on remedies, so this one must not invite it to
+        # collect or type the passphrase.
+        assert "where the agent process starts" in remedy
+        assert "never in chat or on a command line" in remedy
+
+    def test_unreadable_stored_names_are_reported_for_named_ids(self, tmp_path: Path, monkeypatch):
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered, False))
+        monkeypatch.setattr(
+            aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}, "passphrase")
+        )
+        ts = f"{self.D3}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            f"fleet-{self.D3}.jsonl",
+            [
+                # A stale pre-rename name: only the stored retirement record could match it.
+                self._push_row("dev-old-1", ts, device_name="mac-old"),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.fleet.folded_registrations == ()
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        assert entry is not None and entry["unregistered_ids"] == ["dev-old-1"]
+        assert entry.get("names_unavailable") == "passphrase"
+        assert "MINDMELD_PASSPHRASE" in entry.get("remedy", "")
+
+    def test_unreadable_stored_names_explain_a_changed_fleet(self, tmp_path: Path, monkeypatch):
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered, False))
+        monkeypatch.setattr(
+            aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}, "passphrase")
+        )
+        ts = f"{self.D4}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            "dev-cur-2026-11-10.jsonl",
+            [
+                # A prior-window row without a name: only storage could name this ID.
+                self._push_row("dev-old-1", "2026-11-15T12:00:00+00:00"),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+                self._git_row(
+                    "dev-cur",
+                    ts,
+                    [{"sha": "abcdef1", "date": ts, "add": 2, "del": 1, "subject": "fix: test"}],
+                ),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.comparison.status == "ok" and data.comparison.fleet_changed is True
+        assert data.fleet.unregistered_details == ()
+        entry = _health_entry(aggregator.format_retro(data), "fleet_changed")
+        assert entry is not None and entry.get("names_unavailable") == "passphrase"
+        assert "MINDMELD_PASSPHRASE" in entry.get("remedy", "")
+
     def test_unregistered_disclosure_lists_stay_bounded(self, tmp_path: Path, monkeypatch):
         registered = [
             {"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"},

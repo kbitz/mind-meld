@@ -1238,9 +1238,14 @@ the storage directory and enforces its byte limit on the opened regular file.
 A retirement record written without a name stores the device ID; that
 placeholder is not a name, so the event-row and manifest sources still apply.
 The lookup reports why stored names were unreadable (`passphrase` or
-`storage`); when that leaves an unfolded ID with no name, `unregistered_devices`
-says so and names the fix (unlock the keyring or set `MINDMELD_PASSPHRASE`, or
-check storage with `mm status`).
+`storage`). A stored name outranks the event-row name, so while the lookup
+fails any ID left unfolded, named or not and active or prior-window only,
+might belong to a registered machine: `unregistered_devices` and
+`fleet_changed` carry `names_unavailable` and a remedy (unlock the keyring, or
+have the owner export `MINDMELD_PASSPHRASE` where the agent process starts,
+never in chat or on a command line; or check storage with `mm status`). When
+`mm devices` also dropped an entry, the remedy keeps its `mm devices` step
+first.
 If `mm devices --format=json` warns that it dropped a registration (unreadable,
 or vanished while being read), the readable entries still scope the retro:
 counts, host `by_device` and the denominator are unchanged. Nothing folds,

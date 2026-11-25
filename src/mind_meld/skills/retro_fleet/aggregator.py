@@ -3779,9 +3779,12 @@ def _resolve_unregistered_registrations(
             )
         )
 
+    # A stored name outranks the event-row name, so any candidate left
+    # unfolded (active or prior-window only) might have matched had the
+    # lookup worked.
     names_unavailable = (
         lookup_unavailable
-        if lookup_unavailable and any(item.device_name is None for item in unfolded)
+        if lookup_unavailable and any(cid not in fold_map for cid in candidates)
         else None
     )
     return RegistrationResolution(
@@ -5562,6 +5565,27 @@ def _health_summary_line(health: list[dict]) -> list[str]:
     ]
 
 
+def _stored_names_unavailable(reason: str | None) -> tuple[str, str] | None:
+    """Cause sentence and remedy step when stored device names were unreadable.
+
+    The retro skill acts on remedies, so the passphrase step keeps the passphrase
+    with the owner: it is never typed into chat or onto a command line.
+    """
+    if reason == "passphrase":
+        return (
+            "Names stored for earlier registrations could not be read because no"
+            " passphrase was available",
+            "Unlock the keyring, or have the owner export `MINDMELD_PASSPHRASE` where the"
+            " agent process starts (never in chat or on a command line).",
+        )
+    if reason == "storage":
+        return (
+            "Names stored for earlier registrations could not be read from this device's storage",
+            "Run `mm status` to check this device's storage.",
+        )
+    return None
+
+
 def format_retro(
     data: RetroData,
     *,
@@ -5928,29 +5952,23 @@ def format_retro(
             "Retained Claude token and skill data may still contribute to the report. "
             f"Stale files reap after {EVENTS_RETENTION_DAYS} days."
         )
-        unreg_remedy: str | None = None
+        # Keep every step, the registry one first: an incomplete registry
+        # blocks every fold whatever the stored names say.
+        unreg_steps: list[str] = []
         if registry_incomplete:
             unreg_detail += (
                 " Matching names were not folded because the device registry is incomplete"
                 " (`mm devices` dropped an entry)."
             )
-            unreg_remedy = "Run `mm devices` to see the dropped entry, then re-run the retro."
-        if data.fleet.names_unavailable == "passphrase":
-            unreg_extra["names_unavailable"] = "passphrase"
-            unreg_detail += (
-                " Names stored for earlier registrations could not be read because no"
-                " passphrase was available, so unnamed IDs could not fold."
-            )
-            unreg_remedy = "Unlock the keyring or set `MINDMELD_PASSPHRASE`, then re-run the retro."
-        elif data.fleet.names_unavailable == "storage":
-            unreg_extra["names_unavailable"] = "storage"
-            unreg_detail += (
-                " Names stored for earlier registrations could not be read from this"
-                " device's storage, so unnamed IDs could not fold."
-            )
-            unreg_remedy = "Run `mm status` to check this device's storage, then re-run the retro."
-        if unreg_remedy is not None:
-            unreg_extra["remedy"] = unreg_remedy
+            unreg_steps.append("Run `mm devices` to see the dropped entry.")
+        unreg_names = _stored_names_unavailable(data.fleet.names_unavailable)
+        if unreg_names is not None:
+            cause, step = unreg_names
+            unreg_extra["names_unavailable"] = data.fleet.names_unavailable
+            unreg_detail += f" {cause}, so these IDs could not be matched by their stored names."
+            unreg_steps.append(step)
+        if unreg_steps:
+            unreg_extra["remedy"] = " ".join(unreg_steps) + " Then re-run the retro."
         note("unregistered_devices", unreg_detail, **unreg_extra)
     elif data.fleet.unregistered_event_devices:
         note(
@@ -6039,11 +6057,21 @@ def format_retro(
             f"{EVENTS_RETENTION_DAYS}-day events retention; older days were reaped by `mm gc`.",
         )
     elif data.comparison.status == "ok" and data.comparison.fleet_changed:
-        note(
-            "fleet_changed",
+        changed_detail = (
             f"The set of machines that pushed in the prior {data.window_days}d differs from "
-            f"this {data.window_days}d. Counts compare as activity, not as a same-machine pair.",
+            f"this {data.window_days}d. Counts compare as activity, not as a same-machine pair."
         )
+        changed_extra: dict[str, object] = {}
+        changed_names = _stored_names_unavailable(data.fleet.names_unavailable)
+        if changed_names is not None:
+            cause, step = changed_names
+            changed_detail += (
+                f" {cause}, so an earlier registration of a current machine may count as a"
+                " different machine."
+            )
+            changed_extra["names_unavailable"] = data.fleet.names_unavailable
+            changed_extra["remedy"] = f"{step} Then re-run the retro."
+        note("fleet_changed", changed_detail, **changed_extra)
 
     lines.extend(_health_summary_line(health))
 

@@ -318,6 +318,9 @@ Your job:
   not change a 172-commit picture. "8 of 16" does.
 - Then offer: *"Want me to diagnose?"* If they say yes, walk the `MM_HEALTH`
   entries, run the `remedy` commands where they're local, and report back.
+- Never ask for, read, type, export or store the fleet passphrase. When a
+  remedy names `MINDMELD_PASSPHRASE`, the owner supplies it where the agent
+  process starts; say so, and re-run the retro once they have.
 - Never invent a cause. Each entry carries `code`, `detail`, and usually
   `remedy`; the wire does not always say *why* something failed, and an
   unrecognized `code` is reported verbatim, never interpreted.
