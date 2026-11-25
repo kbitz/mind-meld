@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.88] - 2026-11-25
+
+`mm retro-fleet` now folds superseded registrations of a re-registered machine into the current device so tokens and machine counts are not double-counted, explains when stored names cannot be read, and records `device_name` on new `mm-events` rows.
+
+### Added
+
+- New `mm-events` rows carry the machine's configured `device_name`.
+
+### Changed
+
+- `mm retro-fleet` now folds superseded device registrations that share a registered machine's name into that current device per agent family and day, fixing double-counted tokens and inflated machine counts while disclosing each fold in `MM_HEALTH` and `--dump-host-usage`.
+- `mm retro-fleet` now counts an earlier registration of a re-registered machine as that machine when their recorded device names match, and lists each fold under `folded_registrations` in `MM_HEALTH` and in `--dump-host-usage`.
+
+### Fixed
+
+- When stored device names cannot be read, the retro's `unregistered_devices` and `fleet_changed` entries say why (`passphrase`, `passphrase-rejected` or `storage`) and name a fix for the owner to make.
+
 ## [1.12.87] - 2026-11-25
 
 Deadline-stopped `mm autopush` capture now finishes unfinished usage and Git work in a background catch-up, and `mm status` and `mm diag` show that work.
