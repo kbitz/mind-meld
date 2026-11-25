@@ -77,6 +77,7 @@ def _empty_state() -> dict[str, Any]:
         "started_at": None,
         "finished_at": None,
         "trigger_phases": [],
+        "failed_phases": [],
         "event_file": None,
         "event_sha256": None,
         "detail": None,
@@ -129,6 +130,9 @@ def _normalize_state(raw: object) -> dict[str, Any]:
         "trigger_phases": _normalize_phases(
             raw.get("trigger_phases") if isinstance(raw.get("trigger_phases"), list) else ()
         ),
+        "failed_phases": _normalize_phases(
+            raw.get("failed_phases") if isinstance(raw.get("failed_phases"), list) else ()
+        ),
         "event_file": _clean_opt_str(raw.get("event_file")),
         "event_sha256": _clean_opt_str(raw.get("event_sha256")),
         "detail": _clean_opt_str(raw.get("detail")),
@@ -167,6 +171,7 @@ def record_catchup_state(
     started_at: str | None = None,
     finished_at: str | None = None,
     trigger_phases: Sequence[str] = (),
+    failed_phases: Sequence[str] = (),
     event_file: str | None = None,
     event_sha256: str | None = None,
     detail: str | None = None,
@@ -182,6 +187,7 @@ def record_catchup_state(
         "started_at": _clean_opt_str(started_at),
         "finished_at": _clean_opt_str(finished_at),
         "trigger_phases": _normalize_phases(trigger_phases),
+        "failed_phases": _normalize_phases(failed_phases),
         "event_file": _clean_opt_str(event_file),
         "event_sha256": _clean_opt_str(event_sha256),
         "detail": _clean_opt_str(detail),
@@ -338,6 +344,7 @@ def diag_catchup_state() -> dict[str, Any]:
         "started_at": state["started_at"],
         "finished_at": state["finished_at"],
         "trigger_phases": list(state["trigger_phases"]),
+        "failed_phases": list(state["failed_phases"]),
         "event_file": state["event_file"],
         "event_sha256": state["event_sha256"],
         "detail": state["detail"],
@@ -522,34 +529,57 @@ def _classify_capture_outcome(
     claude_paths: Sequence[Path],
     append_skipped: bool,
     git_confirmed: bool,
-) -> tuple[str, str | None]:
+    trigger_phases: Sequence[str] = (),
+) -> tuple[str, str | None, list[str]]:
     if append_skipped:
-        return "failed", "event append skipped (max-file-size)"
+        skipped_parts: list[str] = []
+        if capture.git_rows:
+            skipped_parts.append("git_walk")
+        if capture.session_rows:
+            skipped_parts.append("session_scan")
+        if capture.host_rows:
+            skipped_parts.extend(p for p in trigger_phases if p.startswith("host:"))
+        return (
+            "failed",
+            "event append skipped (max-file-size)",
+            skipped_parts or list(trigger_phases),
+        )
     if not git_confirmed:
-        return "failed", "Git snapshot or cursor update could not be confirmed; run mm diag"
+        return (
+            "failed",
+            "Git snapshot or cursor update could not be confirmed; run mm diag",
+            ["git_walk"],
+        )
     if capture.walk_errors > 0:
-        return "failed", f"git walk had {capture.walk_errors} error(s)"
+        return "failed", f"git walk had {capture.walk_errors} error(s)", ["git_walk"]
     if any(
         err
         not in {events.GIT_ROOT_DISCOVERY_BUDGET_ERROR, events_tail.CATCHUP_GIT_IDENTITY_PENDING}
         for err in capture.root_discovery.errors
     ):
-        return "failed", "git root discovery failed"
+        return "failed", "git root discovery failed", ["git_discovery"]
     if events.classify_discovery(capture.root_discovery) == "empty":
-        return "failed", "no git repositories discovered"
+        return "failed", "no git repositories discovered", ["git_discovery"]
     if (claude_paths and not capture.token_cache_requested) or capture.warn_lock_unavailable:
-        return "failed", "Claude token cache unavailable"
-    if any(reason != "deadline" for _, reason in capture.host_capture.dropped) or (
+        return "failed", "Claude token cache unavailable", ["session_scan"]
+    failed_hosts = [
+        f"host:{name}" for name, reason in capture.host_capture.dropped if reason != "deadline"
+    ]
+    if failed_hosts or (
         not capture.host_capture.complete
         and not capture.host_capture.dropped
         and capture.host_capture.reason != "deadline"
     ):
-        return "failed", "host usage reader failed"
+        return (
+            "failed",
+            "host usage reader failed",
+            failed_hosts or [p for p in trigger_phases if p.startswith("host:")],
+        )
     if events_tail.CATCHUP_GIT_IDENTITY_PENDING in capture.root_discovery.errors:
-        return "deferred", "Git author identity check pending. Run: mm push"
+        return "deferred", "Git author identity check pending. Run: mm push", []
     if events_tail.deadline_stopped_phases(capture):
-        return "partial", "capture still stopped at deadline; run mm push"
-    return "ok", None
+        return "partial", "capture still stopped at deadline; run mm push", []
+    return "ok", None, []
 
 
 def _run_catchup_pass(
@@ -563,12 +593,14 @@ def _run_catchup_pass(
         result: str,
         detail: str | None = None,
         *,
+        failed_phases: Sequence[str] = (),
         event_file: str | None = None,
         event_sha256: str | None = None,
     ) -> dict[str, Any]:
         return {
             "result": result,
             "detail": detail,
+            "failed_phases": _normalize_phases(failed_phases),
             "event_file": event_file,
             "event_sha256": event_sha256,
             "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -584,13 +616,21 @@ def _run_catchup_pass(
         try:
             cfg = config.load_config()
         except Exception as exc:
-            return finish("failed", f"configuration unreadable ({type(exc).__name__})")
+            return finish(
+                "failed",
+                f"configuration unreadable ({type(exc).__name__})",
+                failed_phases=trigger_phases,
+            )
 
         check_config_unchanged = _config_guard(cfg)
         try:
             resolved = config.resolve_sources(cfg, strict=True, bootstrap=False)
         except Exception as exc:
-            return finish("failed", f"source configuration invalid ({type(exc).__name__})")
+            return finish(
+                "failed",
+                f"source configuration invalid ({type(exc).__name__})",
+                failed_phases=trigger_phases,
+            )
 
         sources = resolved.available
         mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
@@ -607,7 +647,11 @@ def _run_catchup_pass(
         except OSError:
             cache_state = "unreadable"
         if cache_state not in {"valid", "missing"}:
-            return finish("failed", "Git capture index unreadable; run mm diag")
+            return finish(
+                "failed",
+                "Git capture index unreadable; run mm diag",
+                failed_phases=["git_walk", "git_discovery"],
+            )
 
         device_id = str((cfg.get("device") or {}).get("id") or "")
         events_dir = Path(mm_events_src["path"]).expanduser() / "events"
@@ -731,19 +775,30 @@ def _run_catchup_pass(
             except OSError:
                 event_sha256 = None
 
-        outcome, detail = _classify_capture_outcome(
+        outcome, detail, failed_phases = _classify_capture_outcome(
             capture,
             claude_paths=claude_paths,
             append_skipped=append_skipped,
             git_confirmed=git_confirmed,
+            trigger_phases=trigger_phases,
         )
         # Rule out PR #382 F25: stamp finished_at BEFORE releasing L2 so any
         # subsequent autopush acquiring L2 gets auto_push_at > finished_at.
-        return finish(outcome, detail, event_file=event_file, event_sha256=event_sha256)
+        return finish(
+            outcome,
+            detail,
+            failed_phases=failed_phases,
+            event_file=event_file,
+            event_sha256=event_sha256,
+        )
     except _ConfigChanged:
         return finish("deferred", "capture configuration changed; run mm push")
     except Exception as exc:
-        return finish("failed", f"catch-up failed ({type(exc).__name__})")
+        return finish(
+            "failed",
+            f"catch-up failed ({type(exc).__name__})",
+            failed_phases=trigger_phases,
+        )
     finally:
         lockfile.release_lock(config.LOCK_PATH)
 
@@ -850,6 +905,7 @@ def run_catchup(
                     started_at=started_at,
                     finished_at=final_res["finished_at"],
                     trigger_phases=phases,
+                    failed_phases=final_res.get("failed_phases") or (),
                     event_file=final_res["event_file"],
                     event_sha256=final_res["event_sha256"],
                     detail=final_res["detail"],

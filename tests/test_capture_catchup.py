@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -1946,3 +1947,61 @@ def test_status_and_diag_never_write_catchup_state(tmp_path, monkeypatch):
     assert runner.invoke(cli.app, ["diag", "--json"]).exit_code == 0
     assert runner.invoke(cli.app, ["push", "--dry-run"]).exit_code == 0
     assert state_path.read_bytes() == before_bytes
+
+
+def test_git_backlog_cleared_before_host_reader_failure(tmp_path, monkeypatch):
+    """Simulate a Codex read failure after real Git capture to check per-part status."""
+    env = _setup_fleet(tmp_path, monkeypatch, include_codex=True)
+    repo = _make_git_repo(tmp_path / "repo-capture-backlog")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    monkeypatch.setattr(
+        identity, "_gather_gh_noreply_email", lambda: "5+user@users.noreply.github.com"
+    )
+    monkeypatch.setattr(
+        codex_host,
+        "read_codex_usage",
+        lambda **kw: host_usage.HostUsageResult(hosts={}, complete=True),
+    )
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    aborted_push = events.make_mm_push_event(
+        device=env["device_id"],
+        mm_version="1.0.0",
+        sources=["mm-events"],
+        git_capture=events.make_git_capture(
+            since=datetime.now(timezone.utc) - timedelta(hours=1),
+            discovery="complete",
+            walk_budget_aborts=1,
+            walk_errors=0,
+        ),
+    )
+    events.write_push_event(env["events_dir"], env["device_id"], [aborted_push], strict=True)
+    backlog_at = datetime.fromisoformat(aborted_push["ts"])
+    assert events.count_pending_repositories([], backlog_at) == 1
+
+    monkeypatch.setattr(
+        codex_host,
+        "read_codex_usage",
+        lambda **kw: host_usage.HostUsageResult(hosts=None, complete=False, reason="io_error"),
+    )
+    worker = capturecatchup.run_catchup(["git_walk", "host:codex"])
+    assert worker is not None and worker["result"] == "failed", worker
+    assert worker["detail"] == "host usage reader failed"
+    assert worker["failed_phases"] == ["host:codex"]
+    scan = events.latest_event_rows(
+        env["events_dir"], env["device_id"], {"git-snapshot", "mm-push"}
+    )
+    assert scan.rows["mm-push"]["ts"] == aborted_push["ts"]
+    git_snapshot = scan.rows["git-snapshot"]
+    assert git_snapshot["origin"] == events.GIT_SNAPSHOT_ORIGIN_CATCHUP
+    assert datetime.fromisoformat(git_snapshot["ts"]) > backlog_at
+    assert events.capture_advances_cursor(git_snapshot["git_capture"])
+    assert events.count_pending_repositories([], backlog_at) == 0
+    assert not events.read_git_capture_cache().get("pending_refresh_since")
+
+    status = runner.invoke(cli.app, ["status"])
+    assert status.exit_code == 0, status.stdout
+    output = " ".join(status.stdout.split())
+    assert not re.search(r"Retro capture:[^.]*background catch-up failed", output), output

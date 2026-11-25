@@ -1865,16 +1865,30 @@ def _host_publication(
     return projected
 
 
+def _phases_cover_part(phases: Sequence[str], part: str) -> bool:
+    phase_set = set(phases)
+    if part == "git":
+        return bool(phase_set & {"git_walk", "git_discovery"})
+    if part == "session":
+        return "session_scan" in phase_set
+    return part in phase_set
+
+
 def _catchup_covers_part(state: Mapping[str, Any] | None, part: str) -> bool:
     """Return True if the recorded catch-up state covered ``part``."""
     if not isinstance(state, Mapping):
         return False
-    triggers = set(state.get("trigger_phases") or ())
-    if part == "git":
-        return bool(triggers & {"git_walk", "git_discovery"})
-    if part == "session":
-        return "session_scan" in triggers
-    return part in triggers
+    return _phases_cover_part(state.get("trigger_phases") or (), part)
+
+
+def _catchup_failure_covers_part(state: Mapping[str, Any] | None, part: str) -> bool:
+    """Return True if a failed catch-up names ``part`` (falling back to triggers if interrupted)."""
+    if not isinstance(state, Mapping):
+        return False
+    failed = state.get("failed_phases") or ()
+    if failed:
+        return _phases_cover_part(failed, part)
+    return _phases_cover_part(state.get("trigger_phases") or (), part)
 
 
 def _catchup_part_suffix(
@@ -1884,11 +1898,11 @@ def _catchup_part_suffix(
     part: str,
 ) -> str:
     """Append the last catch-up fact for ``part`` onto its live backlog line."""
-    if not _catchup_covers_part(state, part):
-        return ""
     if running:
-        return " — background catch-up running"
+        return " — background catch-up running" if _catchup_covers_part(state, part) else ""
     if not isinstance(state, Mapping) or state.get("result") != "failed":
+        return ""
+    if not _catchup_failure_covers_part(state, part):
         return ""
     ts = events.parse_aware_ts(state.get("finished_at")) or events.parse_aware_ts(
         state.get("started_at")
@@ -2141,11 +2155,24 @@ def _print_retro_capture_status(
     if mm_events_src is None:
         return False
     events_dir = Path(mm_events_src["path"]).expanduser() / "events"
-    row = (
+    mm_push_row = (
         scan.rows.get("mm-push")
         if scan is not None
         else events.latest_mm_push_row(events_dir, device_id)
     )
+    git_snapshot_row = (
+        scan.rows.get("git-snapshot")
+        if scan is not None
+        else events.latest_event_rows(events_dir, device_id, {"git-snapshot"}).rows.get(
+            "git-snapshot"
+        )
+    )
+    row = mm_push_row
+    if isinstance(git_snapshot_row, dict) and isinstance(git_snapshot_row.get("git_capture"), dict):
+        mm_ts = events.parse_aware_ts((mm_push_row or {}).get("ts"))
+        git_ts = events.parse_aware_ts(git_snapshot_row.get("ts"))
+        if git_ts is not None and (mm_ts is None or git_ts > mm_ts):
+            row = git_snapshot_row
     projected = events.project_recorded_capture(row)
     if projected is None:
         return False
@@ -2162,14 +2189,11 @@ def _print_retro_capture_status(
             pass
     pending = events.count_pending_repositories([], pending_since)
     cache = events.read_git_capture_cache()
-    incomplete = (
-        not projected.get("advances_cursor", True)
-        or skipped > 0
-        or pending > 0
+    live_backlog = (
+        pending > 0
+        or projected.get("discovery") == "partial"
         or bool(cache.get("pending_refresh_since"))
     )
-    if not incomplete:
-        return False
     cursor = (
         scan.cursor
         if scan is not None and scan.cursor is not None
@@ -2202,6 +2226,10 @@ def _print_retro_capture_status(
         or errs > 0
         or cache.get("incomplete_streak", 0) >= 3
     )
+    if not live_backlog and not (
+        recovery_required and (not projected.get("advances_cursor", True) or skipped > 0)
+    ):
+        return False
     git_suffix = _catchup_part_suffix(catchup_state, running=catchup_running, part="git")
     if not recovery_required:
         discovery_errors = row.get("discovery_errors", [])
