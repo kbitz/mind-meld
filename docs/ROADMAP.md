@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Cross-model memory setup and the Codex source fold shipped by v1.12.80. The owner will decide the path to 2.0 after using the Syncthing fleet. [PROGRESS.md](PROGRESS.md#acceptance) records achieved checkpoints.
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Cross-model memory (O9) shipped through v1.12.84 (dedicated `mind-meld` qmd index) and achieved owner-fleet acceptance on 2026-11-24 ([PROGRESS.md](PROGRESS.md#acceptance)). The owner will decide the path to 2.0 after using the Syncthing fleet.
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -22,47 +22,45 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 
 ## In Progress
 
-None declared.
+Declared 2026-11-24 by the Factory Manager's brief: Track 165C is in planning (item `715b9168`, branch `mmm/715b9168`), split from Track 165A (item `67e29a92`, draft PR #382 on branch `mmm/67e29a92`, which stays open as reference material) on the developer's word, 2026-11-24: "split is fine". Its prerequisite Track 165B shipped in v1.12.86 (PR #383).
 
-## Current Plan
-
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161_
-
-### Group 163: Mind Meld's own qmd index and agent setup
+### Group 165: Background push-capture catch-up
 
 _Depends on: none_
 
-**This group delivers:** agent memory search that leaves the owner's other qmd collections alone and gives agents a clear trigger and setup instructions.
+**This group delivers:** background catch-up for deadline-stopped autopush capture so usage and Git capture stay complete without slowing agent hooks or requiring manual attended pushes.
 
-#### Track 163A: Give Mind Meld its own qmd index and qualify agent recall
-_4 tasks . ~210 LOC . medium risk . 7 files_
-**Outcome:** The owner can keep a notes vault in qmd and use Mind Meld to search agent memories independently. Agents know when to search and how to surface conflicting memories.
-**Supports:** [SPEC](SPEC.md) O8.6 and O9.2–6. The default qmd index is shared today, and incomplete agent setup can prevent the recall and contradiction checks that O9 requires.
-**Done when:** enabling or refreshing moves legacy Mind Meld collections, regular operations and agent searches use the dedicated index, and the setup instructions and isolated Q1/Q2 results agree with the shipped commands.
-**Acceptance:**
-1. Select `--index mind-meld` for every routine index operation, including collection listing, inspection, reconciliation, removal, update and optional embed. Only the one-time cleanup uses the default `index`: the next successful `mm memory-index on` or enabled refresh creates and refreshes the desired collections in the named index, then removes only legacy `mm-` collections from the default index. Never update or embed the default or a project index. Keep cleanup retryable after a partial failure. A fresh installation and subsequent routine runs leave the default index alone. Leave every other collection and its search results intact. An isolated fixture with a notes collection in the default index and a project-local index verifies migration, search isolation, refresh, embed, read-only inspection and disable.
-2. Use one recommended pointer line for setup and docs: “If the owner mentions something they discussed with an agent before and you can't find it in your own memory, search every agent's memory with `qmd --index mind-meld search "<key words>" -n 10` (`qmd --index mind-meld get <docid>` reads a hit). If memories disagree, show the owner each one with its path and ask which is right.” Update O9.3 in [SPEC](SPEC.md) and the [cross-model memory design](designs/cross-model-memory.md). The developer approves the SPEC wording at the implementation PR's merge gate.
-3. After successful `mm memory-index on`, use shared O8 output to print the agent setup or link directly to the README's Agent setup subsection. Keep pointer edits by hand available for symlinked instruction files.
-4. Add Agent setup under the README's Searching agent memory (qmd) section. Include the pointer line, the two Claude Code allow rules (`Bash(qmd --index mind-meld search:*)` and `Bash(qmd --index mind-meld get:*)`), and the Codex writable-root setting for the named index's actual cache folder only if criterion 5 demonstrates it is needed. Point existing users to replace the old pointer line, and use the named index in optional MCP examples.
-5. Before documenting a Codex writable-root setting, try both named-index `search` and `get` under the normal Codex sandbox in an isolated home without the extra grant. If either fails because of filesystem permissions, verify the minimal cache-directory grant and record the evidence. If both work without it, omit that step from the README and CLI guidance.
-6. Rerun Q1 and Q2 from the cross-model memory design with fresh Codex and Claude Code sessions, the revised line and the named index, in the isolated homes it prescribes. The owner prompts must mention a previous discussion with an agent and leave the answer in the seeded foreign memory. Verify cross-agent recall in both directions and that each agent surfaces both sides of the seeded contradiction with paths and asks which is right. Record commands, tool versions, sandbox settings, final pointer and results in that design. This covers O9.6's isolated evidence. The owner's Mac and Linux fleet acceptance remains separate.
-7. At enablement, an installed qmd that exits nonzero, prints an unparseable version or times out still exits 1 with the failure detail and the copyable install command last. Assert that the failed preflight leaves config, index state and collections untouched.
+#### Track 165C: Finish deadline-stopped autopush capture in the background (re-plan)
+_2 tasks . ~300 LOC . medium risk . 14 files_
+**Outcome:** When an autopush stops usage or Git capture at its deadline, the remainder finishes in the background without the owner running an attended push and without a hook waiting.
+**Supports:** [SPEC](SPEC.md) O7 (fleet usage reporting) and O8 (silent hooks and honest status). Split from Track 165A (item `67e29a92`, draft PR #382) on the developer's word, 2026-11-24: "split is fine". Track 165B shipped the timing and per-provider deadline half in v1.12.86 (PR #383); this Track re-plans the background catch-up half from a simpler design (item `715b9168`, branch `mmm/715b9168`, currently in planning; draft PR #382 stays open as reference material).
+**Done when:** set by the active plan for item `715b9168`; at minimum, a deadline-stopped autopush hands off the remainder, at most one catch-up runs per machine, the catch-up never prompts, prints nothing and never changes the autopush exit code, and `mm status` / `mm diag` show its last result.
+**Acceptance (starting points for active planning item `715b9168`; final criteria set by the plan):**
+1. Prefer a capture-only catch-up: it advances caches and cursors with the attended budgets, and the next push (auto or attended) publishes. Weigh this against Track 165A's reason for publishing in the catch-up (the day's last session staying unpublished overnight), and state which the plan chooses and why.
+2. Read draft PR #382's review receipts and its branch's `docs/TODOS.md` follow-ups (the four remaining catch-up follow-ups, after Track 165B resolved timing record duplication and warm-retry ceiling) as the list of failure modes the design must rule out, and name each one in the plan with how the design avoids it.
+3. `mm status` stops advising a manual attended push for a backlog the catch-up is handling or has just handled, without hiding any other degradation (O8).
+4. Build on Track 165B's timing records (`pushtimings.py`) to measure catch-up runs.
 
-_touches: src/mind_meld/memoryindex.py, tests/test_memory_index.py, tests/test_initflow.py, README.md, docs/SPEC.md, docs/designs/cross-model-memory.md, docs/invariants/sync.md_
-_read-first: docs/SPEC.md (O8 and O9), docs/invariants/README.md, docs/invariants/sync.md (Memory index refresh), docs/invariants/init-devices.md (memory setup), docs/designs/cross-model-memory.md (Qualification)_
-_verify: ./bin/check tests/test_memory_index.py tests/test_initflow.py_
+_blocked-by: Track 165B_
+_touches: src/mind_meld/events_tail.py, src/mind_meld/cli.py, src/mind_meld/config.py, src/mind_meld/statusflow.py, src/mind_meld/events.py, src/mind_meld/pushtimings.py, tests/test_events.py, tests/test_events_budget_scope.py, tests/test_host_usage_snapshot.py, tests/test_integration.py, tests/test_statusflow.py, tests/test_diag.py, README.md, docs/invariants/events-retro.md_
+_read-first: docs/invariants/events-retro.md, docs/invariants/sync.md (autopush, detached memory-index refresh), AGENTS.md, PR #382 (diff, review receipts, TODOS additions)_
+_verify: ./bin/check --affected_
 
-_Source: developer decisions relayed on 2026-11-22. The existing `_GLOBAL_INDEX` in `memoryindex.py` selects the default index, and the README documents that sync refreshes other collections there. The design's Q1/Q2 results used the earlier trigger and show Codex with a cache grant. The version-probe test gap came from Track 162A's coverage audit._
+_Source: developer decision, 2026-11-24 ("split is fine"); Track 165A item `67e29a92` and draft PR #382 (branch `mmm/67e29a92`); active planning item `715b9168` (branch `mmm/715b9168`)._
 
-- **Isolate qmd operations and move legacy collections.** Exercise the named index, bounded cleanup and retry with separate index fixtures. _memoryindex.py, tests/test_memory_index.py, tests/test_initflow.py, ~85 lines._ (M)
-- **Revise the pointer and show the setup.** Update the canonical string, CLI success guidance, setup tests, README, SPEC and sync invariant. _memoryindex.py, tests/test_memory_index.py, tests/test_initflow.py, README.md, docs/SPEC.md, docs/invariants/sync.md, ~65 lines._ (S)
-- **Check the Codex grant and rerun Q1/Q2.** Record whether the grant is needed and how both agents recalled and reported the seeds. _docs/designs/cross-model-memory.md, ~35 lines._ (S)
-- **Pin failed qmd version probes.** Exercise nonzero exit, malformed version and timeout in the isolated preflight fixture. _tests/test_memory_index.py, ~25 lines._ (S)
+- **Re-plan and implement background catch-up handoff and execution.** Hand off deadline-stopped autopush capture to a single-instance quiet background catch-up using Track 165B timing records, avoiding the concurrency failure modes documented on PR #382. _events_tail.py, cli.py, config.py, events.py, pushtimings.py, tests, ~180 lines._ (M)
+- **Update status, diagnostics and documentation for background catch-up.** Suppress manual-push advice while catch-up handles a backlog, report the last catch-up result in `mm status` / `mm diag`, and update README and invariants. _statusflow.py, tests, README.md, docs/invariants/events-retro.md, ~120 lines._ (M)
+
+## Current Plan
+
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164_
+
+No unstarted Groups queued. Track 165C (Group 165 above) is the only active Track.
 
 ### Execution Map
 
 ```
-- Group 163 ← {}
+- Group 165 ← {}
 ```
 
 **Total: 1 group, 1 Track remaining.**
@@ -71,7 +69,7 @@ _Source: developer decisions relayed on 2026-11-22. The existing `_GLOBAL_INDEX`
 
 ## Future
 
-Deferred: docs/roadmap-future.md (125 items)
+Deferred: docs/roadmap-future.md (136 items)
 
 ## Shipped
 

@@ -15,11 +15,13 @@ start over". [Memory continuity](memory-continuity.md) and the
 
 ## Goal
 
-Anything one agent learned on any of the owner's machines can be found by
-every agent on every machine. That covers Claude Code, Codex, Grok Build,
-Muse, and any agent that can run a command or call an MCP server. One local
-search index covers every provider's memory. mm never copies a memory into
-another agent's store.
+Cross-machine search on a machine covers memory from projects present on that
+machine plus each agent's machine-wide memory (Codex memories, Grok global
+topics, Muse personal memory); Claude project memory from a project with no
+checkout on that machine stays off it and is not searchable there, by design.
+That covers Claude Code, Codex, Grok Build, Muse, and any agent that can run a
+command or call an MCP server. One local search index covers every provider's
+memory. mm never copies a memory into another agent's store.
 
 ## The developer's decisions
 
