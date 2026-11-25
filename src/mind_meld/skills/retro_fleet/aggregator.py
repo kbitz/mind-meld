@@ -445,6 +445,8 @@ class SessionsAggregate:
     # day -> {canonical_device: (input, cache_create, cache_read, output)}.
     # Consumed by `_detect_duplicate_ledgers` in `aggregate_agent_usage`.
     day_tuples: dict[str, dict[str, tuple[int, int, int, int]]] = field(default_factory=dict)
+    historical_session_gaps: set[str] = field(default_factory=set)
+    historical_token_gaps: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -482,6 +484,7 @@ class SkillsAggregate:
     # ``pre_skills_peers`` for stability — semantic drift documented
     # here.
     pre_skills_peers: set[str] = field(default_factory=set)
+    historical_gaps: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -894,11 +897,18 @@ def aggregate_agent_usage(
     claude_tokens = sum(token_usage.sum_bucket(b) for b in claude_by_model.values())
     if claude_tokens > 0:
         claude_coverage_peers = _token_coverage_peers(data.sessions)
-        claude_coverage_names = (
-            _format_coverage_peer_names({device_label(d, labels) for d in claude_coverage_peers})
-            if claude_coverage_peers
-            else ""
+        claude_causes: list[str] = []
+        if claude_coverage_peers:
+            names = _format_coverage_peer_names(
+                {device_label(d, labels) for d in claude_coverage_peers}
+            )
+            claude_causes.append(f"token coverage is incomplete on {names}")
+        historical_gaps = (
+            data.sessions.historical_token_gaps | data.sessions.historical_session_gaps
         )
+        if historical_gaps:
+            names = _format_coverage_peer_names({device_label(d, labels) for d in historical_gaps})
+            claude_causes.append(f"historical Claude token coverage is incomplete on {names}")
         rows.append(
             FleetAgentRow(
                 key="claude",
@@ -908,11 +918,7 @@ def aggregate_agent_usage(
                 active_days=len(data.sessions.active_days),
                 machines=len(data.sessions.token_devices),
                 counters_known=True,
-                floor_causes=(
-                    (f"token coverage is incomplete on {claude_coverage_names}",)
-                    if claude_coverage_peers
-                    else ()
-                ),
+                floor_causes=tuple(claude_causes),
             )
         )
 
@@ -924,7 +930,7 @@ def aggregate_agent_usage(
     fam_counters_known: dict[str, bool] = {}
     fam_legacy_devices: dict[str, set[str]] = {}
     fam_causes: dict[str, set[str]] = {}
-    fam_reader_causes: dict[str, dict[tuple[str, tuple[str, ...]], set[str]]] = {}
+    fam_reader_causes: dict[str, dict[tuple[str, tuple[str, ...], bool], set[str]]] = {}
     activity_devices = set(data.sessions.token_devices) if rows else set()
     claimed: set[tuple[str, str, str]] = set()
     effective_host_day_tuples: dict[tuple[str, str], dict[str, tuple[int, ...]]] = {}
@@ -982,9 +988,8 @@ def aggregate_agent_usage(
         # Per-model slice for pricing. Absent on a pre-33A peer, in which case
         # the family keeps its token volume and loses only its cost basis.
         legacy_codex = _legacy_codex_prefixes(snap)
-        families_match = _host_model_families_match(snap, lo, hi, legacy_codex=legacy_codex)
         if is_superseded:
-            by_model, residual = _windowed_host_by_model_scoped(
+            by_model, residual_families, mismatched_families = _windowed_host_by_model_scoped(
                 snap,
                 lo,
                 hi,
@@ -993,10 +998,11 @@ def aggregate_agent_usage(
             )
         else:
             by_model, residual = _windowed_host_by_model(snap, lo, hi)
-        if not families_match:
-            # The acceptor deliberately permits classifier differences across
-            # versions. Never price one family's volume under another label.
-            by_model = {}
+            residual_families = touched if residual else set()
+            mismatched_families = set()
+            if not _host_model_families_match(snap, lo, hi, legacy_codex=legacy_codex):
+                mismatched_families = touched
+                by_model = {}
         for model, usage in by_model.items():
             family = _host_model_family(snap, model, legacy_codex=legacy_codex)
             if family not in _HOST_FAMILIES:
@@ -1012,28 +1018,25 @@ def aggregate_agent_usage(
         # snapshot covering both, so a family-blind cause list put Grok's
         # "logs do not record per-request prompt sizes" on the Codex row, which
         # is a claim about a different vendor's log format.
-        shared: set[str] = set()
-        if not families_match:
-            shared.add(
-                f"{device_label(effective_device, labels)}: "
-                "per-model detail uses a different family classification"
+        machine = device_label(effective_device, labels)
+        per_family: dict[str, set[str]] = {}
+        for family in mismatched_families:
+            per_family.setdefault(family, set()).add(
+                f"{machine}: per-model detail uses a different family classification"
             )
-        if residual:
-            # Genuinely cross-family: `tokens_by_day` day totals are not
-            # family-partitioned, so unattributed residue cannot be blamed on
-            # one family. Shared across touched families on this machine is
-            # the honest scope.
-            shared.add(
-                f"{device_label(effective_device, labels)}: "
-                "some tokens were not attributed to a named model (the per-day model cap)"
+        for family in residual_families:
+            per_family.setdefault(family, set()).add(
+                f"{machine}: some tokens were not attributed to a named model "
+                "(the per-day model cap)"
             )
         unusable_coverage = (snap.partial_reason or snap.degraded_reason) and not (
             snap.partial or snap.degraded
         )
         if snap.tokens_by_day is None and touched:
-            shared.add(
-                f"{device_label(effective_device, labels)}: "
-                + _host_detail_phrase(
+            if is_superseded:
+                detail = "historical snapshot has no usable per-model detail"
+            else:
+                detail = _host_detail_phrase(
                     snap.detail,
                     snap.detail_reason,
                     device=effective_device,
@@ -1041,57 +1044,35 @@ def aggregate_agent_usage(
                     versions=versions,
                     labels=labels,
                 )
-            )
+            for family in touched:
+                per_family.setdefault(family, set()).add(f"{machine}: {detail}")
         coverage_unknown = bool(
             snap.partial or snap.degraded or snap.partial_reason or snap.degraded_reason
         )
 
-        def _reader_scope(readers: tuple[str, ...]) -> dict[str, list[str]]:
-            """An incomplete reader may omit any family; the wire cannot say which.
-
-            Reader identity does not identify its model provider. Even a known
-            failed reader can have contributed no data for an affected family.
-            """
-            scoped: dict[str, list[str]] = {}
-            scope_fams = sorted(touched) if is_superseded else sorted(_HOST_FAMILIES)
-            for reader in readers:
-                for fam in scope_fams:
-                    scoped.setdefault(fam, []).append(reader)
-            return scoped
-
-        per_family: dict[str, set[str]] = {}
-        for fam, readers in _reader_scope(snap.partial).items():
-            reader_labels = _reader_display_labels(tuple(readers))
+        # A current reader can have missed any model family. Historical reader
+        # state qualifies only the families whose old usage was kept.
+        coverage_scope = touched if is_superseded else _HOST_FAMILIES
+        catching_up_readers = {reader for reader, _left in snap.pending_left}
+        for kind, readers in (
+            ("partial", snap.partial),
+            ("catching_up", tuple(r for r in snap.degraded if r in catching_up_readers)),
+            ("degraded", tuple(r for r in snap.degraded if r not in catching_up_readers)),
+        ):
+            reader_labels = _reader_display_labels(readers)
             if reader_labels:
-                fam_reader_causes.setdefault(fam, {}).setdefault(
-                    ("partial", reader_labels), set()
-                ).add(effective_device)
-        if not is_superseded:
-            catching_up_readers = {reader for reader, _left in snap.pending_left}
-            degraded_catching_up = tuple(r for r in snap.degraded if r in catching_up_readers)
-            degraded_failed = tuple(r for r in snap.degraded if r not in catching_up_readers)
-            for fam, readers in _reader_scope(degraded_catching_up).items():
-                reader_labels = _reader_display_labels(tuple(readers))
-                if reader_labels:
-                    fam_reader_causes.setdefault(fam, {}).setdefault(
-                        ("catching_up", reader_labels), set()
+                for family in coverage_scope:
+                    fam_reader_causes.setdefault(family, {}).setdefault(
+                        (kind, reader_labels, is_superseded), set()
                     ).add(effective_device)
-            for fam, readers in _reader_scope(degraded_failed).items():
-                reader_labels = _reader_display_labels(tuple(readers))
-                if reader_labels:
-                    fam_reader_causes.setdefault(fam, {}).setdefault(
-                        ("degraded", reader_labels), set()
-                    ).add(effective_device)
-            if unusable_coverage:
-                # An empty reader list is not "no problem". The machine contributed
-                # no family to attach the warning to, and a healthy peer would
-                # otherwise render an ordinary estimate.
-                cause = (
-                    f"{device_label(effective_device, labels)}: "
-                    "host coverage metadata was unusable; run `mm diag`"
-                )
-                for family in sorted(_HOST_FAMILIES):
-                    per_family.setdefault(family, set()).add(cause)
+        if unusable_coverage:
+            detail = (
+                "historical host coverage metadata was unusable"
+                if is_superseded
+                else "host coverage metadata was unusable; run `mm diag`"
+            )
+            for family in coverage_scope:
+                per_family.setdefault(family, set()).add(f"{machine}: {detail}")
         for family in touched:
             family_slice = {
                 m: u
@@ -1108,8 +1089,6 @@ def aggregate_agent_usage(
             if not snap.counters_disjoint:
                 fam_counters_known[family] = False
                 fam_legacy_devices.setdefault(family, set()).add(effective_device)
-            if shared:
-                fam_causes.setdefault(family, set()).update(shared)
         # Reader coverage causes apply even to a family this machine contributed
         # NO data for: a failed codex reader means the fleet's Codex total is
         # missing this machine's share, which is exactly a lower bound. Causes
@@ -1120,21 +1099,21 @@ def aggregate_agent_usage(
             activity_devices.add(effective_device)
 
     for family, grouped in fam_reader_causes.items():
-        for (kind, reader_labels), devices in grouped.items():
+        for (kind, reader_labels, historical), devices in grouped.items():
             machines_txt = _format_coverage_peer_names({device_label(d, labels) for d in devices})
             readers_txt = ", ".join(reader_labels)
             if kind == "partial":
-                fam_causes.setdefault(family, set()).add(
-                    f"{machines_txt}: a host declared totals incomplete ({readers_txt})"
-                )
+                detail = "a historical host" if historical else "a host"
+                detail += " declared totals incomplete"
             elif kind == "catching_up":
-                fam_causes.setdefault(family, set()).add(
-                    f"{machines_txt}: a host reader is still catching up ({readers_txt})"
+                detail = (
+                    "a historical host reader was catching up"
+                    if historical
+                    else "a host reader is still catching up"
                 )
             else:
-                fam_causes.setdefault(family, set()).add(
-                    f"{machines_txt}: a host reader failed ({readers_txt})"
-                )
+                detail = "a historical host reader failed" if historical else "a host reader failed"
+            fam_causes.setdefault(family, set()).add(f"{machines_txt}: {detail} ({readers_txt})")
 
     for key, label in AGENT_ROW_ORDER:
         existing = next((r for r in rows if r.key == key), None)
@@ -2860,6 +2839,23 @@ def aggregate_host_usage(
     )
 
 
+def _short_display_aliases(raw_ids: Iterable[str]) -> dict[str, str]:
+    """Assign stable display keys even when different IDs sanitize alike."""
+    aliases: dict[str, str] = {}
+    used: set[str] = set()
+    for raw_id in sorted(set(raw_ids)):
+        safe_id = _safe_short(raw_id)
+        alias = safe_id
+        suffix = 2
+        while alias in used:
+            # '~' cannot occur in the sanitized base.
+            alias = f"{safe_id}~{suffix}"
+            suffix += 1
+        aliases[raw_id] = alias
+        used.add(alias)
+    return aliases
+
+
 def _sanitize_tokens_by_day(raw: dict | None) -> dict | None:
     """Render-time sanitization. Accept-time leaves model ids intact.
 
@@ -2879,19 +2875,7 @@ def _sanitize_tokens_by_day(raw: dict | None) -> dict | None:
     """
     if raw is None:
         return None
-    alias: dict[str, str] = {}
-    used: set[str] = set()
-    for model in sorted({m for b in raw.values() for m in (b.get("by_model") or {})}):
-        key = _safe_short(str(model))
-        if key in used:
-            # `~2`, `~3`, ... `~` is outside _safe_short's whitelist, so a
-            # suffix here can never collide with a sanitized id.
-            n = 2
-            while f"{key}~{n}" in used:
-                n += 1
-            key = f"{key}~{n}"
-        used.add(key)
-        alias[model] = key
+    alias = _short_display_aliases(m for b in raw.values() for m in (b.get("by_model") or {}))
     out: dict = {}
     for day, bucket in raw.items():
         copied = {field: bucket[field] for field in token_usage.TOKEN_FIELDS}
@@ -2932,6 +2916,10 @@ def _dump_host_inventory(
     git: GitAggregate | None = None,
     fleet: FleetState | None = None,
 ) -> str:
+    folds = fleet.folded_registrations if fleet is not None else ()
+    aliases = _short_display_aliases(
+        set(inventory.superseded_by_device) | {cid for group in folds for cid in group.folded_ids}
+    )
     payload: dict[str, object] = {
         "by_device": {
             device: _serialize_host_snapshot(snap)
@@ -2942,14 +2930,14 @@ def _dump_host_inventory(
             {
                 "device_name": _safe_short(group.target_name),
                 "target_id": _safe_short(group.target_id),
-                "folded_ids": [_safe_short(cid) for cid in group.folded_ids],
+                "folded_ids": [aliases[cid] for cid in group.folded_ids],
             }
-            for group in (fleet.folded_registrations if fleet is not None else ())
+            for group in folds
         ],
         "rejected": [{"device": row.device, "reason": row.reason} for row in inventory.rejected],
         "rejected_rows": inventory.rejected_rows,
         "superseded_by_device": {
-            _safe_short(device): {
+            aliases[device]: {
                 **_serialize_host_snapshot(snap),
                 "folded_into": _safe_short(inventory.fold_map.get(device, "")),
             }
@@ -3039,6 +3027,8 @@ def aggregate_sessions(
     skills = SkillsAggregate(available=False)
     # latest[(device, source_root, claude_dir)] = (ts_dt, project_dict)
     latest: dict[tuple[str, str, str], tuple[datetime, dict]] = {}
+    folded_v1: set[str] = set()
+    folded_v2: set[str] = set()
     for ev in events:
         if ev.get("type") != "sessions-snapshot":
             continue
@@ -3051,12 +3041,16 @@ def aggregate_sessions(
         v = ev.get("v")
         if v != V2_SCHEMA_VERSION:
             # v=1 (or anything else) — record as pre-v2 peer, don't sum.
-            if device not in fold:
+            if device in fold:
+                folded_v1.add(device)
+            else:
                 out.pre_v2_peers.add(device)
             continue
         projects = ev.get("projects")
         if not isinstance(projects, list):
             continue
+        if device in fold:
+            folded_v2.add(device)
         for proj in projects:
             if not isinstance(proj, dict):
                 continue
@@ -3069,6 +3063,7 @@ def aggregate_sessions(
             prior = latest.get(key)
             if prior is None or prior[0] < ts_dt:
                 latest[key] = (ts_dt, proj)
+    out.historical_session_gaps = {fold[device] for device in folded_v1 - folded_v2}
 
     # Coalesce: drop (device, "", claude_dir) keys ONLY when a populated
     # sibling (device, "<root>", claude_dir) exists AND that sibling's ts is
@@ -3149,8 +3144,9 @@ def aggregate_sessions(
         if isinstance(tokens_by_day, dict) and tokens_by_day:
             dev_days = raw_token_days.setdefault(device, {})
             dev_day_ts = raw_token_day_ts.setdefault(device, {})
-            for day_key, bucket in tokens_by_day.items():
-                if not isinstance(day_key, str) or not (since_d <= day_key <= until_d):
+            for raw_day, bucket in tokens_by_day.items():
+                day_key = _canonical_day_key(raw_day)
+                if day_key is None or not (since_d <= day_key <= until_d):
                     continue
                 if not isinstance(bucket, dict):
                     continue
@@ -3190,8 +3186,9 @@ def aggregate_sessions(
             skills_by_day = proj["skills_by_day"]
             if isinstance(skills_by_day, dict):
                 dev_skill_days = raw_skill_days.setdefault(device, {})
-                for day_key, bucket in skills_by_day.items():
-                    if not isinstance(day_key, str) or not (since_d <= day_key <= until_d):
+                for raw_day, bucket in skills_by_day.items():
+                    day_key = _canonical_day_key(raw_day)
+                    if day_key is None or not (since_d <= day_key <= until_d):
                         continue
                     if not isinstance(bucket, dict):
                         continue
@@ -3204,7 +3201,7 @@ def aggregate_sessions(
                         day_skills = dev_skill_days.setdefault(day_key, {})
                         day_skills[skill] = day_skills.get(skill, 0) + n
 
-    for _proj_key, (_is_reg, _ts_dt, _raw_dev, proj) in dedup_projects.items():
+    for (canonical, _, _), (is_registered, _ts_dt, _raw_dev, proj) in dedup_projects.items():
         sessions = _safe_int(proj.get("sessions"))
         ephemeral = bool(proj.get("ephemeral", False))
         out.total_sessions += sessions
@@ -3212,6 +3209,11 @@ def aggregate_sessions(
         if ephemeral:
             out.ephemeral_sessions += sessions
             out.ephemeral_projects += 1
+        if not is_registered and sessions > 0:
+            if not isinstance(proj.get("tokens_by_day"), dict):
+                out.historical_token_gaps.add(canonical)
+            if "skills_by_day" not in proj:
+                skills.historical_gaps.add(canonical)
 
     # Group raw devices by canonical device ID and rank registered first,
     # then newest (device_max_ts[device], device) descending.
@@ -3461,6 +3463,12 @@ def get_known_devices() -> tuple[int | None, list[dict]]:
         return None, []
     if result.returncode != 0:
         return None, []
+    if any(
+        line.startswith("mm: warning: dropped device entry ")
+        for line in (getattr(result, "stderr", "") or "").splitlines()
+    ):
+        # An omitted registration can turn a shared name into a false match.
+        return None, []
     try:
         records = json.loads(result.stdout)
     except json.JSONDecodeError:
@@ -3550,7 +3558,7 @@ def _event_device_names(
         if not isinstance(raw_name, str):
             continue
         cleaned = raw_name.strip()
-        if not cleaned:
+        if not _normalize_device_name(cleaned):
             continue
         ts_dt = _parse_iso(ev.get("ts")) or utc_epoch
         candidate = (ts_dt, cleaned)
@@ -3583,7 +3591,6 @@ def get_unregistered_device_names(
         from mind_meld.storage import keys as mm_keys
 
         cfg = mm_config.load_config(mm_config.CONFIG_PATH)
-        passphrase = mm_crypto.get_passphrase(non_interactive=True)
         backend = get_backend(cfg)
         hdr = mm_crypto.fetch_crypto_init(backend)
         if (
@@ -3593,6 +3600,10 @@ def get_unregistered_device_names(
             or hdr.keycheck_blob is None
         ):
             return {}, {}
+        local_fp = cfg.get("crypto", {}).get("root_salt_fp")
+        if local_fp and local_fp != mm_crypto.root_salt_fingerprint(hdr.root_salt):
+            return {}, {}
+        passphrase = mm_crypto.get_passphrase(non_interactive=True)
     except Exception:
         return {}, {}
 
@@ -3606,13 +3617,13 @@ def get_unregistered_device_names(
         retired_names: dict[str, str] = {}
         try:
             retirements = mm_devices.read_retirement_records(
-                backend, passphrase, hdr.argon2_memory_kb
+                backend, passphrase, hdr.argon2_memory_kb, device_ids=wanted
             )
             for cid in wanted:
                 rec = retirements.records.get(cid)
                 if rec is not None and isinstance(rec.device_name, str):
                     cleaned = rec.device_name.strip()
-                    if cleaned:
+                    if _normalize_device_name(cleaned):
                         retired_names[cid] = cleaned
         except Exception:
             retired_names = {}
@@ -3621,14 +3632,7 @@ def get_unregistered_device_names(
         for cid in sorted(wanted - set(retired_names) - skip_manifest_for):
             try:
                 key = mm_keys.manifest_key(cid)
-                root = getattr(backend, "root", None)
-                if root is not None:
-                    st = (Path(root) / key).stat()
-                    if st.st_size > mm_config.DEFAULT_MAX_FILE_SIZE:
-                        continue
-                raw = backend.get(key)
-                if not isinstance(raw, bytes) or len(raw) > mm_config.DEFAULT_MAX_FILE_SIZE:
-                    continue
+                raw = backend.get_bounded(key, max_bytes=mm_config.DEFAULT_MAX_FILE_SIZE)
                 if mm_crypto.newer_manifest_version(raw) is not None:
                     continue
                 plaintext = mm_crypto.decrypt_manifest(raw, passphrase, hdr.argon2_memory_kb)
@@ -3636,8 +3640,8 @@ def get_unregistered_device_names(
                 if not isinstance(payload, dict) or payload.get("device_id") != cid:
                     continue
                 raw_name = payload.get("device_name")
-                if isinstance(raw_name, str) and (cleaned := raw_name.strip()):
-                    manifest_names[cid] = cleaned
+                if isinstance(raw_name, str) and _normalize_device_name(raw_name):
+                    manifest_names[cid] = raw_name.strip()
             except Exception:
                 continue
         return retired_names, manifest_names
@@ -3653,12 +3657,11 @@ def get_unregistered_device_names(
 def _resolve_unregistered_registrations(
     events: Iterable[dict],
     *,
-    since: datetime,
-    until: datetime,
     devices_known: int | None,
     devices_known_list: list[dict],
     active_unregistered: frozenset[str],
     earliest_ts_by_device: Mapping[str, datetime],
+    comparison_unregistered: frozenset[str] = frozenset(),
 ) -> RegistrationResolution:
     """Match active unregistered device IDs against the current device registry.
 
@@ -3667,8 +3670,8 @@ def _resolve_unregistered_registrations(
     Folds only when the normalized name uniquely matches one registered device.
     Missing, unmatched, or ambiguous names fold nothing and are disclosed.
     """
-    _ = (since, until)
-    if devices_known is None or not active_unregistered:
+    candidates = active_unregistered | comparison_unregistered
+    if devices_known is None or not candidates:
         return RegistrationResolution()
 
     by_norm_name: dict[str, set[str]] = {}
@@ -3683,9 +3686,9 @@ def _resolve_unregistered_registrations(
             by_norm_name.setdefault(norm, set()).add(reg_id)
     registered_by_name = {norm: sorted(ids) for norm, ids in by_norm_name.items()}
 
-    event_names = _event_device_names(events, active_unregistered)
+    event_names = _event_device_names(events, candidates)
     retired_names, manifest_names = get_unregistered_device_names(
-        active_unregistered,
+        candidates,
         skip_manifest_for=frozenset(event_names),
     )
 
@@ -3693,15 +3696,19 @@ def _resolve_unregistered_registrations(
     grouped_folds: dict[str, list[str]] = {}
     unfolded: list[UnregisteredDevice] = []
 
-    for cid in sorted(active_unregistered):
+    for cid in sorted(candidates):
         raw_name = retired_names.get(cid) or event_names.get(cid) or manifest_names.get(cid)
         norm = _normalize_device_name(raw_name) if raw_name else ""
         matches = registered_by_name.get(norm, []) if norm else []
         if len(matches) == 1:
             target_id = matches[0]
             fold_map[cid] = target_id
-            grouped_folds.setdefault(target_id, []).append(cid)
-        elif len(matches) > 1:
+            if cid in active_unregistered:
+                grouped_folds.setdefault(target_id, []).append(cid)
+            continue
+        if cid not in active_unregistered:
+            continue
+        if len(matches) > 1:
             unfolded.append(
                 UnregisteredDevice(
                     device_id=cid,
@@ -3814,7 +3821,15 @@ def aggregate(
     # up to until + 24h) before resolving superseded registrations.
     raw_devices_in_events: set[str] = set()
     earliest_ts_by_device: dict[str, datetime] = {}
-    latest_host_rows: dict[str, _AcceptedHostRow] = {}
+    non_stale_accepted_host_devices: set[str] = set()
+    prior_push_devices: set[str] = set()
+    prior_start = since - timedelta(days=window_days)
+    compare_prior_pushes = (
+        devices_known is not None
+        and window_days < TRENDS_MAX_WINDOW_DAYS
+        and not skip_counter.get(SKIP_CATEGORY_EVENTS, 0)
+        and _coverage_allows_prior(coverage_floor, prior_start)
+    )
     for ev in events:
         if not isinstance(ev, dict):
             continue
@@ -3827,17 +3842,18 @@ def aggregate(
                     earliest_ts_by_device[d] = ts_dt
                 if since <= ts_dt <= until:
                     raw_devices_in_events.add(d)
-        if ev.get("type") == "host-usage-snapshot":
+                elif (
+                    compare_prior_pushes
+                    and prior_start <= ts_dt < since
+                    and ev.get("type") == "mm-push"
+                ):
+                    prior_push_devices.add(d)
+        if devices_known is not None and ev.get("type") == "host-usage-snapshot":
             accepted = _accept_host_row_at(ev, until)
-            if isinstance(accepted, _AcceptedHostRow):
-                prior_host = latest_host_rows.get(accepted.device)
-                if prior_host is None or _row_replaces(accepted, prior_host):
-                    latest_host_rows[accepted.device] = accepted
+            if isinstance(accepted, _AcceptedHostRow) and accepted.as_of >= since:
+                non_stale_accepted_host_devices.add(accepted.device)
 
-    non_stale_accepted_host_devices = {
-        dev for dev, row in latest_host_rows.items() if row.as_of >= since
-    }
-
+    active_fold_map: dict[str, str] = {}
     if devices_known is not None:
         registered_ids = frozenset(
             d.get("device_id")
@@ -3849,14 +3865,18 @@ def aggregate(
         )
         resolution = _resolve_unregistered_registrations(
             events,
-            since=since,
-            until=until,
             devices_known=devices_known,
             devices_known_list=devices_known_list,
             active_unregistered=active_unregistered,
             earliest_ts_by_device=earliest_ts_by_device,
+            comparison_unregistered=frozenset(prior_push_devices - registered_ids),
         )
-        mapped_devices_in_events = {resolution.fold_map.get(d, d) for d in raw_devices_in_events}
+        active_fold_map = {
+            old_id: target_id
+            for old_id, target_id in resolution.fold_map.items()
+            if old_id in active_unregistered
+        }
+        mapped_devices_in_events = {active_fold_map.get(d, d) for d in raw_devices_in_events}
         devices_in_events = mapped_devices_in_events & registered_ids
         unregistered = len(resolution.unfolded)
         host_registered: frozenset[str] | None = registered_ids
@@ -3878,13 +3898,13 @@ def aggregate(
         events,
         since=since,
         until=until,
-        fold_map=resolution.fold_map,
+        fold_map=active_fold_map,
     )
     pushes = aggregate_pushes(
         events,
         since=since,
         until=until,
-        fold_map=resolution.fold_map,
+        fold_map=active_fold_map,
     )
 
     host_inventory = aggregate_host_usage(
@@ -3892,7 +3912,7 @@ def aggregate(
         since=since,
         until=until,
         registered_ids=host_registered,
-        fold_map=resolution.fold_map,
+        fold_map=active_fold_map,
     )
 
     # Host inventory is last-known-good, not window spend, and must never
@@ -4485,38 +4505,52 @@ def _windowed_host_by_model_scoped(
     *,
     allowed_pairs: set[tuple[str, str]],
     legacy_codex: bool,
-) -> tuple[dict[str, dict[str, int]], bool]:
-    """Scope per-model extraction to ``(family, day)`` pairs actually contributed."""
-    merged: dict[str, dict[str, int]] = {}
-    residual = False
-    days = snap.tokens_by_day or {}
+) -> tuple[dict[str, dict[str, int]], set[str], set[str]]:
+    """Reconcile model detail only against the wire family-days that survived."""
+    if snap.tokens_by_day is None:
+        return {}, set(), set()
+    merged: dict[str, dict[str, dict[str, int]]] = {}
+    residual: set[str] = set()
+    mismatched: set[str] = set()
+    allowed_by_day: dict[str, set[str]] = {}
+    for family, day in allowed_pairs:
+        allowed_by_day.setdefault(day, set()).add(family)
     bounds = window_bounds(snap, lo, hi)
-    allowed_days = {day for _fam, day in allowed_pairs}
-    for day, bucket in days.items():
-        if not isinstance(day, str) or day not in allowed_days or not isinstance(bucket, dict):
-            continue
+    for day, families in allowed_by_day.items():
         if not contributes_in_window(day, bounds):
             continue
+        bucket = snap.tokens_by_day.get(day, {})
         by_model = bucket.get("by_model") or {}
-        if not isinstance(by_model, dict):
-            by_model = {}
-        for field_name in token_usage.TOKEN_FIELDS:
-            attributed = 0
-            for usage in by_model.values():
-                if isinstance(usage, dict):
-                    attributed += _safe_int(usage.get(field_name))
-            total = _safe_int(bucket.get(field_name))
-            if attributed < total:
-                residual = True
+        family_models: dict[str, dict[str, dict[str, int]]] = {}
         for model, usage in by_model.items():
-            if not isinstance(model, str) or not isinstance(usage, dict):
-                continue
             family = _host_model_family(snap, model, legacy_codex=legacy_codex)
-            if (family, day) not in allowed_pairs:
+            if family in families:
+                family_models.setdefault(family, {})[model] = usage
+        for family in families:
+            reported = snap.lifetime_by_family[family][day]
+            models = family_models.get(family, {})
+            attributed = token_usage.zero_model_bucket()
+            for usage in models.values():
+                token_usage.merge_usage_bucket(attributed, usage)
+            if any(attributed[k] > reported[k] for k in token_usage.TOKEN_FIELDS):
+                mismatched.add(family)
                 continue
-            dest = merged.setdefault(model, {k: 0 for k in token_usage.TOKEN_FIELDS})
-            token_usage.merge_usage_bucket(dest, usage)
-    return merged, residual
+            if any(attributed[k] < reported[k] for k in token_usage.TOKEN_FIELDS):
+                residual.add(family)
+            by_family = merged.setdefault(family, {})
+            for model, usage in models.items():
+                dest = by_family.setdefault(model, token_usage.zero_model_bucket())
+                token_usage.merge_usage_bucket(dest, usage)
+    return (
+        {
+            model: usage
+            for family, models in merged.items()
+            if family not in mismatched
+            for model, usage in models.items()
+        },
+        residual - mismatched,
+        mismatched,
+    )
 
 
 def _legacy_codex_prefixes(snap: HostDeviceSnapshot) -> bool:
@@ -5755,6 +5789,22 @@ def format_retro(
             "token cache omit skill counts.",
             remedy="Run `mm push` interactively on those machines.",
         )
+
+    def historical_gap_names(devices: set[str]) -> str:
+        return _format_coverage_peer_names({device_label(d, labels) for d in devices})
+
+    if data.sessions.historical_session_gaps:
+        names = historical_gap_names(data.sessions.historical_session_gaps)
+        note("sessions_incomplete", f"Historical Claude session coverage is incomplete on {names}.")
+    historical_token_gaps = (
+        data.sessions.historical_token_gaps | data.sessions.historical_session_gaps
+    )
+    if historical_token_gaps:
+        names = historical_gap_names(historical_token_gaps)
+        note("tokens_incomplete", f"Historical Claude token coverage is incomplete on {names}.")
+    if data.skills.historical_gaps:
+        names = historical_gap_names(data.skills.historical_gaps)
+        note("skills_incomplete", f"Historical Claude skill coverage is incomplete on {names}.")
     for row in agent_usage.rows:
         if not row.has_volume or not row.counters_known:
             continue

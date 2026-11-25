@@ -833,6 +833,14 @@ REVIEWED = {
             "os.unlink(tmp_path)",
         ],
     ),
+    "storage/local.py:LocalBackend.get_bounded": (
+        *_READ_ONLY,
+        [
+            "os.open(self.root, directory_flags)",
+            "os.open(component, directory_flags, dir_fd=directory)",
+            "os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)",
+        ],
+    ),
     "storage/local.py:LocalBackend.delete": (
         *_GUARDED,
         [

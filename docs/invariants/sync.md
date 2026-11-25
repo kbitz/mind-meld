@@ -810,6 +810,11 @@ registry and Syncthing-record listings, so an incomplete directory walk
 cannot release a removal hold. Ordinary inspection and pairing retain the
 best-effort listing behavior.
 
+Retro's targeted retirement and manifest lookups use
+`LocalBackend.get_bounded`. The reader opens each directory component and the
+file without following symlinks, then checks regular-file type and the byte
+limit on that descriptor. A missing or unusable record supplies no name.
+
 ## Own-device blob collection (Track 71A)
 
 Both explicit `mm gc` and post-publication GC on a content-changing attended

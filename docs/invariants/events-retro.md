@@ -1230,9 +1230,14 @@ Name-source precedence is deterministic:
    `DEFAULT_MAX_FILE_SIZE`, rejecting newer manifest versions, verifying
    `payload["device_id"] == id`, only read when neither 1 nor 2 supplied a name).
 
-`get_unregistered_device_names` is strictly read-only, non-interactive, never
-raises, never imports `cli`, and saves/restores `crypto`'s process-global
-session state in `try/finally`. When the name is missing, matches zero
+`get_unregistered_device_names` reads without prompting and restores
+`crypto`'s session and cache even on lookup failure. It checks any configured
+fleet fingerprint before decryption. Retirement and manifest reads use
+`LocalBackend.get_bounded` with validated storage keys. The read stays inside
+the storage directory and enforces its byte limit on the opened regular file.
+If `mm devices --format=json` reports a dropped registration, treat the
+registry as unavailable for the retro. A partial registry cannot prove a
+unique match. When the name is missing, matches zero
 registered devices, or matches more than one registered device (ambiguous),
 nothing folds for that ID: Claude retains its usage as today, host `by_device`
 keeps it excluded as today, registered-machine counts exclude it, and
@@ -1249,10 +1254,16 @@ active days, `token_devices`), host-usage rows (`superseded_by_device`, scoped
 per-model pricing and floor causes via `_windowed_host_by_model_scoped`), pushes
 (`devices_with_pushes` and prior-period `fleet_changed`), and every machine
 count. Git commit deduplication (`(canonical_remote, sha)`) is unchanged.
+Prior-only pushes use the same name resolution for the comparison. Current
+activity counts and current fold disclosures retain their own window.
+Missing historical Claude detail and degraded historical host coverage stay
+visible when they qualify retained usage. Their notes describe the historical
+data without asking a retired registration to push again.
 Each fold is disclosed in `MM_HEALTH` via `folded_registrations`
 (`<machine>: folded earlier registration(s) <old_ids> into <target_id>`) and in
 `--dump-host-usage` (`folded_registrations`, `superseded_by_device`,
-`unregistered_devices`).
+`unregistered_devices`). Superseded IDs that sanitize to the same display
+key receive distinct deterministic aliases in the forensic dump.
 
 #### Row assembly (`aggregate_agent_usage`)
 
@@ -1282,6 +1293,9 @@ Each fold is disclosed in `MM_HEALTH` via `folded_registrations`
   corresponding wire total, suppress that snapshot's pricing detail rather
   than moving accepted tokens between families or pricing an inconsistent
   basis. Other snapshots can still supply a priced subtotal for the row.
+  For a superseded snapshot, reconcile each retained family and day against
+  its own wire counters. A displaced family/day cannot suppress pricing or
+  add a floor to the retained history.
 - **`claude` is a legal host family**, so a host ledger carrying `claude-*`
   models merges INTO the Claude row rather than being dropped. The row means
   "usage of this model family across the fleet". The two corpora cannot
@@ -1328,6 +1342,8 @@ whose snapshot caused it.
   `"degraded"`.
   Only snapshots eligible for the requested window propagate reader causes;
   stale inventory remains available for diagnostics without repricing current rows.
+  A superseded snapshot can qualify only the families whose history it
+  contributes. A snapshot that contributes zero days adds no reader cause.
   Unusable coverage metadata is the same scope: a snapshot that carries
   `partial_reason` or `degraded_reason` but empty `partial` / `degraded` lists
   still floors every host family, including when that machine contributed no
