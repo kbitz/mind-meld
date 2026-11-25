@@ -17,7 +17,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from mind_meld import config, lockedjson, safety
 
 PUSH_TIMINGS_PATH = config.CONFIG_DIR / "push-timings.json"
-PUSH_KINDS = ("attended", "autopush")
+PUSH_KINDS = ("attended", "autopush", "catchup")
 VALID_PHASE_STATUSES = frozenset({"ok", "deadline", "skipped", "error"})
 
 
@@ -252,7 +252,7 @@ def record_push_timings(
     total_ms: int | None = None,
     now: datetime | None = None,
 ) -> None:
-    """Persist per-phase timings for ``kind`` (attended or autopush). Best-effort."""
+    """Persist per-phase timings for ``kind`` (attended, autopush, or catchup). Best-effort."""
     if kind not in PUSH_KINDS:
         return
     current = now or datetime.now(timezone.utc)

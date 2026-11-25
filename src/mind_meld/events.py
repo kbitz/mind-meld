@@ -149,6 +149,9 @@ Lets the aggregator exclude them from its zero-capture *push* note
 GIT_SNAPSHOT_ORIGIN_INIT = "init"
 """Init backfill marker; commits count, but zero-repository push counts do not."""
 
+GIT_SNAPSHOT_ORIGIN_CATCHUP = "catchup"
+"""Background catch-up marker; commits and coverage count, but push counts do not."""
+
 WALK_SKIP_BUDGET_ABORT = "budget_abort"
 WALK_SKIP_TIMEOUT = "timeout"
 WALK_SKIP_NO_COMMITS = "no_commits"
@@ -694,6 +697,7 @@ def discover_git_roots(
     persist: bool = False,
     since: datetime | None = None,
     progress: Callable[[int, int], None] | None = None,
+    before_read: Callable[[], None] | None = None,
 ) -> GitRootDiscovery:
     """Discover git roots with one cooperative, call-scoped deadline.
 
@@ -814,6 +818,8 @@ def discover_git_roots(
         if deadline_expired():
             mark_exceeded()
             break
+        if before_read is not None:
+            before_read()
         cache["prober_resume_after"] = name
         cache.pop("_probe_validated", None)
         try:
@@ -977,6 +983,8 @@ def discover_git_roots(
             if key in retained and isinstance(value, str) and value
         }
     if persist:
+        if before_read is not None:
+            before_read()
         try:
             with lockedjson.locked_json_rmw(
                 mm_config.GIT_CAPTURE_CACHE_PATH,
@@ -3474,6 +3482,7 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
                 if row.get("origin") not in (
                     GIT_SNAPSHOT_ORIGIN_INIT,
                     GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+                    GIT_SNAPSHOT_ORIGIN_CATCHUP,
                 ):
                     pending.append(row)
                 continue
@@ -4065,7 +4074,8 @@ def write_push_event(
     Order invariant (CT-4): when an ``mm-push`` row is present, it MUST
     be last so a partial write cannot advance the cursor. Host-only attended
     captures may omit it; git rows in a batch without it must carry an
-    origin (init or recapture). These rows do not move the cursor. Partial write before the
+    origin (init, recapture, or catchup). These rows do not move the cursor.
+    Partial write before the
     mm-push appends → next push re-walks the range (deduped at retro
     render via canonical (remote, sha)). The single flock window is
     best-effort batching, NOT transactionality. A subsequent append separates

@@ -162,3 +162,43 @@ def release_lock(path: Path | None = None) -> None:
         os.close(fd)
     except OSError:
         pass
+
+
+def is_lock_held(path: Path | None = None) -> bool:
+    """Return True if `path` (default LOCK_PATH) is currently locked.
+
+    Read-only probe: never creates or modifies `path`. Checks this process's
+    own held-lock table first, then probes a shared non-blocking flock on an
+    existing file. Missing or unreadable files return False.
+    """
+    lock_path = path or LOCK_PATH
+    key = _resolve_key(lock_path)
+    if key in _LOCK_FDS:
+        return True
+    try:
+        fd = os.open(str(lock_path), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        for attempt in (1, 2):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                return False
+            except InterruptedError:
+                if attempt == 2:
+                    return False
+                continue
+            except BlockingIOError:
+                return True
+            except OSError:
+                return False
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass

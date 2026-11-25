@@ -154,6 +154,8 @@ class Degradations(list[str]):
         self._lock = threading.Lock()
         self.total = 0
         self.omitted = 0
+        self.deadline_phases: tuple[str, ...] = ()
+        self.deadline_notices = 0
 
     def _append_unlocked(self, detail):
         if isinstance(detail, str):
@@ -174,6 +176,33 @@ class Degradations(list[str]):
                 self._append_unlocked(detail)
             self.total = min(2**53, self.total + getattr(details, "omitted", 0))
             self.omitted = min(2**53, self.omitted + getattr(details, "omitted", 0))
+            self.deadline_notices = min(
+                2**53, self.deadline_notices + getattr(details, "deadline_notices", 0)
+            )
+            incoming_phases = getattr(details, "deadline_phases", ())
+            if incoming_phases:
+                self.deadline_phases = tuple(
+                    dict.fromkeys((*self.deadline_phases, *incoming_phases))
+                )
+
+
+def deadline_stopped_phases(capture: CaptureResult) -> tuple[str, ...]:
+    """Return canonical phase keys for every phase stopped at its deadline."""
+    phases: list[str] = []
+    if capture.host_capture.dropped:
+        for reader_name, reason in capture.host_capture.dropped:
+            if reason == "deadline":
+                phases.append(f"host:{reader_name}" if reader_name else "host:all")
+    elif not capture.host_capture.complete and capture.host_capture.reason == "deadline":
+        reader_name = capture.host_capture.reader
+        phases.append(f"host:{reader_name}" if reader_name else "host:all")
+    if capture.root_discovery.exceeded:
+        phases.append("git_discovery")
+    if capture.walk_budget_aborts > 0:
+        phases.append("git_walk")
+    if capture.session_walk_exceeded_budget:
+        phases.append("session_scan")
+    return tuple(dict.fromkeys(phases))
 
 
 HOST_USAGE_READ_BUDGET_INTERACTIVE_MS = DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS
@@ -702,6 +731,17 @@ def _host_progress_label(name: str) -> str:
     return descriptor.label if descriptor is not None else name
 
 
+def consented_host_readers(
+    config: dict,
+    sources: Sequence[dict],
+) -> list[tuple[str, HostReader]]:
+    """Return consented host readers using the shared Grok consent verdict."""
+    return _default_host_readers(
+        sources,
+        grok_consented=mm_config.grok_usage_consented(config),
+    )
+
+
 def _capture_host_usage(
     readers: Sequence[tuple[str, HostReader]],
     *,
@@ -711,6 +751,8 @@ def _capture_host_usage(
     phase_deadline: float | None = None,
     budget_ms_override: int | None = None,
     accumulate_budget: bool = False,
+    before_read: Callable[[], None] | None = None,
+    preserve_budget_for: frozenset[str] = frozenset(),
 ) -> HostUsageCapture:
     """Read consented hosts with an equal per-provider deadline, concurrently when safe.
 
@@ -831,6 +873,8 @@ def _capture_host_usage(
             if budget_ms_override is not None
             else max(0, round((reader_deadline - start) * 1000))
         )
+        if before_read is not None:
+            before_read()
         try:
             if start >= reader_deadline:
                 return None, 0, budget_ms, False
@@ -893,7 +937,7 @@ def _capture_host_usage(
             f"host:{name}",
             label,
             elapsed_ms,
-            budget_ms=budget_ms,
+            budget_ms=None if name in preserve_budget_for else budget_ms,
             completed=done,
             total=total,
             status=status,
@@ -1487,6 +1531,9 @@ def _capture_host_snapshot(
     *,
     host_budget_ms: int,
     warm_host_cache: Callable[[str], None] | None = None,
+    before_read: Callable[[], None] | None = None,
+    preserve_budget_for: frozenset[str] = frozenset(),
+    collect_deadline_evidence: bool = False,
 ) -> tuple[HostUsageCapture, list[dict]]:
     """One bounded sweep, one warm/retry, at most one row. No writes.
 
@@ -1511,11 +1558,14 @@ def _capture_host_snapshot(
     phase_deadline = (
         started + _host_phase_ms(capture_ms) / 1000.0 if capture_ms is not None else None
     )
-    sweep_kwargs = (
-        _accepted_kwargs(_capture_host_usage, phase_deadline=phase_deadline)
-        if phase_deadline is not None
-        else {}
-    )
+    sweep_extra: dict[str, object] = {}
+    if phase_deadline is not None:
+        sweep_extra["phase_deadline"] = phase_deadline
+    if before_read is not None:
+        sweep_extra["before_read"] = before_read
+    if preserve_budget_for:
+        sweep_extra["preserve_budget_for"] = preserve_budget_for
+    sweep_kwargs = _accepted_kwargs(_capture_host_usage, **sweep_extra) if sweep_extra else {}
     host_capture = _capture_host_usage(
         host_readers, deadline=started + host_budget_ms / 1000.0, **sweep_kwargs
     )
@@ -1550,7 +1600,11 @@ def _capture_host_snapshot(
                 deadline: float,
                 progress: Callable[[int, int], None] | None = None,
             ) -> host_usage.HostUsageResult:
+                if before_read is not None:
+                    before_read()
                 warm_host_cache(name)
+                if before_read is not None:
+                    before_read()
                 remaining = max(0.0, deadline - time.monotonic())
                 return host_registry.warm_host_cache_inline(
                     reader=name,
@@ -1567,16 +1621,18 @@ def _capture_host_snapshot(
                 if phase_deadline is not None
                 else time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S
             )
-            retry_kwargs = (
-                _accepted_kwargs(
-                    _capture_host_usage,
-                    phase_deadline=retry_deadline,
-                    budget_ms_override=max(0, round((retry_deadline - started) * 1000)),
-                    accumulate_budget=False,
-                )
+            retry_extra: dict[str, object] = (
+                {
+                    "phase_deadline": retry_deadline,
+                    "budget_ms_override": max(0, round((retry_deadline - started) * 1000)),
+                    "accumulate_budget": False,
+                }
                 if phase_deadline is not None
-                else _accepted_kwargs(_capture_host_usage, accumulate_budget=True)
+                else {"accumulate_budget": True}
             )
+            if before_read is not None:
+                retry_extra["before_read"] = before_read
+            retry_kwargs = _accepted_kwargs(_capture_host_usage, **retry_extra)
             retry_capture = _capture_host_usage(
                 ((name, warm_read),),
                 deadline=retry_deadline,
@@ -1589,7 +1645,7 @@ def _capture_host_snapshot(
                 retried_names={name},
             )
     pending_left: dict[str, int] = {}
-    if warm_host_cache is not None:
+    if warm_host_cache is not None or collect_deadline_evidence:
         deadline_evidence: dict[str, HostReadEvidence] = {}
         for name, reason in host_capture.dropped:
             if reason == "deadline" and name in HOST_READER_SOURCE_GATE:
@@ -1658,6 +1714,9 @@ def _capture_event_snapshots(
     use_repo_cursors: bool = False,
     session_deadline: float | None = None,
     per_repo_cap_ms: int | None = None,
+    before_read: Callable[[], None] | None = None,
+    preserve_budget_for: frozenset[str] = frozenset(),
+    collect_deadline_evidence: bool = False,
 ) -> CaptureResult:
     """Capture device-stamped snapshots; persist discovery only when requested.
 
@@ -1711,6 +1770,11 @@ def _capture_event_snapshots(
             origin=origin,
             deadline_monotonic=session_deadline,
             per_repo_cap_ms=per_repo_cap_ms,
+            **(
+                _accepted_kwargs(_capture_git_rows, before_read=before_read)
+                if before_read is not None
+                else {}
+            ),
         )
     except BaseException:
         _pending_capture_budget_ms = None
@@ -1818,17 +1882,29 @@ def _capture_event_snapshots(
     if suppress_host_capture:
         host_capture, host_rows = HostUsageCapture({}), []
     else:
+        host_snap_extra: dict[str, object] = {}
+        if before_read is not None:
+            host_snap_extra["before_read"] = before_read
+        if preserve_budget_for:
+            host_snap_extra["preserve_budget_for"] = preserve_budget_for
+        if collect_deadline_evidence:
+            host_snap_extra["collect_deadline_evidence"] = True
         host_capture, host_rows = _capture_host_snapshot(
             device_id,
             host_readers,
             host_budget_ms=host_budget_ms,
             warm_host_cache=warm_host_cache,
+            **(
+                _accepted_kwargs(_capture_host_snapshot, **host_snap_extra)
+                if host_snap_extra
+                else {}
+            ),
         )
         if persist:
             _record_host_progress(
                 host_capture,
                 device_id=device_id,
-                attended=warm_host_cache is not None,
+                attended=warm_host_cache is not None or collect_deadline_evidence,
             )
 
     return CaptureResult(
@@ -1859,6 +1935,7 @@ def _capture_git_rows(
     deadline_monotonic: float | None = None,
     per_repo_timeout_ms: int | None = None,
     per_repo_cap_ms: int | None = None,
+    before_read: Callable[[], None] | None = None,
 ) -> tuple[list[dict], events.GitRootDiscovery, int, int]:
     """Discover roots and walk git, optionally persisting the local project index.
 
@@ -1877,14 +1954,19 @@ def _capture_git_rows(
         if _PROGRESS.get() is not None
         else None
     )
+    discovery_extra: dict[str, object] = {}
+    if discovery_progress is not None:
+        discovery_extra["progress"] = discovery_progress
+    if before_read is not None:
+        discovery_extra["before_read"] = before_read
     root_discovery = events.discover_git_roots(
         config,
         deadline_monotonic=discovery_deadline,
         persist=persist,
         since=since,
         **(
-            _accepted_kwargs(events.discover_git_roots, progress=discovery_progress)
-            if discovery_progress is not None
+            _accepted_kwargs(events.discover_git_roots, **discovery_extra)
+            if discovery_extra
             else {}
         ),
     )
@@ -2133,10 +2215,7 @@ def _run_events_tail(
             warm_host_cache=None if quiet else _warm_host_cache_with_notice,
             suppress_host_capture=suppress_host_capture,
             prepare_token_cache=prepare_tail_token_cache,
-            host_readers=_default_host_readers(
-                sources,
-                grok_consented=mm_config.grok_usage_consented(config),
-            ),
+            host_readers=consented_host_readers(config, sources),
         )
 
         if capture.git_rows:
@@ -2277,6 +2356,8 @@ def _run_events_tail(
             token_usage._diagnostic(f"mm: notice: {_CURSOR_COVERAGE_DEGRADATION}\n")
         if capture.root_discovery.exceeded:
             degradations.append(_ROOT_DISCOVERY_DEGRADATION)
+            if set(capture.root_discovery.errors) <= {events.GIT_ROOT_DISCOVERY_BUDGET_ERROR}:
+                degradations.deadline_notices += 1
             token_usage._diagnostic(f"mm: notice: {_ROOT_DISCOVERY_DEGRADATION}\n")
         elif capture.root_discovery.errors:
             degradations.append(_ROOT_DISCOVERY_ERROR_DEGRADATION)
@@ -2302,9 +2383,12 @@ def _run_events_tail(
         )
         if walk_phrase is not None:
             degradations.append(walk_phrase)
+            if capture.walk_budget_aborts > 0 and capture.walk_errors == 0:
+                degradations.deadline_notices += 1
             token_usage._diagnostic(f"mm: notice: {walk_phrase}\n")
         if capture.session_walk_exceeded_budget:
             degradations.append(f"events walk exceeded its {budget_ms}ms budget")
+            degradations.deadline_notices += 1
             token_usage._diagnostic("mm: notice: events tail budget exceeded\n")
         if capture.warn_lock_unavailable:
             degradations.append("token cache was locked, so tokens and skills are missing")
@@ -2337,6 +2421,8 @@ def _run_events_tail(
                     config=config,
                 )
                 degradations.append(phrase)
+                if dropped_reason == "deadline":
+                    degradations.deadline_notices += 1
                 token_usage._diagnostic(f"mm: notice: {phrase}\n")
         elif not capture.host_capture.complete:
             phrase = _capture_skip_phrase(
@@ -2347,7 +2433,10 @@ def _run_events_tail(
                 config=config,
             )
             degradations.append(phrase)
+            if capture.host_capture.reason == "deadline":
+                degradations.deadline_notices += 1
             token_usage._diagnostic(f"mm: notice: {phrase}\n")
+        degradations.deadline_phases = deadline_stopped_phases(capture)
     except Exception as e:
         _attended_host_elapsed_s = None
         degradations.append(f"events tail failed ({type(e).__name__})")
@@ -2535,19 +2624,20 @@ def _commit_recorded_git_rows(
     *,
     since: datetime,
     complete: bool,
-) -> None:
+) -> bool:
     """Advance local progress only after observing the exact persisted snapshot."""
     if not git_rows:
-        return
+        return True
     scan = events.latest_event_rows(events_dir, device_id, {"git-snapshot"})
     if scan.rows.get("git-snapshot") != events.wire_row(git_rows[-1]):
-        return
+        return False
     events.commit_repo_cursors(
         git_rows,
         since=since,
         cursor_ts=datetime.fromisoformat(git_rows[-1]["ts"]),
         complete=complete,
     )
+    return True
 
 
 @dataclass

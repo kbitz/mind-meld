@@ -45,6 +45,7 @@ EXTRACTED = [
     "devicesflow",
     "meshflow",
     "memoryindex",
+    "capturecatchup",
     "diffflow",
     "gcflow",
     "recaptureflow",
@@ -1752,6 +1753,7 @@ def test_owner_call_gate_rejects_dead_aliases(source, consumer, flags):
         "diffflow",
         "gcflow",
         "memoryindex",
+        "capturecatchup",
         "recaptureflow",
     ],
 )
@@ -1868,6 +1870,20 @@ def test_memoryindex_import_does_not_register_cli():
             sys.executable,
             "-c",
             "import sys; from mind_meld import memoryindex; "
+            "assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_capturecatchup_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import capturecatchup; "
             "assert 'mind_meld.cli' not in sys.modules",
         ],
         capture_output=True,

@@ -8,7 +8,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/cli.py` — `PushResult.events_degradations`
 - `src/mind_meld/statusflow.py` — `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_identity_inputs_digest_for_push` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `resolve_attended_capture_cap` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS` / `phase_timer_scope`
-- `src/mind_meld/pushtimings.py` — `PhaseTiming` / `PhaseTimer` / `PUSH_TIMINGS_PATH` / `record_push_timings` / `read_push_timings` / `diag_timings_state` / `format_verbose_timings`
+- `src/mind_meld/pushtimings.py` — `PhaseTiming` / `PhaseTimer` / `PUSH_TIMINGS_PATH` / `PUSH_KINDS` / `record_push_timings` / `read_push_timings` / `diag_timings_state` / `format_verbose_timings`
+- `src/mind_meld/capturecatchup.py` — `CATCHUP_LOCK_PATH` / `CATCHUP_STATE_PATH` / `is_catchup_running` / `start_detached_catchup` / `read_catchup_state` / `record_catchup_state` / `catchup_observation` / `covers_deadline_backlog` / `diag_catchup_state` / `run_catchup` / `_detached_main`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
@@ -4249,3 +4250,72 @@ retired before v1.11.8; its record shapes, census and the reasons for the source
 - **Retro.** Grok Build tokens add to the Grok row (`grok-4.7-build` is
   in `token_usage.GROK_47_MODEL_IDS`, priced from the Grok 4.7 card; unknown ids remain an
   unpriced floor until a rate is available).
+
+---
+
+## Background capture catch-up (Track 165C)
+
+When `mm autopush` stops at a cooperative capture deadline (`host:<name>` / `host:all`,
+`git_discovery`, `git_walk`, or `session_scan`), `cli.autopush` records
+`capture_deadline_only = True` on its `push` breadcrumb only when every recorded
+degradation is a pure deadline notice (zero held files, mesh degradations,
+maintenance/ledger/anchor/unwritable-root warnings, or walk/discovery errors),
+exits `_auto_command_scope` (releasing `mind-meld.lock`), and calls
+`capturecatchup.start_detached_catchup(trigger_phases)`. Previews (`--dry-run`)
+never trigger catch-up, and `autopush`'s exit code and quiet output contract
+never change.
+
+- **Single-flight and lock hierarchy (`L1 < L2 < L3`).**
+  `L1` is `~/.config/mind-meld/capture-catchup.lock`, `L2` is `mind-meld.lock`,
+  and `L3` is individual `lockedjson` files (`capture-catchup.json`,
+  `push-timings.json`, `git-capture-cache.json`, `capture-progress.json`,
+  token/host caches). No command holding `L2` ever waits on `L1`, and no `L3`
+  lock is held while acquiring `L1` or `L2`. `lockfile.is_lock_held` is a
+  read-only probe (`O_RDONLY` + `LOCK_SH | LOCK_NB`) that never creates files.
+  If `L1` is already held when `start_detached_catchup` runs, it writes a
+  non-blocking best-effort retrigger marker (`retrigger_at`, `retrigger_phases`)
+  in `capture-catchup.json` instead of spawning a second worker; the active
+  worker runs at most one bounded follow-up pass before releasing `L1`.
+- **Capture-only two-step execution.**
+  - **Step 1 (under `L1`, outside `L2`):** warms cold or deadline-stopped
+    private host caches (`_capture_host_snapshot` with
+    `warm_host_cache=_warm_host_cache_with_notice`) and cold Claude
+    `session-tokens.json` (`token_usage.warm_token_cache_inline`) using
+    attended budgets and per-reader/per-directory consent rechecks via
+    `before_read`. Never touches `git-capture-cache.json` or `events/*.jsonl`.
+  - **Step 2 (under `L1` -> `L2` with ~2 s bounded retry):** if `L2` stays
+    contended, returns `result="deferred"` while keeping Step 1's warmed caches.
+    Otherwise reloads `config.toml` fresh under `L2`, checks
+    `lockedjson.locked_json_snapshot(GIT_CAPTURE_CACHE_PATH)` and refuses any
+    state outside `{"valid", "missing"}` with `result="failed"` and
+    `detail="Git capture index unreadable; run mm diag"`, runs single-phase
+    attended capture (`origin=events.GIT_SNAPSHOT_ORIGIN_CATCHUP`, warm-only
+    token policy, `preserve_budget_for=step1_timed_hosts`,
+    `collect_deadline_evidence=True`, `before_read` config-unchanged checks),
+    appends `[git-snapshot(origin="catchup"), sessions-snapshot,
+    host-usage-snapshot]` (no `mm-push` row) via `events.write_push_event(...,
+    strict=True)`, confirms exact `git-snapshot` readback via
+    `events_tail._commit_recorded_git_rows` before advancing `repo_cursors` and
+    updating `capture-progress.json`, hashes the appended day file
+    (`event_file`, `event_sha256`), and stamps `finished_at` **before**
+    releasing `L2` so any later hook gets `auto_push_at > finished_at`.
+    Encrypted publication waits for the next push (auto or attended).
+- **Origin & timings.** `events.GIT_SNAPSHOT_ORIGIN_CATCHUP = "catchup"` is
+  excluded from push counts in `aggregator.py` and from push-batch cursor
+  replay in `events.reconcile_uncommitted_push_cursors`, while its commits and
+  coverage intervals count identically to `init` and `recapture`. Timings are
+  persisted under `pushtimings.PUSH_KINDS` kind `"catchup"` in
+  `push-timings.json`.
+- **Status & diag (O8).** `capturecatchup.catchup_observation()` verifies
+  `state == "running"` against `is_catchup_running()` (with one recheck) and
+  synthesizes `state="finished", result="failed", detail="worker interrupted"`
+  if a worker died without finalizing. `mm status` suppresses manual `mm push`
+  advice only when a running or recent (`<= 24h`, `finished_at >= backlog_at`)
+  `ok` catch-up covers a deadline-only backlog (including `mm-events`-only
+  local diffs matching exact `(event_file, event_sha256)`), never hiding
+  `partial`/`deferred` backlogs, user edits, or non-deadline degradations
+  (`unsupported`, `errs > 0`, `incomplete_streak >= 3`, held files, independent
+  attended push failures). Un-superseded `failed` catch-up surfaces
+  `Background capture catch-up failed. Run: mm diag`. `mm diag` exposes
+  read-only `capture_catchup` and `push_timings.by_kind.catchup` without
+  creating files.
