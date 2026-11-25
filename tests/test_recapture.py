@@ -356,7 +356,7 @@ def test_ordinary_push_still_noops_on_a_clean_tree(tmp_path, monkeypatch):
     assert first.exit_code == 0, (first.stdout, first.stderr)
     second = runner.invoke(app, ["push"])
     assert second.exit_code == 0, (second.stdout, second.stderr)
-    assert second.stdout == "Push: no content changes.\n"
+    assert second.stdout == "Push: no content changes; no new usage.\n"
     assert "recapture" not in second.stdout.lower()
 
 

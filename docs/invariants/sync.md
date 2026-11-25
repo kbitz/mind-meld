@@ -89,12 +89,25 @@ no messages, source lines, locals, paths or cause messages).
 
 Push display counts are recomputed from accepted user-file diffs after upload
 holds. Existing content_files/content_changed evidence and GC semantics stay
-unchanged; invocation-only published_content_files and metadata/selection/repair
-facts distinguish accepted bytes, metadata, selection and repair. Usage is
-reported in `--verbose` (`Host usage published (manifest accepted).`), `mm status`, and `mm diag`
-only with publication proof, never counted as user files, and omitted from the
-default `Push:` outcome line (a push that publishes only usage prints
-`Push: no content changes.`). Held counts print on their own outcome line
+unchanged; invocation-only published_content_files, usage_published,
+catching_up_readers, and metadata/selection/repair facts distinguish accepted
+bytes, usage publication, metadata, selection and repair. Usage publication
+(`PushResult.usage_published`, true when this push accepted new or modified
+`mm-events` rows, excluding deletions and unverified attended host day files)
+and deadline-stopped attended host readers (`PushResult.catching_up_readers`,
+in canonical `HOST_USAGE_TOKEN_SOURCES` order) render on the lead `Push:`
+outcome line: `; usage published` when usage published (e.g.
+`Push: 10 content changes published; usage published.`,
+`Push: no content changes; usage published.`), `; no new usage` when the lead
+is `no content changes` or readers are catching up without new usage
+(`Push: no content changes; no new usage.`), and `(<readers> catching up)` in
+parentheses when `catching_up_readers` is non-empty (e.g.
+`Push: no content changes; usage published (Grok catching up).`). Non-empty
+leads without usage publication or catching-up readers (e.g. `mm-events`
+disabled) omit the usage clause, and `Push: no enabled sources.` stays
+unchanged. `--verbose` still prints `Host usage published (manifest accepted).`,
+and `mm status`/`mm diag` still report full publication proof; usage rows are
+never counted as user files. Held counts print on their own outcome line
 (`Push: 1 file held.` / `Push: N files held.`); paths/reasons are verbose. Pull
 records per-peer applied counts (written, merged, and conflict copies) in
 `PullResult.applied_by_device` and renders the attended success lead via

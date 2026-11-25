@@ -915,14 +915,32 @@ def test_readme_prices_all_three_vendors_with_matching_provenance():
         (
             "xAI",
             token_usage.PRICING_XAI_LAST_UPDATED,
-            "https://docs.x.ai/developers/models/grok-4.6",
+            "https://docs.x.ai/developers/pricing",
+        ),
+        (
+            "Google",
+            token_usage.PRICING_GOOGLE_LAST_UPDATED,
+            "https://ai.google.dev/gemini-api/docs/pricing",
+        ),
+        (
+            "Muse",
+            token_usage.PRICING_MUSE_LAST_UPDATED,
+            token_usage.PRICING_MUSE_SOURCE_URL,
         ),
     ):
         assert vendor in readme
         assert date in readme
         assert url in readme
+    assert "docs.x.ai/developers/models/grok-4." not in readme
+    assert "gemini-4-carbon" in readme and "2026-12-01" in readme
     invariant = (ROOT / "docs" / "invariants" / "events-retro.md").read_text()
     assert token_usage.PRICING_LAST_UPDATED in invariant
+    assert "https://docs.x.ai/developers/pricing" in invariant
+    assert "docs.x.ai/developers/models/grok-4." not in invariant
+    skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text()
+    skill_flat = " ".join(skill.split())
+    assert "scheduled price change" in skill_flat
+    assert "--set-model-price" in skill_flat
     assert "Every attended `mm push` refreshes and publishes consented host usage" in " ".join(
         readme.split()
     )

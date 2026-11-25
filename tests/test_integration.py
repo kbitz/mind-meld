@@ -4363,7 +4363,7 @@ class TestGCSafety:
         assert healed.exit_code == 0, healed.output
         assert "Push: no content changes" not in healed.output
         healed_flat = " ".join(healed.output.split())
-        assert "Push: manifest repaired." in healed_flat
+        assert "Push: manifest repaired; usage published." in healed_flat
         fetched = core._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
         assert fetched.status == "ok" and not fetched.conflict_copies_only
         assert not conflict.exists()
@@ -6219,8 +6219,7 @@ def test_no_content_push_capture_usage_refreshes_once(capture61, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Usage capture:" not in result.stdout
     assert "Host usage published" not in result.stdout
-    assert "usage published" not in result.stdout
-    assert result.stdout == "Push: no content changes.\n"
+    assert result.stdout == "Push: no content changes; usage published.\n"
     added = [json.loads(line) for line in env["dayfile"].read_text().splitlines()[len(before) :]]
     rows = [r for r in added if r["type"] == "host-usage-snapshot"]
     assert len(rows) == len(calls) == 1
@@ -6272,7 +6271,7 @@ def test_usage_only_refresh_twice_preserves_retro_and_skips_all_activity(capture
         result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
         assert result.exit_code == 0, result.output
         flat = " ".join(result.stdout.split())  # the mode line wraps at 80 columns
-        assert flat.endswith("Push: no content changes.")
+        assert flat.endswith("Push: no content changes; usage published.")
         # The usage-only mode explanation moved to --verbose; it is not removed.
         assert ("Git cursor unchanged" in flat) is verbose
         assert ("mm recapture 30d" in flat) is verbose
@@ -6337,7 +6336,9 @@ def test_content_refresh_counts_once_and_preserves_next_bare_push(
     assert counted.zero_repo_captures == {"dev-a": (1, 1)}
     committed = path.read_bytes()
     bare = runner.invoke(app, ["push"])
-    assert bare.exit_code == 0 and bare.stdout == "Push: no content changes.\n", bare.output
+    assert bare.exit_code == 0 and bare.stdout == "Push: no content changes; usage published.\n", (
+        bare.output
+    )
     more = [json.loads(line) for line in path.read_bytes()[len(committed) :].splitlines()]
     assert [row["type"] for row in more] == ["host-usage-snapshot"]
 
@@ -6516,7 +6517,7 @@ def test_attended_capture_exit_with_a_held_day_file_carries_held_and_not_publish
     flat = " ".join((result.output + (result.stderr or "")).split())
     assert result.exit_code == 0, result.output
     assert result.stdout.splitlines()[-2:] == [
-        "Push: no content changes.",
+        "Push: no content changes; no new usage.",
         "Push: 1 file held.",
     ]
     assert "not yet synced" in flat  # --verbose names the held file even on a held-only push
@@ -7290,8 +7291,13 @@ class TestTrack7BEventsTail:
         # Nothing changed since the first push → no-op.
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0
-        assert result.stdout == "Push: no content changes.\n"
-        assert "usage published" not in result.output
+        expected_push = (
+            "Push: no content changes; usage published.\n"
+            if consented
+            else "Push: no content changes; no new usage.\n"
+        )
+        assert result.stdout == expected_push
+        assert "Host usage published" not in result.output
         assert calls == (["codex"] if consented else [])
 
     def test_noop_across_utc_keeps_cursor_for_later_git_catchup(self, tmp_path, monkeypatch):
@@ -8695,7 +8701,7 @@ class TestHeldFiles75A:
         assert result.exit_code == 0, result.output
         text = self._text(result)
         assert result.stdout.splitlines() == [
-            "Push: no content changes.",
+            "Push: no content changes; no new usage.",
             "Push: 1 file held.",
         ]
         assert "up to date" not in text
@@ -15387,10 +15393,10 @@ def test_sync78_default_and_verbose_share_one_logical_final_line(
     monkeypatch.setattr(cli_module.stderr_console, "_width", width)
     result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
     assert result.exit_code == 0, result.output
-    assert result.stdout.splitlines()[-1] == "Push: no content changes."
+    assert result.stdout.splitlines()[-1] == "Push: no content changes; no new usage."
     assert sum(line.startswith("Push:") for line in result.output.splitlines()) == 1
     if not verbose:
-        assert result.stdout == "Push: no content changes.\n"
+        assert result.stdout == "Push: no content changes; no new usage.\n"
         assert result.stderr == ""
     assert ("Building manifest" in result.output) is verbose
 
@@ -15404,24 +15410,24 @@ def test_sync78_real_push_accepted_grammar(status77, monkeypatch, verbose, chang
     if change == "files":
         file.write_text("changed")
         (memory / "new78.md").write_text("new")
-        expected = "Push: 2 content changes published."
+        expected = "Push: 2 content changes published; usage published."
     elif change == "metadata":
         stamp = file.stat().st_mtime + 2
         os.utime(file, (stamp, stamp))
-        expected = "Push: metadata updated."
+        expected = "Push: metadata updated; usage published."
     elif change == "selection":
         cfg = env["cfg"]
         extra = env["path"].parent / "empty78"
         extra.mkdir()
         cfg["sync"]["sources"].append({"name": "empty78", "type": "generic", "path": str(extra)})
         save_config(cfg, env["path"])
-        expected = "Push: source selection updated."
+        expected = "Push: source selection updated; usage published."
     else:
         backend = env["backend"]
         key = storage_keys.manifest_key("dev-a")
         (backend.root / Path(key).with_name("manifest.json 2.enc")).write_bytes(backend.get(key))
         backend.delete(key)
-        expected = "Push: manifest repaired."
+        expected = "Push: manifest repaired; usage published."
     result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
     assert result.exit_code == 0, result.output
     assert result.output.splitlines()[-1] == expected
@@ -15441,7 +15447,7 @@ def test_sync78_degraded_capture_default_is_quiet_and_status_actionable(
     )
     result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
     assert result.exit_code == 0, result.output
-    assert result.stdout.splitlines()[-1] == "Push: no content changes."
+    assert result.stdout.splitlines()[-1] == "Push: no content changes; no new usage."
     assert ("Usage capture (no-row)" in result.stderr) is verbose
     run = cli_module.attemptlog.read_runs()["runs"]["push"]
     assert run["outcome"] == "degraded"
@@ -15638,7 +15644,12 @@ cli.app(args=["push", *(["--verbose"] if sys.argv[2] == "yes" else [])])
         assert "MINDMELD_PASSPHRASE" in lines[-2] and "no content published" in lines[-2]
         assert last == "Run: mm diag"
     else:
-        assert last == "Push: 1 content change published."
+        expected_last = (
+            "Push: 1 content change published; usage published."
+            if mode == "degraded"
+            else "Push: 1 content change published."
+        )
+        assert last == expected_last
         if mode == "success" and not verbose:
             assert child.stdout == last + "\n"
         if mode == "degraded":
@@ -16286,8 +16297,8 @@ def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capt
         )
         result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Push: 2 content changes published.\n"
-    assert "usage published" not in result.output
+    assert result.stdout == "Push: 2 content changes published; usage published.\n"
+    assert "Host usage published" not in result.output
     assert result.stderr == f"mm: notice: {events_tail._CURSOR_HOLD_DEGRADATION}\n"
     output = terminal.getvalue()
     assert "⠋ Unlocking storage" in output
@@ -16314,7 +16325,7 @@ def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capt
     verbose = runner.invoke(app, ["push", "-v"])
     assert verbose.exit_code == 0, verbose.output
     assert "Host usage published (manifest accepted)." in verbose.stdout
-    assert verbose.stdout.splitlines()[-1] == "Push: 2 content changes published."
+    assert verbose.stdout.splitlines()[-1] == "Push: 2 content changes published; usage published."
     assert "Push complete" not in verbose.output
 
 
@@ -16421,7 +16432,7 @@ def test_sync_progress_forced_color_on_pipe_runs_without_spinner(status77, monke
     )
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Push: no content changes.\n"
+    assert result.stdout == "Push: no content changes; no new usage.\n"
     assert piped.getvalue() == ""
 
 
@@ -16490,7 +16501,7 @@ def test_sync_progress_timer_animates_silent_step_and_stops_on_draw_error(status
     assert result.exit_code == 0, result.output
     assert len(scanning_frames()) >= 2
     assert thread_errors == []
-    assert result.stdout == "Push: no content changes.\n"
+    assert result.stdout == "Push: no content changes; no new usage.\n"
 
 
 def test_sync_progress_resilient_to_start_failure_and_blocked_ticker_shutdown(
@@ -16526,7 +16537,7 @@ def test_sync_progress_resilient_to_start_failure_and_blocked_ticker_shutdown(
     )
     res = runner.invoke(app, ["push"])
     assert res.exit_code == 0, res.output
-    assert res.stdout == "Push: no content changes.\n"
+    assert res.stdout == "Push: no content changes; no new usage.\n"
 
     # Blocked ticker does not hang stop()
     monkeypatch.setattr(core, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
@@ -16791,7 +16802,7 @@ def test_sync_progress_display_faults_preserve_success(status77, monkeypatch, fa
     result = runner.invoke(app, ["push"])
     assert triggered, "the injected display failure was not reached"
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Push: no content changes.\n"
+    assert result.stdout == "Push: no content changes; no new usage.\n"
     assert result.stderr == ("synthetic apply warning\n" if fault == "resume" else "")
     if fault != "isatty":
         assert "\x1b[?25h" in terminal.getvalue()
@@ -17644,3 +17655,194 @@ def test_interrupted_timing_write_releases_attended_push_lock_165b(capture61, mo
         cli_module.acquire_lock()
     finally:
         cli_module.release_lock()
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            cli_module.PushResult(published_content_files=10, usage_published=True),
+            ["Push: 10 content changes published; usage published."],
+        ),
+        (
+            cli_module.PushResult(published_content_files=0, usage_published=True),
+            ["Push: no content changes; usage published."],
+        ),
+        (
+            cli_module.PushResult(published_content_files=0, usage_published=False),
+            ["Push: no content changes; no new usage."],
+        ),
+        (
+            cli_module.PushResult(
+                published_content_files=0,
+                usage_published=True,
+                catching_up_readers=("Grok",),
+            ),
+            ["Push: no content changes; usage published (Grok catching up)."],
+        ),
+        (
+            cli_module.PushResult(
+                published_content_files=0,
+                usage_published=True,
+                catching_up_readers=("Codex", "Grok"),
+            ),
+            ["Push: no content changes; usage published (Codex, Grok catching up)."],
+        ),
+        (
+            cli_module.PushResult(
+                published_content_files=2,
+                usage_published=True,
+                catching_up_readers=("Grok",),
+            ),
+            ["Push: 2 content changes published; usage published (Grok catching up)."],
+        ),
+        (
+            cli_module.PushResult(
+                published_content_files=0,
+                usage_published=False,
+                catching_up_readers=("Grok",),
+            ),
+            ["Push: no content changes; no new usage (Grok catching up)."],
+        ),
+        (
+            cli_module.PushResult(published_content_files=1, usage_published=False),
+            ["Push: 1 content change published."],
+        ),
+        (
+            cli_module.PushResult(metadata_updated=True, usage_published=False),
+            ["Push: metadata updated."],
+        ),
+        (
+            cli_module.PushResult(selection_updated=True, usage_published=False),
+            ["Push: source selection updated."],
+        ),
+        (
+            cli_module.PushResult(manifest_repaired=True, usage_published=False),
+            ["Push: manifest repaired."],
+        ),
+        (
+            cli_module.PushResult(no_sources=True, usage_published=True),
+            ["Push: no enabled sources."],
+        ),
+        (
+            cli_module.PushResult(
+                published_content_files=0,
+                usage_published=False,
+                held=[("mm-events", "events/2026-11-25.jsonl", "changed")],
+            ),
+            ["Push: no content changes; no new usage.", "Push: 1 file held."],
+        ),
+    ],
+)
+def test_push_outcome_line_usage_grammar_167a(result, expected):
+    assert cli_module._sync_success("push", result) == expected
+
+
+def test_attended_push_reports_ten_content_changes_and_usage_published_167a(capture61):
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    for i in range(10):
+        (memory / f"note_{i}.md").write_text(f"note {i}\n")
+    res = runner.invoke(app, ["push"])
+    assert res.exit_code == 0, res.output
+    assert res.stdout == "Push: 10 content changes published; usage published.\n"
+
+
+def test_attended_push_reports_queued_events_file_and_ignores_delete_only_events_167a(
+    status77, monkeypatch
+):
+    events_dir = (
+        Path(
+            next(s["path"] for s in status77["cfg"]["sync"]["sources"] if s["name"] == "mm-events")
+        )
+        / "events"
+    )
+    events_dir.mkdir(parents=True, exist_ok=True)
+    queued = events_dir / "2026-11-20.jsonl"
+    queued.write_text('{"v":1,"type":"git-snapshot","device":"dev-a"}\n')
+    res_pub = runner.invoke(app, ["push"])
+    assert res_pub.exit_code == 0, res_pub.output
+    assert res_pub.stdout == "Push: no content changes; usage published.\n"
+
+    # Deleting an expired mm-events file (without new tail rows) is not publishing new rows.
+    monkeypatch.setattr(events_tail, "_run_events_tail", lambda *a, **k: events_tail.Degradations())
+    queued.unlink()
+    res_del = runner.invoke(app, ["push"])
+    assert res_del.exit_code == 0, res_del.output
+    assert res_del.stdout == "Push: no content changes; no new usage.\n"
+
+
+def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monkeypatch):
+    from mind_meld import host_registry
+
+    monkeypatch.setattr(events_tail, "_warm_host_cache_with_notice", lambda *a, **k: None)
+    monkeypatch.setattr(
+        host_registry,
+        "warm_host_cache_inline",
+        lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
+    )
+
+    def codex_ok(**_kw):
+        return _mm_host_usage.HostUsageResult({}, complete=True)
+
+    def grok_deadline(**_kw):
+        return _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
+
+    def codex_deadline(**_kw):
+        return _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
+
+    def grok_unsupported(**_kw):
+        return _mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported")
+
+    # 1. Partial capture: Codex succeeds, Grok hits deadline -> usage published (Grok catching up).
+    monkeypatch.setattr(
+        events_tail,
+        "_default_host_readers",
+        lambda *a, **k: (("codex", codex_ok), ("grok", grok_deadline)),
+    )
+    r1 = runner.invoke(app, ["push"])
+    assert r1.exit_code == 0, r1.output
+    assert r1.stdout == "Push: no content changes; usage published (Grok catching up).\n"
+
+    # 2. Content changes + partial capture -> content + usage + Grok catching up.
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    (memory / "c1.md").write_text("one\n")
+    (memory / "c2.md").write_text("two\n")
+    r2 = runner.invoke(app, ["push"])
+    assert r2.exit_code == 0, r2.output
+    assert r2.stdout == "Push: 2 content changes published; usage published (Grok catching up).\n"
+
+    # 3. All readers hit deadline (no-row) -> canonical order (Codex, Grok catching up).
+    monkeypatch.setattr(
+        events_tail,
+        "_default_host_readers",
+        lambda *a, **k: (("codex", codex_deadline), ("grok", grok_deadline)),
+    )
+    r3 = runner.invoke(app, ["push"])
+    assert r3.exit_code == 0, r3.output
+    assert r3.stdout == "Push: no content changes; no new usage (Codex, Grok catching up).\n"
+
+    # 4. Non-deadline reader failure does not emit catching up.
+    monkeypatch.setattr(
+        events_tail,
+        "_default_host_readers",
+        lambda *a, **k: (("codex", codex_ok), ("grok", grok_unsupported)),
+    )
+    r4 = runner.invoke(app, ["push"])
+    assert r4.exit_code == 0, r4.output
+    assert r4.stdout == "Push: no content changes; usage published.\n"
+
+
+def test_autopush_stays_quiet_with_and_without_usage_167a(capture61):
+    # Healthy autopush with nothing to publish: silent.
+    r_noop = runner.invoke(app, ["autopush"])
+    assert r_noop.exit_code == 0
+    assert r_noop.stdout == ""
+    assert r_noop.stderr == ""
+
+    # Healthy autopush with content + usage: still silent.
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    (memory / "auto_quiet.md").write_text("quiet\n")
+    r_change = runner.invoke(app, ["autopush"])
+    assert r_change.exit_code == 0
+    assert r_change.stdout == ""
+    assert r_change.stderr == ""

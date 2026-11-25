@@ -7993,7 +7993,7 @@ class TestAgentEconomics:
         assert pricing["anthropic_verified"] == tu.PRICING_LAST_UPDATED
         assert pricing["openai_verified"] == tu.PRICING_OPENAI_LAST_UPDATED
         assert pricing["xai_verified"] == tu.PRICING_XAI_LAST_UPDATED
-        assert "docs.x.ai" in pricing["xai_url"]
+        assert pricing["xai_url"] == "https://docs.x.ai/developers/pricing"
         assert "cursor_url" not in pricing and "cursor_verified" not in pricing
         assert "never zero" in pricing["basis"]
 
@@ -8446,7 +8446,7 @@ class TestPricingRefreshHealth:
         data = aggregator.RetroData(window_days=7, since=until - timedelta(days=7), until=until)
         day = "2026-10-26"
         models = {
-            "gpt-6.2-sol": _usage(4),
+            "gpt-6.9-sol": _usage(4),
             "mystery-model": _usage(5),
             "codex-auto-review": _usage(20),
             "vendor:model": _usage(1),
@@ -8465,7 +8465,7 @@ class TestPricingRefreshHealth:
         tu.update_pricing_cache({}, mark_verified=True)
         pricing = self._pricing(data)
         assert pricing["unverified_model_ids"] == [
-            "gpt-6.2-sol",
+            "gpt-6.9-sol",
             "mystery-model",
             "vendor:model",
             "vendor_model",
@@ -8474,7 +8474,7 @@ class TestPricingRefreshHealth:
         assert pricing["refresh_due"] is True
         tu.update_pricing_cache(
             {
-                "gpt-6.2-sol": (2, 0.1, 2.5, 10),
+                "gpt-6.9-sol": (2, 0.1, 2.5, 10),
                 "mystery-model": (1, 0, 0, 2),
                 "vendor:model": (1, 0, 0, 1),
                 "vendor_model": (2, 0, 0, 2),
@@ -8483,7 +8483,7 @@ class TestPricingRefreshHealth:
         pricing = self._pricing(data)
         assert pricing["unverified_model_ids"] == pricing["unpriced_model_ids"] == []
         assert pricing["cached_model_ids"] == [
-            "gpt-6.2-sol",
+            "gpt-6.9-sol",
             "mystery-model",
             "vendor:model",
             "vendor_model",
@@ -8506,7 +8506,7 @@ class TestPricingRefreshHealth:
         assert "\x1b" not in json.dumps(pricing)
 
     @pytest.mark.parametrize(
-        "model", ["gpt-6.2-sol", "gemini-4.1-argon", "muse-wonder-1.1", "muse-spark-full-1.4"]
+        "model", ["gpt-6.9-sol", "gemini-4.1-argon", "muse-wonder-1.1", "muse-spark-full-1.4"]
     )
     def test_vendor_future_releases_report_extrapolation(self, model):
         notes = aggregator._extrapolation_notes({model: _usage(1)}, scope="agent")
@@ -8891,7 +8891,7 @@ class TestTrack128APricingAndFloorExtrapolation:
                         **_usage(2_000_000),
                         "by_model": {
                             "gpt-6-astra": astra_bucket,
-                            "gpt-6.2-sol": sol_bucket,
+                            "gpt-6.9-sol": sol_bucket,
                         },
                     }
                 },
@@ -8909,7 +8909,7 @@ class TestTrack128APricingAndFloorExtrapolation:
         out = aggregator.format_retro(data)
         extrap = _health_entry(out, "pricing_extrapolated")
         assert extrap is not None
-        assert "gpt-6.2-sol" in extrap["detail"]
+        assert "gpt-6.9-sol" in extrap["detail"]
 
     @pytest.mark.parametrize("floor_fixture", [False, True])
     def test_identical_claude_5_5_cost_with_and_without_matching_local_override(
@@ -9009,3 +9009,26 @@ def test_catchup_origin_contributes_commits_and_coverage_without_push_count():
     assert git_agg.commits == 1
     assert git_agg.zero_repo_captures == {}
     assert "dev-a" not in git_agg.uncovered_git
+
+
+def test_grok_47_build_fast_long_context_cause_and_ceiling_167a():
+    hosts = {
+        "grok": {
+            "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
+        }
+    }
+    ev = _host_event(
+        "dev-a",
+        "2026-04-28T12:00:00+00:00",
+        token_sources=("grok",),
+        hosts=hosts,
+        extra={"tokens_by_day": _sibling(hosts, "grok-4.7-build-fast")},
+    )
+    data = _econ_data([ev])
+    out = aggregator.format_retro(data)
+    cause = _health_entry(out, "cost_floor")
+    assert cause is not None
+    assert "Per-turn totals cannot recover the per-request context tier" in cause["detail"]
+    assert "grok-4.7-build-fast" in cause["detail"]
+    assert "$4.00" in cause["detail"]
+    assert "at most $6.00" in cause["detail"]

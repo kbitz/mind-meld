@@ -2547,15 +2547,18 @@ def test_verified_ids_cover_overrides_and_live_families():
     }
     assert set(tu.PRICING) | set(tu.PRICING_FAMILY_BY_MODEL) | live <= tu.VERIFIED_MODEL_IDS
     assert all(tu.resolve_prices(m) is not None for m in tu.VERIFIED_MODEL_IDS)
-    assert tu.PRICING_LAST_UPDATED == "2026-11-11"
+    assert tu.PRICING_LAST_UPDATED == "2026-11-25"
 
 
 @pytest.mark.parametrize(
     "model,family,expected_rates,expected_floor_write",
     [
         ("claude-opus-5-5", "opus", (4.0, 0.20, 8.0, 20.0), 5.0),
+        ("claude-opus-5-5-high", "opus", (4.0, 0.20, 8.0, 20.0), 5.0),
         ("claude-sonnet-5-5", "sonnet", (2.0, 0.10, 4.0, 10.0), 2.5),
         ("claude-haiku-5-5", "haiku", (0.10, 0.01, 0.20, 0.50), 0.125),
+        ("claude-fable-5-2", "fable", (8.0, 0.20, 16.0, 40.0), 10.0),
+        ("claude-mythos-5-2", "mythos", (8.0, 0.20, 16.0, 40.0), 10.0),
     ],
 )
 def test_claude_5_5_bundled_cards_and_verification(
@@ -2598,9 +2601,8 @@ def test_grok_47_rate_cards_and_xai_provenance_109b_116a():
     assert not hasattr(tu, "PRICING_CURSOR_LAST_UPDATED")
     assert tu.PRICING_FAMILY_BY_MODEL["grok-4.7"] == "grok-4.7"
     assert "grok-4.7-fast" not in tu.PRICING_FAMILY_BY_MODEL
-    assert "grok-4.7-fast" not in tu.VENDOR_FAMILY_TIERS
-    assert "grok-4.7-fast" not in tu.VENDOR_LONG_CONTEXT_TIERS
     assert "grok-4.7-fast" not in tu.VERIFIED_MODEL_IDS
+    assert tu.resolve_prices("grok-4.7-fast") is None
     assert tu.resolve_prices("grok-4.7") == {
         "input": 2.0,
         "cache_read": 0.5,
@@ -2614,11 +2616,13 @@ def test_grok_47_rate_cards_and_xai_provenance_109b_116a():
         "output": 12.0,
     }
     assert "grok-4.7" in tu.VERIFIED_MODEL_IDS
-    assert tu.PRICING_XAI_LAST_UPDATED == date(2026, 11, 5).isoformat()
+    assert tu.PRICING_XAI_LAST_UPDATED == date(2026, 11, 25).isoformat()
 
 
 _GROK_47_STD_CARD = {"input": 2.0, "cache_read": 0.5, "cache_create": 0.0, "output": 6.0}
 _GROK_47_STD_LONG = {"input": 4.0, "cache_read": 1.0, "cache_create": 0.0, "output": 12.0}
+_GROK_47_FAST_CARD = {"input": 4.0, "cache_read": 1.0, "cache_create": 0.0, "output": 12.0}
+_GROK_47_FAST_LONG = {"input": 6.0, "cache_read": 1.5, "cache_create": 0.0, "output": 18.0}
 
 
 @pytest.mark.parametrize(
@@ -2626,6 +2630,7 @@ _GROK_47_STD_LONG = {"input": 4.0, "cache_read": 1.0, "cache_create": 0.0, "outp
     [
         ("grok-4.7", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
         ("grok-4.7-build", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+        ("grok-4.7-build-fast", "grok-4.7-fast", _GROK_47_FAST_CARD, _GROK_47_FAST_LONG),
     ],
 )
 def test_grok_47_effort_fast_and_build_cards_and_aliases109b(model, family, base_card, long_card):
@@ -2673,7 +2678,6 @@ def test_grok_47_variants_and_build_emit_no_unknown_model_notice109b(capsys):
         "grok-4.7-fast-high",
         "grok-4.7-ultra",
         "grok-4.7-unspecified",
-        "grok-4.7-build-fast",
     ],
 )
 def test_grok_47_name_traps_stay_unpriced109b(model):
@@ -2726,9 +2730,13 @@ def test_sync78_pricing_and_oversize_notices_follow_diagnostic_scope(monkeypatch
 @pytest.mark.parametrize(
     "model,rates",
     [
+        ("gpt-6.2-astra", (8.0, 0.4, 10.0, 40.0)),
+        ("gpt-6.2-sol", (2.0, 0.1, 2.5, 10.0)),
         ("gpt-6.1-sol", (2, 0.1, 2.5, 10)),
         ("gpt-6-sol", (2, 0.2, 2.5, 10)),
         ("gpt-6-luna", (0.1, 0.01, 0.125, 0.5)),
+        ("gemini-4-carbon", (2.0, 0.1, 0.0, 10.0)),
+        ("gemini-4-neon", (3.0, 0.15, 0.0, 15.0)),
         ("muse-wonder-1.0", (4, 0.2, 0, 20)),
         ("muse-wonder-full-1.0", (4, 0.2, 0, 20)),
         ("muse-spark-1.3", (1.25, 0.15, 0, 4.25)),
@@ -2738,17 +2746,26 @@ def test_october_verified_cards(model, rates):
     assert tu.resolve_prices(model) == dict(zip(tu._PRICING_RATE_FIELDS, rates, strict=True))
     assert model in tu.VERIFIED_MODEL_IDS
     assert tu.is_verified_model(model)
-    assert tu.PRICING_OPENAI_LAST_UPDATED == tu.PRICING_MUSE_LAST_UPDATED == "2026-10-27"
+    assert (
+        tu.PRICING_LAST_UPDATED
+        == tu.PRICING_OPENAI_LAST_UPDATED
+        == tu.PRICING_XAI_LAST_UPDATED
+        == tu.PRICING_GOOGLE_LAST_UPDATED
+        == tu.PRICING_MUSE_LAST_UPDATED
+        == "2026-11-25"
+    )
 
 
 @pytest.mark.parametrize(
     "model,family",
     [
-        ("gpt-6.2-sol", "gpt-6.1-sol"),
-        ("gpt-7-astra", "gpt-6-astra"),
+        ("gpt-6.9-sol", "gpt-6.2-sol"),
+        ("gpt-7-astra", "gpt-6.2-astra"),
         ("gpt-7.1-terra", "gpt-5.6-terra"),
         ("gpt-8-luna", "gpt-6-luna"),
+        ("gemini-4.1-carbon", "gemini-4-carbon"),
         ("gemini-4.1-argon", "gemini-4-argon"),
+        ("gemini-4.1-neon", "gemini-4-neon"),
         ("gemini-4-flash", "gemini-3.8-flash"),
         ("muse-wonder-1.1", "muse-wonder-1.0"),
         ("muse-spark-full-1.4", "muse-spark-1.3"),
@@ -3095,6 +3112,7 @@ def test_just_written_card_survives_same_day_eviction():
 
 _GROK_CARD_ALIASES_111B = (
     ("grok-4.7", ("grok-4.7-build",)),
+    ("grok-4.7-fast", ("grok-4.7-build-fast",)),
     ("grok-4.6", ("grok-4.6-build",)),
 )
 
@@ -3111,6 +3129,7 @@ def test_grok_override_card_reaches_every_alias_111b(card_id, aliases):
     assert tu._GROK_OVERRIDE_CARD_BY_MODEL == {
         "grok-4.6-build": "grok-4.6",
         "grok-4.7-build": "grok-4.7",
+        "grok-4.7-build-fast": "grok-4.7-fast",
     }
     gate_date = tu._builtin_verified_date(aliases[0])
     override = {"input": 3.0, "cache_read": 0.75, "cache_create": 0.0, "output": 9.0}
@@ -3143,11 +3162,11 @@ def test_grok_override_alias_date_gate_both_ids_111b(card_id, aliases):
     _write_pricing_cache({card_id: _pricing_card(before, **override)})
     for alias in aliases:
         assert tu.resolve_prices(alias) == tu.VENDOR_FAMILY_TIERS[card_id]
-    if card_id == "grok-4.6":
-        # Bare grok-4.6 is not in VERIFIED_MODEL_IDS, so it has no gate of its own,
-        # while grok-4.6-build requires PRICING_XAI_LAST_UPDATED.
-        assert tu.resolve_prices("grok-4.6") == override
-        assert tu.active_cached_model_ids() == ["grok-4.6"]
+    if card_id not in tu.VERIFIED_MODEL_IDS:
+        # Bare grok-4.6 / grok-4.7-fast are not in VERIFIED_MODEL_IDS, so they have
+        # no gate of their own, while their build aliases require PRICING_XAI_LAST_UPDATED.
+        assert tu.resolve_prices(card_id) == override
+        assert tu.active_cached_model_ids() == [card_id]
     else:
         assert tu.resolve_prices(card_id) == tu.VENDOR_FAMILY_TIERS[card_id]
         assert tu.active_cached_model_ids() == []
@@ -3207,8 +3226,8 @@ def test_grok_override_preserves_long_card_and_gates_ceiling_111b(card_id, alias
     for model in models:
         assert tu.resolve_long_context_prices(model) == tu.VENDOR_LONG_CONTEXT_TIERS[card_id]
         assert tu.long_context_ceiling_known(model) is False
-    if card_id == "grok-4.6":
-        assert tu.resolve_long_context_prices("grok-4.6") is None
+    if card_id not in tu.PRICING_FAMILY_BY_MODEL:
+        assert tu.resolve_long_context_prices(card_id) is None
 
     same_as_bundled = dict(tu.VENDOR_FAMILY_TIERS[card_id])
     _write_pricing_cache({card_id: _pricing_card(gate_date, **same_as_bundled)})

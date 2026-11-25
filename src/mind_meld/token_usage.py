@@ -233,7 +233,7 @@ generously. Slow disks degrade gracefully via the budget."""
 # Pricing (per-million-token rates in USD, list price)
 # ---------------------------------------------------------------------------
 
-PRICING_LAST_UPDATED = "2026-11-11"
+PRICING_LAST_UPDATED = "2026-11-25"
 """Date the Anthropic rates below were last verified against Anthropic's
 public pricing page (https://platform.claude.com/docs/en/about-claude/pricing).
 Rendered onto the Claude token-block caveat line so the reader can judge
@@ -242,51 +242,57 @@ design, so this table cannot self-update and a "warn after N months" rule
 would be a verdict the code has not earned. The v0.12.13 miss was three
 months inside a six-month window.
 
-2026-11-11 reading for the Claude 5.5 models (USD per MTok: input, cache_read,
-5m cache_create, 1h cache_create, output):
-  claude-opus-5-5:   $4.00, $0.20 (0.05x input), $5.00, $8.00, $20.00
-  claude-sonnet-5-5: $2.00, $0.10 (0.05x input), $2.50, $4.00, $10.00
-  claude-haiku-5-5:  $0.10, $0.01 (0.1x input),  $0.125, $0.20, $0.50
+2026-11-25 reading (USD per MTok: input, cache_read, 5m cache_create,
+1h cache_create, output):
+  claude-opus-5-5 / claude-opus-5-5-high: $4.00, $0.20 (0.05x input), $5.00, $8.00, $20.00
+  claude-sonnet-5-5:                      $2.00, $0.10 (0.05x input), $2.50, $4.00, $10.00
+  claude-haiku-5-5:                       $0.10, $0.01 (0.1x input),  $0.125, $0.20, $0.50
+  claude-fable-5-2 / claude-mythos-5-2:   $8.00, $0.20 (0.025x input), $10.00, $16.00, $40.00
 (Haiku 5.5 standard rate is for prompts up to 100k tokens; prompts over 100k
 tokens bill $0.50/$0.05/$0.625/$1.00/$2.50. ``claude-opus-4-0`` and
 ``claude-sonnet-4-0`` alias the page's ``Claude Opus 4`` and ``Claude Sonnet 4``
-rows, first verified 2026-09-14 and re-verified 2026-11-11.)
+rows, first verified 2026-09-14 and re-verified 2026-11-25.)
 
 This is the Anthropic date only. OpenAI rates have
 ``PRICING_OPENAI_LAST_UPDATED``. One date over two vendors' tables would
 be a lie of composition."""
 
-PRICING_OPENAI_LAST_UPDATED = "2026-10-27"
+PRICING_OPENAI_LAST_UPDATED = "2026-11-25"
 """Date the OpenAI short-context list rates in ``VENDOR_FAMILY_TIERS``
 were last verified against https://developers.openai.com/api/docs/pricing
 (also published at https://platform.openai.com/docs/pricing). Standard
 short-context, not Batch / Flex / Fast / long-context.
 
-``gpt-5.6-sol`` is OpenAI's promotional rate (at least through
-2026-11-21). Two public sources disagreed by 20-25% on
-``gpt-5.6-terra`` during review ($2/$12 vs $2.50/$15); this table uses
-the official page on this date, not a third-party aggregator."""
+``gpt-5.6-sol`` is OpenAI's promotional rate (through 2026-11-30).
+``gpt-6.2-astra`` ($8/$0.40/$10/$40) and ``gpt-6.2-sol`` ($2/$0.10/$2.50/$10)
+use Standard short-context rates with 30m cache writes. Two public sources
+disagreed by 20-25% on ``gpt-5.6-terra`` during review ($2/$12 vs $2.50/$15);
+this table uses the official page on this date, not a third-party aggregator."""
 
-PRICING_GOOGLE_LAST_UPDATED = "2026-10-22"
+PRICING_GOOGLE_LAST_UPDATED = "2026-11-25"
 """Google Gemini API rates: https://ai.google.dev/gemini-api/docs/pricing, accessed
-on this date. Antigravity uses Google Gemini models. Censused models:
+on this date. Antigravity uses Google Gemini models. Verified models:
+gemini-4-carbon: $2.00 input, $0.10 cache_read, $0.00 cache_create, $10.00 output
+(in effect through 2026-11-30; scheduled increase to $4.00/$0.20/$0.00/$20.00 on 2026-12-01).
 gemini-4-argon: $2.00 input, $0.10 cache_read, $0.00 cache_create, $10.00 output
-(promotional rate through Nov 30, 2026).
+(in effect through 2026-11-30; scheduled increase to $4.00/$0.20/$0.00/$20.00 on 2026-12-01).
+gemini-4-neon: $3.00 input, $0.15 cache_read, $0.00 cache_create, $15.00 output
+(no scheduled increase).
 gemini-3.8-flash: $0.75 input, $0.075 cache_read, $0.00 cache_create, $3.75 output
-(promotional rate through Dec 31, 2026)."""
+(in effect through 2026-12-31; scheduled increase to $1.50/$0.15/$0.00/$7.50 on 2027-01-01)."""
 
-PRICING_MUSE_LAST_UPDATED = "2026-10-27"
+PRICING_MUSE_LAST_UPDATED = "2026-11-25"
 PRICING_MUSE_SOURCE_URL = "https://dev.meta.ai/docs/pricing-rate-limits"
 
-PRICING_XAI_LAST_UPDATED = "2026-11-05"
-"""xAI rates: https://docs.x.ai/developers/models,
-https://docs.x.ai/developers/models/grok-4.7 and
-https://docs.x.ai/developers/models/grok-4.6, accessed on this date.
-Requests whose prompt reaches 200k tokens pay the higher rate ($4/$1/$0/$12)
-for ALL tokens in the request. On 2026-09-10 https://docs.x.ai/build/overview
-identified grok-4.6 as the model powering Grok Build. The observed
-``grok-4.6-build`` alias is exact; ``grok-build-0.1`` is a different model and
-a name trap. The 303-turn costUsdTicks census fits
+PRICING_XAI_LAST_UPDATED = "2026-11-25"
+"""xAI rates: https://docs.x.ai/developers/pricing, accessed on this date.
+Standard Grok 4.7 and Grok 4.6 bill $2/$0.50/$0/$6 (<200k prompt) and
+$4/$1/$0/$12 (>=200k prompt) for ALL tokens in the request. Grok 4.7 Fast
+(Cursor and Grok Build only; backing ``grok-4.7-build-fast``) bills
+$4/$1/$0/$12 (<200k prompt) and $6/$1.50/$0/$18 (>200k prompt). On 2026-09-10
+https://docs.x.ai/build/overview identified grok-4.6 as the model powering
+Grok Build. The observed ``grok-4.6-build`` alias is exact; ``grok-build-0.1``
+is a different model and a name trap. The 303-turn costUsdTicks census fits
 this rate SHAPE exactly, but at the API's documented 1e10 ticks/USD the CLI
 field is 0.17x list. It is never decoded or used for pricing; the Build
 overview establishes the rate level. No cache-write price is published;
@@ -364,6 +370,7 @@ def _tier(
 # unpriced and surfaces honestly.
 PRICING: dict[str, dict[str, float]] = {
     "claude-opus-5-5": _tier(4.0, 20.0, cache_read_mult=_CACHE_READ_MULT_OPUS_SONNET_55),
+    "claude-opus-5-5-high": _tier(4.0, 20.0, cache_read_mult=_CACHE_READ_MULT_OPUS_SONNET_55),
     "claude-opus-4-1": _tier(15.0, 75.0),
     "claude-opus-4-0": _tier(15.0, 75.0),
     "claude-opus-4": _tier(15.0, 75.0),
@@ -374,7 +381,9 @@ PRICING: dict[str, dict[str, float]] = {
     "claude-sonnet-4-0": _tier(3.0, 15.0),
     "claude-haiku-5-5": _tier(0.10, 0.50),
     "claude-fable-5-1": _tier(10.0, 50.0, cache_read_mult=_CACHE_READ_MULT_FABLE_MYTHOS_51),
+    "claude-fable-5-2": _tier(8.0, 40.0, cache_read_mult=_CACHE_READ_MULT_FABLE_MYTHOS_51),
     "claude-mythos-5-1": _tier(10.0, 50.0, cache_read_mult=_CACHE_READ_MULT_FABLE_MYTHOS_51),
+    "claude-mythos-5-2": _tier(8.0, 40.0, cache_read_mult=_CACHE_READ_MULT_FABLE_MYTHOS_51),
 }
 
 # Family-tier fallback. Keyed on the FAMILY segment of a
@@ -425,26 +434,34 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # repaired the reader, but no Grok tokens had reached the wire. The base
 # card is always a floor: aggregate counters cannot recover request tiers.
 #
-# Grok Build's observed Grok 4.7 id is ``grok-4.7-build``, which aliases
-# onto the xAI ``grok-4.7`` card alongside exact ``grok-4.7``.
+# Grok Build's observed Grok 4.7 ids are ``grok-4.7-build`` (aliased onto the
+# xAI ``grok-4.7`` card alongside exact ``grok-4.7``) and ``grok-4.7-build-fast``
+# (aliased onto the xAI ``grok-4.7-fast`` card).
 GROK_47_MODEL_IDS: frozenset[str] = frozenset(
     {
         "grok-4.7",
         "grok-4.7-build",
+        "grok-4.7-build-fast",
     }
 )
 
 PRICING_FAMILY_BY_MODEL: dict[str, str] = {
+    "gpt-6.2-astra": "gpt-6.2-astra",
+    "gpt-6.2-sol": "gpt-6.2-sol",
     "gpt-6.1-sol": "gpt-6.1-sol",
     "gpt-6-sol": "gpt-6-sol",
     "gpt-6-luna": "gpt-6-luna",
     "muse-wonder-1.0": "muse-wonder-1.0",
     "muse-spark-1.3": "muse-spark-1.3",
     "muse-wonder-full-1.0": "muse-wonder-1.0",
+    "gemini-4-carbon": "gemini-4-carbon",
     "gemini-4-argon": "gemini-4-argon",
+    "gemini-4-neon": "gemini-4-neon",
     "gemini-3.8-flash": "gemini-3.8-flash",
     "grok-4.6-build": "grok-4.6",
-    **{model: "grok-4.7" for model in sorted(GROK_47_MODEL_IDS)},
+    "grok-4.7": "grok-4.7",
+    "grok-4.7-build": "grok-4.7",
+    "grok-4.7-build-fast": "grok-4.7-fast",
     "gpt-6-astra": "gpt-6-astra",
     "gpt-5.6-terra": "gpt-5.6-terra",
     "gpt-5.6-sol": "gpt-5.6-sol",
@@ -456,13 +473,17 @@ PRICING_FAMILY_BY_MODEL: dict[str, str] = {
 # a new override cannot silently claim verification. Dates remain per vendor.
 VERIFIED_MODEL_IDS = frozenset(
     {
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
         "gpt-6.1-sol",
         "gpt-6-sol",
         "gpt-6-luna",
         "muse-wonder-1.0",
         "muse-spark-1.3",
         "muse-wonder-full-1.0",
+        "gemini-4-carbon",
         "gemini-4-argon",
+        "gemini-4-neon",
         "gemini-3.8-flash",
         "claude-opus-4",
         "claude-opus-4-0",
@@ -473,6 +494,7 @@ VERIFIED_MODEL_IDS = frozenset(
         "claude-opus-4-8",
         "claude-opus-5",
         "claude-opus-5-5",
+        "claude-opus-5-5-high",
         "claude-sonnet-4",
         "claude-sonnet-4-0",
         "claude-sonnet-4-5",
@@ -483,8 +505,10 @@ VERIFIED_MODEL_IDS = frozenset(
         "claude-haiku-5-5",
         "claude-fable-5",
         "claude-fable-5-1",
+        "claude-fable-5-2",
         "claude-mythos-5",
         "claude-mythos-5-1",
+        "claude-mythos-5-2",
         "grok-4.6-build",
         *GROK_47_MODEL_IDS,
         "gpt-6-astra",
@@ -509,16 +533,40 @@ _GROK_OVERRIDE_CARD_BY_MODEL: dict[str, str] = {
 # xAI's source and alias evidence are documented at PRICING_XAI_LAST_UPDATED.
 # Do not derive these from ``_tier``.
 VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
+    "gpt-6.2-astra": {
+        "input": 8.00,
+        "cache_read": 0.40,
+        "cache_create": 10.00,
+        "output": 40.00,
+    },
+    "gpt-6.2-sol": {
+        "input": 2.00,
+        "cache_read": 0.10,
+        "cache_create": 2.50,
+        "output": 10.00,
+    },
     "gpt-6.1-sol": {"input": 2, "cache_read": 0.1, "cache_create": 2.5, "output": 10},
     "gpt-6-sol": {"input": 2, "cache_read": 0.2, "cache_create": 2.5, "output": 10},
     "gpt-6-luna": {"input": 0.1, "cache_read": 0.01, "cache_create": 0.125, "output": 0.5},
     "muse-wonder-1.0": {"input": 4, "cache_read": 0.2, "cache_create": 0, "output": 20},
     "muse-spark-1.3": {"input": 1.25, "cache_read": 0.15, "cache_create": 0, "output": 4.25},
+    "gemini-4-carbon": {
+        "input": 2.00,
+        "cache_read": 0.10,
+        "cache_create": 0.0,
+        "output": 10.00,
+    },
     "gemini-4-argon": {
         "input": 2.00,
         "cache_read": 0.10,
         "cache_create": 0.0,
         "output": 10.00,
+    },
+    "gemini-4-neon": {
+        "input": 3.00,
+        "cache_read": 0.15,
+        "cache_create": 0.0,
+        "output": 15.00,
     },
     "gemini-3.8-flash": {
         "input": 0.75,
@@ -526,16 +574,24 @@ VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
         "cache_create": 0.0,
         "output": 3.75,
     },
-    # xAI Grok 4.7 (https://docs.x.ai/developers/models/grok-4.7, verified
-    # PRICING_XAI_LAST_UPDATED = 2026-11-05): standard Grok 4.7 is $2/$0.50/$0/$6.
+    # xAI Grok 4.7 (https://docs.x.ai/developers/pricing, verified
+    # PRICING_XAI_LAST_UPDATED = 2026-11-25): standard Grok 4.7 is $2/$0.50/$0/$6.
     "grok-4.7": {
         "input": 2.0,
         "cache_read": 0.5,
         "cache_create": 0.0,
         "output": 6.0,
     },
-    # xAI Grok 4.6 (https://docs.x.ai/developers/models/grok-4.6, verified
-    # PRICING_XAI_LAST_UPDATED = 2026-11-05).
+    # xAI Grok 4.7 Fast (https://docs.x.ai/developers/pricing, verified
+    # PRICING_XAI_LAST_UPDATED = 2026-11-25): Cursor and Grok Build only; $4/$1/$0/$12.
+    "grok-4.7-fast": {
+        "input": 4.0,
+        "cache_read": 1.0,
+        "cache_create": 0.0,
+        "output": 12.0,
+    },
+    # xAI Grok 4.6 (https://docs.x.ai/developers/pricing, verified
+    # PRICING_XAI_LAST_UPDATED = 2026-11-25).
     "grok-4.6": {
         "input": 2.00,
         "cache_read": 0.50,
@@ -578,14 +634,21 @@ VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # Codex's observed 258,400-token window is below OpenAI's 272K threshold;
 # its short-context estimate rests on that assumption (tripwire in TODOS).
 VENDOR_LONG_CONTEXT_TIERS: dict[str, dict[str, float]] = {
-    # xAI Grok 4.7 (>=200k prompt, verified PRICING_XAI_LAST_UPDATED = 2026-11-05): 2x base.
+    # xAI Grok 4.7 (>=200k prompt, verified PRICING_XAI_LAST_UPDATED = 2026-11-25): 2x base.
     "grok-4.7": {
         "input": 4.0,
         "cache_read": 1.0,
         "cache_create": 0.0,
         "output": 12.0,
     },
-    # xAI Grok 4.6 (>=200k prompt, verified PRICING_XAI_LAST_UPDATED = 2026-11-05): 2x base.
+    # xAI Grok 4.7 Fast (>200k prompt, verified PRICING_XAI_LAST_UPDATED = 2026-11-25): 1.5x base.
+    "grok-4.7-fast": {
+        "input": 6.0,
+        "cache_read": 1.5,
+        "cache_create": 0.0,
+        "output": 18.0,
+    },
+    # xAI Grok 4.6 (>=200k prompt, verified PRICING_XAI_LAST_UPDATED = 2026-11-25): 2x base.
     "grok-4.6": {
         "input": 4.00,
         "cache_read": 1.00,
@@ -888,16 +951,18 @@ def vendor_model_family(model: str) -> str | None:
         (
             r"gpt-\d+(?:\.\d+)?-(astra|terra|sol|luna)",
             {
-                "astra": "gpt-6-astra",
+                "astra": "gpt-6.2-astra",
                 "terra": "gpt-5.6-terra",
-                "sol": "gpt-6.1-sol",
+                "sol": "gpt-6.2-sol",
                 "luna": "gpt-6-luna",
             },
         ),
         (
-            r"gemini-\d+(?:\.\d+)?-(argon|flash)",
+            r"gemini-\d+(?:\.\d+)?-(carbon|argon|neon|flash)",
             {
+                "carbon": "gemini-4-carbon",
                 "argon": "gemini-4-argon",
+                "neon": "gemini-4-neon",
                 "flash": "gemini-3.8-flash",
             },
         ),
