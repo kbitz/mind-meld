@@ -44,6 +44,66 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/storage/local.py|tests/test_storage_local.py] Test gap: Bounded storage read refusals
+
+- **ID:** wi-087a66
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** `LocalBackend.get_bounded` confines the retro's retirement and manifest reads, but only its size limit has a test. Its refusals of a symlinked final component, a non-regular file such as a FIFO, a traversal or empty key part, a missing key, and a file that grows past the limit after `fstat` have none.
+- **Hypothesis (untested):** One direct test per refusal in `tests/test_storage_local.py`, each asserting the documented exception.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/storage/local.py:241`
+- **Evidence:** Track 166A review, cycle 2 testing specialist; code read only, no failure reproduced.
+- **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `56f6699` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/events_tail.py|tests/test_events.py] Test gap: device_name on captured event rows
+
+- **ID:** wi-32c09f
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Folding a re-registered machine relies on newly written `mm-push`, sessions, git and host-usage rows carrying `device_name`. Only the `make_*` row builders are tested. Nothing drives the capture paths (`_capture_event_snapshots`, `_capture_git_rows`, `_run_events_tail`, `cli._capture_attended_usage`) to check that a configured name arrives trimmed and that a blank name is left out.
+- **Hypothesis (untested):** Run the events-tail capture with `device.name` set to `"  mac-a "` and assert every emitted row carries `mac-a`; repeat with a blank name and assert the key is absent.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/events_tail.py:1819`
+- **Evidence:** Track 166A review, cycle 2 testing specialist, repeated by cycle 3 reviewers; no failure reproduced.
+- **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `56f6699` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/devicesflow.py|src/mind_meld/core.py|tests/test_devices.py] Test gap: Vanished registry entry warnings in mm devices
+
+- **ID:** wi-1d1986
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** `mm devices --format json` now warns on stderr for a registry entry that vanished between listing and reading, while the table format stays quiet. Neither behavior has a test; `tests/test_devices.py` checks only the inventory field.
+- **Hypothesis (untested):** A CLI test that removes an entry between list and read, asserting that the JSON format warns and the table format does not.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/devicesflow.py:49`
+- **Evidence:** Track 166A review, cycle 2 testing specialist; no failure reproduced.
+- **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `56f6699` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/devices.py|tests/test_devices_retire.py] Test gap: Targeted retirement record reads
+
+- **ID:** wi-e2c6f0
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** `read_retirement_records(device_ids=...)`, the targeted mode the retro uses, is exercised only through the aggregator's happy path. A skipped invalid device ID, a missing record counted as normal rather than vanished, an oversize or symlinked record landing in `unreadable`, and a mix of good and bad IDs are untested.
+- **Hypothesis (untested):** Direct tests in `tests/test_devices_retire.py`, one per case.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/devices.py:880`
+- **Evidence:** Track 166A review, cycle 2 testing specialist; no failure reproduced.
+- **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `56f6699` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_fleet_aggregator.py] Test gap: Stored-name storage failure in the retro
+
+- **ID:** wi-0b63d7
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** When stored device names cannot be read for storage reasons (`names_unavailable: storage`), the retro's health entries carry an `mm status` remedy. Only the missing-passphrase case is rendered end to end. The fleet-fingerprint mismatch test checks the lookup's return value without rendering it, and a wrong passphrase is not exercised.
+- **Hypothesis (untested):** Render the storage case, for example a mismatched fleet fingerprint with an unnamed superseded push row, asserting `names_unavailable == "storage"` and the `mm status` step; add a wrong-passphrase variant of `test_unreadable_stored_names_explain_unfolded_registrations`.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `tests/test_retro_fleet_aggregator.py:9648`
+- **Evidence:** Track 166A review, cycle 3 testing specialist; no failure reproduced.
+- **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `da9877e` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap regeneration — 2026-11-24 (Tracks 163A, 164A and 165B recorded; 165C pinned in progress; O9 acceptance reconciled)
