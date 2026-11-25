@@ -4292,10 +4292,13 @@ never change.
     state outside `{"valid", "missing"}` with `result="failed"` and
     `detail="Git capture index unreadable; run mm diag"`, runs single-phase
     attended capture (`origin=events.GIT_SNAPSHOT_ORIGIN_CATCHUP`, warm-only
-    token policy, `preserve_budget_for=step1_timed_hosts`,
-    `collect_deadline_evidence=True`, `before_read` config-unchanged checks).
-    Deadline evidence under `L2` uses cached diagnostics so it cannot start
-    a second host-log inventory. Unknown pending counts stay unknown.
+    token policy, the timed host set from Step 1, and `before_read` config checks).
+    Step 2 uses counts from Step 1 when the configuration still matches.
+    It retains valid saved counts for readers still at deadline if a fresh
+    count is unavailable. This avoids a second host-log inventory under
+    `L2`. Git attribution uses local identity evidence and walks without
+    an author filter when it lacks the GitHub noreply identity. The normal
+    push path owns the remote identity lookup.
     A first-use discovery cancelled after opening the index initializes only
     its empty schema, so the worker can retry without carrying revoked roots.
     The worker

@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
@@ -58,6 +59,14 @@ _MAX_TRIGGER_PHASES = 16
 
 class _ConfigChanged(Exception):
     """Raised when live config.toml changes mid-catch-up."""
+
+
+@dataclass(frozen=True)
+class _WarmedCaches:
+    timed_hosts: frozenset[str] = frozenset()
+    no_sources: bool = False
+    config_stamp: tuple[Any, ...] = ()
+    deadline_evidence: Mapping[str, events_tail.HostReadEvidence] = field(default_factory=dict)
 
 
 def _empty_state() -> dict[str, Any]:
@@ -394,20 +403,16 @@ def _select_step1_readers(
 def _warm_step1_caches(
     trigger_phases: Sequence[str],
     timer: pushtimings.PhaseTimer,
-) -> tuple[frozenset[str], str | None]:
-    """Step 1 (outside L2): warm cold/deadline private host and Claude caches.
-
-    Returns ``(step1_timed_hosts, early_result)`` where ``early_result`` is
-    ``"no-sources"`` if ``mm-events`` is absent/missing, else ``None``.
-    """
+) -> _WarmedCaches:
+    """Warm consented private caches and collect any host deadline counts outside L2."""
     try:
         cfg = config.load_config()
     except Exception:
-        return frozenset(), None
+        return _WarmedCaches()
     sources = config.get_sources(cfg)
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None or not Path(mm_events_src["path"]).expanduser().is_dir():
-        return frozenset(), "no-sources"
+        return _WarmedCaches(no_sources=True)
 
     device_id = str((cfg.get("device") or {}).get("id") or "")
     all_readers = events_tail.consented_host_readers(cfg, sources)
@@ -417,15 +422,16 @@ def _warm_step1_caches(
             all_readers, trigger_phases, before_read=check_config_unchanged
         )
     except _ConfigChanged:
-        return frozenset(), None
+        return _WarmedCaches()
     warm_reader_names = frozenset(name for name, _ in warm_readers)
     step1_timed_hosts: set[str] = set()
+    deadline_evidence: Mapping[str, events_tail.HostReadEvidence] = {}
 
     if warm_readers:
         try:
             host_budget_ms = events_tail.resolve_host_read_budget(cfg, interactive=True)[0]
             with events_tail.phase_timer_scope(timer):
-                events_tail._capture_host_snapshot(
+                host_capture, _ = events_tail._capture_host_snapshot(
                     device_id,
                     warm_readers,
                     host_budget_ms=host_budget_ms,
@@ -433,6 +439,7 @@ def _warm_step1_caches(
                     before_read=check_config_unchanged,
                 )
             step1_timed_hosts.update(warm_reader_names)
+            deadline_evidence = host_capture.deadline_evidence
         except Exception:
             pass
 
@@ -455,7 +462,11 @@ def _warm_step1_caches(
         except Exception:
             pass
 
-    return frozenset(step1_timed_hosts), None
+    return _WarmedCaches(
+        timed_hosts=frozenset(step1_timed_hosts),
+        config_stamp=_config_fingerprint(cfg),
+        deadline_evidence=deadline_evidence,
+    )
 
 
 def _attended_tail_budgets(
@@ -534,7 +545,7 @@ def _run_catchup_pass(
     trigger_phases: Sequence[str],
     timer: pushtimings.PhaseTimer,
 ) -> dict[str, Any]:
-    step1_timed_hosts, early_result = _warm_step1_caches(trigger_phases, timer)
+    warmed = _warm_step1_caches(trigger_phases, timer)
     step2_started_at = datetime.now(timezone.utc)
 
     def finish(
@@ -553,7 +564,7 @@ def _run_catchup_pass(
             "step2_started_at": step2_started_at,
         }
 
-    if early_result == "no-sources":
+    if warmed.no_sources:
         return finish("no-sources")
     if not _acquire_sync_lock_bounded():
         return finish("deferred", "sync lock busy; run mm push")
@@ -604,6 +615,9 @@ def _run_catchup_pass(
 
         claude_paths = events_tail._enabled_claude_paths(sources)
         host_readers = events_tail.consented_host_readers(cfg, sources)
+        warm_deadline_evidence = (
+            warmed.deadline_evidence if warmed.config_stamp == _config_fingerprint(cfg) else None
+        )
 
         def prepare_token_cache_warm_only() -> events_tail.CacheLockMode:
             if not claude_paths:
@@ -631,8 +645,8 @@ def _run_catchup_pass(
                 prepare_token_cache=prepare_token_cache_warm_only,
                 host_readers=host_readers,
                 before_read=check_config_unchanged,
-                preserve_budget_for=step1_timed_hosts,
-                collect_deadline_evidence=True,
+                preserve_budget_for=warmed.timed_hosts,
+                warm_deadline_evidence=warm_deadline_evidence,
             )
         check_config_unchanged()
 

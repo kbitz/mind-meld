@@ -28,6 +28,7 @@ from mind_meld import (
     events_tail,
     host_registry,
     host_usage,
+    identity,
     lockedjson,
     lockfile,
     manifest,
@@ -985,7 +986,7 @@ def test_adversarial_busy_sync_lock_defers_and_keeps_warmed_caches(tmp_path, mon
 
     def fake_step1(phases, timer):
         warm_marker.write_text("yes")
-        return frozenset({"codex"}), None
+        return capturecatchup._WarmedCaches(timed_hosts=frozenset({"codex"}))
 
     monkeypatch.setattr(capturecatchup, "_warm_step1_caches", fake_step1)
 
@@ -1018,7 +1019,9 @@ def test_adversarial_cold_claude_token_cache_in_step2_fails(tmp_path, monkeypatc
     config.save_config(env["cfg"])
 
     # Skip Step 1 warming so cache remains cold entering Step 2
-    monkeypatch.setattr(capturecatchup, "_warm_step1_caches", lambda p, t: (frozenset(), None))
+    monkeypatch.setattr(
+        capturecatchup, "_warm_step1_caches", lambda p, t: capturecatchup._WarmedCaches()
+    )
     monkeypatch.setattr(token_usage, "is_cache_cold", lambda: True)
 
     res = capturecatchup.run_catchup(["session_scan"])
@@ -1054,25 +1057,91 @@ def test_adversarial_still_deadline_stopped_records_partial(tmp_path, monkeypatc
     assert res["result"] == "partial"
 
 
-def test_catchup_deadline_evidence_uses_cached_host_diagnostics_only(monkeypatch):
-    inventory_calls = []
+def test_catchup_does_not_inventory_codex_logs_under_sync_lock(tmp_path, monkeypatch):
+    env = _setup_fleet(tmp_path, monkeypatch, include_codex=True)
+    repo = _make_git_repo(tmp_path / "repo-inventory")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    codex_host.CACHE_PATH.write_text(json.dumps({"files": {}}))
+    sessions = tmp_path / "codex-sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(codex_host, "CODEX_SESSIONS_PATH", sessions)
 
-    def diag(reader, *, count_logs=False):
-        inventory_calls.append(count_logs)
-        return {}
+    rglob = Path.rglob
+    inventoried = []
+
+    def observe_inventory(path, *args, **kwargs):
+        if path == sessions:
+            inventoried.append(lockfile.is_lock_held(config.LOCK_PATH))
+        return rglob(path, *args, **kwargs)
+
+    def read_codex(**kwargs):
+        if lockfile.is_lock_held(config.LOCK_PATH):
+            return host_usage.HostUsageResult(hosts=None, complete=False, reason="deadline")
+        return host_usage.HostUsageResult(hosts={}, complete=True)
+
+    monkeypatch.setattr(Path, "rglob", observe_inventory)
+    monkeypatch.setattr(codex_host, "read_codex_usage", read_codex)
+    evidence = events_tail.HostUsageCapture(
+        None,
+        "codex",
+        "deadline",
+        dropped=(("codex", "deadline"),),
+        deadline_evidence={"codex": events_tail.HostReadEvidence(files_on_disk=10, files_cached=2)},
+    )
+    events_tail._record_host_progress(evidence, device_id=env["device_id"], attended=True)
+
+    assert capturecatchup.run_catchup(["host:codex"])["result"] == "partial"
+    assert inventoried == []
+    assert events_tail._read_capture_progress(env["device_id"]).host == {"codex": 8}
+
+
+def test_catchup_carries_fresh_deadline_counts_from_before_sync_lock(tmp_path, monkeypatch):
+    env = _setup_fleet(tmp_path, monkeypatch)
+    device_id = env["device_id"]
 
     def stop(**kwargs):
         return host_usage.HostUsageResult(hosts=None, complete=False, reason="deadline")
 
-    monkeypatch.setattr(host_registry, "reader_usage_diag", diag)
-    capture, _ = events_tail._capture_host_snapshot(
-        "dev-a",
-        (("codex", stop),),
-        host_budget_ms=100,
-        collect_deadline_evidence=True,
+    def read(**kwargs):
+        return host_usage.HostUsageResult(hosts={}, complete=True)
+
+    capture, rows = events_tail._capture_host_snapshot(
+        device_id,
+        (("codex", stop), ("muse", read)),
+        host_budget_ms=1000,
+        warm_deadline_evidence={
+            "codex": events_tail.HostReadEvidence(files_on_disk=10, files_cached=3)
+        },
     )
-    assert capture.dropped == (("codex", "deadline"),)
-    assert inventory_calls == [False]
+    assert rows[0]["pending_left"] == {"codex": 7}
+    events_tail._record_host_progress(capture, device_id=device_id, attended=False)
+    assert events_tail._read_capture_progress(device_id).host == {"codex": 7}
+
+
+def test_catchup_keeps_git_attribution_local_and_fails_open(tmp_path, monkeypatch):
+    env = _setup_fleet(tmp_path, monkeypatch)
+    repo = _make_git_repo(tmp_path / "repo-identity")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    identity_lookups = []
+    monkeypatch.setattr(events, "resolve_walk_author_emails", lambda *args: ("user@example.com",))
+    monkeypatch.setattr(
+        identity,
+        "union_checked_github_noreply",
+        lambda emails: identity_lookups.append(emails) or emails,
+    )
+    walk = events.walk_git_projects
+    filters = []
+
+    def observe_walk(*args, **kwargs):
+        filters.append(kwargs.get("author_emails"))
+        return walk(*args, **kwargs)
+
+    monkeypatch.setattr(events, "walk_git_projects", observe_walk)
+    assert capturecatchup.run_catchup(["git_walk"])["result"] == "ok"
+    assert identity_lookups == []
+    assert filters == [()]
 
 
 def test_adversarial_revoking_grok_before_step1_prevents_read(tmp_path, monkeypatch):

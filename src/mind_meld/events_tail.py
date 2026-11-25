@@ -1132,14 +1132,14 @@ def _no_release_reads_clause(readers: Sequence[str]) -> str:
     )
 
 
-def _deadline_read_evidence(reader: str, *, count_logs: bool = True) -> HostReadEvidence:
+def _deadline_read_evidence(reader: str) -> HostReadEvidence:
     """Count on-disk and cached items for a deadline-stopped reader."""
     try:
         locked = False
         if reader == "codex":
             with codex_host.locked_json_snapshot(codex_host.CACHE_PATH, blocking=False) as snap:
                 locked = snap.state == "lock_failed"
-        diag = {} if locked else host_registry.reader_usage_diag(reader, count_logs=count_logs)
+        diag = {} if locked else host_registry.reader_usage_diag(reader, count_logs=True)
     except Exception:
         diag = {}
     if isinstance(diag, Mapping):
@@ -1239,17 +1239,16 @@ def _record_host_progress(
         for name, reason in capture.dropped
         if reason == "deadline" and name in events.HOST_USAGE_TOKEN_SOURCES
     }
-    desired_attended: dict[str, dict[str, object]] = {}
-    if attended:
-        for name in events.HOST_USAGE_TOKEN_SOURCES:
-            if name not in deadline_readers:
-                continue
-            left = _evidence_left(capture.deadline_evidence.get(name))
-            if type(left) is int and 1 <= left <= events.MAX_PENDING_LEFT:
-                desired_attended[name] = {"left": left, "saved_at": current_iso}
+    desired_counts: dict[str, dict[str, object]] = {}
+    for name in events.HOST_USAGE_TOKEN_SOURCES:
+        if name not in deadline_readers:
+            continue
+        left = _evidence_left(capture.deadline_evidence.get(name))
+        if type(left) is int and 1 <= left <= events.MAX_PENDING_LEFT:
+            desired_counts[name] = {"left": left, "saved_at": current_iso}
     try:
         with lockedjson.locked_json_snapshot(CAPTURE_PROGRESS_PATH, blocking=False) as snap:
-            if not attended:
+            if not attended and not desired_counts:
                 if (
                     snap.state != "valid"
                     or not isinstance(snap.data, Mapping)
@@ -1267,7 +1266,7 @@ def _record_host_progress(
                     )
                 ):
                     return
-            elif not desired_attended:
+            elif not desired_counts:
                 if snap.state == "missing":
                     return
                 if (
@@ -1296,7 +1295,7 @@ def _record_host_progress(
                 else None
             )
             if attended:
-                new_host = desired_attended
+                new_host = desired_counts
             else:
                 existing_host = (
                     ljson.data.get("host")
@@ -1308,6 +1307,7 @@ def _record_host_progress(
                     for k, v in existing_host.items()
                     if isinstance(k, str) and k in deadline_readers and isinstance(v, Mapping)
                 }
+                new_host.update(desired_counts)
             target: dict[str, object] = {"version": 1, "device": device_id}
             if new_host:
                 target["host"] = new_host
@@ -1533,7 +1533,7 @@ def _capture_host_snapshot(
     warm_host_cache: Callable[[str], None] | None = None,
     before_read: Callable[[], None] | None = None,
     preserve_budget_for: frozenset[str] = frozenset(),
-    collect_deadline_evidence: bool = False,
+    warm_deadline_evidence: Mapping[str, HostReadEvidence] | None = None,
 ) -> tuple[HostUsageCapture, list[dict]]:
     """One bounded sweep, one warm/retry, at most one row. No writes.
 
@@ -1645,19 +1645,19 @@ def _capture_host_snapshot(
                 retried_names={name},
             )
     pending_left: dict[str, int] = {}
-    if warm_host_cache is not None or collect_deadline_evidence:
+    if warm_host_cache is not None or warm_deadline_evidence:
         deadline_evidence: dict[str, HostReadEvidence] = {}
         for name, reason in host_capture.dropped:
             if reason == "deadline" and name in HOST_READER_SOURCE_GATE:
-                if before_read is not None:
-                    before_read()
-                # A detached capture under the sync lock may inspect cached
-                # diagnostics, but a second full log inventory is unbounded.
-                evidence = (
-                    _deadline_read_evidence(name)
-                    if warm_host_cache is not None
-                    else _deadline_read_evidence(name, count_logs=False)
-                )
+                if warm_host_cache is not None:
+                    if before_read is not None:
+                        before_read()
+                    evidence = _deadline_read_evidence(name)
+                else:
+                    # Catch-up inventories logs only before acquiring the sync lock.
+                    evidence = (warm_deadline_evidence or {}).get(name)
+                if evidence is None:
+                    continue
                 deadline_evidence[name] = evidence
                 left = _evidence_left(evidence)
                 if type(left) is int and 1 <= left <= events.MAX_PENDING_LEFT:
@@ -1676,13 +1676,15 @@ def _capture_host_snapshot(
                 usage_days=host_capture.usage_days,
                 deadline_evidence=deadline_evidence,
             )
-    elif host_capture.hosts is not None and any(
-        reason == "deadline" for _name, reason in host_capture.dropped
+    if (
+        warm_host_cache is None
+        and host_capture.hosts is not None
+        and any(reason == "deadline" for _name, reason in host_capture.dropped)
     ):
         progress = _read_capture_progress(device_id)
         for name, reason in host_capture.dropped:
             if reason == "deadline" and name in progress.host:
-                pending_left[name] = progress.host[name]
+                pending_left.setdefault(name, progress.host[name])
     host_rows: list[dict] = []
     if host_capture.hosts is not None:
         host_rows.append(
@@ -1724,7 +1726,7 @@ def _capture_event_snapshots(
     per_repo_cap_ms: int | None = None,
     before_read: Callable[[], None] | None = None,
     preserve_budget_for: frozenset[str] = frozenset(),
-    collect_deadline_evidence: bool = False,
+    warm_deadline_evidence: Mapping[str, HostReadEvidence] | None = None,
 ) -> CaptureResult:
     """Capture device-stamped snapshots; persist discovery only when requested.
 
@@ -1897,8 +1899,8 @@ def _capture_event_snapshots(
             host_snap_extra["before_read"] = before_read
         if preserve_budget_for:
             host_snap_extra["preserve_budget_for"] = preserve_budget_for
-        if collect_deadline_evidence:
-            host_snap_extra["collect_deadline_evidence"] = True
+        if warm_deadline_evidence:
+            host_snap_extra["warm_deadline_evidence"] = warm_deadline_evidence
         host_capture, host_rows = _capture_host_snapshot(
             device_id,
             host_readers,
@@ -1914,7 +1916,7 @@ def _capture_event_snapshots(
             _record_host_progress(
                 host_capture,
                 device_id=device_id,
-                attended=warm_host_cache is not None or collect_deadline_evidence,
+                attended=warm_host_cache is not None,
             )
 
     return CaptureResult(
@@ -2017,7 +2019,13 @@ def _capture_git_rows(
         )
     if roots:
         author_emails = events.resolve_walk_author_emails(config, roots)
-        author_emails = identity.union_checked_github_noreply(author_emails)
+        if origin == events.GIT_SNAPSHOT_ORIGIN_CATCHUP:
+            # An incomplete local identity must not advance the cursor past
+            # web merges. Capture stays local and leaves the lookup to push.
+            if not any(email.endswith("@users.noreply.github.com") for email in author_emails):
+                author_emails = ()
+        else:
+            author_emails = identity.union_checked_github_noreply(author_emails)
         walk_kwargs.update(_accepted_kwargs(events.walk_git_projects, author_emails=author_emails))
     if deadline_monotonic is not None:
         # The git walk gets what discovery actually left of the tail
