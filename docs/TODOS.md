@@ -44,6 +44,50 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Pin the usage line when publication verification raises
+- **ID:** wi-9bd775
+- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The evidence-error fixtures pin the warning and accepted content. Their assertions cover only part of the usage line.
+- **Hypothesis (untested):** When publication reporting next changes, extend both evidence-error fixtures to check the exact final outcome and keep the existing side-effect assertions.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/cli.py`, the early and post-acceptance calls to `_report_usage_publication`.
+- **Evidence:** Track 167A coverage audit C04. Source and fixtures inspected, with no failure reproduced.
+- **Context:** Filed by /review-and-prep on Track 167A at `2c9dee0` (2026-11-25).
+- **Effort:** ?
+
+### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Pin the usage line after an events upload hold
+- **ID:** wi-dd9352
+- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The late upload-hold fixture verifies accepted bytes and the hold. The exact usage receipt for a late-held event file lacks a direct assertion.
+- **Hypothesis (untested):** When the upload hold or receipt code next changes, force the event file to change during upload and check the held line and omission of a claim for that file.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/cli.py`, the event file comparison after upload holds.
+- **Evidence:** Track 167A coverage audit C12. Source and fixtures inspected, with no failure reproduced.
+- **Context:** Filed by /review-and-prep on Track 167A at `2c9dee0` (2026-11-25).
+- **Effort:** ?
+
+### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Show a reader deadline beside content accepted without usage
+- **ID:** wi-90be55
+- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The attended CLI fixtures exercise content plus published usage with a deadline, and a deadline on a no-content push. They omit the combination of accepted content and zero accepted usage with a deadline.
+- **Hypothesis (untested):** When the lead message or deadline handling next changes, add that combination to the existing attended fixture and assert the canonical reader name and the no-usage clause.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/cli.py`, the deadline suffix in `_sync_success`.
+- **Evidence:** Track 167A coverage audit U25. Source and fixtures inspected, with no failure reproduced.
+- **Context:** Filed by /review-and-prep on Track 167A at `2c9dee0` (2026-11-25).
+- **Effort:** ?
+
+### [review:files=src/mind_meld/skills/retro_fleet/SKILL.md|tests/test_docs_routing.py] Test gap: Exercise scheduled pricing decisions with synthetic vendor docs
+- **ID:** wi-4dcf5a
+- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** The static pin checks the UTC effective-date instruction and override flag. Agent execution across the date boundary lacks an eval.
+- **Hypothesis (untested):** When the skill next changes its pricing steps, use synthetic vendor documentation for the day before the change, the effective day, and a failed lookup. Inspect the second-pass flags and unknown-price disclosure.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/skills/retro_fleet/SKILL.md`, the Pass 2 pricing check.
+- **Evidence:** Track 167A coverage audit U29. The instruction and test were inspected, with no failure reproduced.
+- **Context:** Filed by /review-and-prep on Track 167A at `2c9dee0` (2026-11-25).
+- **Effort:** ?
+
 ### [review:files=src/mind_meld/cli.py|src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py] Test gap: Verify ordinary autopush records complete catch-up recovery
 
 - The recovery tests assert the stored resolution for attended push and the detached worker. The ordinary autopush drain test checks publication.
