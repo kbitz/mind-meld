@@ -1779,3 +1779,42 @@ def test_diag_plain_text_and_json_render_catchup_and_timings(tmp_path, monkeypat
     assert "Background capture catch-up" in res_text.stdout
     assert "host:codex, git_walk" in res_text.stdout
     assert "catchup: 42 ms" in res_text.stdout
+
+
+def test_attended_push_skipping_git_capture_does_not_supersede_failed_catchup(
+    tmp_path, monkeypatch
+):
+    env = _setup_fleet(tmp_path, monkeypatch)
+    repo = _make_git_repo(tmp_path / "repo-attended-skip")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    now = datetime.now(timezone.utc)
+    capturecatchup.record_catchup_state(
+        state="finished",
+        result="failed",
+        started_at=(now - timedelta(seconds=1)).isoformat(),
+        finished_at=now.isoformat(),
+        trigger_phases=["git_walk"],
+        detail="Git capture index unreadable; run mm diag",
+    )
+    res_fail = runner.invoke(cli.app, ["status"])
+    assert res_fail.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" in res_fail.stdout
+
+    # Successful attended push with no content change skips Git capture.
+    res_push = runner.invoke(cli.app, ["push"])
+    assert res_push.exit_code == 0
+    res_after_skip = runner.invoke(cli.app, ["status"])
+    assert res_after_skip.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" in res_after_skip.stdout
+
+    # A subsequent attended push that actually completes Git capture supersedes the failure.
+    (env["notes_dir"] / "hello.md").write_text("trigger attended git capture\n")
+    res_capture_push = runner.invoke(cli.app, ["push"])
+    assert res_capture_push.exit_code == 0
+    res_recovered = runner.invoke(cli.app, ["status"])
+    assert res_recovered.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" not in res_recovered.stdout
