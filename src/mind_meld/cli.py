@@ -4546,9 +4546,7 @@ def _write_autorun_breadcrumb(
     Silent contract preserved: nothing is printed. Any failure here is
     swallowed -- a broken breadcrumb must never crash the hook.
     """
-    recorded_at = datetime.now(timezone.utc)
     entry: dict[str, str | bool] = {
-        "timestamp": recorded_at.isoformat(),
         "outcome": outcome,
     }
     if detail:
@@ -4561,6 +4559,10 @@ def _write_autorun_breadcrumb(
         with locked_json_rmw(core._autorun_breadcrumb_path()) as ljson:
             if not ljson.is_locked:
                 return
+            # Order breadcrumbs by their serialized writes so an overlapping
+            # hook cannot discard newer capture evidence.
+            recorded_at = datetime.now(timezone.utc)
+            entry["timestamp"] = recorded_at.isoformat()
             existing = core._normalize_autorun_breadcrumbs(ljson.data)
             if verb == "push":
                 last_capture_at = capture_at or events.parse_aware_ts(

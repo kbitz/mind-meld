@@ -801,7 +801,7 @@ def run_catchup(
         retrigger_at = events.parse_aware_ts(state_now.get("retrigger_at"))
         retrigger_phases = state_now.get("retrigger_phases", [])
         step2_started = pass_res.get("step2_started_at")
-        warm_request_unfinished = pass_res["result"] in {"partial", "failed"} and any(
+        warm_request_unfinished = pass_res["result"] in {"partial", "failed", "deferred"} and any(
             phase.startswith("host:") for phase in retrigger_phases
         )
         if (

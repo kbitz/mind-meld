@@ -647,13 +647,17 @@ def _coerce_gh_uid(raw: object) -> int | None:
     return None
 
 
-def github_noreply_check_due(emails: tuple[str, ...], *, blocking: bool = True) -> bool:
+def github_noreply_check_due(emails: tuple[str, ...], *, offline: bool = False) -> bool:
     """Return whether a known author filter still needs a GitHub identity check."""
     if not emails or any(email.endswith("@users.noreply.github.com") for email in emails):
         return False
-    with lockedjson.locked_json_snapshot(CACHE_PATH, blocking=blocking) as snapshot:
+    with lockedjson.locked_json_snapshot(CACHE_PATH, blocking=not offline) as snapshot:
         if snapshot.state != "valid" or not isinstance(snapshot.data, dict):
             return True
+        # A full refresh already ran this lookup, even when it found no address.
+        # An offline caller can use that recent observation.
+        if offline and not _is_cache_stale(snapshot.data):
+            return False
         checked = snapshot.data.get("github_noreply_checked_at")
         if not isinstance(checked, str) or not checked:
             return True

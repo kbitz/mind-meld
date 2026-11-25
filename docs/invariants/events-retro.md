@@ -4301,10 +4301,10 @@ never change.
     It retains valid saved counts for readers still at deadline if a fresh
     count is unavailable. This avoids a second host-log inventory under
     `L2`. Git attribution uses the resolved local author filter, including
-    when a recent GitHub lookup found no noreply address. When a filter needs
-    a fresh lookup, catch-up defers Git work and leaves its cursors pending for
-    the normal push. A cold identity cache follows the usual first-capture
-    policy.
+    when a recent full refresh or GitHub check found no noreply address. If
+    the filter needs a fresh lookup, catch-up defers Git work and leaves its
+    cursors pending for the normal push. A cold identity cache follows the
+    usual first-capture policy.
     A first-use discovery cancelled after opening the index initializes only
     its empty schema, so the worker can retry without carrying revoked roots.
     The worker
@@ -4336,7 +4336,8 @@ never change.
   still holds the launch lock during Git cleanup. A failed catch-up remains
   actionable until a newer successful capture. The automatic push breadcrumb
   retains `last_capture_at` from a successful hook that confirmed its
-  `mm-push` event and cursor write. Later hooks carry that timestamp forward.
+  `mm-push` event and cursor write. Hooks keep that timestamp across later
+  writes, ordered under the breadcrumb lock.
   Status checks it against the current device's local event evidence when
   projecting recovery.
   An unresolved `failed` catch-up surfaces

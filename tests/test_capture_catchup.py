@@ -464,11 +464,25 @@ def test_single_flight_retrigger_and_bounded_followup(monkeypatch):
     assert not lockfile.is_lock_held(real_mod.CATCHUP_LOCK_PATH)
 
 
-def test_catchup_retrigger_during_step1_warms_newly_requested_host(tmp_path, monkeypatch):
+@pytest.mark.parametrize("git_identity_due", [False, True])
+def test_catchup_retrigger_during_step1_warms_newly_requested_host(
+    tmp_path, monkeypatch, git_identity_due
+):
     env = _setup_fleet(tmp_path, monkeypatch, include_codex=True)
     repo = _make_git_repo(tmp_path / "repo-retrigger")
     env["cfg"]["retro"]["repo_roots"] = [str(repo)]
     config.save_config(env["cfg"])
+    if git_identity_due:
+        refreshed = datetime.now(timezone.utc) - timedelta(seconds=identity.TTL_SECONDS + 1)
+        identity.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": identity.CACHE_VERSION,
+                    "refreshed_at": refreshed.isoformat(),
+                    "emails": ["user@example.com"],
+                }
+            )
+        )
 
     warmed = []
 
@@ -497,7 +511,7 @@ def test_catchup_retrigger_during_step1_warms_newly_requested_host(tmp_path, mon
 
     monkeypatch.setattr(capturecatchup, "_warm_step1_caches", concurrent_trigger)
     result = capturecatchup.run_catchup(["git_walk"])
-    assert result["result"] == "ok", result
+    assert result["result"] == ("deferred" if git_identity_due else "ok"), result
     assert warmed == ["codex"]
 
 
@@ -1192,19 +1206,17 @@ def test_catchup_keeps_git_attribution_local(tmp_path, monkeypatch, lookup_curre
     (repo / "README.md").write_text("collaborator update\n")
     subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, capture_output=True)
     subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Collaborator",
-            "-c",
-            "user.email=peer@example.com",
-            "commit",
-            "-m",
-            "collaborator commit",
-        ],
+        ["git", "commit", "-m", "collaborator commit"],
         cwd=repo,
         check=True,
         capture_output=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Collaborator",
+            "GIT_AUTHOR_EMAIL": "peer@example.com",
+            "GIT_COMMITTER_NAME": "Collaborator",
+            "GIT_COMMITTER_EMAIL": "peer@example.com",
+        },
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -1215,6 +1227,10 @@ def test_catchup_keeps_git_attribution_local(tmp_path, monkeypatch, lookup_curre
     }
     if lookup_current:
         identity_cache["github_noreply_checked_at"] = now
+    else:
+        identity_cache["refreshed_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=identity.TTL_SECONDS + 1)
+        ).isoformat()
     identity.CACHE_PATH.write_text(json.dumps(identity_cache))
 
     def fail_remote_lookup(*args, **kwargs):
@@ -1237,6 +1253,29 @@ def test_catchup_keeps_git_attribution_local(tmp_path, monkeypatch, lookup_curre
         assert "Run: mm push" in result["detail"]
         assert "git-snapshot" not in git.rows
         assert not events.read_git_capture_cache()["repo_cursors"]
+
+
+def test_catchup_reuses_recent_complete_identity_refresh(tmp_path, monkeypatch):
+    env = _setup_fleet(tmp_path, monkeypatch)
+    repo = _make_git_repo(tmp_path / "repo-with-local-identity")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    lookups = []
+
+    def check_github():
+        lookups.append(True)
+        return None
+
+    monkeypatch.setattr(identity, "_gather_global_email", lambda: "user@example.com")
+    monkeypatch.setattr(identity, "_gather_per_repo_emails", lambda **kwargs: [])
+    monkeypatch.setattr(identity, "_gather_config_author_emails", lambda: [])
+    monkeypatch.setattr(identity, "_gather_gh_noreply_email", check_github)
+    assert identity.refresh_identity_cache(force=True) == ["user@example.com"]
+
+    result = capturecatchup.run_catchup(["git_walk"])
+    assert result["result"] == "ok"
+    assert lookups == [True]
+    assert events.read_git_capture_cache()["repo_cursors"]
 
 
 def test_adversarial_revoking_grok_before_step1_prevents_read(tmp_path, monkeypatch):
@@ -1494,6 +1533,38 @@ def test_status_failed_partial_and_non_deadline_degradations_surface(tmp_path, m
     partial_text = " ".join(res_partial.stdout.split())
     assert partial_text.startswith("Latest push needs attention")
     assert "capture still stopped at deadline; run mm push" in partial_text
+
+
+def test_delayed_hook_breadcrumb_keeps_newer_capture_recovery(tmp_path, monkeypatch):
+    env = _setup_fleet(tmp_path, monkeypatch)
+    repo = _make_git_repo(tmp_path / "repo-delayed-breadcrumb")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *args, **kwargs: None)
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+    capturecatchup.record_catchup_state(
+        state="finished", result="failed", finished_at=datetime.now(timezone.utc).isoformat()
+    )
+
+    real_rmw = cli.locked_json_rmw
+    later_results = []
+
+    @contextmanager
+    def delay_once(path, *args, **kwargs):
+        if path == core._autorun_breadcrumb_path() and not later_results:
+            (env["notes_dir"] / "hello.md").write_text("newer capture\n")
+            later_results.append(None)
+            later_results[0] = runner.invoke(cli.app, ["autopush"])
+        with real_rmw(path, *args, **kwargs) as state:
+            yield state
+
+    monkeypatch.setattr(cli, "locked_json_rmw", delay_once)
+    cli._write_autorun_breadcrumb("push", "lock-held")
+
+    assert later_results and later_results[0].exit_code == 0
+    res = runner.invoke(cli.app, ["status"])
+    assert res.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" not in res.stdout
 
 
 def test_status_reports_finished_partial_before_worker_releases_custody(tmp_path, monkeypatch):

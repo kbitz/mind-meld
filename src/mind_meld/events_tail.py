@@ -2026,7 +2026,7 @@ def _capture_git_rows(
     if roots:
         author_emails = events.resolve_walk_author_emails(config, roots)
         if origin == events.GIT_SNAPSHOT_ORIGIN_CATCHUP:
-            if identity.github_noreply_check_due(author_emails, blocking=False):
+            if identity.github_noreply_check_due(author_emails, offline=True):
                 # Keep the known author filter and let push resolve the
                 # missing identity before this interval's Git cursors move.
                 pending = replace(
