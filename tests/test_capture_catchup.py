@@ -384,7 +384,7 @@ def test_start_detached_catchup_spawns_detached_process(tmp_path, monkeypatch):
         "--phase=host:codex",
         "--phase=git_walk",
     ]
-    assert kwargs["cwd"] == tmp_path
+    assert "cwd" not in kwargs
     assert kwargs["stdin"] == subprocess.DEVNULL
     assert kwargs["stdout"] == subprocess.DEVNULL
     assert kwargs["stderr"] == subprocess.DEVNULL
@@ -462,6 +462,70 @@ def test_single_flight_retrigger_and_bounded_followup(monkeypatch):
     assert pass_calls[1] == ["phase-1"]
     assert real_mod.read_catchup_state()["retrigger_phases"] == ["phase-2"]
     assert not lockfile.is_lock_held(real_mod.CATCHUP_LOCK_PATH)
+
+
+def test_catchup_retrigger_during_step1_warms_newly_requested_host(tmp_path, monkeypatch):
+    env = _setup_fleet(tmp_path, monkeypatch, include_codex=True)
+    repo = _make_git_repo(tmp_path / "repo-retrigger")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+
+    warmed = []
+
+    def read_codex(**kwargs):
+        if not warmed:
+            return host_usage.HostUsageResult(hosts=None, complete=False, reason="deadline")
+        return host_usage.HostUsageResult(hosts={}, complete=True)
+
+    def warm_codex(*, reader, **kwargs):
+        assert not lockfile.is_lock_held(config.LOCK_PATH)
+        warmed.append(reader)
+        return host_usage.HostUsageResult(hosts={}, complete=True)
+
+    monkeypatch.setattr(host_registry, "reader_cache_cold", lambda *args, **kwargs: False)
+    monkeypatch.setattr(codex_host, "read_codex_usage", read_codex)
+    monkeypatch.setattr(host_registry, "warm_host_cache_inline", warm_codex)
+    warm_step1 = capturecatchup._warm_step1_caches
+    sent = []
+
+    def concurrent_trigger(phases, timer):
+        result = warm_step1(phases, timer)
+        if not sent:
+            assert not _START_DETACHED_CATCHUP(["host:codex"])
+            sent.append(True)
+        return result
+
+    monkeypatch.setattr(capturecatchup, "_warm_step1_caches", concurrent_trigger)
+    result = capturecatchup.run_catchup(["git_walk"])
+    assert result["result"] == "ok", result
+    assert warmed == ["codex"]
+
+
+def test_catchup_reservation_keeps_trigger_through_shared_status_probe(tmp_path, monkeypatch):
+    _setup_fleet(tmp_path, monkeypatch)
+    lock = capturecatchup.CATCHUP_LOCK_PATH
+    lock.touch()
+    with lock.open("r") as reader:
+        fcntl.flock(reader, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        assert not _START_DETACHED_CATCHUP(["git_walk"])
+    assert capturecatchup.read_catchup_state().get("retrigger_phases") == ["git_walk"]
+
+
+def test_catchup_launch_survives_removed_cwd_for_absolute_sources(tmp_path, monkeypatch):
+    _setup_fleet(tmp_path, monkeypatch)
+    popen_calls = []
+
+    def cwd_removed():
+        raise FileNotFoundError("fixture working directory was removed")
+
+    monkeypatch.setattr(
+        capturecatchup.subprocess, "Popen", lambda *args, **kwargs: popen_calls.append(args)
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "cwd", cwd_removed)
+        started = _START_DETACHED_CATCHUP(["git_walk"])
+    assert started
+    assert len(popen_calls) == 1
 
 
 def test_worker_final_state_retries_after_a_concurrent_inspection(monkeypatch):
@@ -1119,29 +1183,60 @@ def test_catchup_carries_fresh_deadline_counts_from_before_sync_lock(tmp_path, m
     assert events_tail._read_capture_progress(device_id).host == {"codex": 7}
 
 
-def test_catchup_keeps_git_attribution_local_and_fails_open(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lookup_current", [True, False])
+def test_catchup_keeps_git_attribution_local(tmp_path, monkeypatch, lookup_current):
     env = _setup_fleet(tmp_path, monkeypatch)
     repo = _make_git_repo(tmp_path / "repo-identity")
     env["cfg"]["retro"]["repo_roots"] = [str(repo)]
     config.save_config(env["cfg"])
-    identity_lookups = []
-    monkeypatch.setattr(events, "resolve_walk_author_emails", lambda *args: ("user@example.com",))
-    monkeypatch.setattr(
-        identity,
-        "union_checked_github_noreply",
-        lambda emails: identity_lookups.append(emails) or emails,
+    (repo / "README.md").write_text("collaborator update\n")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Collaborator",
+            "-c",
+            "user.email=peer@example.com",
+            "commit",
+            "-m",
+            "collaborator commit",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
     )
-    walk = events.walk_git_projects
-    filters = []
 
-    def observe_walk(*args, **kwargs):
-        filters.append(kwargs.get("author_emails"))
-        return walk(*args, **kwargs)
+    now = datetime.now(timezone.utc).isoformat()
+    identity_cache = {
+        "version": identity.CACHE_VERSION,
+        "refreshed_at": now,
+        "emails": ["user@example.com"],
+    }
+    if lookup_current:
+        identity_cache["github_noreply_checked_at"] = now
+    identity.CACHE_PATH.write_text(json.dumps(identity_cache))
 
-    monkeypatch.setattr(events, "walk_git_projects", observe_walk)
-    assert capturecatchup.run_catchup(["git_walk"])["result"] == "ok"
-    assert identity_lookups == []
-    assert filters == [()]
+    def fail_remote_lookup(*args, **kwargs):
+        pytest.fail("Detached capture must not perform a GitHub identity lookup")
+
+    monkeypatch.setattr(identity, "_gather_gh_noreply_email", fail_remote_lookup)
+    result = capturecatchup.run_catchup(["git_walk"])
+    git = events.latest_event_rows(env["events_dir"], env["device_id"], {"git-snapshot"})
+    if lookup_current:
+        assert result["result"] == "ok"
+        commit_records = [
+            commit
+            for project in git.rows["git-snapshot"]["projects"]
+            for commit in project["commits"]
+        ]
+        assert [commit["subject"] for commit in commit_records] == ["init"]
+        assert events.read_git_capture_cache()["repo_cursors"]
+    else:
+        assert result["result"] == "deferred"
+        assert "Run: mm push" in result["detail"]
+        assert "git-snapshot" not in git.rows
+        assert not events.read_git_capture_cache()["repo_cursors"]
 
 
 def test_adversarial_revoking_grok_before_step1_prevents_read(tmp_path, monkeypatch):
@@ -1372,6 +1467,12 @@ def test_status_failed_partial_and_non_deadline_degradations_surface(tmp_path, m
     assert "In sync with this device's last push." in res_superseded.stdout
     assert "Background capture catch-up failed. Run: mm diag" not in res_superseded.stdout
 
+    # A later change-gated no-op must not bring back a superseded failure.
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+    res_after_noop = runner.invoke(cli.app, ["status"])
+    assert res_after_noop.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" not in res_after_noop.stdout
+
     # (e) partial catch-up does NOT suppress manual advice on deadline-only degraded autopush
     cli._write_autorun_breadcrumb(
         "push",
@@ -1393,6 +1494,32 @@ def test_status_failed_partial_and_non_deadline_degradations_surface(tmp_path, m
     partial_text = " ".join(res_partial.stdout.split())
     assert partial_text.startswith("Latest push needs attention")
     assert "capture still stopped at deadline; run mm push" in partial_text
+
+
+def test_status_reports_finished_partial_before_worker_releases_custody(tmp_path, monkeypatch):
+    _setup_fleet(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+    cli._write_autorun_breadcrumb(
+        "push", "degraded", "git walk hit budget", capture_deadline_only=True
+    )
+    lockfile.acquire_lock(capturecatchup.CATCHUP_LOCK_PATH)
+    try:
+        capturecatchup.record_catchup_state(
+            state="finished",
+            result="partial",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            detail="capture still stopped at deadline; run mm push",
+        )
+        res = runner.invoke(cli.app, ["status"])
+        assert capturecatchup.is_catchup_running()
+    finally:
+        lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
+
+    assert res.exit_code == 0
+    output = " ".join(res.stdout.split())
+    assert "Background capture catch-up: partial" in output
+    assert "Latest push needs attention" in output
 
 
 def test_status_keeps_reader_deadline_newer_than_catchup(tmp_path, monkeypatch):

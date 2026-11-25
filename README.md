@@ -2821,8 +2821,8 @@ silent: it warms cold or deadline-stopped private host and Claude token caches
 outside `mind-meld.lock` with attended budgets and consent rechecks, then
 takes `mind-meld.lock` for the attended capture pass, appends local
 `git-snapshot` (`origin="catchup"`, excluded from push counts),
-`sessions-snapshot`, and `host-usage-snapshot` rows to `mm-events`, confirm the
-written Git snapshot before advancing per-repo cursors, and record `catchup`
+`sessions-snapshot`, and `host-usage-snapshot` rows to `mm-events`, confirms the
+written Git snapshot before advancing per-repo cursors, and records `catchup`
 timings in `push-timings.json`. Encrypted publication to the fleet waits for the
 next `mm autopush` or `mm push`. Previews (`--dry-run`) never trigger catch-up.
 `mm status` suppresses manual `mm push` advice while catch-up is running or has

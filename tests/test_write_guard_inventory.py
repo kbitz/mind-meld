@@ -488,6 +488,13 @@ REVIEWED = {
             "open(path, 'rb')",
         ],
     ),
+    "events_tail.py:_capture_git_rows": (
+        *_READ_ONLY,
+        [
+            "replace(root_discovery, "
+            "errors=(*root_discovery.errors, CATCHUP_GIT_IDENTITY_PENDING))",
+        ],
+    ),
     "fsutil.py:atomic_write_bytes": (
         *_GUARDED,
         [

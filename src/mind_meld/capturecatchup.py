@@ -244,19 +244,24 @@ def start_detached_catchup(trigger_phases: Sequence[str]) -> bool:
     phases = _normalize_phases(trigger_phases)
     if not phases:
         return False
+    lock_fd = None
     try:
-        try:
-            lock_fd = lockfile.acquire_lock(CATCHUP_LOCK_PATH)
-        except errors.LockError:
-            if is_catchup_running():
-                _record_retrigger(phases)
-                return False
-            # A status reader briefly probes with a shared lock. Try once
-            # more if there was no exclusive owner to receive the trigger.
-            lock_fd = lockfile.acquire_lock(CATCHUP_LOCK_PATH)
+        for _ in range(2):
+            try:
+                lock_fd = lockfile.acquire_lock(CATCHUP_LOCK_PATH)
+                break
+            except errors.LockError:
+                # A status reader briefly probes with a shared lock.
+                # Give that reader one immediate chance to release it.
+                if is_catchup_running():
+                    break
     except Exception:
         return False
+    if lock_fd is None:
+        _record_retrigger(phases)
+        return False
     try:
+        # Inherit the working directory for relative source paths.
         subprocess.Popen(
             [
                 sys.executable,
@@ -266,7 +271,6 @@ def start_detached_catchup(trigger_phases: Sequence[str]) -> bool:
                 f"--lock-fd={lock_fd}",
                 *(f"--phase={phase}" for phase in phases),
             ],
-            cwd=Path.cwd(),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -295,7 +299,8 @@ def catchup_observation() -> tuple[dict[str, Any], bool]:
                 "result": "failed",
                 "detail": "worker interrupted",
             }
-    return state, running
+    # The child can still hold L1 while unfinished Git calls unwind.
+    return state, running and state["state"] != "finished"
 
 
 def covers_deadline_backlog(
@@ -524,7 +529,11 @@ def _classify_capture_outcome(
         return "failed", "Git snapshot or cursor update could not be confirmed; run mm diag"
     if capture.walk_errors > 0:
         return "failed", f"git walk had {capture.walk_errors} error(s)"
-    if any(err != events.GIT_ROOT_DISCOVERY_BUDGET_ERROR for err in capture.root_discovery.errors):
+    if any(
+        err
+        not in {events.GIT_ROOT_DISCOVERY_BUDGET_ERROR, events_tail.CATCHUP_GIT_IDENTITY_PENDING}
+        for err in capture.root_discovery.errors
+    ):
         return "failed", "git root discovery failed"
     if events.classify_discovery(capture.root_discovery) == "empty":
         return "failed", "no git repositories discovered"
@@ -536,6 +545,8 @@ def _classify_capture_outcome(
         and capture.host_capture.reason != "deadline"
     ):
         return "failed", "host usage reader failed"
+    if events_tail.CATCHUP_GIT_IDENTITY_PENDING in capture.root_discovery.errors:
+        return "deferred", "Git author identity check pending. Run: mm push"
     if events_tail.deadline_stopped_phases(capture):
         return "partial", "capture still stopped at deadline; run mm push"
     return "ok", None
@@ -756,7 +767,8 @@ def run_catchup(
     except errors.LockError:
         return None
 
-    started_at = datetime.now(timezone.utc).isoformat()
+    started = datetime.now(timezone.utc)
+    started_at = started.isoformat()
     previous = read_catchup_state()
     consumed_retrigger_at = events.parse_aware_ts(previous.get("retrigger_at"))
     phases = _normalize_phases([*phases, *previous.get("retrigger_phases", [])])
@@ -783,18 +795,25 @@ def run_catchup(
         pass_res = _run_catchup_pass(phases, timer)
         final_res = pass_res
 
-        # Bounded at-most-one follow-up pass if a concurrent hook recorded a
-        # retrigger newer than Step 2's start (rules out PR #382 F28).
+        # A later hook can change the inputs to Step 2. A host request that
+        # arrived during Step 1 can also supply warming the first pass missed.
         state_now = read_catchup_state()
         retrigger_at = events.parse_aware_ts(state_now.get("retrigger_at"))
+        retrigger_phases = state_now.get("retrigger_phases", [])
         step2_started = pass_res.get("step2_started_at")
+        warm_request_unfinished = pass_res["result"] in {"partial", "failed"} and any(
+            phase.startswith("host:") for phase in retrigger_phases
+        )
         if (
             retrigger_at is not None
             and isinstance(step2_started, datetime)
-            and retrigger_at > step2_started
+            and (
+                retrigger_at > step2_started
+                or (retrigger_at >= started and warm_request_unfinished)
+            )
         ):
             consumed_retrigger_at = retrigger_at
-            phases = _normalize_phases(state_now.get("retrigger_phases") or phases)
+            phases = _normalize_phases(retrigger_phases or phases)
             record_catchup_state(
                 state="running",
                 result=None,

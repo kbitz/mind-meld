@@ -4276,8 +4276,12 @@ never change.
   to the child. The parent closes its copy and the child holds the lock
   through process exit. When an exclusive owner already holds `L1`, the hook
   records a best-effort, nonblocking retrigger in `capture-catchup.json`.
-  A worker can run one bounded follow-up. Final state writes retry briefly
-  on contention and retain later retriggers for the next worker.
+  If a read-only probe still holds a shared lock after the launch retry,
+  the hook saves the request for the next worker. A worker can run one
+  bounded follow-up when a hook arrives after Step 2 begins or when a
+  host warming request arrives during Step 1 and the first pass is
+  unfinished. Final state writes retry briefly on contention and retain
+  later retriggers for the next worker.
 - **Capture-only two-step execution.**
   - **Step 1 (under `L1`, outside `L2`):** warms cold or deadline-stopped
     private host caches (`_capture_host_snapshot` with
@@ -4296,9 +4300,11 @@ never change.
     Step 2 uses counts from Step 1 when the configuration still matches.
     It retains valid saved counts for readers still at deadline if a fresh
     count is unavailable. This avoids a second host-log inventory under
-    `L2`. Git attribution uses local identity evidence and walks without
-    an author filter when it lacks the GitHub noreply identity. The normal
-    push path owns the remote identity lookup.
+    `L2`. Git attribution uses the resolved local author filter, including
+    when a recent GitHub lookup found no noreply address. When a filter needs
+    a fresh lookup, catch-up defers Git work and leaves its cursors pending for
+    the normal push. A cold identity cache follows the usual first-capture
+    policy.
     A first-use discovery cancelled after opening the index initializes only
     its empty schema, so the worker can retry without carrying revoked roots.
     The worker
@@ -4326,10 +4332,13 @@ never change.
   local diffs matching exact `(event_file, event_sha256)`), never hiding
   `partial`/`deferred` backlogs, user edits, or non-deadline degradations
   (`unsupported`, `errs > 0`, `incomplete_streak >= 3`, held files, independent
-  attended push failures). A failed catch-up remains actionable until a
-  newer successful capture. Status binds an automatic success to a capture row
-  between that hook's saved start and completion times. Older breadcrumbs
-  without a start time and automatic no-ops cannot establish capture recovery.
+  attended push failures). A terminal result is visible while the worker
+  still holds the launch lock during Git cleanup. A failed catch-up remains
+  actionable until a newer successful capture. The automatic push breadcrumb
+  retains `last_capture_at` from a successful hook that confirmed its
+  `mm-push` event and cursor write. Later hooks carry that timestamp forward.
+  Status checks it against the current device's local event evidence when
+  projecting recovery.
   An unresolved `failed` catch-up surfaces
   `Background capture catch-up failed. Run: mm diag`. `mm diag` exposes
   read-only `capture_catchup` and `push_timings.by_kind.catchup` without

@@ -36,7 +36,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Literal, Mapping, Sequence, get_args
@@ -156,6 +156,7 @@ class Degradations(list[str]):
         self.omitted = 0
         self.deadline_phases: tuple[str, ...] = ()
         self.deadline_notices = 0
+        self.recorded_push_at: datetime | None = None
 
     def _append_unlocked(self, detail):
         if isinstance(detail, str):
@@ -179,6 +180,8 @@ class Degradations(list[str]):
             self.deadline_notices = min(
                 2**53, self.deadline_notices + getattr(details, "deadline_notices", 0)
             )
+            if recorded_at := getattr(details, "recorded_push_at", None):
+                self.recorded_push_at = recorded_at
             incoming_phases = getattr(details, "deadline_phases", ())
             if incoming_phases:
                 self.deadline_phases = tuple(
@@ -1934,6 +1937,9 @@ def _capture_event_snapshots(
     )
 
 
+CATCHUP_GIT_IDENTITY_PENDING = "Git author identity check pending"
+
+
 def _capture_git_rows(
     config: dict,
     device_id: str,
@@ -2020,10 +2026,14 @@ def _capture_git_rows(
     if roots:
         author_emails = events.resolve_walk_author_emails(config, roots)
         if origin == events.GIT_SNAPSHOT_ORIGIN_CATCHUP:
-            # An incomplete local identity must not advance the cursor past
-            # web merges. Capture stays local and leaves the lookup to push.
-            if not any(email.endswith("@users.noreply.github.com") for email in author_emails):
-                author_emails = ()
+            if identity.github_noreply_check_due(author_emails, blocking=False):
+                # Keep the known author filter and let push resolve the
+                # missing identity before this interval's Git cursors move.
+                pending = replace(
+                    root_discovery,
+                    errors=(*root_discovery.errors, CATCHUP_GIT_IDENTITY_PENDING),
+                )
+                return [], pending, 0, 0
         else:
             author_emails = identity.union_checked_github_noreply(author_emails)
         walk_kwargs.update(_accepted_kwargs(events.walk_git_projects, author_emails=author_emails))
@@ -2332,7 +2342,7 @@ def _run_events_tail(
             degradations.append("event append skipped (max-file-size)")
         elif events.latest_mm_push_row(events_dir, device_id) == mm_event:
             cursors_committed = True
-            events.commit_repo_cursors(
+            if events.commit_repo_cursors(
                 capture.git_rows,
                 since=since,
                 cursor_ts=mm_event_ts,
@@ -2342,7 +2352,8 @@ def _run_events_tail(
                     and not capture.walk_budget_aborts
                     and not capture.walk_errors
                 ),
-            )
+            ):
+                degradations.recorded_push_at = mm_event_ts
             if not quiet:
                 _record_git_progress(
                     device_id=device_id,

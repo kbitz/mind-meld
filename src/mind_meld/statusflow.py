@@ -1939,17 +1939,16 @@ def _catchup_failure_superseded(
     catchup_at = events.parse_aware_ts(catchup_state.get("finished_at")) or events.parse_aware_ts(
         catchup_state.get("started_at")
     )
-    if isinstance(auto_push, dict) and auto_push.get("outcome") == "success":
+    if isinstance(auto_push, dict):
         auto_at = events.parse_aware_ts(auto_push.get("timestamp"))
-        auto_started = events.parse_aware_ts(auto_push.get("started_at"))
-        # A change-gated no-op also writes a success breadcrumb, but it did
-        # not retry capture. Require a new capture row for an automatic push.
+        capture_at = events.parse_aware_ts(auto_push.get("last_capture_at"))
+        # Later attempts carry the last verified capture timestamp forward.
         if (
             auto_at is not None
-            and auto_started is not None
+            and capture_at is not None
             and mm_push_ts is not None
-            and auto_started <= mm_push_ts <= auto_at
-            and (catchup_at is None or mm_push_ts > catchup_at)
+            and capture_at <= min(auto_at, mm_push_ts)
+            and (catchup_at is None or capture_at > catchup_at)
         ):
             return True
     if attended_evidence.get("state") == "valid":

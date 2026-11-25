@@ -4530,7 +4530,7 @@ def _write_autorun_breadcrumb(
     *,
     removal_wait_only: bool = False,
     capture_deadline_only: bool = False,
-    started_at: datetime | None = None,
+    capture_at: datetime | None = None,
 ) -> None:
     """Record the last autopull/autopush attempt for forensic observability.
 
@@ -4546,8 +4546,9 @@ def _write_autorun_breadcrumb(
     Silent contract preserved: nothing is printed. Any failure here is
     swallowed -- a broken breadcrumb must never crash the hook.
     """
+    recorded_at = datetime.now(timezone.utc)
     entry: dict[str, str | bool] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": recorded_at.isoformat(),
         "outcome": outcome,
     }
     if detail:
@@ -4556,13 +4557,17 @@ def _write_autorun_breadcrumb(
         entry["removal_wait_only"] = True
     if capture_deadline_only:
         entry["capture_deadline_only"] = True
-    if started_at is not None:
-        entry["started_at"] = started_at.isoformat()
     try:
         with locked_json_rmw(core._autorun_breadcrumb_path()) as ljson:
             if not ljson.is_locked:
                 return
             existing = core._normalize_autorun_breadcrumbs(ljson.data)
+            if verb == "push":
+                last_capture_at = capture_at or events.parse_aware_ts(
+                    existing.get(verb, {}).get("last_capture_at")
+                )
+                if last_capture_at is not None and last_capture_at <= recorded_at:
+                    entry["last_capture_at"] = last_capture_at.isoformat()
             existing[verb] = entry
             ljson.data.clear()
             ljson.data.update({k: existing[k] for k in core._AUTORUN_VERBS if k in existing})
@@ -5009,7 +5014,6 @@ def autopush() -> None:
             if setup is None:
                 return
 
-            started_at = datetime.now(timezone.utc)
             if not pullhistory.failed():
                 pullhistory.record_failure(statedb.recover_if_needed())
 
@@ -5126,7 +5130,11 @@ def autopush() -> None:
                 crumb_detail,
                 removal_wait_only=mesh_res.removal_wait_only(details),
                 capture_deadline_only=capture_deadline_only,
-                started_at=started_at if outcome == "success" else None,
+                capture_at=(
+                    getattr(events_degradations, "recorded_push_at", None)
+                    if outcome == "success"
+                    else None
+                ),
             )
             detached_config = setup.config
 

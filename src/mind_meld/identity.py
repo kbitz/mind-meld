@@ -647,21 +647,23 @@ def _coerce_gh_uid(raw: object) -> int | None:
     return None
 
 
-def _github_noreply_checked() -> bool:
-    """True when a completed cache already recorded a noreply lookup."""
-    with lockedjson.locked_json_snapshot(CACHE_PATH) as snapshot:
+def github_noreply_check_due(emails: tuple[str, ...], *, blocking: bool = True) -> bool:
+    """Return whether a known author filter still needs a GitHub identity check."""
+    if not emails or any(email.endswith("@users.noreply.github.com") for email in emails):
+        return False
+    with lockedjson.locked_json_snapshot(CACHE_PATH, blocking=blocking) as snapshot:
         if snapshot.state != "valid" or not isinstance(snapshot.data, dict):
-            return False
+            return True
         checked = snapshot.data.get("github_noreply_checked_at")
         if not isinstance(checked, str) or not checked:
-            return False
+            return True
         try:
             dt = datetime.fromisoformat(checked)
         except ValueError:
-            return False
+            return True
         if dt.tzinfo is None:
-            return False
-        return (datetime.now(timezone.utc) - dt).total_seconds() < TTL_SECONDS
+            return True
+        return (datetime.now(timezone.utc) - dt).total_seconds() >= TTL_SECONDS
 
 
 def _record_github_noreply(email: str | None) -> None:
@@ -701,11 +703,7 @@ def union_checked_github_noreply(emails: tuple[str, ...]) -> tuple[str, ...]:
     ``gh`` on every push. A never-refreshed cache is left untouched. Tests
     skip the lookup: the suite isolates identity and must not call the network.
     """
-    if not emails or any(email.endswith("@users.noreply.github.com") for email in emails):
-        return emails
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return emails
-    if _github_noreply_checked():
+    if os.environ.get("PYTEST_CURRENT_TEST") or not github_noreply_check_due(emails):
         return emails
     found = _gather_gh_noreply_email()
     _record_github_noreply(found)
