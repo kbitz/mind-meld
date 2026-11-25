@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Callable, TypedDict
 
 from mind_meld import host_usage, token_usage
 from mind_meld.lockedjson import LockContended, locked_json_rmw, locked_json_snapshot
@@ -134,6 +134,7 @@ def read_codex_usage(
     root: Path | None = None,
     *,
     deadline: float | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> host_usage.HostUsageResult:
     """Read complete Codex rollout totals, using the isolated local cache.
 
@@ -185,6 +186,7 @@ def read_codex_usage(
                     read_deadline,
                     archived_root=archived_root,
                     settled_days=prior_settled,
+                    **({"progress": progress} if progress is not None else {}),
                 )
             ready = time.monotonic()
             over_budget = result.complete and host_usage._expired(read_deadline)
@@ -387,6 +389,7 @@ def _scan_codex_root(
     *,
     archived_root: Path | None = None,
     settled_days: dict[str, dict[str, Any]] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[host_usage.HostUsageResult, dict[str, _CacheEntry], bool, dict[str, dict[str, Any]]]:
     """Returns ``(result, staged, learned, settled_days)``.
 
@@ -499,6 +502,17 @@ def _scan_codex_root(
         archive_groups=archive_groups,
     )
     key_day: dict[str, str | None] = {}
+    total_rollouts = len(rollouts)
+    completed_rollouts = 0
+
+    def _emit_progress() -> None:
+        if progress is not None and total_rollouts > 0:
+            try:
+                progress(completed_rollouts, total_rollouts)
+            except Exception:
+                pass
+
+    _emit_progress()
 
     def read_rollouts(only: set[str] | None) -> host_usage.HostUsageResult | None:
         """Stage the non-carried rollouts, or just those under ``only``.
@@ -506,10 +520,12 @@ def _scan_codex_root(
         Returns an incomplete result to hand back with what is staged so far,
         or ``None`` when every selected rollout is staged.
         """
-        nonlocal learned
+        nonlocal learned, completed_rollouts
         for path, base, rel in rollouts:
             if only is None:
                 if rel is not None and rel in carried_days:
+                    completed_rollouts += 1
+                    _emit_progress()
                     continue
             elif rel not in only:
                 continue
@@ -529,6 +545,9 @@ def _scan_codex_root(
                         # copy is read in this pass, so the move is not a failure.
                         # Any other stat error, or an archived path that vanished,
                         # stays io_error.
+                        if only is None:
+                            completed_rollouts += 1
+                            _emit_progress()
                         continue
                     raise
                 existing = _validated_entry(cached_files.get(key))
@@ -543,6 +562,9 @@ def _scan_codex_root(
                     learned = True
                 staged[key] = entry
                 key_day[key] = rel
+                if only is None:
+                    completed_rollouts += 1
+                    _emit_progress()
             except host_usage._ReadFailure as failure:
                 # Hand back what was staged BEFORE the failure. Each entry is a
                 # complete, fingerprinted parse of one stable file, so it stays

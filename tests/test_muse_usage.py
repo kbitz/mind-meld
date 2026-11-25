@@ -950,15 +950,24 @@ def test_a_copied_step_unfreezes_only_its_frozen_day(muse_cache, tmp_path, monke
     with live.open("a") as fp:
         fp.write(json.dumps(original) + "\n")
     real_read = hu._read_muse_file
+    counts: list[tuple[int, int]] = []
+    reopen_counts: list[tuple[int, int]] = []
 
     def guard(path, start_offset, prior, before, deadline, dir_date):
         if "/2026/10/12/" in Path(path).as_posix():
             raise AssertionError("sibling reopened")
+        if "/2026/10/10/" in Path(path).as_posix():
+            reopen_counts.append(counts[-1])
         return real_read(path, start_offset, prior, before, deadline, dir_date)
 
     monkeypatch.setattr(hu, "_read_muse_file", guard)
-    result = hu.read_muse_usage(tmp_path, consented=True)
+    result = hu.read_muse_usage(
+        tmp_path, consented=True, progress=lambda done, total: counts.append((done, total))
+    )
     assert result.complete
+    assert counts[-1] == (4, 4)
+    assert reopen_counts == [(3, 4)]
+    assert all(0 <= done <= total for done, total in counts)
     assert result.hosts["muse"]["2026-10-10"]["input"] == 60
     assert result.hosts["muse"]["2026-10-12"]["output"] == 4
     kept = _cache(muse_cache)["frozen"]

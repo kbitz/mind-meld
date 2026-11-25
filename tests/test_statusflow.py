@@ -40,6 +40,7 @@ DIAG_KEYS = {
     "discovery",
     "git_capture",
     "memory_index",
+    "push_timings",
 }
 
 

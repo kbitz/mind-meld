@@ -887,6 +887,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "host_publication",
         "discovery",
         "git_capture",
+        "push_timings",
     ):
         assert section in payload, f"missing {section}"
     muse_hu = payload["host_usage"]["muse"]
@@ -1876,18 +1877,18 @@ class TestDiagGitCapture:
 
 
 @pytest.mark.parametrize(
-    "case,total,margin",
+    "case,slowest,count,margin,per_provider",
     [
-        ("both", 215, "535 ms spare"),
-        ("over", 768, "over by 18 ms"),
-        ("codex-only", 197, "553 ms spare"),
-        ("muse-only", 18, "732 ms spare"),
-        ("missing-read", None, "a reader has no complete read"),
-        ("none", None, "no reader enabled"),
+        ("both", 197, 2, "803 ms spare", "codex 197/1000 ms, muse 18/1000 ms"),
+        ("over", 1050, 2, "over by 50 ms", "codex 1050/1000 ms, muse 18/1000 ms"),
+        ("codex-only", 197, 1, "803 ms spare", "codex 197/1000 ms"),
+        ("muse-only", 18, 1, "982 ms spare", "muse 18/1000 ms"),
+        ("missing-read", None, 0, "a reader has no complete read", None),
+        ("none", None, 0, "no reader enabled", None),
     ],
 )
 def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
-    tmp_path, monkeypatch, case, total, margin
+    tmp_path, monkeypatch, case, slowest, count, margin, per_provider
 ):
     from datetime import datetime, timedelta, timezone
 
@@ -1911,7 +1912,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     save_config(config)
     _enable_capture_sources(tmp_path, readers=())
     at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(timespec="seconds")
-    for reader, ms in (("codex", 750 if case == "over" else 197), ("muse", 18)):
+    for reader, ms in (("codex", 1050 if case == "over" else 197), ("muse", 18)):
         path = codex_host.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -1923,7 +1924,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
                     "last_complete_ms": None if case == "missing-read" and reader == "muse" else ms,
                     "last_complete_at": at,
                     "last_reason": "deadline",
-                    "last_deadline_allotted_ms": 750,
+                    "last_deadline_allotted_ms": 1000,
                 }
             )
         )
@@ -1946,30 +1947,32 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["host_read_budgets"] == {
-        "autopush_ms": 750,
+        "autopush_ms": 1000,
         "autopush_source": "default",
         "interactive_ms": 1000,
         "interactive_source": "config",
         "capture_ms": 5000,
         "capture_source": "default",
         "warm_ms": 5000,
+        "mode": "per_provider_concurrent",
     }
     assert tuple(payload["host_publication"]["readers"]) in selection
     assert payload["host_usage"]["codex"]["last_complete_at"] == at
-    assert payload["host_usage"]["codex"]["last_deadline_allotted_ms"] == 750
+    assert payload["host_usage"]["codex"]["last_deadline_allotted_ms"] == 1000
     line = statusflow._host_read_sweep_line(payload)
-    if total is None:
+    if slowest is None:
         assert line == f"unknown ({margin})"
     else:
         assert line == (
-            f"{total} ms of the 750 ms autopush budget, {margin} "
-            "(excludes cache writes and the later-reader grace; not a publication check)"
+            f"{slowest} ms slowest of {count} concurrent reader(s) against "
+            f"1000 ms per-provider autopush budget, {margin} "
+            f"({per_provider}; excludes cache writes; not a publication check)"
         )
     result = runner.invoke(app, ["diag"])
     assert result.exit_code == 0, result.output
     plain = " ".join(result.output.split())
     assert (
-        "host read budgets: autopush 750 ms (default) · interactive 1000 ms (config)"
+        "host read budgets: autopush 1000 ms per provider (default) · interactive 1000 ms (config)"
         " · capture 5000 ms (default)" in plain
     )
     assert "host read sweep estimate: " + line in plain
@@ -1979,11 +1982,11 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
         )
     assert "read it without that budget, then `mm diag`" not in plain
     if case in {"both", "codex-only"}:
-        assert "Last read allowed 750 ms; last complete read 197 ms" in plain
+        assert "Last read allowed 1000 ms; last complete read 197 ms" in plain
     elif case == "over":
-        assert "Last read allowed 750 ms; last complete read 750 ms" in plain
+        assert "Last read allowed 1000 ms; last complete read 1050 ms" in plain
     elif case == "muse-only":
-        assert "Last read allowed 750 ms; last complete read 18 ms" in plain
+        assert "Last read allowed 1000 ms; last complete read 18 ms" in plain
 
 
 @pytest.mark.parametrize("invalid", [False, True])
@@ -2003,6 +2006,7 @@ def test_diag_unknown_host_read_budget_without_usable_config(tmp_path, monkeypat
         "capture_ms": None,
         "capture_source": None,
         "warm_ms": 5000,
+        "mode": "per_provider_concurrent",
     }
     result = runner.invoke(app, ["diag"])
     assert result.exit_code == 0, result.output
@@ -3281,3 +3285,67 @@ def test_push_and_autopush_with_not_readable_check_print_no_new_stderr_line_124b
     assert res.stderr == ""
     saved = json.loads(upgrade.CACHE_PATH.read_text(encoding="utf-8"))
     assert saved["check_failure_cause"] == "not-readable"
+
+
+def test_diag_push_timings_section_and_read_only_safety_165b(tmp_path, monkeypatch):
+    from mind_meld import lockedjson, pushtimings
+
+    _setup(tmp_path, monkeypatch)
+    timings_path = tmp_path / "push-timings.json"
+    monkeypatch.setattr(pushtimings, "PUSH_TIMINGS_PATH", timings_path)
+
+    # A missing timing file reads as empty without being created.
+    res_empty = runner.invoke(app, ["diag", "--json"])
+    assert res_empty.exit_code == 0, res_empty.output
+    payload_empty = json.loads(res_empty.stdout)
+    assert payload_empty["push_timings"] == {"latest": None, "by_kind": {}}
+    assert not timings_path.exists()
+
+    res_plain_empty = runner.invoke(app, ["diag"])
+    assert res_plain_empty.exit_code == 0, res_plain_empty.output
+    assert "Push timings" in res_plain_empty.output
+    assert "(none recorded)" in res_plain_empty.output
+
+    # Corrupt file: diag degrades cleanly and leaves the file untouched.
+    timings_path.write_text("not-json", encoding="utf-8")
+    res_corrupt = runner.invoke(app, ["diag", "--json"])
+    assert res_corrupt.exit_code == 0, res_corrupt.output
+    assert json.loads(res_corrupt.stdout)["push_timings"] == {"latest": None, "by_kind": {}}
+    assert timings_path.read_text(encoding="utf-8") == "not-json"
+
+    # Recorded attended + autopush timings appear in both JSON and plain text.
+    timings_path.unlink()
+    pushtimings.record_push_timings(
+        "attended",
+        [
+            pushtimings.PhaseTiming("host:codex", "Codex usage", 140, budget_ms=3000),
+            pushtimings.PhaseTiming("manifest_scan", "Manifest scan", 25),
+        ],
+        total_ms=190,
+    )
+    pushtimings.record_push_timings(
+        "autopush",
+        [pushtimings.PhaseTiming("host:codex", "Codex usage", 90, budget_ms=1000)],
+        total_ms=110,
+    )
+    res_json = runner.invoke(app, ["diag", "--json"])
+    assert res_json.exit_code == 0, res_json.output
+    payload = json.loads(res_json.stdout)
+    assert set(payload["push_timings"]["by_kind"]) == {"attended", "autopush"}
+    assert payload["push_timings"]["latest"]["kind"] == "autopush"
+
+    res_plain = runner.invoke(app, ["diag"])
+    assert res_plain.exit_code == 0, res_plain.output
+    assert "Push timings" in res_plain.output
+    assert "attended: 190 ms" in res_plain.output
+    assert "autopush: 110 ms" in res_plain.output
+    assert "Codex usage: 140 ms / 3000 ms" in res_plain.output
+    assert "Codex usage: 90 ms / 1000 ms" in res_plain.output
+
+    before = timings_path.read_bytes(), timings_path.stat().st_mtime_ns
+    with lockedjson.locked_json_rmw(timings_path) as writer:
+        writer.write_on_exit = False
+        res_locked = runner.invoke(app, ["diag", "--json"])
+        assert res_locked.exit_code == 0, res_locked.output
+        assert json.loads(res_locked.stdout)["push_timings"] == {"latest": None, "by_kind": {}}
+    assert (timings_path.read_bytes(), timings_path.stat().st_mtime_ns) == before

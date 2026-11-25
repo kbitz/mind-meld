@@ -32,6 +32,7 @@ from mind_meld import (
     memoryindex,
     outputstyle,
     projectid,
+    pushtimings,
     resolveflow,
     safety,
     seen_sources,
@@ -1585,6 +1586,7 @@ def _host_read_budgets(config: dict | None) -> dict:
         "capture_ms": None,
         "capture_source": None,
         "warm_ms": round(host_usage.DEFAULT_READ_BUDGET_S * 1000),
+        "mode": "per_provider_concurrent",
     }
     if config is not None:
         # Display-only: the resolver stashes the capture total for the next
@@ -1624,12 +1626,14 @@ def _host_read_sweep_line(state: dict) -> str:
     elapsed = [state["host_usage"].get(name, {}).get("last_complete_ms") for name in readers]
     if any(value is None for value in elapsed):
         return "unknown (a reader has no complete read)"
-    total = sum(elapsed)
-    remaining = budget - total
+    slowest = max(elapsed)
+    remaining = budget - slowest
     margin = f"{remaining} ms spare" if remaining >= 0 else f"over by {-remaining} ms"
+    per_provider = ", ".join(f"{name} {ms}/{budget} ms" for name, ms in zip(readers, elapsed))
     return (
-        f"{total} ms of the {budget} ms autopush budget, {margin} "
-        "(excludes cache writes and the later-reader grace; not a publication check)"
+        f"{slowest} ms slowest of {len(elapsed)} concurrent reader(s) against "
+        f"{budget} ms per-provider autopush budget, {margin} "
+        f"({per_provider}; excludes cache writes; not a publication check)"
     )
 
 
@@ -2616,6 +2620,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         "discovery": discovery,
         "git_capture": _collect_git_capture_diag(cfg, dev_id, discovery, scan=capture_rows),
         "memory_index": memoryindex.diag_state(cfg if config_state == "ok" else None),
+        "push_timings": pushtimings.diag_timings_state(),
     }
 
 
@@ -2902,7 +2907,7 @@ def diag(
         budget_line = "unknown (config unavailable)"
     else:
         budget_line = (
-            f"autopush {budgets['autopush_ms']} ms ({budgets['autopush_source']}) · "
+            f"autopush {budgets['autopush_ms']} ms per provider ({budgets['autopush_source']}) · "
             f"interactive {budgets['interactive_ms']} ms ({budgets['interactive_source']}) · "
             f"capture {budgets['capture_ms']} ms ({budgets['capture_source']})"
         )
@@ -3114,6 +3119,24 @@ def diag(
     console.print(f"    pending_repos:       {fresh.get('pending_repos')}")
     console.print(f"    exceeded:            {fresh.get('exceeded')}")
     console.print(f"    error_count:         {fresh.get('error_count')}")
+
+    timings_state = state.get("push_timings") or {}
+    by_kind = timings_state.get("by_kind") or {}
+    console.print("\n[bold]Push timings[/bold]")
+    rendered_timings = False
+    for kind in pushtimings.PUSH_KINDS:
+        run_entry = by_kind.get(kind)
+        if not isinstance(run_entry, dict):
+            continue
+        rendered_timings = True
+        total_ms = run_entry.get("total_ms")
+        total_shown = f"{total_ms} ms" if isinstance(total_ms, int) else "unknown"
+        recorded_at = run_entry.get("recorded_at") or "unknown"
+        console.print(f"  {kind}: {total_shown} ({safe_str(str(recorded_at))})")
+        for timing_line in pushtimings.format_verbose_timings(run_entry.get("phases") or ()):
+            console.print("  " + timing_line, markup=False)
+    if not rendered_timings:
+        console.print("  (none recorded)")
 
 
 _BREADCRUMB_STALE_AFTER_HOURS = 48

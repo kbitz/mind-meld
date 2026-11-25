@@ -44,6 +44,53 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Orphan GC phase timing
+
+- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Existing push and GC tests cover when orphan collection runs and what it warns about. This gap concerns its saved phase timing.
+- **Hypothesis (untested):** Drive an eligible collection and a handled collection error through push. Compare the published timing status with the collection and push outcomes.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/cli.py:1604`
+- **Evidence:** Track 165B coverage audit, path 06. Existing GC checks passed.
+- **Context:** Filed by `/review-and-prep` for Track 165B at `fd0fb70` (2026-11-24).
+- **Revisit when:** Orphan collection or the attended push timing boundary changes.
+- **Effort:** ? (triage in `/roadmap`)
+
+### [review:files=src/mind_meld/events_tail.py|tests/test_events_budget_scope.py] Test gap: Git and session timing status
+
+- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Existing tests cover Git and session deadline and error outcomes independently of the saved timing status.
+- **Hypothesis (untested):** Exercise discovery, walk and session failures through the timing scope and assert each saved phase's status.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/events_tail.py:1642`
+- **Evidence:** Track 165B coverage audit, path 17. Existing capture-budget checks passed.
+- **Context:** Filed by `/review-and-prep` for Track 165B at `fd0fb70` (2026-11-24).
+- **Revisit when:** Event capture changes its deadline policy, result mapping or diagnostic timing phases.
+- **Effort:** ? (triage in `/roadmap`)
+
+### [review:files=src/mind_meld/pushtimings.py|tests/test_integration.py] Test gap: Retain timing bytes on write failure
+
+- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
+- **Description:** Tests cover readers under lock contention and an interrupted timing write. This gap concerns the prior timings and push result after writer contention or an ordinary write error.
+- **Hypothesis (untested):** Seed an earlier sample, fail one attempt to write timings, and verify that the push result and previous persisted bytes survive.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/pushtimings.py:248`
+- **Evidence:** Track 165B coverage audit, path 20. A scoped contention probe preserved the old bytes.
+- **Context:** Filed by `/review-and-prep` for Track 165B at `fd0fb70` (2026-11-24).
+- **Revisit when:** Timing persistence changes locking, retry or error handling.
+- **Effort:** ? (triage in `/roadmap`)
+
+### [review:files=src/mind_meld/events_tail.py|src/mind_meld/host_registry.py|tests/test_host_usage_snapshot.py] Base issue: Warm retry deadline cutoff can shift
+
+- **Base issue:** Present at merge base `f1d35d0`. Filed under `blocking=shown`.
+- **Description:** Attended capture passes the time remaining after the warm notice. The warmer converts that duration back into a deadline, so a scheduling delay between the two clock reads extends the provider's cutoff.
+- **Evidence:** The same isolated replay at `06440f8` and `f1d35d0` gave the Codex warm adapter a 103.3-second clock deadline against a 103.0 cutoff. The clock was advanced by 300 ms at the adapter boundary.
+- **Upstream severity:** Medium
+- **Found in:** `src/mind_meld/host_registry.py:87`
+- **Context:** Filed by `/review-and-prep` for Track 165B (2026-11-24).
+- **Revisit when:** Attended warming or capture deadline ownership changes. Replay a delay at the handoff and check the original absolute cutoff.
+- **Effort:** ? (triage in `/roadmap`)
+
 ### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Legacy qmd cleanup failure boundaries
 
 - **Description:** The three-index fixture covers partial removal followed by a successful retry. It does not individually pin a failed named refresh before cleanup, a failed legacy listing, or a legacy removal timeout or missing process. It also starts the disable check after migration has finished.

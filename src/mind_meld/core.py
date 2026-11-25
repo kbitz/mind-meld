@@ -2773,7 +2773,9 @@ class _SyncProgress:
     before warnings, prompts, or the final outcome line.
     """
 
-    def __init__(self, *, enabled: bool, delay: float | None = None) -> None:
+    def __init__(
+        self, *, enabled: bool, delay: float | None = None, include_elapsed: bool = False
+    ) -> None:
         self._enabled = enabled
         self._delay = delay
         self._lock = threading.RLock()
@@ -2789,6 +2791,9 @@ class _SyncProgress:
         self._pause_depth = 0
         self._stopped = False
         self._started_at: float | None = None
+        self._phase_started_at = time.monotonic()
+        self._show_percent = True
+        self._include_elapsed = include_elapsed
         self._last_render_at = 0.0
 
     def _can_draw(self) -> bool:
@@ -2800,17 +2805,26 @@ class _SyncProgress:
         delay = _SYNC_PROGRESS_DELAY_SECONDS if self._delay is None else self._delay
         return self._started_at is not None and time.monotonic() - self._started_at >= delay
 
+    def _format_detail_locked(self, state: updateprogress.UpdateProgress, now: float) -> str:
+        base = ""
+        if state.total and state.completed is not None:
+            base = (
+                f"{100 * state.completed / state.total:.1f}% {state.detail}".rstrip()
+                if self._show_percent
+                else state.detail.rstrip()
+            )
+        if not self._include_elapsed:
+            return base
+        elapsed = max(0.0, now - self._phase_started_at)
+        return f"{base} · {elapsed:.1f}s" if base else f"· {elapsed:.1f}s"
+
     def _start_progress_locked(self) -> bool:
         if self._progress is not None:
             return True
         if not self._can_draw():
             return False
-        measured = self._state.total is not None and self._state.completed is not None
-        detail = (
-            f"{100 * self._state.completed / self._state.total:.1f}% {self._state.detail}".rstrip()
-            if measured
-            else ""
-        )
+        now = time.monotonic()
+        detail = self._format_detail_locked(self._state, now)
         progress = Progress(
             SpinnerColumn(),
             TextColumn("{task.description}", markup=False),
@@ -2844,10 +2858,21 @@ class _SyncProgress:
             with suppress(Exception, SystemExit):
                 console.show_cursor(True)
             return False
-        self._last_render_at = time.monotonic()
+        self._last_render_at = now
         return True
 
-    def _render_locked(self, state: updateprogress.UpdateProgress, *, force: bool = False) -> None:
+    def _render_locked(
+        self,
+        state: updateprogress.UpdateProgress,
+        *,
+        force: bool = False,
+        started_at: float | None = None,
+    ) -> None:
+        now = time.monotonic()
+        if started_at is not None:
+            self._phase_started_at = started_at
+        elif state.phase != self._state.phase:
+            self._phase_started_at = now
         self._state = state
         if not self._enabled or self._pause_depth > 0:
             return
@@ -2857,13 +2882,11 @@ class _SyncProgress:
             return
         if self._task is None:
             return
-        measured = state.total is not None and state.completed is not None
-        detail = f"{100 * state.completed / state.total:.1f}% {state.detail}" if measured else ""
+        detail = self._format_detail_locked(state, now)
         # Per-file advances only update the task fields; the ticker paints
         # them at 10 Hz. A synchronous redraw per file would let a stalled
         # terminal block the sync mid-run, lock held. Forced renders (phase
         # changes, first/final file) paint immediately.
-        now = time.monotonic()
         do_refresh = force or now - self._last_render_at >= _UPDATE_SPINNER_TICK_SECONDS
         try:
             self._progress.update(
@@ -2882,8 +2905,12 @@ class _SyncProgress:
 
     def start(self, phase: str) -> None:
         with self._lock:
+            now = time.monotonic()
             if self._started_at is None:
-                self._started_at = time.monotonic()
+                self._started_at = now
+            if phase != self._state.phase:
+                self._phase_started_at = now
+            self._show_percent = True
             self._state = updateprogress.UpdateProgress(phase)
             self._batch_total = 0
             if self._progress is not None:
@@ -2908,6 +2935,11 @@ class _SyncProgress:
                             self._start_progress_locked()
                             continue
                         progress = self._progress
+                        task = self._task
+                        detail = self._format_detail_locked(self._state, time.monotonic())
+                        if task is not None:
+                            with suppress(Exception, SystemExit):
+                                progress.update(task, detail=detail, refresh=False)
                     try:
                         progress.refresh()
                     except (Exception, SystemExit):  # First failed draw: timer off.
@@ -2926,11 +2958,13 @@ class _SyncProgress:
     def set_phase(self, phase: str) -> None:
         with self._lock:
             self._batch_total = 0
+            self._show_percent = True
             self._render_locked(updateprogress.UpdateProgress(phase), force=True)
 
     def show(self, state: updateprogress.UpdateProgress) -> None:
         with self._lock:
             self._batch_total = 0
+            self._show_percent = True
             self._render_locked(state, force=True)
 
     @property
@@ -2944,6 +2978,7 @@ class _SyncProgress:
             self._batch_unit = unit
             self._batch_completed = 0
             self._batch_total = max(total, 0)
+            self._show_percent = True
             self._render_locked(updateprogress.UpdateProgress(phase), force=True)
 
     def ensure_batch(self, phase: str, total: int, unit: str) -> None:
@@ -2970,6 +3005,40 @@ class _SyncProgress:
                     detail=detail,
                 ),
                 force=self._batch_completed in (1, self._batch_total),
+            )
+
+    def set_count(
+        self,
+        phase: str,
+        completed: int,
+        total: int,
+        unit: str = "",
+        *,
+        started_at: float | None = None,
+    ) -> None:
+        with self._lock:
+            phase_changed = phase != self._state.phase
+            self._batch_phase = phase
+            self._batch_unit = unit
+            self._batch_total = max(total, 0)
+            self._batch_completed = (
+                min(max(completed, 0), self._batch_total) if self._batch_total > 0 else 0
+            )
+            self._show_percent = bool(unit)
+            if self._batch_total > 0:
+                detail = f"{self._batch_completed}/{self._batch_total} {unit}".rstrip()
+                state = updateprogress.UpdateProgress(
+                    phase,
+                    completed=self._batch_completed,
+                    total=self._batch_total,
+                    detail=detail,
+                )
+            else:
+                state = updateprogress.UpdateProgress(phase)
+            self._render_locked(
+                state,
+                force=phase_changed or self._batch_completed in (0, 1, self._batch_total),
+                started_at=started_at,
             )
 
     @contextmanager
@@ -3080,6 +3149,14 @@ def _sync_progress_advance(step: int = 1) -> None:
     progress = _current_sync_progress()
     if progress is not None:
         progress.advance(step)
+
+
+def _sync_progress_count(
+    phase: str, completed: int, total: int, unit: str = "", *, started_at: float | None = None
+) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.set_count(phase, completed, total, unit, started_at=started_at)
 
 
 def _stop_sync_progress() -> None:

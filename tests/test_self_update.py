@@ -3865,6 +3865,22 @@ class TestSyncUpdateDisplay:
         assert result.exit_code == 0, result.output
         # Normalize only the per-test pytest tmp_path embedded in PIPX_HOME=... by reinstall_cmd.
         actual = result.output.replace(str(venv.parent.parent), "/tmp/pipx")
+        if command == "push" and mode == "--verbose":
+            # Track 165B prints a `Phase timings:` block before `Push:`.
+            # Verify it is present and strip it before comparing the exact update output.
+            assert "Phase timings:\n" in actual
+            lines = actual.splitlines(keepends=True)
+            filtered: list[str] = []
+            in_timings = False
+            for line in lines:
+                if line == "Phase timings:\n":
+                    in_timings = True
+                    continue
+                if in_timings and line.startswith("  "):
+                    continue
+                in_timings = False
+                filtered.append(line)
+            actual = "".join(filtered)
         updated_notice = (
             "mm: notice: updating mm 1.2.0 → 1.3.0 (pipx upgrade mind-meld)…\n"
             "mm: notice: updated mm 1.2.0 → 1.3.0; the next mm command runs it\n"
