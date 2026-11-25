@@ -757,6 +757,9 @@ def test_end_to_end_capture_only_and_next_push_drain(tmp_path, monkeypatch):
 
     # Initial push publishes notes/hello.md so remote manifest exists
     monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    monkeypatch.setattr(
+        identity, "_gather_gh_noreply_email", lambda: "5+user@users.noreply.github.com"
+    )
     assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
     mkey = storage_keys.manifest_key(env["device_id"])
     before_manifest = env["backend"].get(mkey)
@@ -1255,27 +1258,79 @@ def test_catchup_keeps_git_attribution_local(tmp_path, monkeypatch, lookup_curre
         assert not events.read_git_capture_cache()["repo_cursors"]
 
 
-def test_catchup_reuses_recent_complete_identity_refresh(tmp_path, monkeypatch):
+@pytest.mark.parametrize("refresh", ["overlap", "lookup-failed", "old-version", "older-check"])
+def test_catchup_preserves_cursor_until_identity_is_resolved(tmp_path, monkeypatch, refresh):
     env = _setup_fleet(tmp_path, monkeypatch)
-    repo = _make_git_repo(tmp_path / "repo-with-local-identity")
+    noreply = "5+user@users.noreply.github.com"
+    repo = _make_git_repo(tmp_path / "repo-identity-refresh", email=noreply)
     env["cfg"]["retro"]["repo_roots"] = [str(repo)]
     config.save_config(env["cfg"])
-    lookups = []
 
-    def check_github():
-        lookups.append(True)
-        return None
+    now = datetime.now(timezone.utc)
+    previous_cursor = (now - timedelta(days=1)).isoformat()
+    with lockedjson.locked_json_rmw(
+        config.GIT_CAPTURE_CACHE_PATH, default_factory=events._default_git_capture_cache
+    ) as state:
+        state.data["repo_cursors"] = {str(repo): previous_cursor}
+
+    cache = {
+        "version": identity.CACHE_VERSION,
+        "refreshed_at": (now - timedelta(seconds=identity.TTL_SECONDS + 1)).isoformat(),
+        "emails": ["user@example.com"],
+    }
+    if refresh == "old-version":
+        cache.update(version=identity.CACHE_VERSION - 1, refreshed_at=now.isoformat())
+    if refresh == "older-check":
+        cache.update(refreshed_at=now.isoformat(), github_noreply_checked_at=previous_cursor)
+    identity.CACHE_PATH.write_text(json.dumps(cache))
 
     monkeypatch.setattr(identity, "_gather_global_email", lambda: "user@example.com")
     monkeypatch.setattr(identity, "_gather_per_repo_emails", lambda **kwargs: [])
     monkeypatch.setattr(identity, "_gather_config_author_emails", lambda: [])
-    monkeypatch.setattr(identity, "_gather_gh_noreply_email", check_github)
-    assert identity.refresh_identity_cache(force=True) == ["user@example.com"]
+    lookups = []
+    lookup_result = None if refresh == "lookup-failed" else noreply
 
-    result = capturecatchup.run_catchup(["git_walk"])
-    assert result["result"] == "ok"
-    assert lookups == [True]
-    assert events.read_git_capture_cache()["repo_cursors"]
+    def check_github():
+        lookups.append(lookup_result)
+        return lookup_result
+
+    monkeypatch.setattr(identity, "_gather_gh_noreply_email", check_github)
+    if refresh == "lookup-failed":
+        assert identity.refresh_identity_cache(force=True) == ["user@example.com"]
+    elif refresh == "overlap":
+        configured_author_spellings = events._configured_author_spellings
+
+        def refresh_while_building_filter(config, roots):
+            if not lookups:
+                assert noreply in identity.refresh_identity_cache(force=True)
+            return configured_author_spellings(config, roots)
+
+        monkeypatch.setattr(events, "_configured_author_spellings", refresh_while_building_filter)
+
+    lookups_expected = {"lookup-failed": [None], "overlap": [noreply]}.get(refresh, [])
+    first = capturecatchup.run_catchup(["git_walk"])
+    git = events.latest_event_rows(env["events_dir"], env["device_id"], {"git-snapshot"})
+    assert lookups == lookups_expected
+    assert events.read_git_capture_cache()["repo_cursors"][str(repo)] == previous_cursor
+    assert first["result"] == "deferred"
+    assert "git-snapshot" not in git.rows
+    if refresh == "older-check":
+        assert identity.github_noreply_check_due(("user@example.com",))
+
+    if refresh != "overlap":
+        lookup_result = noreply
+        assert noreply in identity.refresh_identity_cache(force=True)
+        lookups_expected.append(noreply)
+    second = capturecatchup.run_catchup(["git_walk"])
+    git = events.latest_event_rows(env["events_dir"], env["device_id"], {"git-snapshot"})
+    assert lookups == lookups_expected
+    assert second["result"] == "ok"
+    assert events.read_git_capture_cache()["repo_cursors"][str(repo)] > previous_cursor
+    assert [
+        commit["subject"]
+        for project in git.rows["git-snapshot"]["projects"]
+        for commit in project["commits"]
+    ] == ["init"]
 
 
 def test_adversarial_revoking_grok_before_step1_prevents_read(tmp_path, monkeypatch):

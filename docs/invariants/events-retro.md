@@ -351,9 +351,9 @@ cache has a completed refresh, because capture runs before the tail's
 identity refresh and a partial or never-refreshed set would drop commits the
 cursor then passes. A completed cache that has no
 `<id>+<login>@users.noreply.github.com` address gets one bounded `gh api user`
-lookup, remembered for the cache TTL even when ``refreshed_at`` is already
-old. A never-refreshed cache is not created to store the check. A failed
-lookup does not fail open and is not repeated on every push.
+lookup, remembered for the cache TTL or until a full refresh replaces the
+identity baseline. A never-refreshed cache is not created to store the
+check. A failed lookup keeps the configured author filter.
 Push walks group representatives from their oldest effective per-group cursor
 — including an older cursor left by a sibling worktree this run did not
 discover, which discovery retirement folds into the retained representative
@@ -4300,11 +4300,14 @@ never change.
     Step 2 uses counts from Step 1 when the configuration still matches.
     It retains valid saved counts for readers still at deadline if a fresh
     count is unavailable. This avoids a second host-log inventory under
-    `L2`. Git attribution uses the resolved local author filter, including
-    when a recent full refresh or GitHub check found no noreply address. If
-    the filter needs a fresh lookup, catch-up defers Git work and leaves its
-    cursors pending for the normal push. A cold identity cache follows the
-    usual first-capture policy.
+    `L2`. Git attribution uses one read-only identity-cache snapshot for
+    both the author filter and its GitHub lookup evidence. A known noreply
+    address or a recent standalone GitHub check on that baseline allows
+    the walk. A full identity refresh can finish after a GitHub lookup
+    failure, so its timestamp alone cannot qualify a filtered walk. If the
+    cache is unreadable or the filter still needs a lookup, catch-up defers
+    Git work and leaves its cursors pending for a normal push. A missing or
+    never-refreshed cache follows the usual first-capture policy.
     A first-use discovery cancelled after opening the index initializes only
     its empty schema, so the worker can retry without carrying revoked roots.
     The worker

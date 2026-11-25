@@ -2024,9 +2024,9 @@ def _capture_git_rows(
             _accepted_kwargs(events.walk_git_projects, per_repo_cap_ms=per_repo_cap_ms)
         )
     if roots:
-        author_emails = events.resolve_walk_author_emails(config, roots)
         if origin == events.GIT_SNAPSHOT_ORIGIN_CATCHUP:
-            if identity.github_noreply_check_due(author_emails, offline=True):
+            author_emails = events.resolve_catchup_walk_author_emails(config, roots)
+            if author_emails is None:
                 # Keep the known author filter and let push resolve the
                 # missing identity before this interval's Git cursors move.
                 pending = replace(
@@ -2035,7 +2035,9 @@ def _capture_git_rows(
                 )
                 return [], pending, 0, 0
         else:
-            author_emails = identity.union_checked_github_noreply(author_emails)
+            author_emails = identity.union_checked_github_noreply(
+                events.resolve_walk_author_emails(config, roots)
+            )
         walk_kwargs.update(_accepted_kwargs(events.walk_git_projects, author_emails=author_emails))
     if deadline_monotonic is not None:
         # The git walk gets what discovery actually left of the tail

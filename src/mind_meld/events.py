@@ -2142,6 +2142,28 @@ def resolve_walk_author_emails(
     cached = identity.read_cached_identities(require_refresh=True)
     if cached is None:
         return ()
+    return _walk_author_patterns(cached, config, roots)
+
+
+def resolve_catchup_walk_author_emails(
+    config: Mapping[str, object], roots: Sequence[Path]
+) -> tuple[str, ...] | None:
+    """Select and validate the detached walk's author filter from one cache read.
+
+    ``None`` keeps the Git interval pending for a normal push.
+    """
+    cached, check_due = identity.read_catchup_identities()
+    if cached is None:
+        return None if check_due else ()
+    emails = _walk_author_patterns(cached, config, roots)
+    if check_due and emails and not identity.has_github_noreply(emails):
+        return None
+    return emails
+
+
+def _walk_author_patterns(
+    cached: list[str], config: Mapping[str, object] | None, roots: Sequence[Path]
+) -> tuple[str, ...]:
     found = _author_spellings(cached)
     for key, value in _configured_author_spellings(config, roots).items():
         found.setdefault(key, value)
