@@ -482,6 +482,10 @@ failure does not make content sync fail. Actionable and data-at-risk warnings
 still print before the outcome. Successful automatic commands stay silent,
 including when they move files.
 
+Update scripts that match the exact `Push: no content changes.` line to
+accept the usage clause. After upgrading, refresh the `/retro-fleet` skill
+with `mm install-skills` or the next `mm push`, then restart the agent.
+
 **Exit change:** an attended pull with any failed file now exits **1**, replacing
 its previous exit 0. Completed files remain applied. `mm autopull` keeps exit 0
 for contained failures and records the failed count; conflict-fail preflight
@@ -1237,11 +1241,13 @@ because `~/.claude/projects` cannot be listed says
 A held file keeps its previous
 published version, if any, and adds its own outcome line (`Push: 1 file held.` /
 `Push: N files held.`); its paths/reasons appear with `--verbose`.
-When an attended push publishes new or modified `mm-events` rows (host usage,
+When an attended push publishes new or changed `mm-events` data (host usage,
 session, or commit rows), the lead `Push:` line appends `; usage published`
 (for example, `Push: 10 content changes published; usage published.` or
-`Push: no content changes; usage published.`); when nothing in user content or
-`mm-events` published, it prints `Push: no content changes; no new usage.`.
+`Push: no content changes; usage published.`). The receipt uses the accepted
+manifest after file holds and requires publication proof for the captured host
+day file. A `no content changes` lead with no verified new usage prints
+`Push: no content changes; no new usage.`.
 If any attended host usage reader stopped at its deadline, the usage clause names
 the readers still catching up in parentheses (for example,
 `Push: no content changes; usage published (Grok catching up).`). `mm push --verbose`

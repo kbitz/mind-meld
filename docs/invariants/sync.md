@@ -92,10 +92,15 @@ holds. Existing content_files/content_changed evidence and GC semantics stay
 unchanged; invocation-only published_content_files, usage_published,
 catching_up_readers, and metadata/selection/repair facts distinguish accepted
 bytes, usage publication, metadata, selection and repair. Usage publication
-(`PushResult.usage_published`, true when this push accepted new or modified
-`mm-events` rows, excluding deletions and unverified attended host day files)
-and deadline-stopped attended host readers (`PushResult.catching_up_readers`,
-in canonical `HOST_USAGE_TOKEN_SOURCES` order) render on the lead `Push:`
+(`PushResult.usage_published`) compares the accepted `mm-events` files after
+upload holds with the prior file list, including recovered sidecar entries.
+An accepted path qualifies if it is new to that list or its hash differs
+from a valid prior SHA-256. The day file written by attended capture counts
+after the existing row-revision check verifies publication.
+
+Usage publication and deadline-stopped attended host readers
+(`PushResult.catching_up_readers`, in canonical `HOST_USAGE_TOKEN_SOURCES` order)
+render on the lead `Push:`
 outcome line: `; usage published` when usage published (e.g.
 `Push: 10 content changes published; usage published.`,
 `Push: no content changes; usage published.`), `; no new usage` when the lead

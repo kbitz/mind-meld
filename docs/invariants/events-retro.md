@@ -67,8 +67,10 @@ remain unchanged: a walk error does not introduce a new cursor-HOLD rule.
 
 Capture prerequisites, reader loss, no-row, append failure and unverified
 publication remain in the existing capture receipt/status projection while
-content's exit stays independent. Default output shows content's outcome, and
-verbose shows the optional phase; when a non-verbose attended `mm push` records
+content's exit stays independent. The final `Push:` line can report accepted usage
+and name deadline-stopped host readers. See
+[Attended terminal outcome](sync.md#attended-terminal-outcome-track-78a).
+Verbose output shows the optional phase. When a non-verbose attended `mm push` records
 `outcome == "degraded"`, `cli._sync_outcome` inspects `record["degradations"]`
 via `cli._owner_action_detail` and emits one `mm: notice: <detail>` line on
 stderr via `core._notice` immediately before `Push: ...` for the first detail
@@ -3714,9 +3716,11 @@ policy is inferred. The pin is the census host version, not a compatibility
 proof across intervening releases; CONTRACT keeps earlier fixture provenance.
 The real reader returned complete, 12 days, 3 partial days, 1.94s cold.
 The prior 2026-09-10 census used 1.0.25 (185 ledgers).
-https://docs.x.ai/build/overview establishes the model identity/rate level;
-https://docs.x.ai/developers/pricing establishes the rate cards and
-threshold. The 303-turn `costUsdTicks` census corroborates the rate shape
+The Build overview establishes the model identity, and xAI's pricing page
+supplies the rate cards and threshold.
+[Build overview](https://docs.x.ai/build/overview), [xAI pricing](https://docs.x.ai/developers/pricing).
+
+The 303-turn `costUsdTicks` census corroborates the rate shape
 (modal 1.700e9 ticks per list-USD; 77 turns exactly double), but the CLI
 field is 0.17x list at the documented API unit of 1e10 ticks/USD. Never
 decode it or use a census-calibrated constant to infer request tiers.
@@ -3731,8 +3735,8 @@ aggregates cannot recover, so the estimate is a floor. `grok-4.7-build` aliases 
 `GROK_47_MODEL_IDS` is those three ids
 (`frozenset({"grok-4.7", "grok-4.7-build", "grok-4.7-build-fast"})`), in
 `VERIFIED_MODEL_IDS`, dated by `PRICING_XAI_LAST_UPDATED`
-(https://docs.x.ai/developers/pricing). Bare `grok-4.7-fast` (retained Cursor)
-and effort ids remain unpriced. The dollar column is a list-rate
+(https://docs.x.ai/developers/pricing). Bundled rates leave bare `grok-4.7-fast`
+(retained Cursor) and effort ids unpriced. The dollar column is a list-rate
 equivalent, **not subscription spend**. Included usage and on-demand charges cannot
 be reconstructed from these counters.
 
