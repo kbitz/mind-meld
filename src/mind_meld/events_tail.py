@@ -1481,12 +1481,27 @@ def _host_skip_phrase(
     return f"{phrase}. Attended mm push refreshes usage automatically{diag}."
 
 
+def _configured_device_name(config: dict) -> str | None:
+    """Return the trimmed local device name from config, or None when absent/blank."""
+    if not isinstance(config, dict):
+        return None
+    dev = config.get("device")
+    if not isinstance(dev, dict):
+        return None
+    raw = dev.get("name")
+    if not isinstance(raw, str):
+        return None
+    cleaned = raw.strip()
+    return cleaned or None
+
+
 def _capture_host_snapshot(
     device_id: str,
     host_readers: Sequence[tuple[str, HostReader]],
     *,
     host_budget_ms: int,
     warm_host_cache: Callable[[str], None] | None = None,
+    device_name: str | None = None,
 ) -> tuple[HostUsageCapture, list[dict]]:
     """One bounded sweep, one warm/retry, at most one row. No writes.
 
@@ -1631,6 +1646,10 @@ def _capture_host_snapshot(
                 partial_days=host_capture.partial_days,
                 usage_days=host_capture.usage_days,
                 pending_left=pending_left or None,
+                **_accepted_kwargs(
+                    events.make_host_usage_snapshot,
+                    device_name=device_name,
+                ),
             )
         )
 
@@ -1797,17 +1816,19 @@ def _capture_event_snapshots(
         )
     if persist:
         events.flush_pending_session_state()
+    device_name = _configured_device_name(config)
     session_rows: list[dict] = []
     if claude_paths:
-        session_rows.append(
-            {
-                "v": events.EVENTS_SCHEMA_VERSION,
-                "type": "sessions-snapshot",
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "device": device_id,
-                "projects": projects,
-            }
-        )
+        session_row: dict = {
+            "v": events.EVENTS_SCHEMA_VERSION,
+            "type": "sessions-snapshot",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "device": device_id,
+            "projects": projects,
+        }
+        if device_name is not None:
+            session_row["device_name"] = device_name
+        session_rows.append(session_row)
 
     # Host capture starts only AFTER the `walk_done` snapshot, on a fresh
     # absolute deadline of its own. Both halves matter: reading the hosts
@@ -1823,6 +1844,7 @@ def _capture_event_snapshots(
             host_readers,
             host_budget_ms=host_budget_ms,
             warm_host_cache=warm_host_cache,
+            **_accepted_kwargs(_capture_host_snapshot, device_name=device_name),
         )
         if persist:
             _record_host_progress(
@@ -1954,8 +1976,11 @@ def _capture_git_rows(
         walk_budget_aborts=aborts,
         walk_errors=errs,
     )
+    device_name = _configured_device_name(config)
     for row in git_rows:
         row["device"] = device_id
+        if device_name is not None:
+            row["device_name"] = device_name
         row["git_capture"] = capture
         if origin is not None:
             row["origin"] = origin
@@ -2185,6 +2210,10 @@ def _run_events_tail(
                 discovery=events.classify_discovery(capture.root_discovery),
                 walk_budget_aborts=capture.walk_budget_aborts,
                 walk_errors=capture.walk_errors,
+            ),
+            **_accepted_kwargs(
+                events.make_mm_push_event,
+                device_name=_configured_device_name(config),
             ),
         )
         mm_event_ts = datetime.fromisoformat(mm_event["ts"])
