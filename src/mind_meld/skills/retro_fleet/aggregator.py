@@ -517,9 +517,13 @@ class RegistrationResolution:
     fold_map: dict[str, str] = field(default_factory=dict)
     folds: tuple[FoldedGroup, ...] = ()
     unfolded: tuple[UnregisteredDevice, ...] = ()
-    # Why stored names were unreadable ("passphrase" or "storage") when an
-    # unfolded ID was left without any name; None otherwise.
+    # Why stored names were unreadable ("passphrase", "passphrase-rejected" or
+    # "storage") when the lookup failed and any candidate, active or
+    # prior-window only, stayed unfolded; None otherwise.
     names_unavailable: str | None = None
+    # True when an incomplete registry blocked a unique name match for any
+    # candidate, active or prior-window only.
+    registry_blocked: bool = False
 
 
 @dataclass
@@ -539,6 +543,7 @@ class FleetState:
     folded_registrations: tuple[FoldedGroup, ...] = ()
     unregistered_details: tuple[UnregisteredDevice, ...] = ()
     names_unavailable: str | None = None
+    registry_blocked: bool = False
 
 
 # Skip-counter category key. Kept as a constant so call-sites stay
@@ -3592,7 +3597,8 @@ def get_unregistered_device_names(
 
     Returns ``(retired_names, manifest_names, unavailable)``. ``unavailable``
     is None when the stored records could be read, ``"passphrase"`` when no
-    passphrase was available or it did not verify, and ``"storage"`` when this
+    passphrase was available, ``"passphrase-rejected"`` when the available
+    passphrase did not unlock the key header, and ``"storage"`` when this
     device's storage could not be read or trusted (no usable config or key
     header, or a different fleet lineage). A retirement record written without
     a name stores the device ID instead; that placeholder is not a name.
@@ -3638,7 +3644,7 @@ def get_unregistered_device_names(
         try:
             mm_crypto.verify_passphrase(master_key, hdr.keycheck_blob)
         except Exception:
-            return {}, {}, "passphrase"
+            return {}, {}, "passphrase-rejected"
         mm_crypto.set_crypto_session(hdr.root_salt, hdr.argon2_memory_kb)
 
         retired_names: dict[str, str] = {}
@@ -3728,11 +3734,14 @@ def _resolve_unregistered_registrations(
     fold_map: dict[str, str] = {}
     grouped_folds: dict[str, list[str]] = {}
     unfolded: list[UnregisteredDevice] = []
+    registry_blocked = False
 
     for cid in sorted(candidates):
         raw_name = retired_names.get(cid) or event_names.get(cid) or manifest_names.get(cid)
         norm = _normalize_device_name(raw_name) if raw_name else ""
         matches = registered_by_name.get(norm, []) if norm else []
+        if len(matches) == 1 and registry_incomplete:
+            registry_blocked = True
         if len(matches) == 1 and not registry_incomplete:
             target_id = matches[0]
             fold_map[cid] = target_id
@@ -3793,6 +3802,7 @@ def _resolve_unregistered_registrations(
         folds=tuple(folds),
         unfolded=tuple(unfolded),
         names_unavailable=names_unavailable,
+        registry_blocked=registry_blocked,
     )
 
 
@@ -3989,6 +3999,7 @@ def aggregate(
             folded_registrations=resolution.folds,
             unregistered_details=resolution.unfolded,
             names_unavailable=resolution.names_unavailable,
+            registry_blocked=resolution.registry_blocked,
         ),
         skipped_per_source=dict(skip_counter),
         skipped_lines=sum(skip_counter.values()),
@@ -5569,15 +5580,24 @@ def _health_summary_line(health: list[dict]) -> list[str]:
 def _stored_names_unavailable(reason: str | None) -> tuple[str, str] | None:
     """Cause sentence and remedy step when stored device names were unreadable.
 
-    The retro skill acts on remedies, so the passphrase step keeps the passphrase
-    with the owner: it is never typed into chat or onto a command line.
+    The retro skill acts on remedies, so every passphrase or keyring step is the
+    owner's. The agent never unlocks a keyring, and no step advises exporting
+    `MINDMELD_PASSPHRASE`, a plaintext secret every agent subprocess would inherit.
     """
     if reason == "passphrase":
         return (
             "Names stored for earlier registrations could not be read because no"
             " passphrase was available",
-            "Unlock the keyring, or have the owner export `MINDMELD_PASSPHRASE` where the"
-            " agent process starts (never in chat or on a command line).",
+            "Have the owner unlock the keyring in their own desktop session or run"
+            " `mm retro-fleet` from a terminal there (`mm diag` shows the keyring backend"
+            " and item).",
+        )
+    if reason == "passphrase-rejected":
+        return (
+            "Names stored for earlier registrations could not be read because the"
+            " available passphrase did not unlock this fleet's key header",
+            "Have the owner check the passphrase the keyring or `MINDMELD_PASSPHRASE`"
+            " supplies (`mm diag` shows the keyring backend and item).",
         )
     if reason == "storage":
         return (
@@ -6063,15 +6083,30 @@ def format_retro(
             f"this {data.window_days}d. Counts compare as activity, not as a same-machine pair."
         )
         changed_extra: dict[str, object] = {}
+        changed_causes: list[str] = []
+        changed_steps: list[str] = []
+        # Same order as unregistered_devices: an incomplete registry blocks
+        # every fold whatever the stored names say.
+        if data.fleet.registry_blocked:
+            changed_causes.append(
+                "Matching names were not folded because the device registry is incomplete"
+                " (`mm devices` dropped an entry)"
+            )
+            changed_steps.append("Run `mm devices` to see the dropped entry.")
         changed_names = _stored_names_unavailable(data.fleet.names_unavailable)
         if changed_names is not None:
             cause, step = changed_names
+            changed_causes.append(cause)
+            changed_extra["names_unavailable"] = data.fleet.names_unavailable
+            changed_steps.append(step)
+        if changed_causes:
             changed_detail += (
-                f" {cause}, so an earlier registration of a current machine may count as a"
+                " "
+                + ". ".join(changed_causes)
+                + ", so an earlier registration of a current machine may count as a"
                 " different machine."
             )
-            changed_extra["names_unavailable"] = data.fleet.names_unavailable
-            changed_extra["remedy"] = f"{step} Then re-run the retro."
+            changed_extra["remedy"] = " ".join(changed_steps) + " Then re-run the retro."
         note("fleet_changed", changed_detail, **changed_extra)
 
     lines.extend(_health_summary_line(health))

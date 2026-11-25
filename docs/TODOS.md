@@ -156,12 +156,105 @@ here by hand, use the H3 form.
 
 - **ID:** wi-0b63d7
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** When stored device names cannot be read for storage reasons (`names_unavailable: storage`), the retro's health entries carry an `mm status` remedy. Only the missing-passphrase case is rendered end to end. The fleet-fingerprint mismatch test checks the lookup's return value without rendering it, and a wrong passphrase is not exercised.
-- **Hypothesis (untested):** Render the storage case, for example a mismatched fleet fingerprint with an unnamed superseded push row, asserting `names_unavailable == "storage"` and the `mm status` step; add a wrong-passphrase variant of `test_unreadable_stored_names_explain_unfolded_registrations`.
+- **Description:** When stored device names cannot be read for storage reasons (`names_unavailable: storage`), the retro's health entries carry an `mm status` remedy. Only the missing-passphrase and rejected-passphrase cases are rendered end to end. The fleet-fingerprint mismatch test checks the lookup's return value without rendering it.
+- **Hypothesis (untested):** Render the storage case, for example a mismatched fleet fingerprint with an unnamed superseded push row, asserting `names_unavailable == "storage"` and the `mm status` step.
 - **Upstream severity:** INFORMATIONAL
 - **Found in:** `tests/test_retro_fleet_aggregator.py:9648`
 - **Evidence:** Track 166A review, cycle 3 testing specialist; no failure reproduced.
 - **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `da9877e` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py] Decide whether a concurrent same-name machine may fold
+
+- **ID:** wi-330c1d
+- **Description:** Folding matches on the normalized device name alone. An unregistered ID that is still active and shares a registered machine's name folds into that machine even when both pushed on the same days. The registered device then wins each overlapping (agent family, day), and the other machine's usage on those days leaves the totals. The retro is read-only, every event stays on disk and each fold is disclosed under `folded_registrations`, so nothing is lost. A temporal guard, folding only IDs whose last event precedes the target's first, would change the plan's approved rule, so this needs an owner decision.
+- **Upstream severity:** P3 (outside challenge, cycle 2); Low (native adversarial, cycle 3)
+- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3703`
+- **Revisit:** An owner decision on name reuse, or a retro that folds a machine that was still running.
+- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py] Disclose partial stored-name reads and a dropped registry match
+
+- **ID:** wi-67acb1
+- **Description:** The review recorded three disclosure gaps as not shown:
+  - An unreadable retirement or manifest record is skipped per record. `names_unavailable` stays None and no remedy appears (`aggregator.py:3585`). The same happens after the passphrase verifies: `retirements.unreadable` and `newer_format` are ignored, and any exception from `read_retirement_records` empties every retired name. A peer-supplied candidate ID that the OS path encoder rejects raises `ValueError`, which the bounded read does not convert, so one bad ID discards every requested record (`aggregator.py:3657`).
+  - While the stored lookup fails, an ID whose event-row name matches still folds. A stored retirement name outranks the event-row name and might name another machine. The fold is disclosed but not marked provisional (`aggregator.py:3732`).
+  - When the dropped registry entry is the match itself, for example an unreadable `devices/dev-cur.json`, no match is blocked. Neither `unregistered_devices` nor `fleet_changed` then says the registry is incomplete. The current machine shows as unregistered, and Claude can double-count (`aggregator.py:5888`, `:5906`). Carrying the raw `registry_incomplete` signal on `FleetState` and disclosing it whenever it is set would close this.
+- **Upstream severity:** P2, P3 and INFORMATIONAL (outside voices, native adversarial, state-machines specialist, red team)
+- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3585`
+- **Revisit:** A retro whose stored-name lookup partly fails, or an `mm devices` warning about the current machine's own entry.
+- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|docs/invariants/events-retro.md] Measure the stored-name lookup's key derivation and keyring access
+
+- **ID:** wi-7da076
+- **Description:** Each retro with an unregistered candidate derives the Argon2 master key once (`aggregator.py:3571`, `:3889`). It also reads one manifest per unnamed candidate, with no cap (`:3621`). `docs/invariants/events-retro.md:1233` says the lookup reads without prompting. README already documents that macOS Keychain dialogs, some Linux keyring backends and a stalled D-Bus session can block. A retro started by an agent could therefore wait on a dialog the agent cannot answer. The plan accepts a locked keyring (risk at plan line 144). A changed `MINDMELD_PASSPHRASE` also reaches only an agent session started after the change, so when that variable supplies a rejected passphrase, a re-run in the same session repeats the cause (red team, `src/mind_meld/skills/retro_fleet/SKILL.md:323`).
+- **Upstream severity:** P3 (outside voices) and Low (native adversarial)
+- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3571`
+- **Revisit:** A slow retro on a fleet with many superseded IDs, or an unlock dialog during a retro.
+- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py] Keep fold disclosures distinct for non-ASCII and colliding IDs
+
+- **ID:** wi-e60b6b
+- **Description:** `_normalize_device_name` keeps non-ASCII letters, but `_safe_short` strips them. A fold matched on a non-ASCII name therefore renders an empty target name in `MM_HEALTH` and in `--dump-host-usage` (`aggregator.py:5866`, `:2939`). The dump gives colliding superseded IDs distinct aliases. Two other places use plain sanitization, so IDs that sanitize alike look identical there: `folded_registrations` in `MM_HEALTH` (`:5868`) and the dump's `unregistered_devices[].device_id` (`:2954`). The `folded_registrations` entry is also not bounded the way `unregistered_ids` is (`:5876`).
+- **Upstream severity:** P3 (outside voices, native adversarial); INFORMATIONAL (red team, twice)
+- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:5876`
+- **Revisit:** A device name outside ASCII, or a fold list long enough to crowd `MM_HEALTH`.
+- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py] Decide whether one winner per folded day should cover tokens and skills
+
+- **ID:** wi-cf4c62
+- **Description:** For a folded (canonical, day), the token winner is the highest-ranked member with non-excluded tokens. The skill winner is chosen separately, as the highest-ranked member with skills that day. Plan lines 66-67 direct both rules. So on a day the registered machine reports Claude tokens but no skills, the superseded registration's skills count. When the registered machine has only `COST_EXCLUDED_MODELS` volume, the superseded registration's tokens win. Both outside voices graded this against criterion 1 (only the registered device counts on an overlapping day). They suggested choosing one winner per (canonical, day) from any reported activity and using it for both tokens and skills.
+- **Upstream severity:** P3 (outside challenge and structured, continuation); P2 (outside structured, cycle 2)
+- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3301`
+- **Revisit:** An owner decision on the winner rule, or a retro whose skill counts look high on a re-registration day.
+- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|src/mind_meld/core.py|src/mind_meld/devicesflow.py|docs/invariants/events-retro.md] Make the registry-incomplete signal a contract, not warning text
+
+- **ID:** wi-cd3838
+- **Description:** `get_known_devices` treats any stderr line that starts with the literal `mm: warning: dropped device entry ` as an incomplete registry (`aggregator.py:3467`). That text is produced in `core.py`, and no shared constant or end-to-end test ties the two together. The `mm devices --format=json` contract in `events-retro.md` does not say stderr is part of it. The new vanished-entry warnings (`devicesflow.py:50`) also print on a transient Syncthing replacement. The owner cannot act on those, which conflicts with the O8 output rule.
+- **Upstream severity:** P3 (maintainability, outside voices); Low (native adversarial)
+- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3467`
+- **Revisit:** Any change to the `mm devices` warning text, or a vanished-entry warning during a normal Syncthing pull.
+- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|src/mind_meld/events_tail.py|src/mind_meld/crypto.py|docs/invariants/README.md] Clean up Track 166A's dead helper and compatibility shims
+
+- **ID:** wi-b7e65e
+- **Description:** Four cleanups the review kept as advisory:
+  - `_host_family_day_tuples` has no callers after the scoped rewrite, and `docs/invariants/README.md` still cites it (`aggregator.py:805`).
+  - Production code carries arity shims for old test doubles: the star-unpacks of `get_known_devices()` and `get_unregistered_device_names(...)` (`aggregator.py:3855`), and `device_name` passed through `_accepted_kwargs` at four call sites (`events_tail.py:1649`).
+  - `get_unregistered_device_names` snapshots and restores `crypto`'s private `_SESSION` and `_MASTER_KEY_CACHE` from outside the module (`aggregator.py:3610`).
+  - Every retro validates each host-usage row twice: `aggregate()` runs `_accept_host_row_at` on every host row, registered devices included, and `aggregate_host_usage` repeats it (`aggregator.py:3893`).
+- **Upstream severity:** INFORMATIONAL (simplification and maintainability specialists, outside structured); Low (native adversarial)
+- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:805`
+- **Revisit:** The next change to these call sites, or a test-double sweep.
+- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py] Re-run the attacker-reported fold edge cases
+
+- **ID:** wi-487c8a
+- **Description:** Attacker parts reported these, and the review did not re-run them (`attacker-not-rerun`):
+  - Empty-`source_root` coalescing runs on the raw device before folding, so a superseded registration's v=2 snapshot with an empty root and the target's populated root for the same `claude_dir` may both count (`aggregator.py:3140`).
+  - `_agent_rhythm_view` folds superseded rows into active machines but counts accepted snapshots only from `by_device` (`:4467`).
+  - Legacy counters on a superseded snapshot blame the registered target, so the `legacy_counters` note tells the owner to push or upgrade the current machine. That cannot fix a retired registration's history (`:1099`).
+  - A folded device whose only accepted host snapshot is near-future skew contributes host usage while `devices_in_events` stays 0 (`:3859`).
+  - A new registration that never pushes can stay hidden for up to one window after its old ID retires. The target counts as active when only its superseded ID pushed, so `fleet_incomplete` does not name it (`:3922`).
+  - Cycle 2's family-drift (`:961`) and coverage-note (`:4709`) items, recorded in the stopped run's cycle-2 decision file.
+- **Upstream severity:** INFORMATIONAL and Low (red team, native adversarial)
+- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3140`
+- **Revisit:** A retro that folds a machine with v=2 snapshots, legacy counters or clock skew.
+- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
 - **Effort:** ? (user triages in /roadmap)
 
 ## Drain records

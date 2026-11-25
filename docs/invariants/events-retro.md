@@ -1238,20 +1238,26 @@ fleet fingerprint before decryption. Retirement and manifest reads use
 the storage directory and enforces its byte limit on the opened regular file.
 A retirement record written without a name stores the device ID; that
 placeholder is not a name, so the event-row and manifest sources still apply.
-The lookup reports why stored names were unreadable (`passphrase` or
-`storage`). A stored name outranks the event-row name, so while the lookup
-fails any ID left unfolded, named or not and active or prior-window only,
-might belong to a registered machine: `unregistered_devices` and
-`fleet_changed` carry `names_unavailable` and a remedy (unlock the keyring, or
-have the owner export `MINDMELD_PASSPHRASE` where the agent process starts,
-never in chat or on a command line; or check storage with `mm status`). When
-`mm devices` also dropped an entry, the remedy keeps its `mm devices` step
-first.
+The lookup reports why stored names were unreadable: `passphrase` (no
+passphrase was available), `passphrase-rejected` (the available passphrase did
+not unlock the key header) or `storage`. A stored name outranks the event-row
+name, so while the lookup fails any ID left unfolded, named or not and active
+or prior-window only, might belong to a registered machine:
+`unregistered_devices` and `fleet_changed` carry `names_unavailable` and a
+remedy. The retro skill acts on remedies, so every passphrase or keyring step
+is the owner's: they unlock the keyring in their own desktop session or run
+`mm retro-fleet` from a terminal there, and they check a rejected passphrase
+(`mm diag` shows the keyring backend and item). No remedy advises exporting
+`MINDMELD_PASSPHRASE`, a plaintext secret every agent subprocess would
+inherit. A storage failure is checked with `mm status`.
 If `mm devices --format=json` warns that it dropped a registration (unreadable,
 or vanished while being read), the readable entries still scope the retro:
 counts, host `by_device` and the denominator are unchanged. Nothing folds,
-because a partial registry cannot prove a unique match; each name match is
-listed under `unregistered_devices`, which says the registry is incomplete.
+because a partial registry cannot prove a unique match. Each active name match
+is listed under `unregistered_devices`, which says the registry is incomplete.
+Any blocked match, active or prior-window only, sets
+`FleetState.registry_blocked`, so `fleet_changed` names the incomplete registry
+too. Both remedies put the `mm devices` step before any stored-name step.
 When the name is missing, matches zero
 registered devices, or matches more than one registered device (ambiguous),
 nothing folds for that ID: Claude retains its usage as today, host `by_device`

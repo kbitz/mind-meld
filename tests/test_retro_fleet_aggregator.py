@@ -9675,7 +9675,7 @@ class TestSupersededRegistrationFolding:
         entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
         assert entry is not None and entry["unregistered_ids"] == ["dev-old-1"]
         assert entry.get("names_unavailable") == "passphrase"
-        assert "MINDMELD_PASSPHRASE" in entry.get("remedy", "")
+        assert "Have the owner unlock the keyring" in entry.get("remedy", "")
 
     def test_nameless_retirement_record_defers_to_event_names(self, tmp_path: Path, monkeypatch):
         # A record written without a name stores the device ID instead.
@@ -9729,8 +9729,8 @@ class TestSupersededRegistrationFolding:
         assert entry.get("names_unavailable") == "passphrase"
         remedy = entry.get("remedy", "")
         # Nothing folds until the registry is whole, so its step comes first.
-        assert "mm devices" in remedy and "MINDMELD_PASSPHRASE" in remedy
-        assert remedy.index("mm devices") < remedy.index("MINDMELD_PASSPHRASE")
+        assert "mm devices" in remedy and "unlock the keyring" in remedy
+        assert remedy.index("mm devices") < remedy.index("unlock the keyring")
 
     def test_passphrase_remedy_leaves_the_passphrase_to_the_owner(
         self, tmp_path: Path, monkeypatch
@@ -9752,10 +9752,12 @@ class TestSupersededRegistrationFolding:
         entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
         assert entry is not None
         remedy = entry.get("remedy", "")
-        # The retro skill acts on remedies, so this one must not invite it to
-        # collect or type the passphrase.
-        assert "where the agent process starts" in remedy
-        assert "never in chat or on a command line" in remedy
+        # The retro skill acts on remedies, so this one leaves the keyring to the
+        # owner and never advises putting the passphrase in an agent's environment.
+        assert "Have the owner unlock the keyring in their own desktop session" in remedy
+        assert "Unlock the keyring" not in remedy
+        assert "MINDMELD_PASSPHRASE" not in remedy
+        assert "export" not in remedy
 
     def test_unreadable_stored_names_are_reported_for_named_ids(self, tmp_path: Path, monkeypatch):
         registered = [{"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"}]
@@ -9780,7 +9782,7 @@ class TestSupersededRegistrationFolding:
         entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
         assert entry is not None and entry["unregistered_ids"] == ["dev-old-1"]
         assert entry.get("names_unavailable") == "passphrase"
-        assert "MINDMELD_PASSPHRASE" in entry.get("remedy", "")
+        assert "Have the owner unlock the keyring" in entry.get("remedy", "")
 
     def test_unreadable_stored_names_explain_a_changed_fleet(self, tmp_path: Path, monkeypatch):
         registered = [{"device_id": "dev-cur", "device_name": "mac-a"}]
@@ -9810,7 +9812,92 @@ class TestSupersededRegistrationFolding:
         assert data.fleet.unregistered_details == ()
         entry = _health_entry(aggregator.format_retro(data), "fleet_changed")
         assert entry is not None and entry.get("names_unavailable") == "passphrase"
-        assert "MINDMELD_PASSPHRASE" in entry.get("remedy", "")
+        assert "Have the owner unlock the keyring" in entry.get("remedy", "")
+
+    def test_rejected_passphrase_is_reported_apart_from_a_missing_one(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from mind_meld import crypto as mm_crypto
+
+        self._storage_fleet(tmp_path, monkeypatch, retired_name="mac-a", passphrase_set=False)
+        # A passphrase is available but does not unlock this fleet's key header.
+        monkeypatch.setenv(mm_crypto.ENV_VAR, "other-passphrase-folding")
+        events_dir = tmp_path / "events"
+        self._write_events(
+            events_dir,
+            f"storage-{self.D4}.jsonl",
+            [
+                self._push_row("dev-old-1", f"{self.D3}T12:00:00+00:00"),
+                self._push_row("dev-cur", f"{self.D4}T12:00:00+00:00", device_name="mac-a"),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.fleet.folded_registrations == ()
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        assert entry is not None and entry["unregistered_ids"] == ["dev-old-1"]
+        assert entry.get("names_unavailable") == "passphrase-rejected"
+        assert "did not unlock this fleet's key header" in entry["detail"]
+        remedy = entry.get("remedy", "")
+        # Exporting a passphrase does not fix a wrong one; the owner checks it.
+        assert "export" not in remedy
+        assert remedy.startswith("Have the owner check the passphrase")
+        assert "mm diag" in remedy
+
+    @pytest.mark.parametrize("lookup", [None, "passphrase"])
+    def test_incomplete_registry_explains_a_changed_fleet(
+        self, tmp_path: Path, monkeypatch, lookup
+    ):
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            aggregator.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"device_id": "dev-cur", "device_name": "mac-a"}]),
+                stderr="mm: warning: dropped device entry devices/dev-b.json — unreadable\n",
+            ),
+        )
+        monkeypatch.setattr(
+            aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}, lookup)
+        )
+        ts = f"{self.D4}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            "dev-cur-2026-11-10.jsonl",
+            [
+                # A prior-window name match the dropped entry blocks.
+                self._push_row("dev-old-1", "2026-11-15T12:00:00+00:00", device_name="mac-a"),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+                self._git_row(
+                    "dev-cur",
+                    ts,
+                    [{"sha": "abcdef1", "date": ts, "add": 2, "del": 1, "subject": "fix: test"}],
+                ),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.comparison.status == "ok" and data.comparison.fleet_changed is True
+        assert data.fleet.unregistered_details == ()
+        rendered = aggregator.format_retro(data)
+        assert _health_entry(rendered, "unregistered_devices") is None
+        entry = _health_entry(rendered, "fleet_changed")
+        assert entry is not None
+        assert "device registry is incomplete" in entry["detail"]
+        remedy = entry.get("remedy", "")
+        assert remedy.startswith("Run `mm devices` to see the dropped entry.")
+        assert remedy.endswith("Then re-run the retro.")
+        if lookup is None:
+            assert "names_unavailable" not in entry
+            assert "keyring" not in remedy
+        else:
+            # Nothing folds until the registry is whole, so its step comes first.
+            assert entry.get("names_unavailable") == "passphrase"
+            assert remedy.index("mm devices") < remedy.index("unlock the keyring")
 
     def test_unregistered_disclosure_lists_stay_bounded(self, tmp_path: Path, monkeypatch):
         registered = [
