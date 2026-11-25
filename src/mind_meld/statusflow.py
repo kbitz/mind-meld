@@ -1974,11 +1974,7 @@ def _catchup_failure_superseded(
     if attended_evidence.get("state") == "valid":
         att_runs = attended_evidence.get("runs")
         att_push = att_runs.get("push") if isinstance(att_runs, dict) else None
-        if (
-            isinstance(att_push, dict)
-            and att_push.get("outcome") == "success"
-            and att_push.get("cause") == "ok"
-        ):
+        if isinstance(att_push, dict) and att_push.get("outcome") == "success":
             att_at = events.parse_aware_ts(att_push.get("completed_at"))
             auto_at = (
                 events.parse_aware_ts(auto_push.get("timestamp"))

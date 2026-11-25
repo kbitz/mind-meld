@@ -1818,3 +1818,39 @@ def test_attended_push_skipping_git_capture_does_not_supersede_failed_catchup(
     res_recovered = runner.invoke(cli.app, ["status"])
     assert res_recovered.exit_code == 0
     assert "Background capture catch-up failed. Run: mm diag" not in res_recovered.stdout
+
+
+def test_no_change_attended_push_preserves_catchup_recovery(tmp_path, monkeypatch):
+    """Simulate failed catch-up, repairing attended push, then a no-change attended push."""
+    env = _setup_fleet(tmp_path, monkeypatch)
+    repo = _make_git_repo(tmp_path / "repo-attended-recovery-stays")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+
+    now = datetime.now(timezone.utc)
+    capturecatchup.record_catchup_state(
+        state="finished",
+        result="failed",
+        started_at=(now - timedelta(seconds=1)).isoformat(),
+        finished_at=now.isoformat(),
+        trigger_phases=["git_walk"],
+        detail="Git capture index unreadable; run mm diag",
+    )
+    res_fail = runner.invoke(cli.app, ["status"])
+    assert res_fail.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" in res_fail.stdout
+
+    # Repairing attended push completes Git capture and clears the catch-up warning.
+    (env["notes_dir"] / "hello.md").write_text("repair git capture\n")
+    assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    res_recovered = runner.invoke(cli.app, ["status"])
+    assert res_recovered.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" not in res_recovered.stdout
+
+    # A later no-change attended push must not bring the cleared warning back.
+    assert runner.invoke(cli.app, ["push"]).exit_code == 0
+    res_after_noop = runner.invoke(cli.app, ["status"])
+    assert res_after_noop.exit_code == 0
+    assert "Background capture catch-up failed. Run: mm diag" not in res_after_noop.stdout
