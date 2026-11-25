@@ -2,6 +2,17 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.86] - 2026-11-24
+
+Attended push now shows phase progress and timings, and `mm autopush` reads enabled host usage providers concurrently.
+
+### Changed
+
+- Attended push progress now shows per-phase counts and elapsed time, `mm push --verbose` and `mm diag` report per-phase timings, and `mm autopush` runs enabled host usage readers concurrently with an equal 1,000 ms deadline per provider.
+- Attended `mm push` shows live phase counts and elapsed time.
+- `mm push --verbose` reports phase timings, and `mm diag --json` exposes the recorded timings in `push_timings`.
+- `mm autopush` reads enabled providers concurrently with an independent deadline that defaults to 1,000 ms per provider.
+
 ## [1.12.85] - 2026-11-24
 
 Attended `mm pull` now reports the content changes applied from each peer device on its outcome line.
