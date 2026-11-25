@@ -149,6 +149,9 @@ Lets the aggregator exclude them from its zero-capture *push* note
 GIT_SNAPSHOT_ORIGIN_INIT = "init"
 """Init backfill marker; commits count, but zero-repository push counts do not."""
 
+GIT_SNAPSHOT_ORIGIN_CATCHUP = "catchup"
+"""Background catch-up marker; commits and coverage count, but push counts do not."""
+
 WALK_SKIP_BUDGET_ABORT = "budget_abort"
 WALK_SKIP_TIMEOUT = "timeout"
 WALK_SKIP_NO_COMMITS = "no_commits"
@@ -698,6 +701,7 @@ def discover_git_roots(
     persist: bool = False,
     since: datetime | None = None,
     progress: Callable[[int, int], None] | None = None,
+    before_read: Callable[[], None] | None = None,
 ) -> GitRootDiscovery:
     """Discover git roots with one cooperative, call-scoped deadline.
 
@@ -769,6 +773,8 @@ def discover_git_roots(
 
     # Explicit roots take precedence over automatic registries: a large stale
     # host corpus must not starve the user-configured escape hatch.
+    if before_read is not None:
+        before_read()
     try:
         manual_raw = (config.get("retro", {}) or {}).get("repo_roots") or []
         manual_candidates: list[Path] = []
@@ -818,6 +824,8 @@ def discover_git_roots(
         if deadline_expired():
             mark_exceeded()
             break
+        if before_read is not None:
+            before_read()
         cache["prober_resume_after"] = name
         cache.pop("_probe_validated", None)
         try:
@@ -981,42 +989,67 @@ def discover_git_roots(
             if key in retained and isinstance(value, str) and value
         }
     if persist:
+        index_path = mm_config.GIT_CAPTURE_CACHE_PATH
+        if before_read is not None:
+            before_read()
+        initializing_index = before_read is not None and not index_path.exists()
+        cancelled = None
         try:
             with lockedjson.locked_json_rmw(
-                mm_config.GIT_CAPTURE_CACHE_PATH,
+                index_path,
                 default_factory=_default_git_capture_cache,
                 on_contention="raise",
             ) as locked:
-                _normalize_git_capture_cache(locked.data)
-                # Merge only discovery-owned fields; cursor commits have their own lock interval.
-                for key in (
-                    "projects",
-                    "discovery_resume_after",
-                    "prober_resume_after",
-                    "pending_refresh_since",
-                    "probe_index",
-                ):
-                    locked.data[key] = cache[key]
-                for root, ts in cache["repo_cursors"].items():
-                    if original_cache["repo_cursors"].get(root) != ts:
-                        previous = locked.data["repo_cursors"].get(root)
-                        locked.data["repo_cursors"][root] = min(previous, ts) if previous else ts
-                for root in original_cache["repo_cursors"].keys() - cache["repo_cursors"].keys():
-                    locked.data["repo_cursors"].pop(root, None)
-                locked_stores = locked.data.get("repo_cursor_stores")
-                if not isinstance(locked_stores, dict):
-                    locked_stores = {}
-                    locked.data["repo_cursor_stores"] = locked_stores
-                for key in list(locked_stores):
-                    if key not in locked.data["repo_cursors"]:
-                        locked_stores.pop(key, None)
-                remembered = cache.get("repo_cursor_stores")
-                if isinstance(remembered, dict):
-                    for key, value in remembered.items():
-                        if key in locked.data["repo_cursors"] and isinstance(value, str) and value:
-                            locked_stores.setdefault(key, value)
+                try:
+                    if before_read is not None:
+                        before_read()
+                except Exception as exc:
+                    # An aborted first-use open may have created the inode.
+                    # Initialize just the empty schema so a later worker can
+                    # retry. Preserve every byte of an existing index.
+                    locked.write_on_exit = initializing_index and locked.read_state == "empty"
+                    cancelled = exc
+                else:
+                    _normalize_git_capture_cache(locked.data)
+                    # Merge discovery-owned fields only. Cursor commits have their own lock.
+                    for key in (
+                        "projects",
+                        "discovery_resume_after",
+                        "prober_resume_after",
+                        "pending_refresh_since",
+                        "probe_index",
+                    ):
+                        locked.data[key] = cache[key]
+                    for root, ts in cache["repo_cursors"].items():
+                        if original_cache["repo_cursors"].get(root) != ts:
+                            previous = locked.data["repo_cursors"].get(root)
+                            locked.data["repo_cursors"][root] = (
+                                min(previous, ts) if previous else ts
+                            )
+                    for root in (
+                        original_cache["repo_cursors"].keys() - cache["repo_cursors"].keys()
+                    ):
+                        locked.data["repo_cursors"].pop(root, None)
+                    locked_stores = locked.data.get("repo_cursor_stores")
+                    if not isinstance(locked_stores, dict):
+                        locked_stores = {}
+                        locked.data["repo_cursor_stores"] = locked_stores
+                    for key in list(locked_stores):
+                        if key not in locked.data["repo_cursors"]:
+                            locked_stores.pop(key, None)
+                    remembered = cache.get("repo_cursor_stores")
+                    if isinstance(remembered, dict):
+                        for key, value in remembered.items():
+                            if (
+                                key in locked.data["repo_cursors"]
+                                and isinstance(value, str)
+                                and value
+                            ):
+                                locked_stores.setdefault(key, value)
         except OSError:
             pass
+        if cancelled is not None:
+            raise cancelled
     if exceeded:
         errors.append(GIT_ROOT_DISCOVERY_BUDGET_ERROR)
     return GitRootDiscovery(
@@ -2113,6 +2146,28 @@ def resolve_walk_author_emails(
     cached = identity.read_cached_identities(require_refresh=True)
     if cached is None:
         return ()
+    return _walk_author_patterns(cached, config, roots)
+
+
+def resolve_catchup_walk_author_emails(
+    config: Mapping[str, object], roots: Sequence[Path]
+) -> tuple[str, ...] | None:
+    """Select and validate the detached walk's author filter from one cache read.
+
+    ``None`` keeps the Git interval pending for a normal push.
+    """
+    cached, check_due = identity.read_catchup_identities()
+    if cached is None:
+        return None if check_due else ()
+    emails = _walk_author_patterns(cached, config, roots)
+    if check_due and emails and not identity.has_github_noreply(emails):
+        return None
+    return emails
+
+
+def _walk_author_patterns(
+    cached: list[str], config: Mapping[str, object] | None, roots: Sequence[Path]
+) -> tuple[str, ...]:
     found = _author_spellings(cached)
     for key, value in _configured_author_spellings(config, roots).items():
         found.setdefault(key, value)
@@ -3430,12 +3485,12 @@ def commit_repo_cursors(
     recorded_ts: str | datetime | None = None,
     complete: bool = True,
     _reconciling: bool = False,
-) -> None:
+) -> bool:
     """Commit repository progress only after the caller verifies the event append.
 
     Failed roots keep the exact previously retained interval. New failed roots
     acquire the capture's old interval before the global event cursor advances.
-    A completed empty repository is progress just like a successful git log.
+    Return False when the cache could not be written.
     """
     recorded = recorded_ts if isinstance(recorded_ts, datetime) else parse_aware_ts(recorded_ts)
     try:
@@ -3452,8 +3507,9 @@ def commit_repo_cursors(
                 reconciling=_reconciling,
             ):
                 state.write_on_exit = False
+        return state.is_locked and state.write_error is None
     except OSError:
-        pass  # The event log remains authoritative; reconciliation retries later.
+        return False  # The event log remains authoritative.
 
 
 def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None:
@@ -3478,6 +3534,7 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
                 if row.get("origin") not in (
                     GIT_SNAPSHOT_ORIGIN_INIT,
                     GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+                    GIT_SNAPSHOT_ORIGIN_CATCHUP,
                 ):
                     pending.append(row)
                 continue
@@ -4069,7 +4126,8 @@ def write_push_event(
     Order invariant (CT-4): when an ``mm-push`` row is present, it MUST
     be last so a partial write cannot advance the cursor. Host-only attended
     captures may omit it; git rows in a batch without it must carry an
-    origin (init or recapture). These rows do not move the cursor. Partial write before the
+    origin (init, recapture, or catchup). These rows do not move the cursor.
+    Partial write before the
     mm-push appends → next push re-walks the range (deduped at retro
     render via canonical (remote, sha)). The single flock window is
     best-effort batching, NOT transactionality. A subsequent append separates

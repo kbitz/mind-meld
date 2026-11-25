@@ -1667,12 +1667,13 @@ def aggregate_git(
         if isinstance(device, str) and device:
             origin = ev.get("origin")
             in_window = _within_window(ev.get("ts"), since, until)
-            # Init and recapture are not pushes. An absent or unknown origin
-            # still counts (pre-30A / forward fail-open). T8 counts either as
-            # covering its interval — opposite treatment of one field.
+            # Init, recapture, and catch-up are not pushes. An absent or unknown
+            # origin still counts (pre-30A / forward fail-open). T8 counts them
+            # as covering their interval — opposite treatment of one field.
             if in_window and origin not in (
                 mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
                 mm_events.GIT_SNAPSHOT_ORIGIN_INIT,
+                mm_events.GIT_SNAPSHOT_ORIGIN_CATCHUP,
             ):
                 snap_total[device] = snap_total.get(device, 0) + 1
                 if not projects:

@@ -8,7 +8,7 @@ import re
 import stat
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from dataclasses import replace as replace_dataclass
@@ -22,6 +22,7 @@ from packaging.version import InvalidVersion, Version
 from mind_meld import (
     __version__,
     attemptlog,
+    capturecatchup,
     core,
     crypto,
     events,
@@ -873,6 +874,70 @@ def status(
         # One cached read per command, never a refresh: the verdict, the blocker
         # lines and the Seam 3 display below all follow the same view.
         upgrade_result = upgrade.cached_upgrade_view(config)
+        catchup_state, catchup_running = capturecatchup.catchup_observation()
+        auto_runs = auto_evidence.get("runs") if isinstance(auto_evidence.get("runs"), dict) else {}
+        auto_push = auto_runs.get("push") if isinstance(auto_runs, dict) else None
+        auto_push_at = (
+            events.parse_aware_ts(auto_push.get("timestamp"))
+            if isinstance(auto_push, dict)
+            else None
+        )
+        catchup_covering_push = bool(
+            isinstance(auto_push, dict)
+            and auto_push.get("capture_deadline_only") is True
+            and capturecatchup.covers_deadline_backlog(
+                catchup_state, running=catchup_running, backlog_at=auto_push_at
+            )
+        )
+        covered_readers: set[str] = set()
+        for name, rstate in reader_states.items():
+            if rstate.get("last_reason") == "deadline" and (
+                not catchup_state.get("trigger_phases")
+                or _catchup_covers_part(catchup_state, f"host:{name}")
+            ):
+                reason_at = events.parse_aware_ts(rstate.get("last_reason_since"))
+                if (
+                    catchup_running or reason_at is not None
+                ) and capturecatchup.covers_deadline_backlog(
+                    catchup_state, running=catchup_running, backlog_at=reason_at
+                ):
+                    covered_readers.add(name)
+        mm_push_ts = events.parse_aware_ts((capture_rows.rows.get("mm-push") or {}).get("ts"))
+        git_snapshot_ts = events.parse_aware_ts(
+            (capture_rows.rows.get("git-snapshot") or {}).get("ts")
+        )
+        latest_git_at = max(
+            (ts for ts in (mm_push_ts, git_snapshot_ts) if ts is not None), default=None
+        )
+        catchup_covering_git = capturecatchup.covers_deadline_backlog(
+            catchup_state, running=catchup_running, backlog_at=latest_git_at
+        )
+        only_catchup_event_pending = _is_only_catchup_event_pending(
+            source_diffs,
+            catchup_state,
+            source=source,
+            comparison_complete=comparison_complete,
+            running=catchup_running,
+            metadata_pending=metadata_pending,
+            names_ready=names_ready,
+            names_held=names_held,
+        )
+
+        verdict_projection = projection
+        if (
+            catchup_covering_push
+            and isinstance(auto_push, dict)
+            and auto_push.get("outcome") == "degraded"
+            and projection["push"]["unknown_reason"] is None
+        ):
+            remaining_auto = {
+                **auto_evidence,
+                "runs": {k: v for k, v in auto_runs.items() if k != "push"},
+            }
+            verdict_projection = attemptlog.project_runs(
+                remaining_auto, attended_evidence, mesh_waits_current=mesh_valid
+            )
+
         no_release = _no_release_readers(publication, reader_states, upgrade_result)
         capture_action = None
         if publication["readers"] and publication["readiness"] in ("disabled", "unavailable"):
@@ -888,7 +953,8 @@ def status(
                 publication, reader_states, upgrade_result
             )
         elif publication["readiness"] == "ready" and any(
-            state.get("last_reason") not in (None, "locked") for state in reader_states.values()
+            state.get("last_reason") not in (None, "locked") and name not in covered_readers
+            for name, state in reader_states.items()
         ):
             capture_action = "Usage capture needs attention. Run: mm diag"
 
@@ -983,9 +1049,9 @@ def status(
             source=source,
             blocking=blocking,
             conflicts=n_conflicts,
-            projection=projection,
-            counts=pending_counts,
-            metadata=metadata_pending,
+            projection=verdict_projection,
+            counts=(0, 0, 0) if only_catchup_event_pending else pending_counts,
+            metadata=False if only_catchup_event_pending else metadata_pending,
             first_push=fetch.status == "missing" and not fetch.vanished,
             capture_action=capture_action,
             manifest_arriving=fetch.status == "missing" and fetch.vanished,
@@ -1074,12 +1140,19 @@ def status(
             detail = crumb.get("detail")
             if verb == "pull" and isinstance(detail, str):
                 detail = syncthing.historical_delivery_detail(detail)
-            outcome_str = (
-                f"{safe_str(safety.safe_terminal_str(outcome))}: "
-                f"{safe_str(safety.safe_terminal_str(detail))}"
-                if detail
-                else safe_str(safety.safe_terminal_str(outcome))
-            )
+            if verb == "push" and catchup_covering_push:
+                outcome_str = (
+                    "capture deadline backlog in progress"
+                    if catchup_running
+                    else "capture deadline backlog covered by background catch-up"
+                )
+            else:
+                outcome_str = (
+                    f"{safe_str(safety.safe_terminal_str(outcome))}: "
+                    f"{safe_str(safety.safe_terminal_str(detail))}"
+                    if detail
+                    else safe_str(safety.safe_terminal_str(outcome))
+                )
             # Staleness gate. `_write_autorun_breadcrumb` is called from INSIDE
             # the command, so a failure that happens before typer's runner --
             # an ImportError at module scope being the obvious one -- writes no
@@ -1110,11 +1183,18 @@ def status(
                 )
             if (
                 verb == "push"
+                and not catchup_covering_push
                 and outcome == "degraded"
                 and isinstance(detail, str)
                 and "git repository discovery" in detail
             ):
                 discovery_nag = True
+        if catchup_running or only_catchup_event_pending:
+            catchup_line = _format_catchup_status_line(
+                catchup_state, running=catchup_running, queued=only_catchup_event_pending
+            )
+            if catchup_line:
+                console.print(catchup_line)
         if mesh_valid:
             for wait in mesh_evidence["waits"]:
                 console.print(safe_str(f"    {wait}"))
@@ -1122,7 +1202,14 @@ def status(
                 console.print(
                     f"    {mesh_evidence['omitted_details']} diagnostic detail(s) not retained."
                 )
-        retro_nag = _print_retro_capture_status(sources_configs, device_id, scan=capture_rows)
+        retro_nag = _print_retro_capture_status(
+            sources_configs,
+            device_id,
+            scan=capture_rows,
+            catchup_covering=catchup_covering_git,
+            catchup_running=catchup_running,
+            catchup_state=catchup_state,
+        )
         if discovery_nag and not retro_nag:
             console.print(
                 "  [yellow]Git repository discovery incomplete:[/yellow] run [bold]mm diag[/bold]"
@@ -1300,13 +1387,22 @@ def status(
             reader_states=reader_states,
             hide_superseded=True,
             upgrade_view=upgrade_result,
+            covered_readers=covered_readers,
         )
 
         # Enabling the Codex source is consent. A standing blocker takes priority
         # over inventory-based remedies; healthy Codex capture stays quiet here.
         if any(s.get("name") == "codex" for s in sources_configs):
             codex_diag = reader_states["codex"]
-            if codex_diag.get("last_reason"):
+            codex_suffix = _catchup_part_suffix(
+                catchup_state, running=catchup_running, part="host:codex"
+            )
+            if "codex" in covered_readers:
+                if catchup_running:
+                    console.print(
+                        _host_running_backlog_line("Codex", codex_diag, enabled_prefix=False)
+                    )
+            elif codex_diag.get("last_reason"):
                 console.print(
                     "  Codex usage capture: "
                     + _host_usage_blocker(
@@ -1316,16 +1412,17 @@ def status(
                         upgrade_required=upgrade_required,
                         no_release_reads=no_release,
                     )
+                    + codex_suffix
                 )
             elif codex_diag.get("files_pre_track"):
                 console.print(
                     f"  Codex usage capture: rebuilding — {codex_diag['files_pre_track']} rollouts "
-                    f"awaiting re-walk; {safe_str(capture_remedy)}"
+                    f"awaiting re-walk; {safe_str(capture_remedy)}{codex_suffix}"
                 )
             elif codex_diag.get("state") == "migrating":
                 console.print(
                     f"  Codex usage capture: warming — {codex_diag.get('pending') or 0} rollouts "
-                    f"not yet scanned; {safe_str(capture_remedy)}"
+                    f"not yet scanned; {safe_str(capture_remedy)}{codex_suffix}"
                 )
 
         muse_on = any(s.get("name") == "muse" for s in sources_configs)
@@ -1341,7 +1438,15 @@ def status(
         if muse_on or muse_present:
             if muse_on:
                 muse_diag = reader_states["muse"]
-                if muse_diag.get("last_reason"):
+                muse_suffix = _catchup_part_suffix(
+                    catchup_state, running=catchup_running, part="host:muse"
+                )
+                if "muse" in covered_readers:
+                    if catchup_running:
+                        console.print(
+                            _host_running_backlog_line("Muse", muse_diag, enabled_prefix=True)
+                        )
+                elif muse_diag.get("last_reason"):
                     console.print(
                         "  Muse usage capture: enabled — "
                         + _host_usage_blocker(
@@ -1351,6 +1456,7 @@ def status(
                             upgrade_required=upgrade_required,
                             no_release_reads=no_release,
                         )
+                        + muse_suffix
                     )
                 elif muse_diag.get("complete_once") is True:
                     console.print(
@@ -1379,7 +1485,15 @@ def status(
         if agy_on or agy_present:
             if agy_on:
                 agy_diag = reader_states["agy"]
-                if agy_diag.get("last_reason"):
+                agy_suffix = _catchup_part_suffix(
+                    catchup_state, running=catchup_running, part="host:agy"
+                )
+                if "agy" in covered_readers:
+                    if catchup_running:
+                        console.print(
+                            _host_running_backlog_line("Antigravity", agy_diag, enabled_prefix=True)
+                        )
+                elif agy_diag.get("last_reason"):
                     console.print(
                         "  Antigravity usage capture: enabled — "
                         + _host_usage_blocker(
@@ -1389,6 +1503,7 @@ def status(
                             upgrade_required=upgrade_required,
                             no_release_reads=no_release,
                         )
+                        + agy_suffix
                     )
                 elif agy_diag.get("complete_once") is True:
                     console.print(
@@ -1410,7 +1525,15 @@ def status(
             # Present only when Grok usage capture is consented: no presence probe and no
             # nudge when it is not, so an unconsented ``~/.grok`` is never opened here.
             grok_diag = reader_states["grok"]
-            if grok_diag.get("last_reason"):
+            grok_suffix = _catchup_part_suffix(
+                catchup_state, running=catchup_running, part="host:grok"
+            )
+            if "grok" in covered_readers:
+                if catchup_running:
+                    console.print(
+                        _host_running_backlog_line("Grok Build", grok_diag, enabled_prefix=True)
+                    )
+            elif grok_diag.get("last_reason"):
                 console.print(
                     "  Grok Build usage capture: enabled — "
                     + _host_usage_blocker(
@@ -1420,6 +1543,7 @@ def status(
                         upgrade_required=upgrade_required,
                         no_release_reads=no_release,
                     )
+                    + grok_suffix
                 )
             elif grok_diag.get("complete_once") is True:
                 console.print(
@@ -1470,6 +1594,11 @@ def status(
 
         if not comparison_complete or blocking:
             console.print("\n  Comparison incomplete; see the verdict above.")
+        elif only_catchup_event_pending:
+            console.print(
+                "\n  Local content matches this device's last push; "
+                "background capture will publish on the next push."
+            )
         elif total_new or total_modified or total_deleted:
             console.print("\n  [yellow]Overall pending push:[/yellow]")
             console.print(
@@ -1693,7 +1822,7 @@ def _read_capture_rows(sources: list[dict], device_id: str | None) -> events.Eve
     return events.latest_event_rows(
         Path(src["path"]).expanduser() / "events",
         device_id,
-        {"mm-push", "host-usage-snapshot"},
+        {"mm-push", "git-snapshot", "host-usage-snapshot"},
         now=now,
         selectors={
             "host-usage-snapshot": lambda row: aggregator.local_host_capture_candidate(
@@ -1736,12 +1865,156 @@ def _host_publication(
     return projected
 
 
+def _phases_cover_part(phases: Sequence[str], part: str) -> bool:
+    phase_set = set(phases)
+    if part == "git":
+        return bool(phase_set & {"git_walk", "git_discovery"})
+    if part == "session":
+        return "session_scan" in phase_set
+    return part in phase_set
+
+
+def _catchup_covers_part(state: Mapping[str, Any] | None, part: str) -> bool:
+    """Return True if the recorded catch-up state covered ``part``."""
+    if not isinstance(state, Mapping):
+        return False
+    return _phases_cover_part(state.get("trigger_phases") or (), part)
+
+
+def _catchup_failure_covers_part(state: Mapping[str, Any] | None, part: str) -> bool:
+    """Return True if a failed catch-up names ``part`` (falling back to triggers if interrupted)."""
+    if not isinstance(state, Mapping):
+        return False
+    failed = state.get("failed_phases") or ()
+    if failed:
+        return _phases_cover_part(failed, part)
+    return _phases_cover_part(state.get("trigger_phases") or (), part)
+
+
+def _catchup_part_suffix(
+    state: Mapping[str, Any] | None,
+    *,
+    running: bool,
+    part: str,
+) -> str:
+    """Append the last catch-up fact for ``part`` onto its live backlog line."""
+    if running:
+        return " — background catch-up running" if _catchup_covers_part(state, part) else ""
+    if not isinstance(state, Mapping) or state.get("result") != "failed":
+        return ""
+    if not _catchup_failure_covers_part(state, part):
+        return ""
+    ts = events.parse_aware_ts(state.get("finished_at")) or events.parse_aware_ts(
+        state.get("started_at")
+    )
+    when = ts.astimezone().strftime("%H:%M %Z") if ts is not None else None
+    raw_detail = state.get("detail")
+    detail = (
+        "interrupted"
+        if raw_detail == "worker interrupted"
+        else safe_str(safety.safe_terminal_str(raw_detail or "unknown error"))
+    )
+    if when:
+        return f" — background catch-up failed at {safe_str(when)} ({detail}). Run: mm diag"
+    return f" — background catch-up failed ({detail}). Run: mm diag"
+
+
+def _host_running_backlog_line(
+    label: str, state: Mapping[str, Any], *, enabled_prefix: bool
+) -> str:
+    cached = state.get("files_cached")
+    on_disk = state.get("files_on_disk")
+    left = (
+        on_disk - cached
+        if type(cached) is int and type(on_disk) is int and on_disk > cached
+        else None
+    )
+    catching = f"catching up ({left} left)" if left is not None else "catching up"
+    prefix = "enabled — " if enabled_prefix else ""
+    return f"  {label} usage capture: {prefix}{catching} — background catch-up running"
+
+
+def _format_catchup_status_line(state: dict, *, running: bool, queued: bool = False) -> str | None:
+    """Format the concise ``Background capture catch-up:`` status line."""
+    if not running and state.get("state") == "idle":
+        return None
+    if running:
+        age = events_tail.host_read_age(state.get("started_at"))
+        when = f"started {age}" if age else "in progress"
+        return f"  Background capture catch-up: running ({safe_str(when)})"
+    result = state.get("result") or "unknown"
+    age = events_tail.host_read_age(state.get("finished_at"))
+    if result == "ok":
+        if queued and age:
+            return f"  Background capture catch-up: ok ({safe_str(age)}, ready for next push)"
+        if queued:
+            return "  Background capture catch-up: ok (ready for next push)"
+        if age:
+            return f"  Background capture catch-up: ok ({safe_str(age)})"
+        return "  Background capture catch-up: ok"
+    age_part = f" ({safe_str(age)})" if age else ""
+    detail = state.get("detail")
+    detail_part = f" — {safe_str(safety.safe_terminal_str(detail))}" if detail else ""
+    return (
+        f"  Background capture catch-up: {safe_str(safety.safe_terminal_str(result))}"
+        f"{age_part}{detail_part}"
+    )
+
+
+def _is_only_catchup_event_pending(
+    source_diffs: Sequence[tuple[str, dict, dict, Any]],
+    catchup_state: dict,
+    *,
+    source: str | None,
+    comparison_complete: bool,
+    running: bool,
+    metadata_pending: bool,
+    names_ready: bool,
+    names_held: bool,
+) -> bool:
+    """Return True iff the sole local diff is catch-up's exact queued mm-events file."""
+    if (
+        source is not None
+        or not comparison_complete
+        or running
+        or metadata_pending
+        or names_ready
+        or names_held
+    ):
+        return False
+    if not capturecatchup.covers_deadline_backlog(catchup_state, running=False):
+        return False
+    event_file = catchup_state.get("event_file")
+    event_sha256 = catchup_state.get("event_sha256")
+    if not isinstance(event_file, str) or not event_file:
+        return False
+    if not isinstance(event_sha256, str) or not event_sha256:
+        return False
+    matched_mm_events = False
+    for src_name, src_data, _remote_src, diff in source_diffs:
+        if src_name != "mm-events":
+            if diff.has_changes:
+                return False
+            continue
+        if diff.deleted:
+            return False
+        changed_paths = set(diff.new) | set(diff.modified)
+        if changed_paths != {event_file}:
+            return False
+        local_entry = (src_data.get("files") or {}).get(event_file)
+        if not isinstance(local_entry, dict) or local_entry.get("sha256") != event_sha256:
+            return False
+        matched_mm_events = True
+    return matched_mm_events
+
+
 def _print_host_publication(
     state: dict,
     *,
     reader_states: dict[str, dict],
     hide_superseded: bool = False,
     upgrade_view: upgrade.UpgradeCheckResult | None = None,
+    covered_readers: set[str] | None = None,
 ) -> None:
     """Keep recorded coverage, publication evidence and attempts distinct."""
     if state["state"] == "absent":
@@ -1785,8 +2058,25 @@ def _print_host_publication(
             )
     if state.get("coverage_invalid"):
         console.print("    Coverage metadata is inconsistent; reader completeness is unknown.")
+    covered = covered_readers or set()
+    only_deadline_gap = bool(
+        covered
+        and state["readiness"] == "ready"
+        and state["state"] != "unknown"
+        and not state.get("coverage_invalid")
+        and not _unsupported_readers(state, reader_states)
+        and all(
+            (name in covered and coverage != "partial")
+            or (
+                coverage == "contributed"
+                and reader_states.get(name, {}).get("last_reason") in (None, "locked")
+            )
+            for name, coverage in state["readers"].items()
+        )
+    )
     if state["readiness"] != "ready" or (
         state["readers"]
+        and not only_deadline_gap
         and (
             state["state"] != "recorded"
             or (state.get("age_days") or 0) > 0
@@ -1852,18 +2142,37 @@ def _usage_capture_remedy(
 
 
 def _print_retro_capture_status(
-    sources: list[dict], device_id: str, *, scan: events.EventScan | None = None
+    sources: list[dict],
+    device_id: str,
+    *,
+    scan: events.EventScan | None = None,
+    catchup_covering: bool = False,
+    catchup_running: bool = False,
+    catchup_state: Mapping[str, Any] | None = None,
 ) -> bool:
     """Nag on an incomplete recorded capture. Returns True if a nag printed."""
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
         return False
     events_dir = Path(mm_events_src["path"]).expanduser() / "events"
-    row = (
+    mm_push_row = (
         scan.rows.get("mm-push")
         if scan is not None
         else events.latest_mm_push_row(events_dir, device_id)
     )
+    git_snapshot_row = (
+        scan.rows.get("git-snapshot")
+        if scan is not None
+        else events.latest_event_rows(events_dir, device_id, {"git-snapshot"}).rows.get(
+            "git-snapshot"
+        )
+    )
+    row = mm_push_row
+    if isinstance(git_snapshot_row, dict) and isinstance(git_snapshot_row.get("git_capture"), dict):
+        mm_ts = events.parse_aware_ts((mm_push_row or {}).get("ts"))
+        git_ts = events.parse_aware_ts(git_snapshot_row.get("ts"))
+        if git_ts is not None and (mm_ts is None or git_ts > mm_ts):
+            row = git_snapshot_row
     projected = events.project_recorded_capture(row)
     if projected is None:
         return False
@@ -1880,14 +2189,11 @@ def _print_retro_capture_status(
             pass
     pending = events.count_pending_repositories([], pending_since)
     cache = events.read_git_capture_cache()
-    incomplete = (
-        not projected.get("advances_cursor", True)
-        or skipped > 0
-        or pending > 0
+    live_backlog = (
+        pending > 0
+        or projected.get("discovery") == "partial"
         or bool(cache.get("pending_refresh_since"))
     )
-    if not incomplete:
-        return False
     cursor = (
         scan.cursor
         if scan is not None and scan.cursor is not None
@@ -1917,16 +2223,36 @@ def _print_retro_capture_status(
         or datetime.now(timezone.utc) - events.effective_capture_since([], capture_since)
         > timedelta(days=events.CURSOR_SCAN_DAYS)
         or projected.get("discovery") == "empty"
-        or (aborts == 0 and errs > 0)
+        or errs > 0
         or cache.get("incomplete_streak", 0) >= 3
     )
+    if not live_backlog and not (
+        recovery_required and (not projected.get("advances_cursor", True) or skipped > 0)
+    ):
+        return False
+    git_suffix = _catchup_part_suffix(catchup_state, running=catchup_running, part="git")
     if not recovery_required:
+        discovery_errors = row.get("discovery_errors", [])
+        discovery_limit = events.GIT_ROOT_DISCOVERY_BUDGET_ERROR
+        deadline_only = (
+            isinstance(discovery_errors, list)
+            and all(error == discovery_limit for error in discovery_errors)
+            and (aborts > 0 or discovery_limit in discovery_errors)
+        )
         noun = "repository" if pending == 1 else "repositories"
         qualifier = "known " if pending == 0 else ""
         catching = f"catching up ({pending} left) — " if pending > 0 else ""
+        if catchup_covering and deadline_only:
+            if catchup_running:
+                console.print(
+                    f"  Retro capture: {catching}{pending} {qualifier}{noun} left to catch up"
+                    " — background catch-up running"
+                )
+                return True
+            return False
         console.print(
             f"  [yellow]Retro capture:[/yellow] {catching}"
-            f"{pending} {qualifier}{noun} left to catch up."
+            f"{pending} {qualifier}{noun} left to catch up{git_suffix or '.'}"
         )
         if projected.get("discovery") == "partial":
             console.print("  Repository discovery is still catching up.")
@@ -1942,7 +2268,8 @@ def _print_retro_capture_status(
     else:
         skip_phrase = "repository set incomplete"
     console.print(
-        f"  [yellow]Retro capture:[/yellow] incomplete since {safe_str(since_day)} — {skip_phrase}."
+        f"  [yellow]Retro capture:[/yellow] incomplete since {safe_str(since_day)} — "
+        f"{skip_phrase}{git_suffix or '.'}"
     )
     if projected.get("discovery") == "partial":
         console.print(
@@ -2620,6 +2947,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         "discovery": discovery,
         "git_capture": _collect_git_capture_diag(cfg, dev_id, discovery, scan=capture_rows),
         "memory_index": memoryindex.diag_state(cfg if config_state == "ok" else None),
+        "capture_catchup": capturecatchup.diag_catchup_state(),
         "push_timings": pushtimings.diag_timings_state(),
     }
 
@@ -3119,6 +3447,26 @@ def diag(
     console.print(f"    pending_repos:       {fresh.get('pending_repos')}")
     console.print(f"    exceeded:            {fresh.get('exceeded')}")
     console.print(f"    error_count:         {fresh.get('error_count')}")
+
+    catchup_diag = state.get("capture_catchup") or {}
+    console.print("\n[bold]Background capture catch-up[/bold]")
+    console.print(f"  running:             {catchup_diag.get('running')}")
+    console.print(f"  state:               {safe_str(str(catchup_diag.get('state') or 'idle'))}")
+    console.print(f"  result:              {safe_str(str(catchup_diag.get('result') or 'none'))}")
+    console.print(
+        f"  started_at:          {safe_str(str(catchup_diag.get('started_at') or 'none'))}"
+    )
+    console.print(
+        f"  finished_at:         {safe_str(str(catchup_diag.get('finished_at') or 'none'))}"
+    )
+    triggers = catchup_diag.get("trigger_phases") or []
+    triggers_text = ", ".join(safe_str(str(p)) for p in triggers) if triggers else "none"
+    console.print(f"  triggers:            {triggers_text}")
+    console.print(
+        f"  event_file:          {safe_str(str(catchup_diag.get('event_file') or 'none'))}"
+    )
+    if catchup_diag.get("detail"):
+        console.print(f"  detail:              {safe_str(str(catchup_diag['detail']))}")
 
     timings_state = state.get("push_timings") or {}
     by_kind = timings_state.get("by_kind") or {}

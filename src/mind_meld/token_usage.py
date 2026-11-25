@@ -81,7 +81,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Literal, NamedTuple, TypedDict
+from typing import Any, Callable, Iterable, Iterator, Literal, NamedTuple, TypedDict
 
 from mind_meld import fsutil
 from mind_meld.lockedjson import (
@@ -2161,6 +2161,7 @@ def warm_token_cache_inline(
     claude_dirs: Iterable[Path],
     *,
     deadline_s: float = DEFAULT_WARM_BUDGET_S,
+    before_read: Callable[[], None] | None = None,
 ) -> tuple[int, int]:
     """Walk every parent + subagent jsonl under each ``claude_dirs`` entry,
     populating the cache. Bounded by ``deadline_s`` wall-clock budget.
@@ -2181,6 +2182,8 @@ def warm_token_cache_inline(
             # acquired). Defensive zero return preserves the prior contract.
             return 0, 0
         for claude_dir in claude_dirs:
+            if before_read is not None:
+                before_read()
             projects_root = claude_dir / "projects"
             if not projects_root.is_dir():
                 continue

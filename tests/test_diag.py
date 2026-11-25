@@ -887,6 +887,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "host_publication",
         "discovery",
         "git_capture",
+        "capture_catchup",
         "push_timings",
     ):
         assert section in payload, f"missing {section}"

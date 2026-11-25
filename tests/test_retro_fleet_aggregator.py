@@ -10208,3 +10208,56 @@ class TestSupersededRegistrationFolding:
         for forbidden in ("\x1b", "`", "\n", "<", ">", "|"):
             assert forbidden not in entry["device_id"]
             assert forbidden not in (entry["device_name"] or "")
+
+
+def test_catchup_origin_contributes_commits_and_coverage_without_push_count():
+    from mind_meld import events as mm_events
+
+    since = datetime(2026, 11, 20, 0, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 11, 25, 0, 0, tzinfo=timezone.utc)
+    snap_ts = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+    commit_ts = datetime(2026, 11, 24, 11, 30, tzinfo=timezone.utc)
+    catchup_row = {
+        "v": mm_events.EVENTS_SCHEMA_VERSION,
+        "type": "git-snapshot",
+        "ts": snap_ts.isoformat(),
+        "device": "dev-a",
+        "origin": mm_events.GIT_SNAPSHOT_ORIGIN_CATCHUP,
+        "projects": [
+            {
+                "remote": "github.com/user/demo",
+                "commits": [
+                    {
+                        "sha": "a" * 40,
+                        "date": commit_ts.isoformat(),
+                        "author_email": "user@example.com",
+                        "subject": "feat: catchup commit",
+                        "files_changed": 1,
+                        "insertions": 10,
+                        "deletions": 2,
+                    }
+                ],
+            }
+        ],
+        "skipped": [],
+        "git_capture": mm_events.make_git_capture(
+            since=since,
+            discovery="complete",
+            walk_budget_aborts=0,
+            walk_errors=0,
+        ),
+    }
+    empty_catchup_row = {
+        **catchup_row,
+        "ts": (snap_ts + timedelta(minutes=5)).isoformat(),
+        "projects": [],
+    }
+    git_agg = aggregator.aggregate_git(
+        [catchup_row, empty_catchup_row],
+        since=since,
+        until=until,
+        author_emails={"user@example.com"},
+    )
+    assert git_agg.commits == 1
+    assert git_agg.zero_repo_captures == {}
+    assert "dev-a" not in git_agg.uncovered_git

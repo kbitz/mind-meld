@@ -488,6 +488,13 @@ REVIEWED = {
             "open(path, 'rb')",
         ],
     ),
+    "events_tail.py:_capture_git_rows": (
+        *_READ_ONLY,
+        [
+            "replace(root_discovery, "
+            "errors=(*root_discovery.errors, CATCHUP_GIT_IDENTITY_PENDING))",
+        ],
+    ),
     "fsutil.py:atomic_write_bytes": (
         *_GUARDED,
         [
@@ -596,6 +603,12 @@ REVIEWED = {
         [
             "lock_path.parent.mkdir(parents=True, exist_ok=True)",
             "os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 420)",
+        ],
+    ),
+    "lockfile.py:is_lock_held": (
+        *_READ_ONLY,
+        [
+            "os.open(str(lock_path), os.O_RDONLY)",
         ],
     ),
     "manifest.py:parse_conflict_created_at": (

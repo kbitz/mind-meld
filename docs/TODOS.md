@@ -44,6 +44,66 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/cli.py|src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py] Test gap: Verify ordinary autopush records complete catch-up recovery
+
+- The recovery tests assert the stored resolution for attended push and the detached worker. The ordinary autopush drain test checks publication.
+- When autopush capture reporting next changes, check that a complete recorded capture writes `resolved_by=autopush` and that a deadline-stopped capture leaves the previous warning visible.
+- Found in the Track 165C coverage audit for [PR #385](https://github.com/kbitz/mind-meld/pull/385) at `291c5c6`. The audit found no demonstrated failure on this path.
+
+### [review:files=src/mind_meld/statusflow.py|tests/test_capture_catchup.py] Test gap: Restore push advice when a queued event file changes
+
+- The status fixture covers matching event bytes and an ordinary user-file edit. A separate case could keep the queued event path while changing its contents.
+- When catch-up advice next changes, check that the digest mismatch restores `Run: mm push`.
+- Found in the Track 165C coverage audit for [PR #385](https://github.com/kbitz/mind-meld/pull/385) at `291c5c6`. The audit found no demonstrated failure on this path.
+
+### [review:files=src/mind_meld/capturecatchup.py|src/mind_meld/events_tail.py|src/mind_meld/statusflow.py] Reconcile Git backlog counts after catch-up
+- **Description:** Compare the reported backlog with the repository cursors when catch-up observes zero remaining repositories or the newest hook lacks deadline evidence for older pending repos.
+- **Revisit:** An owner report of stale pending counts or manual push advice after a covering catch-up. Filed during review of PR #385.
+
+### [review:files=src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py] Test gap: Exercise the detached worker and drain in one regression
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Persistent tests exercise launcher custody and next-push publication separately.
+- **Hypothesis (untested):** Drive the real hook and detached worker in a temporary home, verify one worker, and decrypt the missed commit from the next push's payload.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `tests/test_capture_catchup.py`
+- **Evidence:** The isolated CLI replay passed the full flow, including relative sources and an absolute-source run after removal of the hook's starting directory.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/385 at `4bea5cd` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/events.py|src/mind_meld/events_tail.py|src/mind_meld/capturecatchup.py] Verify queued Git reads across a local source change
+- **Description:** Check that already queued repositories honor a local opt-out during a warm walk, and check the command behavior for an incomplete local clone. Existing checks cover cancellation before reads and before the events append.
+- **Revisit:** Exercise both cases with isolated repositories the next time Git fan-out or source cancellation changes. Filed during review of PR #385.
+
+### [review:files=src/mind_meld/events_tail.py] Simplify the host capture copy
+- **Description:** Check whether the host capture result can use `dataclasses.replace` without changing the per-reader deadline fields.
+- **Revisit:** The next edit to the host snapshot result fields. Filed during review of PR #385.
+
+### [review:files=src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py|src/mind_meld/statusflow.py] Verify detached startup and queued state visibility
+- **Description:** Verify the launcher when the hook starts with closed standard descriptors. Check whether a previous result or parent PID is briefly displayed while a replacement child starts. Those states do not establish a second worker.
+- **Revisit:** A report of incorrect startup diagnostics or a change to detached launch. Filed during review of PR #385.
+
+### [review:files=src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py] Observe retained retrigger requests
+- **Description:** A request recorded at the end of the bounded follow-up or under lock contention can wait for the next eligible deadline worker. Check whether concurrent writes can make older request times win.
+- **Revisit:** An owner report of a retained request waiting past the next hook after the worker exits. Preserve the one-worker and one-follow-up bounds. Filed during review of PR #385.
+
+### [review:files=src/mind_meld/identity.py|src/mind_meld/events_tail.py|tests/test_capture_catchup.py] Test gap: Resolve a deferred Git identity in the next ordinary push
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The regression holds an existing Git cursor through a deferral and rereads the owner commit after a successful identity refresh. The ordinary push path could also exercise identity resolution itself.
+- **Hypothesis (untested):** Use a fixture response to the ordinary push's bounded identity query, then check the held cursor and the owner commit through encrypted publication.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `tests/test_capture_catchup.py`
+- **Evidence:** The isolated tests exercised cursor preservation and capture after an explicit refresh. Review found no failure in the ordinary push path.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/385 at `4bea5cd` (2026-11-25).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=tests/test_capture_catchup.py|src/mind_meld/identity.py] Isolate the delayed breadcrumb fixture from the local GitHub CLI
+- **Description:** The initial `autopush` in the delayed breadcrumb regression can refresh a cold identity cache and contact GitHub when `gh` is available. Seed a fresh fixture baseline or stub that gather at the start of the test.
+- **Revisit:** The next change to breadcrumb tests or identity test isolation. Filed during review of PR #385.
+
+### [review:files=src/mind_meld/cli.py|src/mind_meld/statusflow.py|tests/test_capture_catchup.py] Verify breadcrumb recovery after a wall-clock rollback
+- **Description:** An older wall clock can make a later skip drop an already recorded capture timestamp. The capture row stays recorded, but the superseded status warning can return.
+- **Revisit:** A report of a stale failure after a clock correction, or the next change to timestamped recovery evidence. Filed during review of PR #385.
+
 ### [review:files=src/mind_meld/storage/local.py|tests/test_storage_local.py] Test gap: Bounded storage read refusals
 
 - **ID:** wi-087a66
