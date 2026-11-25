@@ -44,108 +44,31 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Orphan GC phase timing
-
-- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Existing push and GC tests cover when orphan collection runs and what it warns about. This gap concerns its saved phase timing.
-- **Hypothesis (untested):** Drive an eligible collection and a handled collection error through push. Compare the published timing status with the collection and push outcomes.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/cli.py:1604`
-- **Evidence:** Track 165B coverage audit, path 06. Existing GC checks passed.
-- **Context:** Filed by `/review-and-prep` for Track 165B at `fd0fb70` (2026-11-24).
-- **Revisit when:** Orphan collection or the attended push timing boundary changes.
-- **Effort:** ? (triage in `/roadmap`)
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_events_budget_scope.py] Test gap: Git and session timing status
-
-- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Existing tests cover Git and session deadline and error outcomes independently of the saved timing status.
-- **Hypothesis (untested):** Exercise discovery, walk and session failures through the timing scope and assert each saved phase's status.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/events_tail.py:1642`
-- **Evidence:** Track 165B coverage audit, path 17. Existing capture-budget checks passed.
-- **Context:** Filed by `/review-and-prep` for Track 165B at `fd0fb70` (2026-11-24).
-- **Revisit when:** Event capture changes its deadline policy, result mapping or diagnostic timing phases.
-- **Effort:** ? (triage in `/roadmap`)
-
-### [review:files=src/mind_meld/pushtimings.py|tests/test_integration.py] Test gap: Retain timing bytes on write failure
-
-- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** Tests cover readers under lock contention and an interrupted timing write. This gap concerns the prior timings and push result after writer contention or an ordinary write error.
-- **Hypothesis (untested):** Seed an earlier sample, fail one attempt to write timings, and verify that the push result and previous persisted bytes survive.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/pushtimings.py:248`
-- **Evidence:** Track 165B coverage audit, path 20. A scoped contention probe preserved the old bytes.
-- **Context:** Filed by `/review-and-prep` for Track 165B at `fd0fb70` (2026-11-24).
-- **Revisit when:** Timing persistence changes locking, retry or error handling.
-- **Effort:** ? (triage in `/roadmap`)
-
-### [review:files=src/mind_meld/events_tail.py|src/mind_meld/host_registry.py|tests/test_host_usage_snapshot.py] Base issue: Warm retry deadline cutoff can shift
-
-- **Base issue:** Present at merge base `f1d35d0`. Filed under `blocking=shown`.
-- **Description:** Attended capture passes the time remaining after the warm notice. The warmer converts that duration back into a deadline, so a scheduling delay between the two clock reads extends the provider's cutoff.
-- **Evidence:** The same isolated replay at `06440f8` and `f1d35d0` gave the Codex warm adapter a 103.3-second clock deadline against a 103.0 cutoff. The clock was advanced by 300 ms at the adapter boundary.
-- **Upstream severity:** Medium
-- **Found in:** `src/mind_meld/host_registry.py:87`
-- **Context:** Filed by `/review-and-prep` for Track 165B (2026-11-24).
-- **Revisit when:** Attended warming or capture deadline ownership changes. Replay a delay at the handoff and check the original absolute cutoff.
-- **Effort:** ? (triage in `/roadmap`)
-
-### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Legacy qmd cleanup failure boundaries
-
-- **Description:** The three-index fixture covers partial removal followed by a successful retry. It does not individually pin a failed named refresh before cleanup, a failed legacy listing, or a legacy removal timeout or missing process. It also starts the disable check after migration has finished.
-- **Context:** Track 163A coverage audit. The current control flow keeps the legacy marker and skips embed on failed cleanup. The upgrade guide covers the ordering of disable and migration.
-- **Revisit when:** The next Track changes qmd reconciliation, legacy cleanup, or disable. Extend the existing fixture to assert the touched indexes, saved marker and retry behavior at those boundaries.
-
-### [review:files=src/mind_meld/memoryindex.py|tests/test_memory_index.py] Test gap: Exact qmd version and diagnostic invocation
-
-- **Description:** Installed qmd passed with its commit-bearing version banner in the live smoke. Automated success uses a plain banner. The diag test checks the named index, returned names and fixture bytes. The stub leaves those bytes unchanged on listing, whereas real qmd can initialize the database.
-- **Context:** Track 163A testing and coverage audits. Bare inspection already pins the named `collection show` argv.
-- **Revisit when:** The next Track changes qmd preflight or read-only inspection. Exercise the observed version banner and pin the JSON diagnostic's `collection show` calls with `INDEX_PATH=:memory:`.
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Attribute files from a peer with an empty registered name
-
-- **Test gap:** No demonstrated defect. The formatter fixture covers display fallback.
-- **Description:** A pull fixture with an empty registered name could verify that the accounting result uses the device ID as the label.
-- **Evidence:** Track 164A coverage audit of `_pull_core` and `TestAppliedClause`.
-- **Revisit when:** A Track changes peer registration or the per-peer accounting result.
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pull_result.py] Test gap: Sort pull labels whose order changes after sanitization
-
-- **Test gap:** No demonstrated defect. Current tests exercise sorting and sanitization separately.
-- **Description:** Add two labels whose order differs before and after sanitization to the existing formatter fixture.
-- **Evidence:** Track 164A coverage audit of `applied_clause`.
-- **Revisit when:** A Track changes peer label formatting or sorting.
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_integration.py] Test gap: Attribute LCS merges in the per-peer pull result
-
-- **Test gap:** No demonstrated defect. Current tests assert LCS history and aggregate counts.
-- **Description:** Inspect the peer count for an LCS merge through the existing pull result observer.
-- **Evidence:** Track 164A coverage audit of `_account_source` and the post-LCS fixture.
-- **Revisit when:** A Track changes inline merges or per-peer accounting.
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_integration.py] Test gap: Preserve peer counts when a pull is interrupted
-
-- **Test gap:** No demonstrated defect. Existing interruption checks assert aggregate counts and retained history.
-- **Description:** Extend the in-flight result observer check to assert the device and count for a write that completed before interruption.
-- **Evidence:** Track 164A coverage audit of `_pull_core` recovery and the post-LCS fixture.
-- **Revisit when:** A Track changes interrupted pull accounting or reads per-peer counts from partial results.
-
-### [review:files=src/mind_meld/cli.py|tests/test_codex_memory_source.py] Test gap: Report retired-copy cleanup alongside an applying peer
-
-- **Test gap:** No demonstrated defect. The mixed fixture checks the result and disk state.
-- **Description:** Assert the cleanup line follows the applying peer's line when both outcomes occur.
-- **Evidence:** Track 164A coverage audit of `_sync_success` and Codex memory copy removal.
-- **Revisit when:** A Track changes retired-copy cleanup or attended pull line ordering.
-
-### [review:files=src/mind_meld/cli.py|tests/test_pull_result.py] Test gap: Report old-form delivery alongside an applying peer
-
-- **Test gap:** No demonstrated defect. Existing tests cover the old-form clause on its own.
-- **Description:** Assert the old-form line follows the applied lead when a pull sees both outcomes.
-- **Evidence:** Track 164A coverage audit of `_sync_success` and the old-form result fixture.
-- **Revisit when:** A Track changes old-form reporting or attended pull line ordering.
-
 ## Drain records
+
+### Roadmap regeneration — 2026-11-24 (Tracks 163A, 164A and 165B recorded; 165C pinned in progress; O9 acceptance reconciled)
+
+Verified against `cf73e48` (v1.12.86). Selected target remains the owner's MVP-1 Syncthing fleet on macOS and Arch Linux, with cross-model memory (O9) now accepted on the owner's fleet (`docs/PROGRESS.md` `## Acceptance`, PR #380, `e12f181`). Tracks 163A (v1.12.84, PR #379), 164A (v1.12.85, PR #381) and 165B (v1.12.86, PR #383) have independent receipts in `docs/roadmap-shipped.md`; Groups 163 and 164 are retired with tombstones. Track 165A (`item 67e29a92`, draft PR #382 on `mmm/67e29a92`) was dropped and split on the developer's word, 2026-11-24 ("split is fine"): its timing/deadline half shipped as 165B and its background catch-up half is pinned in `## In Progress` as Track 165C (Group 165, `item 715b9168`, branch `mmm/715b9168`), with draft PR #382 kept open as reference material and prefix 165 reserved until 165C closes. `README.md` (`### Searching agent memory (qmd)`) and `docs/designs/cross-model-memory.md` (`## Goal`) are aligned with `docs/SPEC.md` O9.2; `docs/SPEC.md` is untouched. The six follow-ups filed on PR #382's branch never reached `main`: two (timing record duplication, warm-retry ceiling) were resolved in 165B, and the remaining four stay on PR #382 for 165C's plan instead of being imported here. Current Plan has no unstarted Groups; Track 165C is pinned in planning, so no inbox test gap is folded into it.
+
+| Item | Disposition | Evidence or revisit trigger |
+|---|---|---|
+| Tracks 163A, 164A and 165B | shipped | Independent receipts for PRs #379 (`e66ea68`, v1.12.84), #381 (`f1d35d0`, v1.12.85) and #383 (`cf73e48`, v1.12.86). |
+| Track 165A → split into 165B (shipped) and 165C (in progress) | reconciled | Developer decision 2026-11-24 ("split is fine"); 165C pinned in `## In Progress` (Group 165, item `715b9168`); draft PR #382 stays open as reference. |
+| O9 owner-fleet acceptance (PR #380) | retired owed text | Recorded in `docs/PROGRESS.md` `## Acceptance` (`e12f181`); Track 163A archived and ROADMAP intro updated; `README.md` and `docs/designs/cross-model-memory.md` aligned with O9.2. |
+| Test gap: Orphan GC phase timing (165B) | defer | a Track's `_touches:` cover `src/mind_meld/cli.py`, `tests/test_integration.py`. |
+| Test gap: Git and session timing status (165B) | defer | a Track's `_touches:` cover `src/mind_meld/events_tail.py`, `tests/test_events_budget_scope.py`. |
+| Test gap: Retain timing bytes on write failure (165B) | defer | a Track's `_touches:` cover `src/mind_meld/pushtimings.py`, `tests/test_integration.py`. |
+| Base issue: Warm retry deadline cutoff can shift (165B) | kill | unobserved; reversible and inconsequential (constructed 300 ms clock-advance replay at `src/mind_meld/host_registry.py:87` on a cooperative attended warm-retry deadline; no data loss, exposure or outward action); reopen if it manifests. |
+| Test gap: Legacy qmd cleanup failure boundaries (163A) | defer | a Track's `_touches:` cover `src/mind_meld/memoryindex.py`, `tests/test_memory_index.py`. |
+| Test gap: Exact qmd version and diagnostic invocation (163A) | defer | a Track's `_touches:` cover `src/mind_meld/memoryindex.py`, `tests/test_memory_index.py`. |
+| Test gap: Attribute files from a peer with an empty registered name (164A) | defer | a Track's `_touches:` cover `src/mind_meld/pullflow.py`, `tests/test_pullflow.py`. |
+| Test gap: Sort pull labels whose order changes after sanitization (164A) | defer | a Track's `_touches:` cover `src/mind_meld/pullflow.py`, `tests/test_pull_result.py`. |
+| Test gap: Attribute LCS merges in the per-peer pull result (164A) | defer | a Track's `_touches:` cover `src/mind_meld/pullflow.py`, `tests/test_integration.py`. |
+| Test gap: Preserve peer counts when a pull is interrupted (164A) | defer | a Track's `_touches:` cover `src/mind_meld/pullflow.py`, `tests/test_integration.py`. |
+| Test gap: Report retired-copy cleanup alongside an applying peer (164A) | defer | a Track's `_touches:` cover `src/mind_meld/cli.py`, `tests/test_codex_memory_source.py`. |
+| Test gap: Report old-form delivery alongside an applying peer (164A) | defer | a Track's `_touches:` cover `src/mind_meld/cli.py`, `tests/test_pull_result.py`. |
+
+Drained 12 inbox entries (0 placed, 11 deferred, 1 killed — 1 unobserved defect pruned by the manifestation gate — 0 discharged). Future grows from 125 to 136 entries (0 missing triggers). No release bump under the SPEC documentation-only policy.
 
 ### Targeted roadmap regeneration of qmd isolation (2026-11-22)
 

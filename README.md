@@ -979,7 +979,7 @@ and publication lines in `mm status` provide that evidence. For a blocker, see
 
 ### Searching agent memory (qmd)
 
-Mind Meld can maintain one local [qmd](https://github.com/tobi/qmd) search index on this machine over every enabled provider's memory so any agent can search what any other agent learned on any machine:
+Mind Meld can maintain one local [qmd](https://github.com/tobi/qmd) search index on this machine over every enabled provider's memory so any agent here can search memory from projects present on this machine plus each agent's machine-wide memory across machines (Codex memories, Grok global topics, Muse personal memory); Claude project memory from a project with no checkout on this machine stays off it and is not searchable here:
 
 - **What is indexed:** only enabled sources whose memory folder exists — `mm-claude` (`<claude>/projects`, `*/memory/**/*.md`), `mm-grok` (`<grok>/memory-v2`, `**/topics/**/*.md`), `mm-muse` (`<muse>/memory`, `**/*.md`), `mm-codex-<this-machine>` (`<codex>/memories_v2` or `memories`, `{MEMORY.md,memory_summary.md,rollout_summaries/*.md}`), and one `mm-codex-<peer>` per peer copies folder under `~/.local/share/mind-meld/codex-memory/`.
 - **Local and derived:** the index and its `[memory_index]` config live on this machine only and never sync. The markdown files stay the source of truth.
