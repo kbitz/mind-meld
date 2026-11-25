@@ -1132,14 +1132,14 @@ def _no_release_reads_clause(readers: Sequence[str]) -> str:
     )
 
 
-def _deadline_read_evidence(reader: str) -> HostReadEvidence:
+def _deadline_read_evidence(reader: str, *, count_logs: bool = True) -> HostReadEvidence:
     """Count on-disk and cached items for a deadline-stopped reader."""
     try:
         locked = False
         if reader == "codex":
             with codex_host.locked_json_snapshot(codex_host.CACHE_PATH, blocking=False) as snap:
                 locked = snap.state == "lock_failed"
-        diag = {} if locked else host_registry.reader_usage_diag(reader, count_logs=True)
+        diag = {} if locked else host_registry.reader_usage_diag(reader, count_logs=count_logs)
     except Exception:
         diag = {}
     if isinstance(diag, Mapping):
@@ -1651,7 +1651,13 @@ def _capture_host_snapshot(
             if reason == "deadline" and name in HOST_READER_SOURCE_GATE:
                 if before_read is not None:
                     before_read()
-                evidence = _deadline_read_evidence(name)
+                # A detached capture under the sync lock may inspect cached
+                # diagnostics, but a second full log inventory is unbounded.
+                evidence = (
+                    _deadline_read_evidence(name)
+                    if warm_host_cache is not None
+                    else _deadline_read_evidence(name, count_logs=False)
+                )
                 deadline_evidence[name] = evidence
                 left = _evidence_left(evidence)
                 if type(left) is int and 1 <= left <= events.MAX_PENDING_LEFT:

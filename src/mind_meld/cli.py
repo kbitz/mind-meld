@@ -4530,6 +4530,7 @@ def _write_autorun_breadcrumb(
     *,
     removal_wait_only: bool = False,
     capture_deadline_only: bool = False,
+    started_at: datetime | None = None,
 ) -> None:
     """Record the last autopull/autopush attempt for forensic observability.
 
@@ -4555,6 +4556,8 @@ def _write_autorun_breadcrumb(
         entry["removal_wait_only"] = True
     if capture_deadline_only:
         entry["capture_deadline_only"] = True
+    if started_at is not None:
+        entry["started_at"] = started_at.isoformat()
     try:
         with locked_json_rmw(core._autorun_breadcrumb_path()) as ljson:
             if not ljson.is_locked:
@@ -5006,6 +5009,7 @@ def autopush() -> None:
             if setup is None:
                 return
 
+            started_at = datetime.now(timezone.utc)
             if not pullhistory.failed():
                 pullhistory.record_failure(statedb.recover_if_needed())
 
@@ -5122,6 +5126,7 @@ def autopush() -> None:
                 crumb_detail,
                 removal_wait_only=mesh_res.removal_wait_only(details),
                 capture_deadline_only=capture_deadline_only,
+                started_at=started_at if outcome == "success" else None,
             )
             detached_config = setup.config
 

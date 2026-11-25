@@ -1941,12 +1941,14 @@ def _catchup_failure_superseded(
     )
     if isinstance(auto_push, dict) and auto_push.get("outcome") == "success":
         auto_at = events.parse_aware_ts(auto_push.get("timestamp"))
+        auto_started = events.parse_aware_ts(auto_push.get("started_at"))
         # A change-gated no-op also writes a success breadcrumb, but it did
         # not retry capture. Require a new capture row for an automatic push.
         if (
             auto_at is not None
+            and auto_started is not None
             and mm_push_ts is not None
-            and mm_push_ts <= auto_at
+            and auto_started <= mm_push_ts <= auto_at
             and (catchup_at is None or mm_push_ts > catchup_at)
         ):
             return True

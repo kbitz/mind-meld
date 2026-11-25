@@ -4293,7 +4293,12 @@ never change.
     `detail="Git capture index unreadable; run mm diag"`, runs single-phase
     attended capture (`origin=events.GIT_SNAPSHOT_ORIGIN_CATCHUP`, warm-only
     token policy, `preserve_budget_for=step1_timed_hosts`,
-    `collect_deadline_evidence=True`, `before_read` config-unchanged checks),
+    `collect_deadline_evidence=True`, `before_read` config-unchanged checks).
+    Deadline evidence under `L2` uses cached diagnostics so it cannot start
+    a second host-log inventory. Unknown pending counts stay unknown.
+    A first-use discovery cancelled after opening the index initializes only
+    its empty schema, so the worker can retry without carrying revoked roots.
+    The worker
     appends `[git-snapshot(origin="catchup"), sessions-snapshot,
     host-usage-snapshot]` (no `mm-push` row) via `events.write_push_event(...,
     strict=True)`, confirms exact `git-snapshot` readback via
@@ -4319,7 +4324,9 @@ never change.
   `partial`/`deferred` backlogs, user edits, or non-deadline degradations
   (`unsupported`, `errs > 0`, `incomplete_streak >= 3`, held files, independent
   attended push failures). A failed catch-up remains actionable until a
-  newer successful capture. An automatic no-op records hook success only.
+  newer successful capture. Status binds an automatic success to a capture row
+  between that hook's saved start and completion times. Older breadcrumbs
+  without a start time and automatic no-ops cannot establish capture recovery.
   An unresolved `failed` catch-up surfaces
   `Background capture catch-up failed. Run: mm diag`. `mm diag` exposes
   read-only `capture_catchup` and `push_timings.by_kind.catchup` without

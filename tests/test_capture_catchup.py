@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mind_meld import (
+    attemptlog,
     capturecatchup,
     cli,
     config,
@@ -580,7 +581,7 @@ def test_healthy_autopush_and_dry_run_never_start_catchup(tmp_path, monkeypatch)
     assert launched == []
 
 
-@pytest.mark.parametrize("phase", ["git_walk", "session_scan"])
+@pytest.mark.parametrize("phase", ["git_walk", "session_scan", "git_discovery", "host:codex"])
 def test_real_event_tail_marks_pure_deadline_breadcrumb(tmp_path, monkeypatch, phase):
     env = _setup_fleet(tmp_path, monkeypatch)
     repo = _make_git_repo(tmp_path / "repo-deadline")
@@ -590,8 +591,23 @@ def test_real_event_tail_marks_pure_deadline_breadcrumb(tmp_path, monkeypatch, p
     original_capture = events_tail._capture_event_snapshots
 
     def deadline_capture(*args, **kwargs):
+        captured = original_capture(*args, **kwargs)
+        if phase == "git_discovery":
+            errors = (events.GIT_ROOT_DISCOVERY_BUDGET_ERROR,)
+            return replace(
+                captured,
+                root_discovery=events.GitRootDiscovery((repo,), errors, True),
+                discovery_errors=errors,
+            )
+        if phase == "host:codex":
+            return replace(
+                captured,
+                host_capture=events_tail.HostUsageCapture(
+                    None, "codex", "deadline", dropped=(("codex", "deadline"),)
+                ),
+            )
         return replace(
-            original_capture(*args, **kwargs),
+            captured,
             walk_budget_aborts=int(phase == "git_walk"),
             session_walk_exceeded_budget=phase == "session_scan",
         )
@@ -882,7 +898,52 @@ def test_catchup_rechecks_consent_after_git_work(tmp_path, monkeypatch, revoke_a
     assert events.read_git_capture_cache()["repo_cursors"] == {}
 
 
-def test_catchup_reports_cursor_write_failure_after_append(tmp_path, monkeypatch):
+def test_discovery_rechecks_before_probing_manual_roots(tmp_path, monkeypatch):
+    repo = _make_git_repo(tmp_path / "repo-manual")
+    probed = []
+    classify = events._classify_git_root
+
+    def observe_probe(root):
+        probed.append(root)
+        return classify(root)
+
+    def revoke():
+        raise capturecatchup._ConfigChanged
+
+    monkeypatch.setattr(events, "_classify_git_root", observe_probe)
+    with pytest.raises(capturecatchup._ConfigChanged):
+        events.discover_git_roots({"retro": {"repo_roots": [str(repo)]}}, before_read=revoke)
+    assert probed == []
+
+
+def test_cancelled_first_discovery_leaves_a_reusable_index(tmp_path, monkeypatch):
+    env = _setup_fleet(tmp_path, monkeypatch)
+    repo = _make_git_repo(tmp_path / "repo-first-use")
+    env["cfg"]["retro"]["repo_roots"] = [str(repo)]
+    config.save_config(env["cfg"])
+    locked_json_rmw = lockedjson.locked_json_rmw
+    changed = False
+
+    @contextmanager
+    def change_after_opening(path, **kwargs):
+        nonlocal changed
+        with locked_json_rmw(path, **kwargs) as state:
+            if path == config.GIT_CAPTURE_CACHE_PATH and not changed:
+                changed = True
+                env["cfg"]["retro"]["author_emails"] = ["other@example.com"]
+                config.save_config(env["cfg"])
+            yield state
+
+    monkeypatch.setattr(lockedjson, "locked_json_rmw", change_after_opening)
+    assert not config.GIT_CAPTURE_CACHE_PATH.exists()
+    result = capturecatchup.run_catchup(["git_discovery"])
+    assert result["result"] == "deferred"
+    assert not list(env["events_dir"].glob("*.jsonl"))
+    assert capturecatchup.run_catchup(["git_discovery"])["result"] == "ok"
+
+
+@pytest.mark.parametrize("failure", ["write", "lock"])
+def test_catchup_reports_cursor_write_failure_after_append(tmp_path, monkeypatch, failure):
     env = _setup_fleet(tmp_path, monkeypatch)
     repo = _make_git_repo(tmp_path / "repo-cursor")
     env["cfg"]["retro"]["repo_roots"] = [str(repo)]
@@ -895,7 +956,19 @@ def test_catchup_reports_cursor_write_failure_after_append(tmp_path, monkeypatch
             return OSError("cursor storage unavailable")
         return write_json(fd, data, **kwargs)
 
-    monkeypatch.setattr(lockedjson, "_write_json", fail_cursor_write)
+    acquire = lockedjson._acquire_lock
+
+    def fail_cursor_lock(fd, **kwargs):
+        if kwargs["on_contention"] == "block" and os.path.samestat(
+            os.fstat(fd), config.GIT_CAPTURE_CACHE_PATH.stat()
+        ):
+            return False
+        return acquire(fd, **kwargs)
+
+    if failure == "write":
+        monkeypatch.setattr(lockedjson, "_write_json", fail_cursor_write)
+    else:
+        monkeypatch.setattr(lockedjson, "_acquire_lock", fail_cursor_lock)
     result = capturecatchup.run_catchup(["git_walk"])
 
     assert result["result"] == "failed"
@@ -979,6 +1052,27 @@ def test_adversarial_still_deadline_stopped_records_partial(tmp_path, monkeypatc
     res = capturecatchup.run_catchup(["git_walk"])
     assert res is not None
     assert res["result"] == "partial"
+
+
+def test_catchup_deadline_evidence_uses_cached_host_diagnostics_only(monkeypatch):
+    inventory_calls = []
+
+    def diag(reader, *, count_logs=False):
+        inventory_calls.append(count_logs)
+        return {}
+
+    def stop(**kwargs):
+        return host_usage.HostUsageResult(hosts=None, complete=False, reason="deadline")
+
+    monkeypatch.setattr(host_registry, "reader_usage_diag", diag)
+    capture, _ = events_tail._capture_host_snapshot(
+        "dev-a",
+        (("codex", stop),),
+        host_budget_ms=100,
+        collect_deadline_evidence=True,
+    )
+    assert capture.dropped == (("codex", "deadline"),)
+    assert inventory_calls == [False]
 
 
 def test_adversarial_revoking_grok_before_step1_prevents_read(tmp_path, monkeypatch):
@@ -1186,6 +1280,20 @@ def test_status_failed_partial_and_non_deadline_degradations_surface(tmp_path, m
     res_noop = runner.invoke(cli.app, ["status"])
     assert "Background capture catch-up failed. Run: mm diag" in res_noop.stdout
 
+    # A degraded capture may record a newer row. The no-op still cannot borrow it.
+    capture = events_tail._capture_event_snapshots
+
+    def stop_session_scan(*args, **kwargs):
+        return replace(capture(*args, **kwargs), session_walk_exceeded_budget=True)
+
+    (env["notes_dir"] / "hello.md").write_text("degraded capture\n")
+    with monkeypatch.context() as patch:
+        patch.setattr(events_tail, "_capture_event_snapshots", stop_session_scan)
+        assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+    after_degraded = runner.invoke(cli.app, ["status"])
+    assert "Background capture catch-up failed. Run: mm diag" in after_degraded.stdout
+
     # A newer successful capture supersedes the old failure.
     (env["notes_dir"] / "hello.md").write_text("capture again\n")
     assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
@@ -1240,23 +1348,30 @@ def test_status_keeps_reader_deadline_newer_than_catchup(tmp_path, monkeypatch):
     assert "Usage capture needs attention. Run: mm diag" in result.stdout
 
 
-def test_retro_discovery_errors_stay_visible_while_catchup_runs(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("fault", ["discovery", "walk", "streak"])
+def test_retro_discovery_errors_stay_visible_while_catchup_runs(
+    tmp_path, monkeypatch, capsys, fault
+):
     env = _setup_fleet(tmp_path, monkeypatch)
     now = datetime.now(timezone.utc)
     row = events.make_mm_push_event(
         device=env["device_id"],
         mm_version="1.0.0",
         sources=["mm-events"],
-        discovery_errors=["Git discovery prober failed"],
+        discovery_errors=["Git discovery prober failed"] if fault == "discovery" else [],
         git_capture=events.make_git_capture(
             since=now - timedelta(hours=1),
-            discovery="partial",
+            discovery="partial" if fault == "discovery" else "complete",
             walk_budget_aborts=1,
-            walk_errors=0,
+            walk_errors=int(fault == "walk"),
         ),
     )
     sources = env["cfg"]["sync"]["sources"]
     events.write_push_event(env["events_dir"], env["device_id"], [row], strict=True)
+    if fault == "streak":
+        with lockedjson.locked_json_rmw(config.GIT_CAPTURE_CACHE_PATH) as cache:
+            cache.data.update(events._default_git_capture_cache())
+            cache.data["incomplete_streak"] = 3
     statusflow._print_retro_capture_status(
         sources,
         env["device_id"],
@@ -1264,8 +1379,52 @@ def test_retro_discovery_errors_stay_visible_while_catchup_runs(tmp_path, monkey
         catchup_running=True,
     )
     output = " ".join(capsys.readouterr().out.split())
-    assert "Continue capture on this machine: mm push" in output
+    assert (
+        "Continue capture on this machine: mm push" if fault == "discovery" else "mm recapture"
+    ) in output
     assert "background catch-up is handling" not in output
+
+
+@pytest.mark.parametrize(
+    "fault, expected",
+    [
+        ("attended", "Latest push needs attention"),
+        ("unsupported", "unsupported"),
+        ("held", "held, not yet synced"),
+    ],
+)
+def test_status_keeps_independent_degradation_while_catchup_runs(
+    tmp_path, monkeypatch, fault, expected
+):
+    _setup_fleet(tmp_path, monkeypatch, include_codex=True)
+    monkeypatch.setattr(cli.upgrade, "update_or_nudge", lambda *a, **k: None)
+    assert runner.invoke(cli.app, ["autopush"]).exit_code == 0
+    cli._write_autorun_breadcrumb(
+        "push", "degraded", events_tail._ROOT_DISCOVERY_DEGRADATION, capture_deadline_only=True
+    )
+    if fault == "attended":
+        attemptlog.write_run(
+            "push",
+            attemptlog.make_run(
+                outcome="degraded", cause="result-degraded", counts={"events_degradations": 1}
+            ),
+        )
+    elif fault == "unsupported":
+        monkeypatch.setattr(
+            host_registry, "reader_usage_diag", lambda *a, **kw: {"last_reason": "unsupported"}
+        )
+    else:
+        detail = cli._held_breadcrumb_detail([("notes", "hello.md", "changed")], budget=1024)
+        cli._write_autorun_breadcrumb("push", "degraded", detail)
+
+    lockfile.acquire_lock(capturecatchup.CATCHUP_LOCK_PATH)
+    try:
+        result = runner.invoke(cli.app, ["status"])
+    finally:
+        lockfile.release_lock(capturecatchup.CATCHUP_LOCK_PATH)
+    assert result.exit_code == 0
+    assert "Background capture catch-up: running" in " ".join(result.stdout.split())
+    assert expected in " ".join(result.stdout.split())
 
 
 def test_diag_plain_text_and_json_render_catchup_and_timings(tmp_path, monkeypatch):

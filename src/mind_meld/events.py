@@ -769,6 +769,8 @@ def discover_git_roots(
 
     # Explicit roots take precedence over automatic registries: a large stale
     # host corpus must not starve the user-configured escape hatch.
+    if before_read is not None:
+        before_read()
     try:
         manual_raw = (config.get("retro", {}) or {}).get("repo_roots") or []
         manual_candidates: list[Path] = []
@@ -983,44 +985,67 @@ def discover_git_roots(
             if key in retained and isinstance(value, str) and value
         }
     if persist:
+        index_path = mm_config.GIT_CAPTURE_CACHE_PATH
+        if before_read is not None:
+            before_read()
+        initializing_index = before_read is not None and not index_path.exists()
+        cancelled = None
         try:
             with lockedjson.locked_json_rmw(
-                mm_config.GIT_CAPTURE_CACHE_PATH,
+                index_path,
                 default_factory=_default_git_capture_cache,
                 on_contention="raise",
             ) as locked:
-                if before_read is not None:
-                    before_read()
-                _normalize_git_capture_cache(locked.data)
-                # Merge only discovery-owned fields; cursor commits have their own lock interval.
-                for key in (
-                    "projects",
-                    "discovery_resume_after",
-                    "prober_resume_after",
-                    "pending_refresh_since",
-                    "probe_index",
-                ):
-                    locked.data[key] = cache[key]
-                for root, ts in cache["repo_cursors"].items():
-                    if original_cache["repo_cursors"].get(root) != ts:
-                        previous = locked.data["repo_cursors"].get(root)
-                        locked.data["repo_cursors"][root] = min(previous, ts) if previous else ts
-                for root in original_cache["repo_cursors"].keys() - cache["repo_cursors"].keys():
-                    locked.data["repo_cursors"].pop(root, None)
-                locked_stores = locked.data.get("repo_cursor_stores")
-                if not isinstance(locked_stores, dict):
-                    locked_stores = {}
-                    locked.data["repo_cursor_stores"] = locked_stores
-                for key in list(locked_stores):
-                    if key not in locked.data["repo_cursors"]:
-                        locked_stores.pop(key, None)
-                remembered = cache.get("repo_cursor_stores")
-                if isinstance(remembered, dict):
-                    for key, value in remembered.items():
-                        if key in locked.data["repo_cursors"] and isinstance(value, str) and value:
-                            locked_stores.setdefault(key, value)
+                try:
+                    if before_read is not None:
+                        before_read()
+                except Exception as exc:
+                    # An aborted first-use open may have created the inode.
+                    # Initialize just the empty schema so a later worker can
+                    # retry. Preserve every byte of an existing index.
+                    locked.write_on_exit = initializing_index and locked.read_state == "empty"
+                    cancelled = exc
+                else:
+                    _normalize_git_capture_cache(locked.data)
+                    # Merge discovery-owned fields only. Cursor commits have their own lock.
+                    for key in (
+                        "projects",
+                        "discovery_resume_after",
+                        "prober_resume_after",
+                        "pending_refresh_since",
+                        "probe_index",
+                    ):
+                        locked.data[key] = cache[key]
+                    for root, ts in cache["repo_cursors"].items():
+                        if original_cache["repo_cursors"].get(root) != ts:
+                            previous = locked.data["repo_cursors"].get(root)
+                            locked.data["repo_cursors"][root] = (
+                                min(previous, ts) if previous else ts
+                            )
+                    for root in (
+                        original_cache["repo_cursors"].keys() - cache["repo_cursors"].keys()
+                    ):
+                        locked.data["repo_cursors"].pop(root, None)
+                    locked_stores = locked.data.get("repo_cursor_stores")
+                    if not isinstance(locked_stores, dict):
+                        locked_stores = {}
+                        locked.data["repo_cursor_stores"] = locked_stores
+                    for key in list(locked_stores):
+                        if key not in locked.data["repo_cursors"]:
+                            locked_stores.pop(key, None)
+                    remembered = cache.get("repo_cursor_stores")
+                    if isinstance(remembered, dict):
+                        for key, value in remembered.items():
+                            if (
+                                key in locked.data["repo_cursors"]
+                                and isinstance(value, str)
+                                and value
+                            ):
+                                locked_stores.setdefault(key, value)
         except OSError:
             pass
+        if cancelled is not None:
+            raise cancelled
     if exceeded:
         errors.append(GIT_ROOT_DISCOVERY_BUDGET_ERROR)
     return GitRootDiscovery(
@@ -3456,7 +3481,7 @@ def commit_repo_cursors(
                 reconciling=_reconciling,
             ):
                 state.write_on_exit = False
-        return state.write_error is None
+        return state.is_locked and state.write_error is None
     except OSError:
         return False  # The event log remains authoritative.
 
