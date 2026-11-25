@@ -54,7 +54,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `sidecar.py` | Manifest sidecar read/write |
 | `attemptlog.py` | (65A) Local attended-capture outcome holder, atomic private record, closed-vocabulary validation, and write-free attempt projection/render states |
 | `pushtimings.py` | (165B/165C) Leaf: per-phase push timing model (`PhaseTiming`, `PhaseTimer`, `PUSH_TIMINGS_PATH`, `PUSH_KINDS` including `catchup`, `VALID_PHASE_STATUSES`, `format_verbose_timings`, `record_push_timings`, `read_push_timings`, `diag_timings_state`); stdlib + `config`/`lockedjson`/`safety` only |
-| `lockfile.py` | The mm lockfile (`acquire_lock`, `release_lock`, read-only `is_lock_held`) |
+| `lockfile.py` | The mm lockfile (`acquire_lock`, `release_lock`, read-only `is_lock_held`, and `adopt_lock` for a detached worker's inherited descriptor) |
 | `lockedjson.py` | Single-file flock read/modify/write primitive |
 | `fsutil.py` | Atomic write, flock-append (61A opt-in strict outcome; (64A) whole-batch size ceiling, torn-row separator, regular-files-only), `fsync_dir`, (91A) `fsync_file` (plain data flush behind a recorded ledger base), the shared pytest account-state write guard |
 | `errors.py` | Exception hierarchy |

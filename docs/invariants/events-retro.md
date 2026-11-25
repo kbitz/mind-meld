@@ -4272,10 +4272,12 @@ never change.
   token/host caches). No command holding `L2` ever waits on `L1`, and no `L3`
   lock is held while acquiring `L1` or `L2`. `lockfile.is_lock_held` is a
   read-only probe (`O_RDONLY` + `LOCK_SH | LOCK_NB`) that never creates files.
-  If `L1` is already held when `start_detached_catchup` runs, it writes a
-  non-blocking best-effort retrigger marker (`retrigger_at`, `retrigger_phases`)
-  in `capture-catchup.json` instead of spawning a second worker; the active
-  worker runs at most one bounded follow-up pass before releasing `L1`.
+  The launcher takes `L1` before spawning and passes its locked descriptor
+  to the child. The parent closes its copy and the child holds the lock
+  through process exit. When an exclusive owner already holds `L1`, the hook
+  records a best-effort, nonblocking retrigger in `capture-catchup.json`.
+  A worker can run one bounded follow-up. Final state writes retry briefly
+  on contention and retain later retriggers for the next worker.
 - **Capture-only two-step execution.**
   - **Step 1 (under `L1`, outside `L2`):** warms cold or deadline-stopped
     private host caches (`_capture_host_snapshot` with
@@ -4295,8 +4297,9 @@ never change.
     appends `[git-snapshot(origin="catchup"), sessions-snapshot,
     host-usage-snapshot]` (no `mm-push` row) via `events.write_push_event(...,
     strict=True)`, confirms exact `git-snapshot` readback via
-    `events_tail._commit_recorded_git_rows` before advancing `repo_cursors` and
-    updating `capture-progress.json`, hashes the appended day file
+    `events_tail._commit_recorded_git_rows` before advancing `repo_cursors`.
+    A failed cursor write remains a capture failure and preserves progress
+    evidence. The worker hashes the appended day file
     (`event_file`, `event_sha256`), and stamps `finished_at` **before**
     releasing `L2` so any later hook gets `auto_push_at > finished_at`.
     Encrypted publication waits for the next push (auto or attended).
@@ -4315,7 +4318,9 @@ never change.
   local diffs matching exact `(event_file, event_sha256)`), never hiding
   `partial`/`deferred` backlogs, user edits, or non-deadline degradations
   (`unsupported`, `errs > 0`, `incomplete_streak >= 3`, held files, independent
-  attended push failures). Un-superseded `failed` catch-up surfaces
+  attended push failures). A failed catch-up remains actionable until a
+  newer successful capture. An automatic no-op records hook success only.
+  An unresolved `failed` catch-up surfaces
   `Background capture catch-up failed. Run: mm diag`. `mm diag` exposes
   read-only `capture_catchup` and `push_timings.by_kind.catchup` without
   creating files.

@@ -29,7 +29,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from mind_meld import (
     config,
@@ -51,6 +51,7 @@ CATCHUP_RECENT_WINDOW = timedelta(hours=24)
 VALID_CATCHUP_STATES = frozenset({"idle", "running", "finished"})
 VALID_CATCHUP_RESULTS = frozenset({"ok", "partial", "deferred", "no-sources", "failed"})
 _SYNC_LOCK_BACKOFFS_S = (0.05, 0.1, 0.2, 0.4, 0.6, 0.65)
+_STATE_LOCK_BACKOFFS_S = (0.005, 0.01, 0.02, 0.05)
 _FUTURE_SKEW_WINDOW = timedelta(seconds=60)
 _MAX_TRIGGER_PHASES = 16
 
@@ -160,7 +161,7 @@ def record_catchup_state(
     event_file: str | None = None,
     event_sha256: str | None = None,
     detail: str | None = None,
-    clear_retrigger: bool = False,
+    consumed_retrigger_at: datetime | None = None,
 ) -> None:
     """Persist catch-up state atomically under L3. Best-effort."""
     clean_state = state if state in VALID_CATCHUP_STATES else "finished"
@@ -181,19 +182,17 @@ def record_catchup_state(
             CATCHUP_STATE_PATH,
             mode=0o600,
             compact=True,
-            retry_intervals=(),
+            retry_intervals=_STATE_LOCK_BACKOFFS_S,
             on_contention="raise",
         ) as ljson:
-            if (
-                not clear_retrigger
-                and ljson.read_state == "valid"
-                and isinstance(ljson.data, Mapping)
-            ):
+            if ljson.read_state == "valid":
                 existing = _normalize_state(ljson.data)
-                if "retrigger_at" in existing:
+                retrigger_at = events.parse_aware_ts(existing.get("retrigger_at"))
+                if retrigger_at is not None and (
+                    consumed_retrigger_at is None or retrigger_at > consumed_retrigger_at
+                ):
                     payload["retrigger_at"] = existing["retrigger_at"]
-                if "retrigger_phases" in existing:
-                    payload["retrigger_phases"] = existing["retrigger_phases"]
+                    payload["retrigger_phases"] = existing.get("retrigger_phases", [])
             ljson.data.clear()
             ljson.data.update(payload)
     except Exception:
@@ -236,8 +235,17 @@ def start_detached_catchup(trigger_phases: Sequence[str]) -> bool:
     phases = _normalize_phases(trigger_phases)
     if not phases:
         return False
-    if is_catchup_running():
-        _record_retrigger(phases)
+    try:
+        try:
+            lock_fd = lockfile.acquire_lock(CATCHUP_LOCK_PATH)
+        except errors.LockError:
+            if is_catchup_running():
+                _record_retrigger(phases)
+                return False
+            # A status reader briefly probes with a shared lock. Try once
+            # more if there was no exclusive owner to receive the trigger.
+            lock_fd = lockfile.acquire_lock(CATCHUP_LOCK_PATH)
+    except Exception:
         return False
     try:
         subprocess.Popen(
@@ -246,17 +254,21 @@ def start_detached_catchup(trigger_phases: Sequence[str]) -> bool:
                 "-P",
                 "-m",
                 "mind_meld.capturecatchup",
+                f"--lock-fd={lock_fd}",
                 *(f"--phase={phase}" for phase in phases),
             ],
-            cwd="/",
+            cwd=Path.cwd(),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            pass_fds=(lock_fd,),
         )
         return True
     except Exception:
         return False
+    finally:
+        lockfile.release_lock(CATCHUP_LOCK_PATH, unlock=False)
 
 
 def catchup_observation() -> tuple[dict[str, Any], bool]:
@@ -327,6 +339,16 @@ def _config_fingerprint(cfg: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _config_guard(cfg: Mapping[str, Any]) -> Callable[[], None]:
+    expected = _config_fingerprint(cfg)
+
+    def check_config_unchanged() -> None:
+        if _config_fingerprint(config.load_config()) != expected:
+            raise _ConfigChanged("capture configuration changed")
+
+    return check_config_unchanged
+
+
 def _acquire_sync_lock_bounded() -> bool:
     try:
         lockfile.acquire_lock(config.LOCK_PATH)
@@ -346,6 +368,8 @@ def _acquire_sync_lock_bounded() -> bool:
 def _select_step1_readers(
     all_readers: Sequence[tuple[str, events_tail.HostReader]],
     trigger_phases: Sequence[str],
+    *,
+    before_read: Callable[[], None],
 ) -> list[tuple[str, events_tail.HostReader]]:
     triggered_hosts = {
         phase.removeprefix("host:")
@@ -357,6 +381,7 @@ def _select_step1_readers(
         if "all" in triggered_hosts or name in triggered_hosts:
             selected.append((name, reader_fn))
             continue
+        before_read()
         try:
             diag = host_registry.reader_usage_diag(name, count_logs=False)
             if host_registry.reader_cache_cold(name, diag):
@@ -386,23 +411,17 @@ def _warm_step1_caches(
 
     device_id = str((cfg.get("device") or {}).get("id") or "")
     all_readers = events_tail.consented_host_readers(cfg, sources)
-    warm_readers = _select_step1_readers(all_readers, trigger_phases)
+    check_config_unchanged = _config_guard(cfg)
+    try:
+        warm_readers = _select_step1_readers(
+            all_readers, trigger_phases, before_read=check_config_unchanged
+        )
+    except _ConfigChanged:
+        return frozenset(), None
     warm_reader_names = frozenset(name for name, _ in warm_readers)
     step1_timed_hosts: set[str] = set()
 
     if warm_readers:
-
-        def check_hosts_consented() -> None:
-            fresh_cfg = config.load_config()
-            fresh_sources = config.get_sources(fresh_cfg)
-            if not any(s.get("name") == "mm-events" for s in fresh_sources):
-                raise _ConfigChanged("mm-events disabled")
-            fresh_names = {
-                n for n, _ in events_tail.consented_host_readers(fresh_cfg, fresh_sources)
-            }
-            if not warm_reader_names.issubset(fresh_names):
-                raise _ConfigChanged("host usage consent changed")
-
         try:
             host_budget_ms = events_tail.resolve_host_read_budget(cfg, interactive=True)[0]
             with events_tail.phase_timer_scope(timer):
@@ -411,25 +430,14 @@ def _warm_step1_caches(
                     warm_readers,
                     host_budget_ms=host_budget_ms,
                     warm_host_cache=events_tail._warm_host_cache_with_notice,
-                    before_read=check_hosts_consented,
+                    before_read=check_config_unchanged,
                 )
             step1_timed_hosts.update(warm_reader_names)
-        except _ConfigChanged:
-            pass
         except Exception:
             pass
 
     claude_paths = events_tail._enabled_claude_paths(sources)
     if claude_paths and token_usage.is_cache_cold():
-
-        def check_claude_consented() -> None:
-            fresh_cfg = config.load_config()
-            fresh_sources = config.get_sources(fresh_cfg)
-            if not any(s.get("name") == "mm-events" for s in fresh_sources):
-                raise _ConfigChanged("mm-events disabled")
-            if not events_tail._enabled_claude_paths(fresh_sources):
-                raise _ConfigChanged("claude source disabled")
-
         try:
             total_ms, _ = events_tail.resolve_attended_capture_cap(cfg)
             warm_budget_s = max(
@@ -442,10 +450,8 @@ def _warm_step1_caches(
             token_usage.warm_token_cache_inline(
                 claude_paths,
                 deadline_s=warm_budget_s,
-                before_read=check_claude_consented,
+                before_read=check_config_unchanged,
             )
-        except _ConfigChanged:
-            pass
         except Exception:
             pass
 
@@ -504,7 +510,7 @@ def _classify_capture_outcome(
     if append_skipped:
         return "failed", "event append skipped (max-file-size)"
     if not git_confirmed:
-        return "failed", "git snapshot readback failed"
+        return "failed", "Git snapshot or cursor update could not be confirmed; run mm diag"
     if capture.walk_errors > 0:
         return "failed", f"git walk had {capture.walk_errors} error(s)"
     if any(err != events.GIT_ROOT_DISCOVERY_BUDGET_ERROR for err in capture.root_discovery.errors):
@@ -529,64 +535,45 @@ def _run_catchup_pass(
     timer: pushtimings.PhaseTimer,
 ) -> dict[str, Any]:
     step1_timed_hosts, early_result = _warm_step1_caches(trigger_phases, timer)
-    if early_result == "no-sources":
-        return {
-            "result": "no-sources",
-            "detail": None,
-            "event_file": None,
-            "event_sha256": None,
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-            "step2_started_at": datetime.now(timezone.utc),
-        }
-
     step2_started_at = datetime.now(timezone.utc)
-    if not _acquire_sync_lock_bounded():
+
+    def finish(
+        result: str,
+        detail: str | None = None,
+        *,
+        event_file: str | None = None,
+        event_sha256: str | None = None,
+    ) -> dict[str, Any]:
         return {
-            "result": "deferred",
-            "detail": "sync lock busy; run mm push",
-            "event_file": None,
-            "event_sha256": None,
+            "result": result,
+            "detail": detail,
+            "event_file": event_file,
+            "event_sha256": event_sha256,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "step2_started_at": step2_started_at,
         }
+
+    if early_result == "no-sources":
+        return finish("no-sources")
+    if not _acquire_sync_lock_bounded():
+        return finish("deferred", "sync lock busy; run mm push")
 
     try:
         try:
             cfg = config.load_config()
         except Exception as exc:
-            return {
-                "result": "failed",
-                "detail": f"configuration unreadable ({type(exc).__name__})",
-                "event_file": None,
-                "event_sha256": None,
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "step2_started_at": step2_started_at,
-            }
+            return finish("failed", f"configuration unreadable ({type(exc).__name__})")
 
-        step2_fp = _config_fingerprint(cfg)
+        check_config_unchanged = _config_guard(cfg)
         try:
             resolved = config.resolve_sources(cfg, strict=True, bootstrap=False)
         except Exception as exc:
-            return {
-                "result": "failed",
-                "detail": f"source configuration invalid ({type(exc).__name__})",
-                "event_file": None,
-                "event_sha256": None,
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "step2_started_at": step2_started_at,
-            }
+            return finish("failed", f"source configuration invalid ({type(exc).__name__})")
 
         sources = resolved.available
         mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
         if mm_events_src is None or not Path(mm_events_src["path"]).expanduser().is_dir():
-            return {
-                "result": "no-sources",
-                "detail": None,
-                "event_file": None,
-                "event_sha256": None,
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "step2_started_at": step2_started_at,
-            }
+            return finish("no-sources")
 
         # Rule out PR #382 F42/F41: reject pre-existing empty/corrupt/unreadable
         # git-capture-cache.json while allowing absent ("missing") first use.
@@ -598,19 +585,7 @@ def _run_catchup_pass(
         except OSError:
             cache_state = "unreadable"
         if cache_state not in {"valid", "missing"}:
-            return {
-                "result": "failed",
-                "detail": "Git capture index unreadable; run mm diag",
-                "event_file": None,
-                "event_sha256": None,
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "step2_started_at": step2_started_at,
-            }
-
-        def check_config_unchanged() -> None:
-            fresh = config.load_config()
-            if _config_fingerprint(fresh) != step2_fp:
-                raise _ConfigChanged("capture configuration changed; run mm push")
+            return finish("failed", "Git capture index unreadable; run mm diag")
 
         device_id = str((cfg.get("device") or {}).get("id") or "")
         events_dir = Path(mm_events_src["path"]).expanduser() / "events"
@@ -637,39 +612,29 @@ def _run_catchup_pass(
                 return None
             return "warn"
 
-        try:
-            with events_tail.phase_timer_scope(timer):
-                capture = events_tail._capture_event_snapshots(
-                    cfg,
-                    claude_paths,
-                    device_id,
-                    since=since,
-                    budget_ms=budget_ms,
-                    git_budget_ms=git_budget_ms,
-                    persist=True,
-                    use_repo_cursors=True,
-                    root_discovery_budget_ms=root_discovery_budget_ms,
-                    host_budget_ms=host_budget_ms,
-                    session_deadline=tail_deadline,
-                    per_repo_cap_ms=per_repo_cap_ms,
-                    warm_host_cache=None,
-                    origin=events.GIT_SNAPSHOT_ORIGIN_CATCHUP,
-                    prepare_token_cache=prepare_token_cache_warm_only,
-                    host_readers=host_readers,
-                    before_read=check_config_unchanged,
-                    preserve_budget_for=step1_timed_hosts,
-                    collect_deadline_evidence=True,
-                )
-            check_config_unchanged()
-        except _ConfigChanged:
-            return {
-                "result": "deferred",
-                "detail": "capture configuration changed; run mm push",
-                "event_file": None,
-                "event_sha256": None,
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "step2_started_at": step2_started_at,
-            }
+        with events_tail.phase_timer_scope(timer):
+            capture = events_tail._capture_event_snapshots(
+                cfg,
+                claude_paths,
+                device_id,
+                since=since,
+                budget_ms=budget_ms,
+                git_budget_ms=git_budget_ms,
+                persist=True,
+                use_repo_cursors=True,
+                root_discovery_budget_ms=root_discovery_budget_ms,
+                host_budget_ms=host_budget_ms,
+                session_deadline=tail_deadline,
+                per_repo_cap_ms=per_repo_cap_ms,
+                warm_host_cache=None,
+                origin=events.GIT_SNAPSHOT_ORIGIN_CATCHUP,
+                prepare_token_cache=prepare_token_cache_warm_only,
+                host_readers=host_readers,
+                before_read=check_config_unchanged,
+                preserve_budget_for=step1_timed_hosts,
+                collect_deadline_evidence=True,
+            )
+        check_config_unchanged()
 
         if capture.git_rows:
             since = datetime.fromisoformat(capture.git_rows[0]["git_capture"]["since"])
@@ -697,6 +662,7 @@ def _run_catchup_pass(
         append_result: Path | events.EventAppendSkipped | None = None
         append_skipped = False
         if rows:
+            check_config_unchanged()
             append_result = events.write_push_event(
                 events_dir,
                 device_id,
@@ -723,7 +689,7 @@ def _run_catchup_pass(
                 since=since,
                 complete=complete_git,
             )
-            if git_confirmed:
+            if git_confirmed and (complete_git or published_git_left is not None):
                 events_tail._record_git_progress(
                     device_id=device_id,
                     published=published_git_left,
@@ -748,20 +714,20 @@ def _run_catchup_pass(
         )
         # Rule out PR #382 F25: stamp finished_at BEFORE releasing L2 so any
         # subsequent autopush acquiring L2 gets auto_push_at > finished_at.
-        finished_at = datetime.now(timezone.utc).isoformat()
-        return {
-            "result": outcome,
-            "detail": detail,
-            "event_file": event_file,
-            "event_sha256": event_sha256,
-            "finished_at": finished_at,
-            "step2_started_at": step2_started_at,
-        }
+        return finish(outcome, detail, event_file=event_file, event_sha256=event_sha256)
+    except _ConfigChanged:
+        return finish("deferred", "capture configuration changed; run mm push")
+    except Exception as exc:
+        return finish("failed", f"catch-up failed ({type(exc).__name__})")
     finally:
         lockfile.release_lock(config.LOCK_PATH)
 
 
-def run_catchup(trigger_phases: Sequence[str]) -> dict[str, Any] | None:
+def run_catchup(
+    trigger_phases: Sequence[str],
+    *,
+    inherited_lock_fd: int | None = None,
+) -> dict[str, Any] | None:
     """Run single-flight background catch-up under L1.
 
     Returns the final pass result dict, or ``None`` if another worker already
@@ -769,11 +735,17 @@ def run_catchup(trigger_phases: Sequence[str]) -> dict[str, Any] | None:
     """
     phases = _normalize_phases(trigger_phases)
     try:
-        lockfile.acquire_lock(CATCHUP_LOCK_PATH)
+        if inherited_lock_fd is None:
+            lockfile.acquire_lock(CATCHUP_LOCK_PATH)
+        else:
+            lockfile.adopt_lock(CATCHUP_LOCK_PATH, inherited_lock_fd)
     except errors.LockError:
         return None
 
     started_at = datetime.now(timezone.utc).isoformat()
+    previous = read_catchup_state()
+    consumed_retrigger_at = events.parse_aware_ts(previous.get("retrigger_at"))
+    phases = _normalize_phases([*phases, *previous.get("retrigger_phases", [])])
     timer = pushtimings.PhaseTimer()
     final_res: dict[str, Any] = {
         "result": "failed",
@@ -792,7 +764,7 @@ def run_catchup(trigger_phases: Sequence[str]) -> dict[str, Any] | None:
             event_file=None,
             event_sha256=None,
             detail=None,
-            clear_retrigger=False,
+            consumed_retrigger_at=consumed_retrigger_at,
         )
         pass_res = _run_catchup_pass(phases, timer)
         final_res = pass_res
@@ -807,20 +779,20 @@ def run_catchup(trigger_phases: Sequence[str]) -> dict[str, Any] | None:
             and isinstance(step2_started, datetime)
             and retrigger_at > step2_started
         ):
-            followup_phases = _normalize_phases(state_now.get("retrigger_phases") or phases)
+            consumed_retrigger_at = retrigger_at
+            phases = _normalize_phases(state_now.get("retrigger_phases") or phases)
             record_catchup_state(
                 state="running",
                 result=None,
                 started_at=started_at,
                 finished_at=None,
-                trigger_phases=followup_phases,
+                trigger_phases=phases,
                 event_file=None,
                 event_sha256=None,
                 detail=None,
-                clear_retrigger=True,
+                consumed_retrigger_at=consumed_retrigger_at,
             )
-            final_res = _run_catchup_pass(followup_phases, timer)
-            phases = followup_phases
+            final_res = _run_catchup_pass(phases, timer)
     except Exception as exc:
         final_res = {
             "result": "failed",
@@ -830,24 +802,31 @@ def run_catchup(trigger_phases: Sequence[str]) -> dict[str, Any] | None:
             "finished_at": datetime.now(timezone.utc).isoformat(),
         }
     finally:
-        if recorded_phases := timer.phases():
-            pushtimings.record_push_timings(
-                "catchup",
-                recorded_phases,
-                total_ms=timer.total_ms(),
-            )
-        record_catchup_state(
-            state="finished",
-            result=final_res["result"],
-            started_at=started_at,
-            finished_at=final_res["finished_at"],
-            trigger_phases=phases,
-            event_file=final_res["event_file"],
-            event_sha256=final_res["event_sha256"],
-            detail=final_res["detail"],
-            clear_retrigger=True,
-        )
-        lockfile.release_lock(CATCHUP_LOCK_PATH)
+        try:
+            if recorded_phases := timer.phases():
+                pushtimings.record_push_timings(
+                    "catchup",
+                    recorded_phases,
+                    total_ms=timer.total_ms(),
+                )
+        finally:
+            try:
+                record_catchup_state(
+                    state="finished",
+                    result=final_res["result"],
+                    started_at=started_at,
+                    finished_at=final_res["finished_at"],
+                    trigger_phases=phases,
+                    event_file=final_res["event_file"],
+                    event_sha256=final_res["event_sha256"],
+                    detail=final_res["detail"],
+                    consumed_retrigger_at=consumed_retrigger_at,
+                )
+            finally:
+                # The detached child keeps custody through interpreter exit,
+                # including Git work still unwinding at the capture deadline.
+                if inherited_lock_fd is None:
+                    lockfile.release_lock(CATCHUP_LOCK_PATH)
     return final_res
 
 
@@ -868,7 +847,8 @@ def _parse_argv(argv: Sequence[str] | None = None) -> list[str]:
 
 def _detached_main(argv: Sequence[str] | None = None) -> int:
     """Silent detached worker entrypoint."""
-    phases = _parse_argv(argv)
+    args = sys.argv[1:] if argv is None else argv
+    phases = _parse_argv(args)
     if not phases:
         return 0
     with (
@@ -877,7 +857,15 @@ def _detached_main(argv: Sequence[str] | None = None) -> int:
         token_usage.diagnostic_scope(lambda *a, **k: None),
     ):
         try:
-            run_catchup(phases)
+            inherited_fd = next(
+                (
+                    int(arg.removeprefix("--lock-fd="))
+                    for arg in args
+                    if arg.startswith("--lock-fd=")
+                ),
+                None,
+            )
+            run_catchup(phases, inherited_lock_fd=inherited_fd)
         except Exception:
             pass
     return 0

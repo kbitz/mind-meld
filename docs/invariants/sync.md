@@ -2492,8 +2492,10 @@ markdown files remain the source of truth.
   lock, never wait, and print nothing. The child starts outside the caller's
   project directory. Beside it, a deadline-stopped `mm autopush` spawns
   `capturecatchup.start_detached_catchup(trigger_phases)`
-  (`sys.executable -P -m mind_meld.capturecatchup`, same detached stream/cwd
-  contract) after `_auto_command_scope` releases `mind-meld.lock`, and sets
+  (`sys.executable -P -m mind_meld.capturecatchup`, all streams `DEVNULL`,
+  detached session) after `_auto_command_scope` releases `mind-meld.lock`.
+  Catch-up uses the hook's working directory so relative source paths keep
+  their meaning. The hook sets
   `capture_deadline_only = True` on its `push` breadcrumb only when every
   recorded degradation is a pure capture deadline notice; see
   `docs/invariants/events-retro.md` ("Background capture catch-up (Track 165C)").

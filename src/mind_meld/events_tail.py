@@ -1649,6 +1649,8 @@ def _capture_host_snapshot(
         deadline_evidence: dict[str, HostReadEvidence] = {}
         for name, reason in host_capture.dropped:
             if reason == "deadline" and name in HOST_READER_SOURCE_GATE:
+                if before_read is not None:
+                    before_read()
                 evidence = _deadline_read_evidence(name)
                 deadline_evidence[name] = evidence
                 left = _evidence_left(evidence)
@@ -1809,6 +1811,8 @@ def _capture_event_snapshots(
             else None
         )
         for claude_dir in claude_paths:
+            if before_read is not None:
+                before_read()
             extra_kwargs = _accepted_kwargs(
                 events.walk_session_metadata,
                 persist=persist,
@@ -1981,6 +1985,8 @@ def _capture_git_rows(
     )
     root_discovery = events.dedup_git_root_discovery(root_discovery)
     roots, _discovery_errors = root_discovery
+    if before_read is not None:
+        before_read()
     if use_repo_cursors:
         since = events.effective_capture_since(roots, since)
     walk_kwargs = (
@@ -2015,6 +2021,8 @@ def _capture_git_rows(
             walk_budget_ms, max(0, int((deadline_monotonic - time.monotonic()) * 1000))
         )
     walk_started = time.monotonic()
+    if before_read is not None:
+        before_read()
     git_rows = events.walk_git_projects(
         roots,
         since=since,
@@ -2631,13 +2639,12 @@ def _commit_recorded_git_rows(
     scan = events.latest_event_rows(events_dir, device_id, {"git-snapshot"})
     if scan.rows.get("git-snapshot") != events.wire_row(git_rows[-1]):
         return False
-    events.commit_repo_cursors(
+    return events.commit_repo_cursors(
         git_rows,
         since=since,
         cursor_ts=datetime.fromisoformat(git_rows[-1]["ts"]),
         complete=complete,
     )
-    return True
 
 
 @dataclass

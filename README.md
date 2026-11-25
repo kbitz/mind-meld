@@ -2819,7 +2819,7 @@ guarded by `~/.config/mind-meld/capture-catchup.lock` (state recorded in
 `~/.config/mind-meld/capture-catchup.json`). The worker is capture-only and
 silent: it warms cold or deadline-stopped private host and Claude token caches
 outside `mind-meld.lock` with attended budgets and consent rechecks, then
-acquires `mind-meld.lock` briefly to run single-phase capture, append local
+takes `mind-meld.lock` for the attended capture pass, appends local
 `git-snapshot` (`origin="catchup"`, excluded from push counts),
 `sessions-snapshot`, and `host-usage-snapshot` rows to `mm-events`, confirm the
 written Git snapshot before advancing per-repo cursors, and record `catchup`

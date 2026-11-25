@@ -983,14 +983,14 @@ def discover_git_roots(
             if key in retained and isinstance(value, str) and value
         }
     if persist:
-        if before_read is not None:
-            before_read()
         try:
             with lockedjson.locked_json_rmw(
                 mm_config.GIT_CAPTURE_CACHE_PATH,
                 default_factory=_default_git_capture_cache,
                 on_contention="raise",
             ) as locked:
+                if before_read is not None:
+                    before_read()
                 _normalize_git_capture_cache(locked.data)
                 # Merge only discovery-owned fields; cursor commits have their own lock interval.
                 for key in (
@@ -3434,12 +3434,12 @@ def commit_repo_cursors(
     recorded_ts: str | datetime | None = None,
     complete: bool = True,
     _reconciling: bool = False,
-) -> None:
+) -> bool:
     """Commit repository progress only after the caller verifies the event append.
 
     Failed roots keep the exact previously retained interval. New failed roots
     acquire the capture's old interval before the global event cursor advances.
-    A completed empty repository is progress just like a successful git log.
+    Return False when the cache could not be written.
     """
     recorded = recorded_ts if isinstance(recorded_ts, datetime) else parse_aware_ts(recorded_ts)
     try:
@@ -3456,8 +3456,9 @@ def commit_repo_cursors(
                 reconciling=_reconciling,
             ):
                 state.write_on_exit = False
+        return state.write_error is None
     except OSError:
-        pass  # The event log remains authoritative; reconciliation retries later.
+        return False  # The event log remains authoritative.
 
 
 def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None:

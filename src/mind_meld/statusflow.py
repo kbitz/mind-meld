@@ -892,14 +892,29 @@ def status(
         covered_readers: set[str] = set()
         for name, rstate in reader_states.items():
             if rstate.get("last_reason") == "deadline":
-                reason_at = events.parse_aware_ts(rstate.get("reason_since"))
-                if capturecatchup.covers_deadline_backlog(
+                reason_at = events.parse_aware_ts(rstate.get("last_reason_since"))
+                if (
+                    catchup_running or reason_at is not None
+                ) and capturecatchup.covers_deadline_backlog(
                     catchup_state, running=catchup_running, backlog_at=reason_at
                 ):
                     covered_readers.add(name)
         mm_push_ts = events.parse_aware_ts((capture_rows.rows.get("mm-push") or {}).get("ts"))
+        git_snapshot_ts = events.parse_aware_ts(
+            (capture_rows.rows.get("git-snapshot") or {}).get("ts")
+        )
+        latest_git_at = max(
+            (ts for ts in (mm_push_ts, git_snapshot_ts) if ts is not None), default=None
+        )
         catchup_covering_git = capturecatchup.covers_deadline_backlog(
-            catchup_state, running=catchup_running, backlog_at=mm_push_ts
+            catchup_state, running=catchup_running, backlog_at=latest_git_at
+        )
+        catchup_superseded = (
+            not catchup_running
+            and catchup_state.get("result") in {"failed", "partial", "deferred"}
+            and _catchup_failure_superseded(
+                catchup_state, auto_push, attended_evidence, mm_push_ts=mm_push_ts
+            )
         )
         only_catchup_event_pending = _is_only_catchup_event_pending(
             source_diffs,
@@ -946,9 +961,12 @@ def status(
             for name, state in reader_states.items()
         ):
             capture_action = "Usage capture needs attention. Run: mm diag"
-        elif not catchup_running and catchup_state.get("result") == "failed":
-            if not _catchup_failure_superseded(catchup_state, auto_push, attended_evidence):
-                capture_action = "Background capture catch-up failed. Run: mm diag"
+        elif (
+            not catchup_running
+            and not catchup_superseded
+            and catchup_state.get("result") == "failed"
+        ):
+            capture_action = "Background capture catch-up failed. Run: mm diag"
 
         devices = core._list_devices_warn(backend)
         peer_fetches: dict[str, Any] = {}
@@ -1181,11 +1199,12 @@ def status(
                 and "git repository discovery" in detail
             ):
                 discovery_nag = True
-        catchup_line = _format_catchup_status_line(
-            catchup_state, running=catchup_running, queued=only_catchup_event_pending
-        )
-        if catchup_line:
-            console.print(catchup_line)
+        if not catchup_superseded:
+            catchup_line = _format_catchup_status_line(
+                catchup_state, running=catchup_running, queued=only_catchup_event_pending
+            )
+            if catchup_line:
+                console.print(catchup_line)
         if mesh_valid:
             for wait in mesh_evidence["waits"]:
                 console.print(safe_str(f"    {wait}"))
@@ -1792,7 +1811,7 @@ def _read_capture_rows(sources: list[dict], device_id: str | None) -> events.Eve
     return events.latest_event_rows(
         Path(src["path"]).expanduser() / "events",
         device_id,
-        {"mm-push", "host-usage-snapshot"},
+        {"mm-push", "git-snapshot", "host-usage-snapshot"},
         now=now,
         selectors={
             "host-usage-snapshot": lambda row: aggregator.local_host_capture_candidate(
@@ -1913,6 +1932,8 @@ def _catchup_failure_superseded(
     catchup_state: dict,
     auto_push: object,
     attended_evidence: dict,
+    *,
+    mm_push_ts: datetime | None,
 ) -> bool:
     """Return True if a newer healthy push superseded a failed catch-up."""
     catchup_at = events.parse_aware_ts(catchup_state.get("finished_at")) or events.parse_aware_ts(
@@ -1920,7 +1941,14 @@ def _catchup_failure_superseded(
     )
     if isinstance(auto_push, dict) and auto_push.get("outcome") == "success":
         auto_at = events.parse_aware_ts(auto_push.get("timestamp"))
-        if auto_at is not None and (catchup_at is None or auto_at > catchup_at):
+        # A change-gated no-op also writes a success breadcrumb, but it did
+        # not retry capture. Require a new capture row for an automatic push.
+        if (
+            auto_at is not None
+            and mm_push_ts is not None
+            and mm_push_ts <= auto_at
+            and (catchup_at is None or mm_push_ts > catchup_at)
+        ):
             return True
     if attended_evidence.get("state") == "valid":
         att_runs = attended_evidence.get("runs")
@@ -1986,11 +2014,16 @@ def _print_host_publication(
     only_deadline_gap = bool(
         covered
         and state["readiness"] == "ready"
+        and state["state"] != "unknown"
         and not state.get("coverage_invalid")
         and not _unsupported_readers(state, reader_states)
         and all(
-            name in covered or reader_states.get(name, {}).get("last_reason") in (None, "locked")
-            for name in state["readers"]
+            (name in covered and coverage != "partial")
+            or (
+                coverage == "contributed"
+                and reader_states.get(name, {}).get("last_reason") in (None, "locked")
+            )
+            for name, coverage in state["readers"].items()
         )
     )
     if state["readiness"] != "ready" or (
@@ -2135,11 +2168,12 @@ def _print_retro_capture_status(
         or cache.get("incomplete_streak", 0) >= 3
     )
     if not recovery_required:
-        deadline_only = errs == 0 and (
-            aborts > 0
-            or projected.get("discovery") == "partial"
-            or pending > 0
-            or bool(cache.get("pending_refresh_since"))
+        discovery_errors = row.get("discovery_errors", [])
+        discovery_limit = events.GIT_ROOT_DISCOVERY_BUDGET_ERROR
+        deadline_only = (
+            isinstance(discovery_errors, list)
+            and all(error == discovery_limit for error in discovery_errors)
+            and (aborts > 0 or discovery_limit in discovery_errors)
         )
         if catchup_covering and deadline_only:
             if catchup_running:
