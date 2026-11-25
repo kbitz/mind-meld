@@ -44,6 +44,18 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/cli.py|src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py] Test gap: Verify ordinary autopush records complete catch-up recovery
+
+- The recovery tests assert the stored resolution for attended push and the detached worker. The ordinary autopush drain test checks publication.
+- When autopush capture reporting next changes, check that a complete recorded capture writes `resolved_by=autopush` and that a deadline-stopped capture leaves the previous warning visible.
+- Found in the Track 165C coverage audit for [PR #385](https://github.com/kbitz/mind-meld/pull/385) at `291c5c6`. The audit found no demonstrated failure on this path.
+
+### [review:files=src/mind_meld/statusflow.py|tests/test_capture_catchup.py] Test gap: Restore push advice when a queued event file changes
+
+- The status fixture covers matching event bytes and an ordinary user-file edit. A separate case could keep the queued event path while changing its contents.
+- When catch-up advice next changes, check that the digest mismatch restores `Run: mm push`.
+- Found in the Track 165C coverage audit for [PR #385](https://github.com/kbitz/mind-meld/pull/385) at `291c5c6`. The audit found no demonstrated failure on this path.
+
 ### [review:files=src/mind_meld/capturecatchup.py|src/mind_meld/events_tail.py|src/mind_meld/statusflow.py] Reconcile Git backlog counts after catch-up
 - **Description:** Compare the reported backlog with the repository cursors when catch-up observes zero remaining repositories or the newest hook lacks deadline evidence for older pending repos.
 - **Revisit:** An owner report of stale pending counts or manual push advice after a covering catch-up. Filed during review of PR #385.
