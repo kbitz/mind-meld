@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.90] - 2026-11-25
+
+Version 1.12.90 keeps mind-meld commands, skills, and upgrade behavior as they are.
+
+### Upgrade notes
+
+- Keep your current install; this version needs no skill refresh or restart.
+
 ## [1.12.89] - 2026-11-25
 
 Attended `mm push` now reports usage publication and readers still catching up on its `Push:` line, and `mm retro-fleet` refreshes vendor rate tables and bundled model pricing while `/retro-fleet` applies scheduled price changes.
