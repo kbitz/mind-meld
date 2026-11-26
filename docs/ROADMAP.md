@@ -26,42 +26,15 @@ None declared (2026-11-25). No branch, session or open pull request is active fo
 
 ## Current Plan
 
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167_
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168_
 
-### Group 168: Upgrade interrupt process-group test determinism
-
-_Depends on: none_
-
-**This group delivers:** a deterministic process-group cleanup test on `KeyboardInterrupt` in `tests/test_upgrade.py` so macOS CI stops failing intermittently while waiting for the OS to reap the killed grandchild.
-
-#### Track 168A: Make the upgrade interrupt process-group cleanup test wait for grandchild reaping
-_2 tasks . ~60 LOC . low risk . 1 file_
-_id: wi-22388c_
-**Outcome:** `tests/test_upgrade.py::TestFetchTagsGitAdapter124B::test_keyboard_interrupt_kills_sleeping_process_group_and_reraises` passes deterministically under macOS and Linux CI load while still catching a descendant that escapes the process group.
-**Supports:** [SPEC](SPEC.md) MVP-1 quality and CI reliability; standing constraint admitting reproducible encountered bugs (owner, 2026-11-09). Observed failing on macOS CI at `main` `e12f181` (run `45442232986`, job `138616232737`, 2026-11-24) and PR #385 (`4ba8562`, run `45684816209`, job `139454492316`, 2026-11-25) at `tests/test_upgrade.py:965` (`Failed: DID NOT RAISE ProcessLookupError` on `os.kill(child_pid, 0)`), passing on rerun both times.
-**Done when:** `test_keyboard_interrupt_kills_sleeping_process_group_and_reraises` uses bounded `_wait_pid_gone` reap waits matching `_run_timeout_grandchild_check` (Track 150A), fails clearly if `pids_file` never appears before interrupting, cleans up with `_wait_pid_gone` in `finally`, a companion detached-grandchild (`os.setsid()`) check proves the assertion still fails when a descendant escapes the process group, and repeated parallel runs of `tests/test_upgrade.py` plus `./bin/check --affected` pass.
-**Acceptance:**
-1. Replace the immediate `with pytest.raises(ProcessLookupError): os.kill(..., 0)` assertions in `TestFetchTagsGitAdapter124B.test_keyboard_interrupt_kills_sleeping_process_group_and_reraises` with bounded `_wait_pid_gone(..., timeout=...)` polling matching `_run_timeout_grandchild_check` (Track 150A, PR #352). Fail clearly if `pids_file` does not appear before the readiness deadline instead of raising `KeyboardInterrupt` without PIDs, and reap with `_wait_pid_gone` in the `finally` fallback.
-2. Add a companion negative test (mirroring `test_timeout_grandchild_check_fails_when_grandchild_calls_setsid`) proving that a grandchild calling `os.setsid()` to escape the process group still fails the reap check and is cleaned up in `finally`.
-3. Verify `src/mind_meld/upgrade.py::_run_git`'s `KeyboardInterrupt` cleanup path; keep `src/mind_meld/upgrade.py` unchanged unless a concrete defect in `_run_git` itself is reproduced (widen `_touches:` per the drift rule if `_run_git` must change).
-4. Keep the test free of real `git` calls and process-listing utilities, and confirm repeated parallel runs of `tests/test_upgrade.py` and `./bin/check --affected` pass deterministically.
-
-_touches: tests/test_upgrade.py_
-_read-first: tests/test_upgrade.py, src/mind_meld/upgrade.py (_run_git), docs/invariants/auto-upgrade.md, AGENTS.md_
-_verify: ./bin/check --affected_
-
-_Source: encountered CI flake on main e12f181 (2026-11-24) and PR #385 (2026-11-25), verified against tests/test_upgrade.py at 8b98a49._
-
-- **Use bounded reap waits and a readiness guard in the interrupt test.** Replace immediate `os.kill(..., 0)` assertions with `_wait_pid_gone`, fail clearly if `pids_file` is missing when the wait expires, and reap in `finally`. _tests/test_upgrade.py, ~35 lines._ (S)
-- **Pin escaped-grandchild detection for the interrupt path.** Add a detached-grandchild (`os.setsid()`) failure test mirroring `test_timeout_grandchild_check_fails_when_grandchild_calls_setsid` and verify repeated parallel runs of `tests/test_upgrade.py`. _tests/test_upgrade.py, ~25 lines._ (S)
+None. Track 168A (`wi-22388c`, the only Track from the 2026-11-25 regeneration) merged as v1.12.90 ([PR #389](https://github.com/kbitz/mind-meld/pull/389), `73cb0cf`) and Group 168 is retired. This regeneration found no open inbox items (`docs/TODOS.md ## Unprocessed` is empty) and no Future entry that passes the admission gates: none records a reproducible bug seen on the owner's machines with a cause found in the code, and no Future revisit trigger is met. The owner will choose the next Track, and the path to 2.0, after using the Syncthing fleet.
 
 ### Execution Map
 
-```
-- Group 168 ← {}
-```
+No Groups remain.
 
-**Total: 1 group, 1 Track remaining.**
+**Total: 0 groups . 0 tracks remaining.**
 
 ---
 
