@@ -46,6 +46,19 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap regeneration — 2026-11-25 (Track 168A recorded; empty plan; 0 inbox items waiting)
+
+Verified against `73cb0cf` (v1.12.90). Selected target remains the owner's MVP-1 Syncthing fleet on macOS and Arch Linux, with cross-model memory (O9) accepted on the owner's fleet (`docs/PROGRESS.md` `## Acceptance`, PR #380, `e12f181`). Triggered by the developer's verbatim request (`"Please regen the roadmap once this merges, before you hibernate."`). Track 168A (`wi-22388c`, v1.12.90, PR #389, merge `73cb0cf`) — the only Track from the prior regeneration (PR #388, `2f479eb`) — now has an independent receipt in `docs/roadmap-shipped.md`, retiring Group 168 and tombstoning `168`. Track 168A's review filed zero TODOs in `docs/TODOS.md` (`## Unprocessed` was empty: `ITEMS: 0`). Re-checking all 151 `docs/roadmap-future.md` entries against `73cb0cf` found no met revisit triggers, no encountered reproducible bugs with a cause found in the code, no newly discharged items, and no unobserved reversible/inconsequential defects to prune under the manifestation gate. In Progress and Current Plan are empty (0 groups, 0 Tracks remaining). `docs/SPEC.md`, `docs/PROGRESS.md`, and `docs/roadmap-future.md` are untouched.
+
+| Item | Disposition | Evidence or revisit trigger |
+|---|---|---|
+| Track 168A (v1.12.90, PR #389) | shipped (`wi-22388c`) | Independent receipt appended for `73cb0cf` (v1.12.90); Group 168 retired from `## Current Plan` and tombstoned (`168`). |
+| `docs/TODOS.md ## Unprocessed` | empty (0 items) | Track 168A's review filed zero TODOs (`Unresolved: none recorded`; PR #389 did not modify `docs/TODOS.md`). |
+| `docs/roadmap-future.md` (151 entries) | stay deferred (151) | Re-checked at `73cb0cf`: 0 met triggers, 0 encountered reproducible bugs admitted, 0 discharged, 0 pruned by the manifestation gate; 0 missing triggers. |
+
+Drained 0 inbox entries (0 placed, 0 deferred, 0 killed, 0 discharged). Future stays at 151 entries (0 missing triggers). No release bump under the SPEC documentation-only policy.
+
+
 ### Roadmap regeneration — 2026-11-25 (Tracks 165C, 166A and 167A recorded; 165A/121A accounted for; Track 168A carded; 28 inbox items drained)
 
 Verified against `8b98a49` (v1.12.89). Selected target remains the owner's MVP-1 Syncthing fleet on macOS and Arch Linux, with cross-model memory (O9) accepted on the owner's fleet (`docs/PROGRESS.md` `## Acceptance`, PR #380, `e12f181`). Developer approved this regeneration verbatim (`"1 - sure"`) and closed the two Track 166A retro-fleet edge-case owner decisions (`"2 - close"`). Tracks 164A (v1.12.85, PR #381) and 165B (v1.12.86, PR #383) already had independent receipts in `docs/roadmap-shipped.md` from PR #384 (`7095113`). Tracks 165C (v1.12.87, PR #385), 166A (v1.12.88, PR #386) and 167A (v1.12.89, PR #387) now have independent receipts in `docs/roadmap-shipped.md`, retiring Group 165 from `## In Progress` and tombstoning `165, 166, 167`. Old Track 165A (draft PR #382, split into 165B and 165C on 2026-11-24) was closed unmerged on 2026-11-25 on the owner's word. Track 121A (git-history hostname scrub) was killed by the owner on 2026-11-08 (PR #296, `cf2e127`; PR #295 closed unmerged; `docs/SPEC.md` amended) and remains tombstoned in `docs/ROADMAP.md` (`121`), never shipped. Encountered macOS CI flake `tests/test_upgrade.py::TestFetchTagsGitAdapter124B::test_keyboard_interrupt_kills_sleeping_process_group_and_reraises` (failed on `main` `e12f181` and PR #385, passed on rerun both times) is carded in `## Current Plan` as Group 168 / Track 168A (`wi-22388c`). One Future entry (`Recheck Fable and Mythos 5.2 cards when observed`) was discharged by Track 167A at `8b98a49`. `docs/SPEC.md` and `docs/PROGRESS.md` are untouched.
