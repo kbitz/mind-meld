@@ -7,7 +7,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/statusflow.py` — `status` / `diag` / `_collect_diag_state`
 - `src/mind_meld/cli.py` — `PushResult.events_degradations`
 - `src/mind_meld/statusflow.py` — `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
-- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_identity_inputs_digest_for_push` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `resolve_attended_capture_cap` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS` / `phase_timer_scope`
+- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_configured_device_name` / `_identity_inputs_digest_for_push` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `resolve_attended_capture_cap` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS` / `phase_timer_scope`
 - `src/mind_meld/pushtimings.py` — `PhaseTiming` / `PhaseTimer` / `PUSH_TIMINGS_PATH` / `PUSH_KINDS` / `record_push_timings` / `read_push_timings` / `diag_timings_state` / `format_verbose_timings`
 - `src/mind_meld/capturecatchup.py` — `CATCHUP_LOCK_PATH` / `CATCHUP_STATE_PATH` / `is_catchup_running` / `start_detached_catchup` / `read_catchup_state` / `record_catchup_state` / `catchup_observation` / `covers_deadline_backlog` / `diag_catchup_state` / `run_catchup` / `_detached_main`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
@@ -21,7 +21,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
 - `src/mind_meld/attemptlog.py` — local attended-attempt writer, validation and read/render states (65A)
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `_is_cache_stale` / `_store_refresh` / `_persist_or_yield_concurrent` / `_persist_force` / `CACHE_PATH` / `TTL_SECONDS`
-- `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
+- `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due` / `FoldedGroup` / `UnregisteredDevice` / `RegistrationResolution` / `get_unregistered_device_names` / `_resolve_unregistered_registrations` / `_event_device_names` / `_normalize_device_name` / `_windowed_host_by_model_scoped` / `_serialize_host_snapshot`
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS` / `DEFAULT_ATTENDED_CAPTURE_CAP_MS` / `ATTENDED_CAPTURE_CAP_MAX_MS`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
@@ -1203,9 +1203,11 @@ both devices. The signal is not proof. Different model inventories can sum
 to the same family/day tuple, and a migrated ledger can subsequently diverge.
 Neither a match nor its absence proves whether all retained history overlaps.
 
-`_detect_duplicate_ledgers` (over `_host_family_day_tuples`) is that signal. It
+`_detect_duplicate_ledgers` (over post-fold host day tuples and separately over
+post-fold Claude session `day_tuples`, never mixing corpora) is that signal. It
 reports affected FAMILIES, and `format_retro` raises health code
-`duplicate_ledger`. Probed against a real two-Mac fleet before the change: 14
+`duplicate_ledger` (including `mm-events` inspection in `remedy` when Claude
+sessions trigger it). Probed against a real two-Mac fleet before the change: 14
 shared `(family, day)` pairs, zero identical tuples. That probe exercises a
 concurrent-use case; it does not establish that false positives are impossible.
 
@@ -1214,6 +1216,80 @@ corpus, so possible copied history does not inflate the Days column.
 `duplicate_ledger` means the token and cost totals may double-count. Inspect
 the named families and devices before deciding whether a device was retired;
 do not automatically discard a device or ledger based on equal totals.
+
+#### Superseded-registration folding (registry rule)
+
+An unregistered device ID (absent from the current `mm devices --format json`
+registry) whose recorded device name uniquely matches one currently registered
+device's normalized name (`_normalize_device_name`, matching
+`devices.normalize_device_name`) is a superseded registration of that device.
+Name-source precedence is deterministic:
+
+1. Authenticated `retired/<id>.enc` (`devices.read_retirement_records`),
+2. Newest non-empty `device_name` on the device's `mm-events` rows
+   (`_event_device_names`; newly written `mm-push`, `sessions-snapshot`,
+   `host-usage-snapshot`, and `git-snapshot` rows carry additive `device_name`
+   without bumping `EVENTS_SCHEMA_VERSION`),
+3. Authenticated `manifests/<id>/manifest.json.enc` (bounded by
+   `DEFAULT_MAX_FILE_SIZE`, rejecting newer manifest versions, verifying
+   `payload["device_id"] == id`, only read when neither 1 nor 2 supplied a name).
+
+`get_unregistered_device_names` reads without prompting and restores
+`crypto`'s session and cache even on lookup failure. It checks any configured
+fleet fingerprint before decryption. Retirement and manifest reads use
+`LocalBackend.get_bounded` with validated storage keys. The read stays inside
+the storage directory and enforces its byte limit on the opened regular file.
+A retirement record written without a name stores the device ID; that
+placeholder is not a name, so the event-row and manifest sources still apply.
+The lookup reports why stored names were unreadable: `passphrase` (no
+passphrase was available), `passphrase-rejected` (the available passphrase did
+not unlock the key header) or `storage`. A stored name outranks the event-row
+name, so while the lookup fails any ID left unfolded, named or not and active
+or prior-window only, might belong to a registered machine:
+`unregistered_devices` and `fleet_changed` carry `names_unavailable` and a
+remedy. The retro skill acts on remedies, so every passphrase or keyring step
+is the owner's: they unlock the keyring in their own desktop session or run
+`mm retro-fleet` from a terminal there, and they check a rejected passphrase
+(`mm diag` shows the keyring backend and item). No remedy advises exporting
+`MINDMELD_PASSPHRASE`, a plaintext secret every agent subprocess would
+inherit. A storage failure is checked with `mm status`.
+If `mm devices --format=json` warns that it dropped a registration (unreadable,
+or vanished while being read), the readable entries still scope the retro:
+counts, host `by_device` and the denominator are unchanged. Nothing folds,
+because a partial registry cannot prove a unique match. Each active name match
+is listed under `unregistered_devices`, which says the registry is incomplete.
+Any blocked match, active or prior-window only, sets
+`FleetState.registry_blocked`, so `fleet_changed` names the incomplete registry
+too. Both remedies put the `mm devices` step before any stored-name step.
+When the name is missing, matches zero
+registered devices, or matches more than one registered device (ambiguous),
+nothing folds for that ID: Claude retains its usage as today, host `by_device`
+keeps it excluded as today, registered-machine counts exclude it, and
+`unregistered_devices` in `MM_HEALTH` (plus `unregistered_devices` in
+`--dump-host-usage`) names it explicitly. The `MM_HEALTH` lists
+(`unregistered_ids`, `ambiguous_devices`) stop at five entries and carry an
+omitted count; the forensic dump keeps every ID.
+
+For every `(agent family, day)` on which both a superseded ID and its registered
+target report, only the registered device counts (registry rule, never
+equal-totals matching). Non-overlapping days reported only by a superseded ID
+still count and attribute to the registered target; when multiple superseded IDs
+of the same target share a non-overlapping day, only the newest superseded ID
+counts. Folding applies to Claude session snapshots (tokens, skills, projects,
+active days, `token_devices`), host-usage rows (`superseded_by_device`, scoped
+per-model pricing and floor causes via `_windowed_host_by_model_scoped`), pushes
+(`devices_with_pushes` and prior-period `fleet_changed`), and every machine
+count. Git commit deduplication (`(canonical_remote, sha)`) is unchanged.
+Prior-only pushes use the same name resolution for the comparison. Current
+activity counts and current fold disclosures retain their own window.
+Missing historical Claude detail and degraded historical host coverage stay
+visible when they qualify retained usage. Their notes describe the historical
+data without asking a retired registration to push again.
+Each fold is disclosed in `MM_HEALTH` via `folded_registrations`
+(`<machine>: folded earlier registration(s) <old_ids> into <target_id>`) and in
+`--dump-host-usage` (`folded_registrations`, `superseded_by_device`,
+`unregistered_devices`). Superseded IDs that sanitize to the same display
+key receive distinct deterministic aliases in the forensic dump.
 
 #### Row assembly (`aggregate_agent_usage`)
 
@@ -1243,6 +1319,9 @@ do not automatically discard a device or ledger based on equal totals.
   corresponding wire total, suppress that snapshot's pricing detail rather
   than moving accepted tokens between families or pricing an inconsistent
   basis. Other snapshots can still supply a priced subtotal for the row.
+  For a superseded snapshot, reconcile each retained family and day against
+  its own wire counters. A displaced family/day cannot suppress pricing or
+  add a floor to the retained history.
 - **`claude` is a legal host family**, so a host ledger carrying `claude-*`
   models merges INTO the Claude row rather than being dropped. The row means
   "usage of this model family across the fleet". The two corpora cannot
@@ -1289,6 +1368,8 @@ whose snapshot caused it.
   `"degraded"`.
   Only snapshots eligible for the requested window propagate reader causes;
   stale inventory remains available for diagnostics without repricing current rows.
+  A superseded snapshot can qualify only the families whose history it
+  contributes. A snapshot that contributes zero days adds no reader cause.
   Unusable coverage metadata is the same scope: a snapshot that carries
   `partial_reason` or `degraded_reason` but empty `partial` / `degraded` lists
   still floors every host family, including when that machine contributed no

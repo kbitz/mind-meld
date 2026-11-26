@@ -55,10 +55,17 @@ active days, contributing machines, estimated cost, top model. Both the card's
 `AGENTS` block and the body's `## Agents` table use that one shape.
 
 The card counts currently registered machines with observed usage; each row's
-`Machines` count includes all observed contributors. Historical Claude usage
-can remain after deregistration, explained by `unregistered_devices` in
-`MM_HEALTH`. If the registry is unavailable, the card counts all observed
-machines and omits the denominator.
+`Machines` count includes all observed contributors. When an unregistered device
+ID's recorded name uniquely matches a currently registered machine, the
+aggregator folds that superseded registration into the registered machine per
+(agent family, day) — keeping the registered machine on overlapping days and
+preserving non-overlapping historical days — and discloses each fold under
+`folded_registrations` in `MM_HEALTH`. Unmatched or ambiguous unregistered IDs
+are never folded, and nothing folds while `mm devices` reports a dropped
+entry; historical Claude usage can remain after deregistration, explained by
+`unregistered_devices` in `MM_HEALTH` (its `remedy`, when present, says how to
+let stored names fold). If the registry is unavailable, the card counts all
+observed machines and omits the denominator.
 
 Comparing the rows is the point. They share a unit (tokens), a window, and a
 counter basis (input + cache write + cache read + output, disjoint counters
@@ -98,10 +105,12 @@ asymmetry was indefensible — Claude carried the identical hazard and was summe
 anyway — and the premise was false. A migration copies the ledger byte for
 byte, so duplicated days carry *identical* counter tuples on both devices.
 
-`_detect_duplicate_ledgers` looks for that signal. If it fires, `MM_HEALTH`
-reports code `duplicate_ledger` and names the affected agents; their token and
-cost figures may be double-counted. Equal aggregate counters can also occur
-independently: inspect `mm devices` and `--dump-host-usage` before recommending
+`_detect_duplicate_ledgers` looks for that signal across post-fold host ledgers
+and post-fold Claude session snapshots (separately, without mixing corpora). If
+it fires, `MM_HEALTH` reports code `duplicate_ledger` and names the affected
+agents; their token and cost figures may be double-counted. Equal aggregate
+counters can also occur independently: inspect `mm devices`, the synced
+`mm-events` files (for Claude), and `--dump-host-usage` before recommending
 device removal. Day counts are unaffected — a set union is idempotent.
 
 ## Step 0: preflight
@@ -316,6 +325,10 @@ Your job:
   not change a 172-commit picture. "8 of 16" does.
 - Then offer: *"Want me to diagnose?"* If they say yes, walk the `MM_HEALTH`
   entries, run the `remedy` commands where they're local, and report back.
+- Never ask for, read, type, export or store the fleet passphrase or any login
+  credential, and never unlock a keyring for the owner. When a remedy names the
+  keyring or the passphrase, that step is the owner's; say so, and re-run the
+  retro once they have.
 - Never invent a cause. Each entry carries `code`, `detail`, and usually
   `remedy`; the wire does not always say *why* something failed, and an
   unrecognized `code` is reported verbatim, never interpreted.
@@ -323,14 +336,16 @@ Your job:
 Known codes: `fleet_incomplete`, `registry_unavailable`, `duplicate_ledger`,
 `legacy_counters`, `cost_floor`, `cost_unavailable`, `sessions_incomplete`, `tokens_incomplete`,
 `pricing_extrapolated`, `skills_incomplete`, `unpriced_models`,
-`agent_coverage`, `unregistered_devices`, `discovery_errors`, `git_budget`,
+`agent_coverage`, `folded_registrations`, `unregistered_devices`, `discovery_errors`, `git_budget`,
 `git_gap`, `zero_repo_capture`, `parse_errors`, `window_exceeds_retention`,
 `fleet_changed`.
 
 Two of these change what a number *means* and should almost always surface:
 `duplicate_ledger` (possible double-counted tokens and cost for the named agents) and
 `zero_repo_capture` (the commit count is a lower bound — do not compute a trend
-from it, and do not write the narrative off it).
+from it, and do not write the narrative off it). Surface `folded_registrations`
+as well when present so the user sees which superseded registrations were folded
+into their current machine.
 
 ### Narrative
 
@@ -395,6 +410,9 @@ mm retro-fleet <window> --dump-host-usage
 
 JSON on stdout, no card or body. It exposes the complete retained
 per-model host inventory by machine; health entries carry selected diagnostics.
+It also includes `folded_registrations`, `superseded_by_device` (each with
+`folded_into`), and `unregistered_devices` so you can verify which earlier
+registrations folded and which stayed unfolded.
 Do not narrate raw per-model host data as actual spend, market share, or a
 cross-machine total — the `## Agents` table is the fleet view, and this dump is
 per machine precisely so you can see which one is misbehaving.

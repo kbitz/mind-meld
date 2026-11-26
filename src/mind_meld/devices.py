@@ -9,7 +9,7 @@ import shlex
 import sys
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -880,14 +880,27 @@ def read_retirement_records(
     memory_kb: int = DEFAULT_ARGON2_MEMORY_KB,
     *,
     strict: bool = False,
+    device_ids: Iterable[str] | None = None,
 ) -> FleetRetirementRecords:
-    """Read and authenticate ``retired/*.enc`` records under the fleet key."""
+    """Authenticate retirement records under the fleet key.
+
+    A targeted lookup probes only the requested keys with a confined, bounded
+    read. A missing requested record is normal.
+    """
     out = FleetRetirementRecords()
-    keys = (
-        backend.list_keys(RETIRED_PREFIX, strict=True)
-        if strict
-        else backend.list_keys(RETIRED_PREFIX)
-    )
+    if device_ids is None:
+        keys = (
+            backend.list_keys(RETIRED_PREFIX, strict=True)
+            if strict
+            else backend.list_keys(RETIRED_PREFIX)
+        )
+    else:
+        keys = []
+        for device_id in device_ids:
+            try:
+                keys.append(retired_record_key(device_id))
+            except ValueError:
+                continue
     if not keys:
         return out
     for key in sorted(keys):
@@ -897,21 +910,26 @@ def read_retirement_records(
         key_id = parse_retired_record_key(key)
         if key_id is None:
             continue
-        path = backend.root / key
+        if device_ids is None:
+            path = backend.root / key
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                st = None
+            except OSError:
+                out.unreadable.append(key_id)
+                continue
+            if st is not None and st.st_size > MAX_SYNCTHING_RECORD_BYTES:
+                out.unreadable.append(key_id)
+                continue
         try:
-            st = path.stat()
-        except FileNotFoundError:
-            st = None
-        except OSError:
-            out.unreadable.append(key_id)
-            continue
-        if st is not None and st.st_size > MAX_SYNCTHING_RECORD_BYTES:
-            out.unreadable.append(key_id)
-            continue
-        try:
-            raw = backend.get(key, expected=not strict)
+            if device_ids is None:
+                raw = backend.get(key, expected=not strict)
+            else:
+                raw = backend.get_bounded(key, max_bytes=MAX_SYNCTHING_RECORD_BYTES)
         except StorageNotFound:
-            out.vanished.append(key_id)
+            if device_ids is None:
+                out.vanished.append(key_id)
             continue
         except (StorageError, OSError):
             out.unreadable.append(key_id)

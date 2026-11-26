@@ -739,6 +739,10 @@ def _capture_attended_usage(
             readers,
             host_budget_ms=events_tail.resolve_host_read_budget(config, interactive=True)[0],
             warm_host_cache=events_tail._warm_host_cache_with_notice,
+            **events_tail._accepted_kwargs(
+                events_tail._capture_host_snapshot,
+                device_name=events_tail._configured_device_name(config),
+            ),
         )
         events_tail._record_host_progress(capture, device_id=config["device"]["id"], attended=True)
         dropped = dict(capture.dropped)

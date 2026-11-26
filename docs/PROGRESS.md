@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.88 | 2026-11-25 | `mm retro-fleet` now folds superseded registrations of a re-registered machine into the current device so tokens and machine counts are not double-counted, explains when stored names cannot be read, and records `device_name` on new `mm-events` rows. |
 | 1.12.87 | 2026-11-25 | Deadline-stopped `mm autopush` capture now finishes unfinished usage and Git work in a background catch-up, and `mm status` and `mm diag` show that work. |
 | 1.12.86 | 2026-11-24 | Attended push now shows phase progress and timings, and `mm autopush` reads enabled host usage providers concurrently. |
 | 1.12.85 | 2026-11-24 | Attended `mm pull` now reports the content changes applied from each peer device on its outcome line. |

@@ -346,6 +346,7 @@ class GitSnapshot(TypedDict, total=False):
     type: str
     ts: str
     device: str
+    device_name: str
     projects: list[GitSnapshotProject]
     skipped: list[GitSnapshotSkip]
     origin: str
@@ -396,6 +397,7 @@ class SessionsSnapshot(TypedDict, total=False):
     type: str
     ts: str
     device: str
+    device_name: str
     projects: list[SessionMetadata]
 
 
@@ -404,6 +406,7 @@ class MmPushEvent(TypedDict, total=False):
     type: str
     ts: str
     device: str
+    device_name: str
     mm_version: str
     sources: list[str]
     discovery_errors: list[str]
@@ -535,6 +538,7 @@ class HostUsageSnapshot(TypedDict, total=False):
     type: str
     ts: str
     device: str
+    device_name: str
     token_sources: list[str]
     hosts: dict[str, dict[str, token_usage.Usage]]
     active_days: list[str]
@@ -4188,6 +4192,7 @@ def make_mm_push_event(
     local_emails: list[str] | None = None,
     git_capture: GitCaptureState | None = None,
     ts: datetime | None = None,
+    device_name: str | None = None,
 ) -> MmPushEvent:
     """Construct an mm-push event row. Caller appends as the LAST element
     of the events list passed to write_push_event (CT-4).
@@ -4227,6 +4232,8 @@ def make_mm_push_event(
         event["local_emails"] = list(local_emails)
     if git_capture is not None:
         event["git_capture"] = git_capture
+    if isinstance(device_name, str) and (cleaned := device_name.strip()):
+        event["device_name"] = cleaned
     return event
 
 
@@ -4331,6 +4338,7 @@ def make_host_usage_snapshot(
     partial_days: Mapping[str, Sequence[str]] | None = None,
     usage_days: Mapping[str, Sequence[str]] | None = None,
     pending_left: Mapping[str, int] | None = None,
+    device_name: str | None = None,
 ) -> HostUsageSnapshot:
     """Construct a ``host-usage-snapshot`` row from completed reader output.
 
@@ -4486,4 +4494,6 @@ def make_host_usage_snapshot(
     # mixed-fleet discriminator: a pre-35A peer's counters are inclusive
     # and must not be priced. No EVENTS_SCHEMA_VERSION bump.
     row["counter_semantics"] = COUNTER_SEMANTICS_DISJOINT_V1
+    if isinstance(device_name, str) and (cleaned := device_name.strip()):
+        row["device_name"] = cleaned
     return row

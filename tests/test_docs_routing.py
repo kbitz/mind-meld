@@ -1384,6 +1384,16 @@ def test_agents_section_replaces_the_three_usage_sections():
     assert "Comparing the rows is the point." in skill
 
 
+def test_skill_md_keeps_unlocking_and_the_passphrase_with_the_owner() -> None:
+    """The retro skill acts on remedies, so its rule names what it must not do."""
+    skill = (ROOT / "src/mind_meld/skills/retro_fleet/SKILL.md").read_text(encoding="utf-8")
+    flat = " ".join(skill.split())
+    assert (
+        "Never ask for, read, type, export or store the fleet passphrase or any login"
+        " credential, and never unlock a keyring for the owner." in flat
+    )
+
+
 def test_preview_docs_describe_diff_as_snapshot_comparison62():
     readme = (ROOT / "README.md").read_text()
     assert "| Command | May touch | Not previewed | Exit codes |" in readme
