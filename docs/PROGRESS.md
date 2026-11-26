@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.90 | 2026-11-25 | Version 1.12.90 keeps mind-meld commands, skills, and upgrade behavior as they are. |
 | 1.12.89 | 2026-11-25 | Attended `mm push` now reports usage publication and readers still catching up on its `Push:` line, and `mm retro-fleet` refreshes vendor rate tables and bundled model pricing while `/retro-fleet` applies scheduled price changes. |
 | 1.12.88 | 2026-11-25 | `mm retro-fleet` now folds superseded registrations of a re-registered machine into the current device so tokens and machine counts are not double-counted, explains when stored names cannot be read, and records `device_name` on new `mm-events` rows. |
 | 1.12.87 | 2026-11-25 | Deadline-stopped `mm autopush` capture now finishes unfinished usage and Git work in a background catch-up, and `mm status` and `mm diag` show that work. |

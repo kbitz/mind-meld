@@ -917,10 +917,19 @@ class TestFetchTagsGitAdapter124B:
         grandchild_pid = int((tmp_path / "grandchild.pid").read_text(encoding="utf-8").strip())
         assert _wait_pid_gone(grandchild_pid, timeout=1.0) is True
 
-    def test_keyboard_interrupt_kills_sleeping_process_group_and_reraises(
-        self, monkeypatch, tmp_path
-    ):
+    def _run_interrupt_process_group_check(
+        self,
+        monkeypatch,
+        tmp_path,
+        *,
+        detach_grandchild: bool = False,
+        reap_timeout: float = 5.0,
+        ready_timeout: float = 5.0,
+        publish_pids: bool = True,
+    ) -> None:
         monkeypatch.setattr(upgrade, "_refuse_git_under_pytest", lambda: None)
+        child_pid_file = tmp_path / "interrupt-child.pid"
+        child_pid_tmp = tmp_path / "interrupt-child.pid.tmp"
         pids_file = tmp_path / "group-pids.json"
         pids_tmp = tmp_path / "group-pids.json.tmp"
         fake_git = tmp_path / "fake-git-interrupt"
@@ -929,12 +938,22 @@ class TestFetchTagsGitAdapter124B:
             + textwrap.dedent(
                 f"""
                 import json, os, subprocess, sys, time
+
+                def prepare_child():
+                    with open({str(child_pid_tmp)!r}, "w", encoding="utf-8") as fh:
+                        fh.write(str(os.getpid()))
+                    os.replace({str(child_pid_tmp)!r}, {str(child_pid_file)!r})
+                    if {detach_grandchild!r}:
+                        os.setsid()
+
                 child = subprocess.Popen(
-                    [{sys.executable!r}, "-c", "import time; time.sleep(60)"]
+                    [{sys.executable!r}, "-c", "import time; time.sleep(60)"],
+                    preexec_fn=prepare_child,
                 )
-                with open({str(pids_tmp)!r}, "w", encoding="utf-8") as fh:
-                    fh.write(json.dumps({{"parent": os.getpid(), "child": child.pid}}))
-                os.replace({str(pids_tmp)!r}, {str(pids_file)!r})
+                if {publish_pids!r}:
+                    with open({str(pids_tmp)!r}, "w", encoding="utf-8") as fh:
+                        fh.write(json.dumps({{"parent": os.getpid(), "child": child.pid}}))
+                    os.replace({str(pids_tmp)!r}, {str(pids_file)!r})
                 time.sleep(60)
                 """
             ).lstrip(),
@@ -943,8 +962,18 @@ class TestFetchTagsGitAdapter124B:
         fake_git.chmod(0o755)
 
         def _interrupt_after_spawn(self_proc, *args, **kwargs):
-            deadline = time.monotonic() + 5.0
-            while not pids_file.exists() and time.monotonic() < deadline:
+            deadline = time.monotonic() + ready_timeout
+            while not pids_file.exists():
+                if self_proc.poll() is not None:
+                    pytest.fail(
+                        f"fake git exited early (rc={self_proc.returncode}) "
+                        f"before writing {pids_file}"
+                    )
+                if time.monotonic() >= deadline:
+                    pytest.fail(
+                        f"fake git did not write {pids_file} within {ready_timeout}s "
+                        f"before interrupt"
+                    )
                 # gstack-timing-ok: bounded poll for child pid file before interrupt
                 time.sleep(0.01)
             raise KeyboardInterrupt()
@@ -953,6 +982,7 @@ class TestFetchTagsGitAdapter124B:
 
         parent_pid: int | None = None
         child_pid: int | None = None
+        parent_reaped = False
         cleanup_verified = False
         try:
             with pytest.raises(KeyboardInterrupt):
@@ -960,10 +990,14 @@ class TestFetchTagsGitAdapter124B:
             recorded = json.loads(pids_file.read_text(encoding="utf-8"))
             parent_pid = int(recorded["parent"])
             child_pid = int(recorded["child"])
-            with pytest.raises(ProcessLookupError):
-                os.kill(parent_pid, 0)
-            with pytest.raises(ProcessLookupError):
-                os.kill(child_pid, 0)
+            parent_timeout = max(reap_timeout, 5.0)
+            assert _wait_pid_gone(parent_pid, timeout=parent_timeout), (
+                f"parent {parent_pid} still alive after {parent_timeout}s"
+            )
+            parent_reaped = True
+            assert _wait_pid_gone(child_pid, timeout=reap_timeout), (
+                f"grandchild {child_pid} still alive after {reap_timeout}s"
+            )
             cleanup_verified = True
         finally:
             if not cleanup_verified:
@@ -971,12 +1005,54 @@ class TestFetchTagsGitAdapter124B:
                     recorded = json.loads(pids_file.read_text(encoding="utf-8"))
                     parent_pid = int(recorded["parent"])
                     child_pid = int(recorded["child"])
-                for pid in (parent_pid, child_pid):
-                    if pid is not None:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+                pids_to_clean: list[int] = []
+                for pid in (None if parent_reaped else parent_pid, child_pid):
+                    if pid is not None and pid not in pids_to_clean:
+                        pids_to_clean.append(pid)
+                if child_pid_file.exists():
+                    extra_child = int(child_pid_file.read_text(encoding="utf-8").strip())
+                    if extra_child not in pids_to_clean:
+                        pids_to_clean.append(extra_child)
+                for pid in pids_to_clean:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    _wait_pid_gone(pid, timeout=2.0)
+
+    def test_keyboard_interrupt_kills_sleeping_process_group_and_reraises(
+        self, monkeypatch, tmp_path
+    ):
+        self._run_interrupt_process_group_check(monkeypatch, tmp_path)
+
+    def test_keyboard_interrupt_check_fails_when_grandchild_calls_setsid(
+        self, monkeypatch, tmp_path
+    ):
+        with pytest.raises(AssertionError, match=r"grandchild \d+ still alive"):
+            self._run_interrupt_process_group_check(
+                monkeypatch,
+                tmp_path,
+                detach_grandchild=True,
+                reap_timeout=0.3,
+            )
+        recorded = json.loads((tmp_path / "group-pids.json").read_text(encoding="utf-8"))
+        assert _wait_pid_gone(int(recorded["parent"]), timeout=1.0) is True
+        assert _wait_pid_gone(int(recorded["child"]), timeout=1.0) is True
+
+    def test_keyboard_interrupt_check_fails_clearly_when_pids_file_missing(
+        self, monkeypatch, tmp_path
+    ):
+        with pytest.raises(pytest.fail.Exception, match="did not write"):
+            self._run_interrupt_process_group_check(
+                monkeypatch,
+                tmp_path,
+                ready_timeout=0.1,
+                publish_pids=False,
+            )
+        child_pid_file = tmp_path / "interrupt-child.pid"
+        if child_pid_file.exists():
+            child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+            assert _wait_pid_gone(child_pid, timeout=1.0) is True
 
     def test_no_prompt_environment_ssh_command_precedence(self, monkeypatch):
         # 1) Existing GIT_SSH_COMMAND gets -o BatchMode=yes appended
