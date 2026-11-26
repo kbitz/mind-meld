@@ -208,7 +208,7 @@ def _error(msg: str, *, fix: str | None = None) -> None:
     raise typer.Exit(1)
 
 
-def _list_devices_warn(backend: LocalBackend) -> list[dict]:
+def _list_devices_warn(backend: LocalBackend, *, warn_vanished: bool = False) -> list[dict]:
     """list_devices variant that surfaces dropped entries to stderr.
 
     Loss of a peer's device entry is load-bearing during corrupt-manifest
@@ -225,6 +225,9 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     inventory = _devices_module.inventory_devices(backend)
     for key, reason in inventory.dropped:
         _warning(f"dropped device entry {key} — {reason}")
+    if warn_vanished:
+        for device_id in inventory.vanished:
+            _warning(f"dropped device entry {device_id} — disappeared while reading the registry")
     return inventory.valid
 
 

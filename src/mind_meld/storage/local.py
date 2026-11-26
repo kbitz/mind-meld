@@ -35,6 +35,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 
 from mind_meld import fsutil, safety
@@ -236,6 +237,38 @@ class LocalBackend:
                 self._sleep(delay)
             except OSError as e:
                 raise StorageError(f"storage: failed to read {key} — {e}") from e
+
+    def get_bounded(self, key: str, *, max_bytes: int) -> bytes:
+        """Read one regular object beneath the storage root without following links."""
+        parts = key.split("/")
+        if max_bytes < 0 or any(part in {"", ".", ".."} for part in parts):
+            raise ValueError("storage: bounded reads require a relative key and a size limit")
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        try:
+            with ExitStack() as stack:
+                directory = os.open(self.root, directory_flags)
+                stack.callback(os.close, directory)
+                for component in parts[:-1]:
+                    directory = os.open(component, directory_flags, dir_fd=directory)
+                    stack.callback(os.close, directory)
+                fd = os.open(
+                    parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+                )
+                stack.callback(os.close, fd)
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+                    raise StorageError(
+                        "storage: object is not a regular file within the size limit"
+                    )
+                with os.fdopen(fd, "rb", closefd=False) as stream:
+                    data = stream.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    raise StorageError("storage: object exceeded the size limit during read")
+                return data
+        except FileNotFoundError:
+            raise StorageNotFound(key) from None
+        except OSError as e:
+            raise StorageError(f"storage: failed to read {key} — {e}") from e
 
     def list_keys(self, prefix: str, *, strict: bool = False) -> list[str]:
         """Keys under `prefix`, skipping foreign names (dot-prefixed and

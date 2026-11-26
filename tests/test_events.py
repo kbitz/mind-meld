@@ -2300,6 +2300,57 @@ class TestMakeHostUsageSnapshot:
         assert ev["hosts"]["codex"]["2026-08-15"]["input"] == 10
         assert "other" not in ev["hosts"]
 
+    def test_device_name_is_additive_and_trimmed(self):
+        """device_name is omitted when None/blank and trimmed when present."""
+        from mind_meld.skills.retro_fleet import aggregator
+
+        ts = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+        hosts = self._hosts()
+        sibling = self._sibling_for(hosts)
+
+        push_omit = events.make_mm_push_event(device="dev-a", mm_version="1.0.0", ts=ts)
+        push_blank = events.make_mm_push_event(
+            device="dev-a", mm_version="1.0.0", ts=ts, device_name="   "
+        )
+        push_named = events.make_mm_push_event(
+            device="dev-a", mm_version="1.0.0", ts=ts, device_name="  mac-a  "
+        )
+        assert "device_name" not in push_omit
+        assert "device_name" not in push_blank
+        assert push_named["device_name"] == "mac-a"
+        assert {k: v for k, v in push_named.items() if k != "device_name"} == push_omit
+
+        host_omit = events.make_host_usage_snapshot(
+            device="dev-a", hosts=hosts, token_sources=_SRC, tokens_by_day=sibling, ts=ts
+        )
+        host_blank = events.make_host_usage_snapshot(
+            device="dev-a",
+            hosts=hosts,
+            token_sources=_SRC,
+            tokens_by_day=sibling,
+            ts=ts,
+            device_name=" \t ",
+        )
+        host_named = events.make_host_usage_snapshot(
+            device="dev-a",
+            hosts=hosts,
+            token_sources=_SRC,
+            tokens_by_day=sibling,
+            ts=ts,
+            device_name="  mac-a ",
+        )
+        assert "device_name" not in host_omit
+        assert "device_name" not in host_blank
+        assert host_named["device_name"] == "mac-a"
+        assert {k: v for k, v in host_named.items() if k != "device_name"} == host_omit
+
+        acc_omit = aggregator._accept_host_usage_snapshot(host_omit)
+        acc_named = aggregator._accept_host_usage_snapshot(host_named)
+        assert isinstance(acc_omit, aggregator._AcceptedHostRow)
+        assert isinstance(acc_named, aggregator._AcceptedHostRow)
+        assert acc_named.tie_key == acc_omit.tie_key
+        assert aggregator._sibling_tie_key(acc_named) == aggregator._sibling_tie_key(acc_omit)
+
     def test_payload_is_capped_at_the_most_recent_days(self):
         """The readers aggregate the WHOLE local corpus — no `since` on the
         rollout walk, no date predicate on the OpenCode query — so without a

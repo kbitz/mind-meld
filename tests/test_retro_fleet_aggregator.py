@@ -6453,6 +6453,7 @@ class TestAgentCoverageNotes:
             "skills_incomplete",
             "unpriced_models",
             "agent_coverage",
+            "folded_registrations",
             "unregistered_devices",
             "discovery_errors",
             "git_budget",
@@ -8956,6 +8957,1344 @@ class TestTrack128APricingAndFloorExtrapolation:
         assert cost_with[1] is floor_fixture
         assert cost_with[0] == pytest.approx(cost_without[0])
         assert line_with == line_without
+
+
+class TestSupersededRegistrationFolding:
+    """Superseded device registrations fold into their current registered device."""
+
+    NOW = datetime(2026, 11, 25, 18, 0, tzinfo=timezone.utc)
+    D1 = "2026-11-20"  # only dev-old-1
+    D2 = "2026-11-21"  # dev-old-1 + dev-old-2 (no dev-cur -> dev-old-2 wins)
+    D3 = "2026-11-22"  # dev-cur + dev-old-1 + dev-old-2 (dev-cur wins with distinct counters)
+    D4 = "2026-11-23"  # dev-cur + dev-b
+
+    @staticmethod
+    def _write_events(events_dir: Path, filename: str, rows: list[dict]) -> None:
+        events_dir.mkdir(parents=True, exist_ok=True)
+        (events_dir / filename).write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+        )
+
+    @staticmethod
+    def _bucket(in_: int, cc: int = 0, cr: int = 0, out: int = 0) -> dict[str, int]:
+        return {"input": in_, "cache_create": cc, "cache_read": cr, "output": out}
+
+    def _session_row(
+        self,
+        device: str,
+        ts: str,
+        *,
+        days: dict[str, dict[str, dict[str, int]]],
+        skills: dict[str, dict[str, int]] | None = None,
+        device_name: str | None = None,
+        claude_dir: str = "-Users-user-proj",
+    ) -> dict:
+        tbd: dict[str, dict] = {}
+        for day, models in days.items():
+            tbd[day] = {
+                "input": sum(b["input"] for b in models.values()),
+                "cache_create": sum(b["cache_create"] for b in models.values()),
+                "cache_read": sum(b["cache_read"] for b in models.values()),
+                "output": sum(b["output"] for b in models.values()),
+                "by_model": models,
+            }
+        proj: dict = {
+            "claude_dir": claude_dir,
+            "source_root": "/Users/user/.claude/projects",
+            "sessions": 3,
+            "total_kb": 100,
+            "last_session_at": ts,
+            "tokens_by_day": tbd,
+            "skills_by_day": skills if skills is not None else {},
+        }
+        row: dict = {
+            "v": 2,
+            "type": "sessions-snapshot",
+            "ts": ts,
+            "device": device,
+            "projects": [proj],
+        }
+        if device_name is not None:
+            row["device_name"] = device_name
+        return row
+
+    def _host_row(
+        self,
+        device: str,
+        ts: str,
+        *,
+        hosts: dict[str, dict[str, dict[str, int]]],
+        by_day_models: dict[str, dict[str, dict[str, int]]],
+        sources: tuple[str, ...] = ("codex", "grok", "muse", "agy"),
+        device_name: str | None = None,
+    ) -> dict:
+        tbd: dict[str, dict] = {}
+        for day, models in by_day_models.items():
+            tbd[day] = {
+                "input": sum(b["input"] for b in models.values()),
+                "cache_create": sum(b["cache_create"] for b in models.values()),
+                "cache_read": sum(b["cache_read"] for b in models.values()),
+                "output": sum(b["output"] for b in models.values()),
+                "by_model": models,
+            }
+        return aggregator.mm_events.make_host_usage_snapshot(
+            device=device,
+            hosts=hosts,
+            token_sources=sources,
+            tokens_by_day=tbd,
+            ts=datetime.fromisoformat(ts),
+            device_name=device_name,
+        )
+
+    def _push_row(self, device: str, ts: str, *, device_name: str | None = None) -> dict:
+        return aggregator.mm_events.make_mm_push_event(
+            device=device,
+            mm_version="1.12.0",
+            sources=["claude", "codex"],
+            local_emails=["user@example.com"],
+            ts=datetime.fromisoformat(ts),
+            device_name=device_name,
+        )
+
+    def _git_row(
+        self,
+        device: str,
+        ts: str,
+        commits: list[dict],
+        *,
+        device_name: str | None = None,
+    ) -> dict:
+        row: dict = {
+            "v": 2,
+            "type": "git-snapshot",
+            "ts": ts,
+            "device": device,
+            "projects": [
+                {
+                    "remote": "github.com/org/repo",
+                    "commits": commits,
+                }
+            ],
+        }
+        if device_name is not None:
+            row["device_name"] = device_name
+        return row
+
+    def test_fleet_folds_two_superseded_registrations_across_all_rows_and_counts(
+        self, tmp_path: Path, monkeypatch
+    ):
+        rates = {"input": 2.0, "cache_read": 0.0, "cache_create": 0.0, "output": 10.0}
+        for model in (
+            "claude-sonnet-4-5",
+            "claude-opus-4-5",
+            "gpt-5.4",
+            "grok-4.6-build",
+            "muse-spark-1.3",
+            "gemini-2.5-pro",
+        ):
+            monkeypatch.setitem(aggregator.token_usage.PRICING, model, rates)
+        events_dir = tmp_path / "events"
+        registered = [
+            {"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"},
+            {"device_id": "dev-b", "device_name": "mac-b", "mm_version": "1.12.0"},
+        ]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (len(registered), registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+
+        shared_commit = {
+            "sha": "aaa111",
+            "date": f"{self.D3}T10:00:00+00:00",
+            "author_email": "user@example.com",
+            "add": 40,
+            "del": 10,
+            "subject": "feat: ship folding",
+        }
+        old_only_commit = {
+            "sha": "bbb222",
+            "date": f"{self.D1}T10:00:00+00:00",
+            "author_email": "user@example.com",
+            "add": 20,
+            "del": 5,
+            "subject": "fix: early commit",
+        }
+
+        # dev-old-1: earliest registration of mac-a (D1, D2, D3)
+        ts_old1 = f"{self.D3}T09:00:00+00:00"
+        self._write_events(
+            events_dir,
+            f"dev-old-1-{self.D3}.jsonl",
+            [
+                self._git_row(
+                    "dev-old-1",
+                    ts_old1,
+                    [old_only_commit, shared_commit],
+                    device_name="mac-a",
+                ),
+                self._session_row(
+                    "dev-old-1",
+                    ts_old1,
+                    days={
+                        self.D1: {"claude-sonnet-4-5": self._bucket(1000, out=100)},
+                        self.D2: {"claude-sonnet-4-5": self._bucket(9999, out=999)},
+                        self.D3: {"claude-sonnet-4-5": self._bucket(8888, out=888)},
+                    },
+                    skills={self.D1: {"review": 2}, self.D2: {"review": 9}, self.D3: {"review": 8}},
+                    device_name="mac-a",
+                ),
+                self._host_row(
+                    "dev-old-1",
+                    ts_old1,
+                    hosts={
+                        "codex": {
+                            self.D1: self._bucket(500, out=50),
+                            self.D2: self._bucket(7777, out=77),
+                            self.D3: self._bucket(6666, out=66),
+                        },
+                        "grok": {self.D1: self._bucket(200, out=20), self.D3: self._bucket(5555)},
+                        "muse": {self.D1: self._bucket(300, out=30), self.D3: self._bucket(3000)},
+                        "agy": {self.D1: self._bucket(400, out=40), self.D3: self._bucket(4000)},
+                        "other": {self.D1: self._bucket(150, out=15), self.D3: self._bucket(1500)},
+                    },
+                    by_day_models={
+                        self.D1: {
+                            "gpt-5.4": self._bucket(500, out=50),
+                            "grok-4.6-build": self._bucket(200, out=20),
+                            "muse-spark-1.3": self._bucket(300, out=30),
+                            "gemini-2.5-pro": self._bucket(400, out=40),
+                            "custom-other-1": self._bucket(150, out=15),
+                        },
+                        self.D2: {"gpt-5.4": self._bucket(7777, out=77)},
+                        self.D3: {
+                            "gpt-5.4": self._bucket(6666, out=66),
+                            "grok-4.6-build": self._bucket(5555),
+                            "muse-spark-1.3": self._bucket(3000),
+                            "gemini-2.5-pro": self._bucket(4000),
+                            "custom-other-1": self._bucket(1500),
+                        },
+                    },
+                    device_name="mac-a",
+                ),
+                self._push_row("dev-old-1", f"{self.D1}T12:00:00+00:00", device_name="mac-a"),
+            ],
+        )
+
+        # dev-old-2: second superseded registration of mac-a (D2, D3 — newer than dev-old-1)
+        ts_old2 = f"{self.D3}T12:00:00+00:00"
+        self._write_events(
+            events_dir,
+            f"dev-old-2-{self.D3}.jsonl",
+            [
+                self._session_row(
+                    "dev-old-2",
+                    ts_old2,
+                    days={
+                        self.D2: {"claude-sonnet-4-5": self._bucket(2000, out=200)},
+                        self.D3: {"claude-sonnet-4-5": self._bucket(7777, out=777)},
+                    },
+                    skills={self.D2: {"review": 3}, self.D3: {"review": 7}},
+                    device_name="mac-a",
+                ),
+                self._host_row(
+                    "dev-old-2",
+                    ts_old2,
+                    hosts={
+                        "codex": {
+                            self.D2: self._bucket(600, out=60),
+                            self.D3: self._bucket(4444, out=44),
+                        },
+                    },
+                    by_day_models={
+                        self.D2: {"gpt-5.4": self._bucket(600, out=60)},
+                        self.D3: {"gpt-5.4": self._bucket(4444, out=44)},
+                    },
+                    device_name="mac-a",
+                ),
+                self._push_row("dev-old-2", f"{self.D2}T12:00:00+00:00", device_name="mac-a"),
+            ],
+        )
+
+        # dev-cur: current registered mac-a (D3, D4 — distinct counters on D3 prove registry rule)
+        ts_cur = f"{self.D4}T15:00:00+00:00"
+        self._write_events(
+            events_dir,
+            f"dev-cur-{self.D4}.jsonl",
+            [
+                self._git_row("dev-cur", ts_cur, [shared_commit], device_name="mac-a"),
+                self._session_row(
+                    "dev-cur",
+                    ts_cur,
+                    days={
+                        self.D3: {"claude-sonnet-4-5": self._bucket(3000, out=300)},
+                        self.D4: {"claude-sonnet-4-5": self._bucket(4000, out=400)},
+                    },
+                    skills={self.D3: {"review": 4}, self.D4: {"ship": 1}},
+                    device_name="mac-a",
+                ),
+                self._host_row(
+                    "dev-cur",
+                    ts_cur,
+                    hosts={
+                        "codex": {
+                            self.D3: self._bucket(700, out=70),
+                            self.D4: self._bucket(800, out=80),
+                        },
+                        "grok": {self.D3: self._bucket(250, out=25)},
+                        "muse": {self.D3: self._bucket(350, out=35)},
+                        "agy": {self.D3: self._bucket(450, out=45)},
+                        "other": {self.D3: self._bucket(175, out=15)},
+                    },
+                    by_day_models={
+                        self.D3: {
+                            "gpt-5.4": self._bucket(700, out=70),
+                            "grok-4.6-build": self._bucket(250, out=25),
+                            "muse-spark-1.3": self._bucket(350, out=35),
+                            "gemini-2.5-pro": self._bucket(450, out=45),
+                            "custom-other-1": self._bucket(175, out=15),
+                        },
+                        self.D4: {"gpt-5.4": self._bucket(800, out=80)},
+                    },
+                    device_name="mac-a",
+                ),
+                self._push_row("dev-cur", ts_cur, device_name="mac-a"),
+            ],
+        )
+
+        # dev-b: second registered machine mac-b (D4)
+        ts_b = f"{self.D4}T16:00:00+00:00"
+        self._write_events(
+            events_dir,
+            f"dev-b-{self.D4}.jsonl",
+            [
+                self._session_row(
+                    "dev-b",
+                    ts_b,
+                    days={self.D4: {"claude-opus-4-5": self._bucket(5000, out=500)}},
+                    skills={self.D4: {"ship": 2}},
+                    device_name="mac-b",
+                ),
+                self._host_row(
+                    "dev-b",
+                    ts_b,
+                    hosts={"codex": {self.D4: self._bucket(900, out=90)}},
+                    by_day_models={self.D4: {"gpt-5.4": self._bucket(900, out=90)}},
+                    device_name="mac-b",
+                ),
+                self._push_row("dev-b", ts_b, device_name="mac-b"),
+            ],
+        )
+
+        data = aggregator.aggregate(
+            events_dir=events_dir,
+            window_days=7,
+            author_emails=frozenset({"user@example.com"}),
+            now=self.NOW,
+        )
+
+        # Machine counts: 2 of 2 (never 4 of 2)
+        assert data.fleet.devices_in_events == {"dev-cur", "dev-b"}
+        assert data.fleet.unregistered_event_devices == 0
+        assert len(data.fleet.folded_registrations) == 1
+        fold = data.fleet.folded_registrations[0]
+        assert fold.target_id == "dev-cur"
+        assert fold.target_name == "mac-a"
+        assert fold.folded_ids == ("dev-old-1", "dev-old-2")
+        assert data.pushes.devices_with_pushes == {"dev-cur", "dev-b"}
+        assert data.pushes.push_events == 4
+
+        # Git commit dedup unchanged (2 unique commits)
+        assert data.git.commits == 2
+        assert data.git.additions == 60
+        assert data.git.deletions == 15
+
+        # Skills: D1(2 from old1) + D2(3 from old2) + D3(4 from cur) + D4(1 cur + 2 b) = 12
+        assert data.skills.invocations == 12
+        assert data.skills.by_skill == {"review": 9, "ship": 3}
+
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        assert usage.duplicate_ledger == ()
+        assert usage.machines_with_activity == 2
+        by_key = {r.key: r for r in usage.rows}
+
+        # Claude: mac-a = D1(1100) + D2(2200) + D3(3300) + D4(4400) = 11000; mac-b = D4(5500)
+        assert by_key["claude"].tokens == 16_500
+        assert by_key["claude"].active_days == 4
+        assert by_key["claude"].machines == 2
+
+        # Codex: mac-a = D1(550) + D2(660) + D3(770) + D4(880) = 2860; mac-b = D4(990)
+        assert by_key["codex"].tokens == 3_850
+        assert by_key["codex"].active_days == 4
+        assert by_key["codex"].machines == 2
+
+        # Grok: mac-a = D1(220 from old1) + D3(275 from cur) = 495 (old1's 5555 on D3 dropped)
+        assert by_key["grok"].tokens == 495
+        assert by_key["grok"].active_days == 2
+        assert by_key["grok"].machines == 1
+
+        # D1 history survives, and the current registration wins every family on D3.
+        for family, expected in [("muse", 715), ("agy", 935), ("other", 355)]:
+            assert by_key[family].tokens == expected
+            assert by_key[family].active_days == 2
+            assert by_key[family].machines == 1
+        assert by_key["codex"].by_model == {"gpt-5.4": self._bucket(3500, out=350)}
+        assert by_key["muse"].by_model == {"muse-spark-1.3": self._bucket(650, out=65)}
+        assert by_key["agy"].by_model == {"gemini-2.5-pro": self._bucket(850, out=85)}
+        assert by_key["other"].by_model == {"custom-other-1": self._bucket(325, out=30)}
+        for family, cost, top in [
+            ("claude", 0.045, "Sonnet 4.5"),
+            ("codex", 0.0105, "gpt-5.4"),
+            ("grok", 0.00135, "grok-4.6-build"),
+            ("muse", 0.00195, "muse-spark-1.3"),
+            ("agy", 0.00255, "gemini-2.5-pro"),
+        ]:
+            amount, floor = aggregator._agent_row_cost(by_key[family])
+            assert amount == pytest.approx(cost)
+            # Grok Build's ledger cannot prove per-request prompt sizes.
+            assert floor is (family == "grok")
+            assert aggregator._agent_top_model(by_key[family]).startswith(f"{top} (")
+        assert aggregator._agent_row_cost(by_key["other"]) == (None, False)
+
+        # Rendered markdown & MM_HEALTH disclosure
+        md = aggregator.format_retro(data)
+        assert "**Activity across 2 of 2 machines**" in md
+        assert "4 pushes across 2 machine(s)" in md
+        fold_entry = _health_entry(md, "folded_registrations")
+        assert fold_entry is not None
+        assert (
+            fold_entry["detail"]
+            == "mac-a: folded earlier registrations dev-old-1, dev-old-2 into dev-cur"
+        )
+        assert fold_entry["machine"] == "mac-a"
+        assert fold_entry["target_id"] == "dev-cur"
+        assert fold_entry["folded_ids"] == ["dev-old-1", "dev-old-2"]
+        assert _health_entry(md, "duplicate_ledger") is None
+        assert _health_entry(md, "unregistered_devices") is None
+
+        # Pass 2 ASCII card shows 2 of 2 registered machines
+        card_md = aggregator.format_retro(
+            data, name="user", themes=["Folded registrations"], noteworthy="Shipped folding"
+        )
+        assert "AGENTS (2 of 2 registered machines)" in card_md
+
+        # --dump-host-usage JSON exposes fold metadata and superseded snapshots
+        dump = json.loads(
+            aggregator._dump_host_inventory(data.host_inventory, git=data.git, fleet=data.fleet)
+        )
+        assert dump["folded_registrations"] == [
+            {
+                "device_name": "mac-a",
+                "target_id": "dev-cur",
+                "folded_ids": ["dev-old-1", "dev-old-2"],
+            }
+        ]
+        assert set(dump["superseded_by_device"]) == {"dev-old-1", "dev-old-2"}
+        assert dump["superseded_by_device"]["dev-old-1"]["folded_into"] == "dev-cur"
+        assert dump["superseded_by_device"]["dev-old-2"]["folded_into"] == "dev-cur"
+        assert dump["unregistered_devices"] == []
+
+    @pytest.mark.parametrize(("prior_name", "changed"), [("mac-a", False), ("mac-b", True)])
+    def test_registration_folding_compares_prior_only_pushes(
+        self, tmp_path: Path, monkeypatch, prior_name, changed
+    ):
+        registered = [
+            {"device_id": "dev-cur", "device_name": "mac-a"},
+            {"device_id": "dev-b", "device_name": "mac-b"},
+        ]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (2, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+        ts = f"{self.D4}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            "dev-cur-2026-11-10.jsonl",
+            [
+                self._push_row("dev-old-1", "2026-11-15T12:00:00+00:00", device_name=prior_name),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+                self._git_row(
+                    "dev-cur",
+                    ts,
+                    [{"sha": "abcdef1", "date": ts, "add": 2, "del": 1, "subject": "fix: test"}],
+                ),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.comparison.status == "ok"
+        assert data.comparison.fleet_changed is changed
+        assert data.pushes.devices_with_pushes == {"dev-cur"}
+        assert data.fleet.folded_registrations == ()
+        assert data.fleet.unregistered_details == ()
+
+    @pytest.mark.parametrize("displaced_detail", ["mismatch", "residual"])
+    def test_registration_folding_ignores_displaced_pricing_evidence(
+        self, tmp_path: Path, monkeypatch, displaced_detail
+    ):
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+        old_codex = self._bucket(1_000_000)
+        old_grok = self._bucket(2_000_000)
+        current_grok = self._bucket(3_000_000)
+        old_codex_day = self.D1 if displaced_detail == "mismatch" else self.D2
+        old_models = {old_codex_day: {"gpt-5.4": old_codex}}
+        if displaced_detail == "mismatch":
+            old_models[self.D2] = {"gpt-5.4": old_grok}
+        old = self._host_row(
+            "dev-old-1",
+            f"{self.D2}T12:00:00+00:00",
+            hosts={"codex": {old_codex_day: old_codex}, "grok": {self.D2: old_grok}},
+            by_day_models=old_models,
+            device_name="mac-a",
+        )
+        if displaced_detail == "residual":
+            old["tokens_by_day"][self.D2]["input"] += old_grok["input"]
+        current = self._host_row(
+            "dev-cur",
+            f"{self.D3}T12:00:00+00:00",
+            hosts={"grok": {self.D2: current_grok}},
+            by_day_models={self.D2: {"grok-4.3": current_grok}},
+        )
+        self._write_events(tmp_path, f"fleet-{self.D2}.jsonl", [old, current])
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        rows = {
+            row.key: row for row in aggregator.aggregate_agent_usage(data, machines_known=1).rows
+        }
+
+        assert rows["codex"].by_model == {"gpt-5.4": old_codex}
+        assert rows["codex"].tokens == 1_000_000
+        assert rows["codex"].active_days == rows["codex"].machines == 1
+        assert rows["codex"].floor_causes == ()
+        assert rows["grok"].by_model == {"grok-4.3": current_grok}
+        assert rows["grok"].tokens == 3_000_000
+
+    def test_registration_folding_reports_historical_reader_gap(self, tmp_path: Path, monkeypatch):
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+        bucket = self._bucket(1_000_000)
+        old = self._host_row(
+            "dev-old-1",
+            f"{self.D2}T12:00:00+00:00",
+            hosts={"codex": {self.D1: bucket}},
+            by_day_models={self.D1: {"gpt-5.4": bucket}},
+            sources=("codex",),
+            device_name="mac-a",
+        )
+        old["degraded_sources"] = ["grok"]
+        old["pending_left"] = {"grok": 1}
+        self._write_events(tmp_path, f"fleet-{self.D2}.jsonl", [old])
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        (codex,) = aggregator.aggregate_agent_usage(data, machines_known=1).rows
+        assert codex.tokens == 1_000_000
+        assert aggregator._agent_row_cost(codex)[1] is True
+        assert any(
+            "historical host reader was catching up" in cause for cause in codex.floor_causes
+        )
+
+    @pytest.mark.parametrize("current_shares_project", [False, True])
+    def test_registration_folding_discloses_historical_claude_gaps(
+        self, tmp_path: Path, monkeypatch, current_shares_project
+    ):
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+        ts = f"{self.D2}T12:00:00+00:00"
+        old = self._session_row("dev-old-1", ts, days={}, device_name="mac-a")
+        del old["projects"][0]["tokens_by_day"]
+        del old["projects"][0]["skills_by_day"]
+        rows = [old]
+        if current_shares_project:
+            # The current registration reports the same project and wins its
+            # session dedup; the superseded project's missing detail still counts.
+            rows.append(
+                self._session_row(
+                    "dev-cur",
+                    ts,
+                    days={self.D1: {"claude-sonnet-4-5": self._bucket(200)}},
+                    device_name="mac-a",
+                )
+            )
+        self._write_events(tmp_path, f"fleet-{self.D2}.jsonl", rows)
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.sessions.total_sessions == 3
+        assert data.sessions.pre_token_peers == data.skills.pre_skills_peers == set()
+        rendered = aggregator.format_retro(data)
+        for code in ("tokens_incomplete", "skills_incomplete"):
+            note = _health_entry(rendered, code)
+            assert note is not None
+            assert "historical" in note["detail"].lower() and "mac-a" in note["detail"]
+            assert "mm push" not in note.get("remedy", "")
+
+    def test_registration_folding_retains_colliding_forensic_aliases(
+        self, tmp_path: Path, monkeypatch
+    ):
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+        self._write_events(
+            tmp_path,
+            f"fleet-{self.D2}.jsonl",
+            [
+                self._host_row(
+                    device,
+                    f"{self.D2}T12:00:00+00:00",
+                    hosts={"codex": {self.D1: self._bucket(volume)}},
+                    by_day_models={self.D1: {"gpt-5.4": self._bucket(volume)}},
+                    device_name="mac-a",
+                )
+                for device, volume in [("dev-é", 100), ("dev-è", 200)]
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        dump = json.loads(aggregator._dump_host_inventory(data.host_inventory, fleet=data.fleet))
+        snapshots = dump["superseded_by_device"]
+        assert set(snapshots) == set(dump["folded_registrations"][0]["folded_ids"])
+        assert {
+            snap["lifetime_by_family"]["codex"][self.D1]["input"] for snap in snapshots.values()
+        } == {100, 200}
+
+    def test_registration_folding_refuses_folds_while_the_registry_is_incomplete(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            aggregator.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"device_id": "dev-cur", "device_name": "mac-a"}]),
+                stderr="mm: warning: dropped device entry devices/dev-old-1.json — unreadable\n",
+            ),
+        )
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+        ts = f"{self.D2}T12:00:00+00:00"
+        bucket = self._bucket(1_000)
+        rows = [
+            self._session_row(
+                device,
+                ts,
+                days={self.D1: {"claude-sonnet-4-5": self._bucket(amount)}},
+                device_name="mac-a",
+            )
+            for device, amount in [("dev-old-1", 100), ("dev-cur", 200)]
+        ]
+        rows += [
+            self._host_row(
+                device,
+                ts,
+                hosts={"codex": {self.D1: bucket}},
+                by_day_models={self.D1: {"gpt-5.4": bucket}},
+                device_name="mac-a",
+            )
+            for device in ("dev-old-1", "dev-cur")
+        ]
+        self._write_events(tmp_path, f"fleet-{self.D2}.jsonl", rows)
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        # The readable entries still scope the retro. Only name folding stops,
+        # because a dropped entry could share the matched name.
+        assert data.fleet.devices_known == 1
+        assert data.fleet.folded_registrations == ()
+        assert data.fleet.devices_in_events == {"dev-cur"}
+        assert set(data.host_inventory.by_device) == {"dev-cur"}
+        assert data.host_inventory.superseded_by_device == {}
+        assert data.sessions.tokens_input == 300
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        assert {row.key: row.tokens for row in usage.rows}["codex"] == 1_000
+        rendered = aggregator.format_retro(data)
+        assert _health_entry(rendered, "registry_unavailable") is None
+        entry = _health_entry(rendered, "unregistered_devices")
+        assert entry is not None and entry["unregistered_ids"] == ["dev-old-1"]
+        assert "registry is incomplete" in entry["detail"]
+
+    def _storage_fleet(
+        self, tmp_path: Path, monkeypatch, *, retired_name: str, passphrase_set: bool
+    ):
+        """Real encrypted storage with one retirement record for dev-old-1."""
+        from mind_meld import config as mm_config
+        from mind_meld import crypto as mm_crypto
+        from mind_meld import devices as mm_devices
+        from mind_meld.storage import LocalBackend
+
+        storage_dir = tmp_path / "storage"
+        storage_dir.mkdir()
+        cfg_path = tmp_path / "config.toml"
+        passphrase = "test-passphrase-folding"
+        monkeypatch.setattr(mm_config, "CONFIG_PATH", cfg_path)
+        mm_config.save_config(
+            {
+                "device": {"id": "dev-cur", "name": "mac-a"},
+                "storage": {"backend": "local", "path": str(storage_dir)},
+                "crypto": {"argon2_memory_kb": 16_384},
+            },
+            cfg_path,
+        )
+        backend = LocalBackend(storage_dir)
+        hdr = mm_crypto.bootstrap_crypto_init(backend, passphrase, 16_384)
+        mm_crypto.set_crypto_session(hdr.root_salt, 16_384)
+        try:
+            mm_devices.write_retirement_record(
+                backend, "dev-old-1", retired_name, None, passphrase, memory_kb=16_384
+            )
+        finally:
+            mm_crypto.clear_crypto_session()
+        if passphrase_set:
+            monkeypatch.setenv(mm_crypto.ENV_VAR, passphrase)
+        else:
+            monkeypatch.delenv(mm_crypto.ENV_VAR, raising=False)
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered))
+
+    def test_unreadable_stored_names_explain_unfolded_registrations(
+        self, tmp_path: Path, monkeypatch
+    ):
+        self._storage_fleet(tmp_path, monkeypatch, retired_name="mac-a", passphrase_set=False)
+        events_dir = tmp_path / "events"
+        self._write_events(
+            events_dir,
+            f"storage-{self.D4}.jsonl",
+            [
+                # An older row without device_name: only storage can name it.
+                self._push_row("dev-old-1", f"{self.D3}T12:00:00+00:00"),
+                self._push_row("dev-cur", f"{self.D4}T12:00:00+00:00", device_name="mac-a"),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.fleet.folded_registrations == ()
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        assert entry is not None and entry["unregistered_ids"] == ["dev-old-1"]
+        assert entry.get("names_unavailable") == "passphrase"
+        assert "Have the owner unlock the keyring" in entry.get("remedy", "")
+
+    def test_nameless_retirement_record_defers_to_event_names(self, tmp_path: Path, monkeypatch):
+        # A record written without a name stores the device ID instead.
+        self._storage_fleet(tmp_path, monkeypatch, retired_name="", passphrase_set=True)
+        events_dir = tmp_path / "events"
+        self._write_events(
+            events_dir,
+            f"storage-{self.D4}.jsonl",
+            [
+                self._push_row("dev-old-1", f"{self.D3}T12:00:00+00:00", device_name="mac-a"),
+                self._push_row("dev-cur", f"{self.D4}T12:00:00+00:00", device_name="mac-a"),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert [group.folded_ids for group in data.fleet.folded_registrations] == [("dev-old-1",)]
+        assert data.fleet.unregistered_details == ()
+
+    def test_registry_remedy_survives_unreadable_stored_names(self, tmp_path: Path, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            aggregator.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"device_id": "dev-cur", "device_name": "mac-a"}]),
+                stderr="mm: warning: dropped device entry devices/dev-b.json — unreadable\n",
+            ),
+        )
+        monkeypatch.setattr(
+            aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}, "passphrase")
+        )
+        ts = f"{self.D3}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            f"fleet-{self.D3}.jsonl",
+            [
+                # A name match the dropped entry blocks, and an ID only storage could name.
+                self._push_row("dev-old-1", ts, device_name="mac-a"),
+                self._push_row("dev-old-2", ts),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        assert entry is not None and "registry is incomplete" in entry["detail"]
+        assert entry.get("names_unavailable") == "passphrase"
+        remedy = entry.get("remedy", "")
+        # Nothing folds until the registry is whole, so its step comes first.
+        assert "mm devices" in remedy and "unlock the keyring" in remedy
+        assert remedy.index("mm devices") < remedy.index("unlock the keyring")
+
+    def test_passphrase_remedy_leaves_the_passphrase_to_the_owner(
+        self, tmp_path: Path, monkeypatch
+    ):
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered, False))
+        monkeypatch.setattr(
+            aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}, "passphrase")
+        )
+        ts = f"{self.D3}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            f"fleet-{self.D3}.jsonl",
+            [self._push_row("dev-old-1", ts), self._push_row("dev-cur", ts, device_name="mac-a")],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        assert entry is not None
+        remedy = entry.get("remedy", "")
+        # The retro skill acts on remedies, so this one leaves the keyring to the
+        # owner and never advises putting the passphrase in an agent's environment.
+        assert "Have the owner unlock the keyring in their own desktop session" in remedy
+        assert "Unlock the keyring" not in remedy
+        assert "MINDMELD_PASSPHRASE" not in remedy
+        assert "export" not in remedy
+
+    def test_unreadable_stored_names_are_reported_for_named_ids(self, tmp_path: Path, monkeypatch):
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered, False))
+        monkeypatch.setattr(
+            aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}, "passphrase")
+        )
+        ts = f"{self.D3}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            f"fleet-{self.D3}.jsonl",
+            [
+                # A stale pre-rename name: only the stored retirement record could match it.
+                self._push_row("dev-old-1", ts, device_name="mac-old"),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.fleet.folded_registrations == ()
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        assert entry is not None and entry["unregistered_ids"] == ["dev-old-1"]
+        assert entry.get("names_unavailable") == "passphrase"
+        assert "Have the owner unlock the keyring" in entry.get("remedy", "")
+
+    def test_unreadable_stored_names_explain_a_changed_fleet(self, tmp_path: Path, monkeypatch):
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered, False))
+        monkeypatch.setattr(
+            aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}, "passphrase")
+        )
+        ts = f"{self.D4}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            "dev-cur-2026-11-10.jsonl",
+            [
+                # A prior-window row without a name: only storage could name this ID.
+                self._push_row("dev-old-1", "2026-11-15T12:00:00+00:00"),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+                self._git_row(
+                    "dev-cur",
+                    ts,
+                    [{"sha": "abcdef1", "date": ts, "add": 2, "del": 1, "subject": "fix: test"}],
+                ),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.comparison.status == "ok" and data.comparison.fleet_changed is True
+        assert data.fleet.unregistered_details == ()
+        entry = _health_entry(aggregator.format_retro(data), "fleet_changed")
+        assert entry is not None and entry.get("names_unavailable") == "passphrase"
+        assert "Have the owner unlock the keyring" in entry.get("remedy", "")
+
+    def test_rejected_passphrase_is_reported_apart_from_a_missing_one(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from mind_meld import crypto as mm_crypto
+
+        self._storage_fleet(tmp_path, monkeypatch, retired_name="mac-a", passphrase_set=False)
+        # A passphrase is available but does not unlock this fleet's key header.
+        monkeypatch.setenv(mm_crypto.ENV_VAR, "other-passphrase-folding")
+        events_dir = tmp_path / "events"
+        self._write_events(
+            events_dir,
+            f"storage-{self.D4}.jsonl",
+            [
+                self._push_row("dev-old-1", f"{self.D3}T12:00:00+00:00"),
+                self._push_row("dev-cur", f"{self.D4}T12:00:00+00:00", device_name="mac-a"),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.fleet.folded_registrations == ()
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        assert entry is not None and entry["unregistered_ids"] == ["dev-old-1"]
+        assert entry.get("names_unavailable") == "passphrase-rejected"
+        assert "did not unlock this fleet's key header" in entry["detail"]
+        remedy = entry.get("remedy", "")
+        # Exporting a passphrase does not fix a wrong one; the owner checks it.
+        assert "export" not in remedy
+        assert remedy.startswith("Have the owner check the passphrase")
+        assert "mm diag" in remedy
+
+    @pytest.mark.parametrize("lookup", [None, "passphrase"])
+    def test_incomplete_registry_explains_a_changed_fleet(
+        self, tmp_path: Path, monkeypatch, lookup
+    ):
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            aggregator.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"device_id": "dev-cur", "device_name": "mac-a"}]),
+                stderr="mm: warning: dropped device entry devices/dev-b.json — unreadable\n",
+            ),
+        )
+        monkeypatch.setattr(
+            aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}, lookup)
+        )
+        ts = f"{self.D4}T12:00:00+00:00"
+        self._write_events(
+            tmp_path,
+            "dev-cur-2026-11-10.jsonl",
+            [
+                # A prior-window name match the dropped entry blocks.
+                self._push_row("dev-old-1", "2026-11-15T12:00:00+00:00", device_name="mac-a"),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+                self._git_row(
+                    "dev-cur",
+                    ts,
+                    [{"sha": "abcdef1", "date": ts, "add": 2, "del": 1, "subject": "fix: test"}],
+                ),
+            ],
+        )
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.comparison.status == "ok" and data.comparison.fleet_changed is True
+        assert data.fleet.unregistered_details == ()
+        rendered = aggregator.format_retro(data)
+        assert _health_entry(rendered, "unregistered_devices") is None
+        entry = _health_entry(rendered, "fleet_changed")
+        assert entry is not None
+        assert "device registry is incomplete" in entry["detail"]
+        remedy = entry.get("remedy", "")
+        assert remedy.startswith("Run `mm devices` to see the dropped entry.")
+        assert remedy.endswith("Then re-run the retro.")
+        if lookup is None:
+            assert "names_unavailable" not in entry
+            assert "keyring" not in remedy
+        else:
+            # Nothing folds until the registry is whole, so its step comes first.
+            assert entry.get("names_unavailable") == "passphrase"
+            assert remedy.index("mm devices") < remedy.index("unlock the keyring")
+
+    def test_unregistered_disclosure_lists_stay_bounded(self, tmp_path: Path, monkeypatch):
+        registered = [
+            {"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"},
+            {"device_id": "dev-dup-1", "device_name": "mac-dup", "mm_version": "1.12.0"},
+            {"device_id": "dev-dup-2", "device_name": "mac-dup", "mm_version": "1.12.0"},
+        ]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (3, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+        ts = f"{self.D4}T12:00:00+00:00"
+        rows = [self._push_row(f"dev-ghost-{index:02d}", ts) for index in range(15)]
+        rows += [
+            self._push_row(f"dev-ambig-{index}", ts, device_name="mac-dup") for index in range(7)
+        ]
+        rows.append(self._push_row("dev-cur", ts, device_name="mac-a"))
+        self._write_events(tmp_path, f"ghosts-{self.D4}.jsonl", rows)
+        data = aggregator.aggregate(
+            events_dir=tmp_path, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert len(data.fleet.unregistered_details) == 22
+        entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+        cap = aggregator.MAX_TOKEN_COVERAGE_PEER_NAMES
+        assert len(entry["unregistered_ids"]) == cap
+        assert entry["unregistered_omitted"] == 22 - cap
+        assert len(entry["ambiguous_devices"]) == cap
+        assert entry["ambiguous_omitted"] == 7 - cap
+
+    def test_unmatched_and_missing_name_unregistered_devices_never_fold(
+        self, tmp_path: Path, monkeypatch
+    ):
+        events_dir = tmp_path / "events"
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+
+        ts = f"{self.D4}T12:00:00+00:00"
+        self._write_events(
+            events_dir,
+            f"fleet-{self.D4}.jsonl",
+            [
+                self._session_row(
+                    "dev-cur",
+                    ts,
+                    days={self.D4: {"claude-sonnet-4-5": self._bucket(1000)}},
+                    device_name="mac-a",
+                ),
+                self._session_row(
+                    "dev-unmatched",
+                    ts,
+                    days={self.D4: {"claude-sonnet-4-5": self._bucket(2000)}},
+                    device_name="mac-gone",
+                ),
+                self._host_row(
+                    "dev-unmatched",
+                    ts,
+                    hosts={"codex": {self.D4: self._bucket(500)}},
+                    by_day_models={self.D4: {"gpt-5.4": self._bucket(500)}},
+                    device_name="mac-gone",
+                ),
+                self._session_row(
+                    "dev-noname",
+                    ts,
+                    days={self.D4: {"claude-sonnet-4-5": self._bucket(3000)}},
+                ),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+                self._push_row("dev-unmatched", ts, device_name="mac-gone"),
+                self._push_row("dev-noname", ts),
+            ],
+        )
+
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.fleet.devices_in_events == {"dev-cur"}
+        assert data.fleet.folded_registrations == ()
+        assert data.fleet.unregistered_event_devices == 2
+        assert "dev-unmatched" not in data.host_inventory.by_device
+        assert data.host_inventory.superseded_by_device == {}
+
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        by_key = {r.key: r for r in usage.rows}
+        # Claude keeps unregistered devices as today; host excludes them as today
+        assert by_key["claude"].tokens == 6_000
+        assert by_key["claude"].machines == 3
+        assert "codex" not in by_key
+        assert usage.machines_with_activity == 1
+
+        md = aggregator.format_retro(data)
+        unreg = _health_entry(md, "unregistered_devices")
+        assert unreg is not None
+        assert "2 unregistered device id(s)" in unreg["detail"]
+        assert "dev-unmatched (mac-gone, unregistered)" in unreg["detail"]
+        assert "dev-noname (unregistered)" in unreg["detail"]
+
+        dump = json.loads(
+            aggregator._dump_host_inventory(data.host_inventory, git=data.git, fleet=data.fleet)
+        )
+        assert dump["unregistered_devices"] == [
+            {
+                "device_id": "dev-noname",
+                "status": "unregistered",
+                "device_name": None,
+                "matching_registered_ids": [],
+            },
+            {
+                "device_id": "dev-unmatched",
+                "status": "unregistered",
+                "device_name": "mac-gone",
+                "matching_registered_ids": [],
+            },
+        ]
+
+    def test_ambiguous_registered_name_refuses_fold_and_discloses(
+        self, tmp_path: Path, monkeypatch
+    ):
+        events_dir = tmp_path / "events"
+        registered = [
+            {"device_id": "dev-dup-1", "device_name": "mac-dup", "mm_version": "1.12.0"},
+            {"device_id": "dev-dup-2", "device_name": "MAC-DUP", "mm_version": "1.12.0"},
+        ]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (2, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+
+        ts = f"{self.D4}T12:00:00+00:00"
+        self._write_events(
+            events_dir,
+            f"ambig-{self.D4}.jsonl",
+            [
+                self._session_row(
+                    "dev-ambig",
+                    ts,
+                    days={self.D4: {"claude-sonnet-4-5": self._bucket(1500)}},
+                    device_name="mac-dup",
+                ),
+                self._push_row("dev-ambig", ts, device_name="mac-dup"),
+            ],
+        )
+
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+        )
+        assert data.fleet.folded_registrations == ()
+        assert data.fleet.unregistered_event_devices == 1
+        assert len(data.fleet.unregistered_details) == 1
+        detail = data.fleet.unregistered_details[0]
+        assert detail.status == "ambiguous"
+        assert detail.matching_registered_ids == ("dev-dup-1", "dev-dup-2")
+
+        md = aggregator.format_retro(data)
+        unreg = _health_entry(md, "unregistered_devices")
+        assert unreg is not None
+        assert "ambiguous name 'mac-dup' matches dev-dup-1, dev-dup-2" in unreg["detail"]
+        assert unreg["ambiguous_devices"] == [
+            {
+                "device_id": "dev-ambig",
+                "device_name": "mac-dup",
+                "matching_registered_ids": ["dev-dup-1", "dev-dup-2"],
+            }
+        ]
+
+        dump = json.loads(
+            aggregator._dump_host_inventory(data.host_inventory, git=data.git, fleet=data.fleet)
+        )
+        assert dump["unregistered_devices"] == [
+            {
+                "device_id": "dev-ambig",
+                "status": "ambiguous",
+                "device_name": "mac-dup",
+                "matching_registered_ids": ["dev-dup-1", "dev-dup-2"],
+            }
+        ]
+
+    def test_storage_backed_name_lookup_and_precedence_preserves_crypto_session(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from mind_meld import config as mm_config
+        from mind_meld import crypto as mm_crypto
+        from mind_meld import devices as mm_devices
+        from mind_meld.errors import StorageError
+        from mind_meld.storage import LocalBackend
+        from mind_meld.storage.keys import manifest_key
+
+        storage_dir = tmp_path / "storage"
+        storage_dir.mkdir()
+        cfg_path = tmp_path / "config.toml"
+        passphrase = "test-passphrase-folding"
+        monkeypatch.setenv(mm_crypto.ENV_VAR, passphrase)
+        monkeypatch.setattr(mm_config, "CONFIG_PATH", cfg_path)
+
+        cfg = {
+            "device": {"id": "dev-cur", "name": "mac-a"},
+            "storage": {"backend": "local", "path": str(storage_dir)},
+            "crypto": {"argon2_memory_kb": 16_384},
+        }
+        mm_config.save_config(cfg, cfg_path)
+
+        backend = LocalBackend(storage_dir)
+        hdr = mm_crypto.bootstrap_crypto_init(backend, passphrase, 16_384)
+        assert hdr.root_salt is not None
+        mm_crypto.set_crypto_session(hdr.root_salt, 16_384)
+        try:
+            # 1) dev-old-1 has retired/<id>.enc saying mac-a (even if event says mac-other)
+            mm_devices.write_retirement_record(
+                backend, "dev-old-1", "mac-a", None, passphrase, memory_kb=16_384
+            )
+            # 2) dev-old-2 has only manifests/<id>/manifest.json.enc saying mac-a
+            for device_id, name in [("dev-old-2", "mac-a"), ("dev-old-3", "mac-wrong")]:
+                manifest_bytes = json.dumps(
+                    {"version": 2, "device_id": device_id, "device_name": name, "sources": {}}
+                ).encode("utf-8")
+                backend.put(
+                    manifest_key(device_id),
+                    mm_crypto.encrypt_manifest(
+                        manifest_bytes, passphrase, memory_kb=16_384, wire_names=True
+                    ),
+                )
+        finally:
+            mm_crypto.clear_crypto_session()
+
+        def storage_bytes():
+            return {
+                path.relative_to(storage_dir): path.read_bytes()
+                for path in storage_dir.rglob("*")
+                if path.is_file()
+            }
+
+        before_files = storage_bytes()
+        with pytest.raises(StorageError, match="size limit"):
+            backend.get_bounded(manifest_key("dev-old-2"), max_bytes=1)
+
+        events_dir = tmp_path / "events"
+        ts = f"{self.D4}T12:00:00+00:00"
+        self._write_events(
+            events_dir,
+            f"storage-{self.D4}.jsonl",
+            [
+                # dev-old-1 event carries a different name to prove retired/<id>.enc wins
+                self._push_row("dev-old-1", f"{self.D1}T12:00:00+00:00", device_name="mac-wrong"),
+                # dev-old-2 event has NO device_name -> falls back to manifest
+                self._push_row("dev-old-2", f"{self.D2}T12:00:00+00:00"),
+                self._push_row("dev-old-3", f"{self.D3}T12:00:00+00:00", device_name="mac-a"),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+            ],
+        )
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered))
+
+        incumbent_salt = b"i" * mm_crypto.ROOT_SALT_LEN
+        mm_crypto.set_crypto_session(incumbent_salt, 16_384)
+        try:
+            mm_crypto.load_master_key(passphrase, incumbent_salt, 16_384)
+            prior_session = dict(mm_crypto._SESSION)
+            prior_cache = dict(mm_crypto._MASTER_KEY_CACHE)
+            data = aggregator.aggregate(
+                events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+            )
+            assert mm_crypto._SESSION == prior_session
+            assert mm_crypto._MASTER_KEY_CACHE == prior_cache
+
+            # A different configured lineage leaves only event-name evidence.
+            cfg["crypto"]["root_salt_fp"] = mm_crypto.root_salt_fingerprint(incumbent_salt)
+            mm_config.save_config(cfg, cfg_path)
+            assert aggregator.get_unregistered_device_names(["dev-old-1", "dev-old-2"]) == (
+                {},
+                {},
+                "storage",
+            )
+        finally:
+            mm_crypto.clear_crypto_session()
+        assert storage_bytes() == before_files
+
+        assert len(data.fleet.folded_registrations) == 1
+        assert data.fleet.folded_registrations[0].folded_ids == (
+            "dev-old-1",
+            "dev-old-2",
+            "dev-old-3",
+        )
+        assert data.fleet.unregistered_event_devices == 0
+
+    def test_duplicate_ledger_preserved_for_host_and_extended_to_claude_sessions(
+        self, tmp_path: Path, monkeypatch
+    ):
+        events_dir = tmp_path / "events"
+        registered = [
+            {"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"},
+            {"device_id": "dev-b", "device_name": "mac-b", "mm_version": "1.12.0"},
+        ]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (2, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+
+        ts = f"{self.D4}T12:00:00+00:00"
+        same_codex = self._bucket(1234, out=56)
+        same_claude = self._bucket(4321, out=65)
+        self._write_events(
+            events_dir,
+            f"dups-{self.D4}.jsonl",
+            [
+                # Distinct registered machines with identical Codex counters -> duplicate_ledger
+                self._host_row(
+                    "dev-cur",
+                    ts,
+                    hosts={"codex": {self.D4: same_codex}},
+                    by_day_models={self.D4: {"gpt-5.4": same_codex}},
+                    device_name="mac-a",
+                ),
+                self._host_row(
+                    "dev-b",
+                    ts,
+                    hosts={"codex": {self.D4: same_codex}},
+                    by_day_models={self.D4: {"gpt-5.4": same_codex}},
+                    device_name="mac-b",
+                ),
+                # Distinct devices (registered + unmatched unregistered) with identical Claude
+                # session counters -> duplicate_ledger includes "claude" without dropping tokens
+                self._session_row(
+                    "dev-cur",
+                    ts,
+                    days={self.D4: {"claude-sonnet-4-5": same_claude}},
+                    device_name="mac-a",
+                ),
+                self._session_row(
+                    "dev-unmatched",
+                    ts,
+                    days={self.D4: {"claude-sonnet-4-5": same_claude}},
+                    device_name="mac-gone",
+                ),
+                # Folded superseded ID with identical Claude & Codex counters does NOT double-count
+                self._session_row(
+                    "dev-old-1",
+                    f"{self.D4}T10:00:00+00:00",
+                    days={self.D4: {"claude-sonnet-4-5": same_claude}},
+                    device_name="mac-a",
+                ),
+                self._host_row(
+                    "dev-old-1",
+                    f"{self.D4}T10:00:00+00:00",
+                    hosts={"codex": {self.D4: same_codex}},
+                    by_day_models={self.D4: {"gpt-5.4": same_codex}},
+                    device_name="mac-a",
+                ),
+            ],
+        )
+
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+        )
+        usage = aggregator.aggregate_agent_usage(data, machines_known=2)
+        assert usage.duplicate_ledger == ("claude", "codex")
+        assert usage.duplicate_ledger_from_sessions is True
+        by_key = {r.key: r for r in usage.rows}
+        # Equal totals never drop distinct devices' data; folded dev-old-1 is not triple-counted
+        assert by_key["codex"].tokens == 2 * (1234 + 56)
+        assert by_key["claude"].tokens == 2 * (4321 + 65)
+
+        md = aggregator.format_retro(data)
+        dup_entry = _health_entry(md, "duplicate_ledger")
+        assert dup_entry is not None
+        assert dup_entry["families"] == ["claude", "codex"]
+        assert "mm devices" in dup_entry["remedy"]
+        assert "mm-events" in dup_entry["remedy"]
+
+    def test_sanitization_of_hostile_names_and_ids_in_disclosure_and_dump(
+        self, tmp_path: Path, monkeypatch
+    ):
+        events_dir = tmp_path / "events"
+        registered = [{"device_id": "dev-cur", "device_name": "mac-a", "mm_version": "1.12.0"}]
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (1, registered))
+        monkeypatch.setattr(aggregator, "get_unregistered_device_names", lambda *a, **k: ({}, {}))
+
+        ts = f"{self.D4}T12:00:00+00:00"
+        hostile_id = "bad`id\n<script>"
+        hostile_name = "evil\x1b[31m`name`\n|pipe|"
+        self._write_events(
+            events_dir,
+            f"hostile-{self.D4}.jsonl",
+            [
+                self._push_row(hostile_id, ts, device_name=hostile_name),
+                self._push_row("dev-cur", ts, device_name="mac-a"),
+            ],
+        )
+
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=None, now=self.NOW
+        )
+        md = aggregator.format_retro(data)
+        unreg = _health_entry(md, "unregistered_devices")
+        assert unreg is not None
+        for forbidden in ("\x1b", "`", "\n", "<", ">", "|"):
+            assert forbidden not in unreg["detail"]
+        dump_text = aggregator._dump_host_inventory(
+            data.host_inventory, git=data.git, fleet=data.fleet
+        )
+        dump = json.loads(dump_text)
+        entry = dump["unregistered_devices"][0]
+        for forbidden in ("\x1b", "`", "\n", "<", ">", "|"):
+            assert forbidden not in entry["device_id"]
+            assert forbidden not in (entry["device_name"] or "")
 
 
 def test_catchup_origin_contributes_commits_and_coverage_without_push_count():

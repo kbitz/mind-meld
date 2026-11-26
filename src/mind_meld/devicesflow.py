@@ -46,10 +46,9 @@ def devices(fmt: str) -> None:
     """List all registered devices (`table` or `json`)."""
     config = core._get_config(read_only=True)
     backend = get_backend(config)
-    device_list = core._list_devices_warn(backend)
-    my_id = config["device"]["id"]
-
     fmt_lower = fmt.lower()
+    device_list = core._list_devices_warn(backend, warn_vanished=fmt_lower == "json")
+    my_id = config["device"]["id"]
     if fmt_lower not in ("table", "json"):
         core._error(f"--format must be 'table' or 'json', got {fmt!r}")
         return  # unreachable
