@@ -22,45 +22,43 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 
 ## In Progress
 
-Declared 2026-11-24 by the Factory Manager's brief: Track 165C is in planning (item `715b9168`, branch `mmm/715b9168`), split from Track 165A (item `67e29a92`, draft PR #382 on branch `mmm/67e29a92`, which stays open as reference material) on the developer's word, 2026-11-24: "split is fine". Its prerequisite Track 165B shipped in v1.12.86 (PR #383).
-
-### Group 165: Background push-capture catch-up
-
-_Depends on: none_
-
-**This group delivers:** background catch-up for deadline-stopped autopush capture so usage and Git capture stay complete without slowing agent hooks or requiring manual attended pushes.
-
-#### Track 165C: Finish deadline-stopped autopush capture in the background (re-plan)
-_2 tasks . ~300 LOC . medium risk . 14 files_
-**Outcome:** When an autopush stops usage or Git capture at its deadline, the remainder finishes in the background without the owner running an attended push and without a hook waiting.
-**Supports:** [SPEC](SPEC.md) O7 (fleet usage reporting) and O8 (silent hooks and honest status). Split from Track 165A (item `67e29a92`, draft PR #382) on the developer's word, 2026-11-24: "split is fine". Track 165B shipped the timing and per-provider deadline half in v1.12.86 (PR #383); this Track re-plans the background catch-up half from a simpler design (item `715b9168`, branch `mmm/715b9168`, currently in planning; draft PR #382 stays open as reference material).
-**Done when:** set by the active plan for item `715b9168`; at minimum, a deadline-stopped autopush hands off the remainder, at most one catch-up runs per machine, the catch-up never prompts, prints nothing and never changes the autopush exit code, and `mm status` / `mm diag` show its last result.
-**Acceptance (starting points for active planning item `715b9168`; final criteria set by the plan):**
-1. Prefer a capture-only catch-up: it advances caches and cursors with the attended budgets, and the next push (auto or attended) publishes. Weigh this against Track 165A's reason for publishing in the catch-up (the day's last session staying unpublished overnight), and state which the plan chooses and why.
-2. Read draft PR #382's review receipts and its branch's `docs/TODOS.md` follow-ups (the four remaining catch-up follow-ups, after Track 165B resolved timing record duplication and warm-retry ceiling) as the list of failure modes the design must rule out, and name each one in the plan with how the design avoids it.
-3. `mm status` stops advising a manual attended push for a backlog the catch-up is handling or has just handled, without hiding any other degradation (O8).
-4. Build on Track 165B's timing records (`pushtimings.py`) to measure catch-up runs.
-
-_blocked-by: Track 165B_
-_touches: src/mind_meld/events_tail.py, src/mind_meld/cli.py, src/mind_meld/config.py, src/mind_meld/statusflow.py, src/mind_meld/events.py, src/mind_meld/pushtimings.py, tests/test_events.py, tests/test_events_budget_scope.py, tests/test_host_usage_snapshot.py, tests/test_integration.py, tests/test_statusflow.py, tests/test_diag.py, README.md, docs/invariants/events-retro.md_
-_read-first: docs/invariants/events-retro.md, docs/invariants/sync.md (autopush, detached memory-index refresh), AGENTS.md, PR #382 (diff, review receipts, TODOS additions)_
-_verify: ./bin/check --affected_
-
-_Source: developer decision, 2026-11-24 ("split is fine"); Track 165A item `67e29a92` and draft PR #382 (branch `mmm/67e29a92`); active planning item `715b9168` (branch `mmm/715b9168`)._
-
-- **Re-plan and implement background catch-up handoff and execution.** Hand off deadline-stopped autopush capture to a single-instance quiet background catch-up using Track 165B timing records, avoiding the concurrency failure modes documented on PR #382. _events_tail.py, cli.py, config.py, events.py, pushtimings.py, tests, ~180 lines._ (M)
-- **Update status, diagnostics and documentation for background catch-up.** Suppress manual-push advice while catch-up handles a backlog, report the last catch-up result in `mm status` / `mm diag`, and update README and invariants. _statusflow.py, tests, README.md, docs/invariants/events-retro.md, ~120 lines._ (M)
+None declared (2026-11-25). No branch, session or open pull request is active for any Track.
 
 ## Current Plan
 
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164_
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167_
 
-No unstarted Groups queued. Track 165C (Group 165 above) is the only active Track.
+### Group 168: Upgrade interrupt process-group test determinism
+
+_Depends on: none_
+
+**This group delivers:** a deterministic process-group cleanup test on `KeyboardInterrupt` in `tests/test_upgrade.py` so macOS CI stops failing intermittently while waiting for the OS to reap the killed grandchild.
+
+#### Track 168A: Make the upgrade interrupt process-group cleanup test wait for grandchild reaping
+_2 tasks . ~60 LOC . low risk . 1 file_
+_id: wi-22388c_
+**Outcome:** `tests/test_upgrade.py::TestFetchTagsGitAdapter124B::test_keyboard_interrupt_kills_sleeping_process_group_and_reraises` passes deterministically under macOS and Linux CI load while still catching a descendant that escapes the process group.
+**Supports:** [SPEC](SPEC.md) MVP-1 quality and CI reliability; standing constraint admitting reproducible encountered bugs (owner, 2026-11-09). Observed failing on macOS CI at `main` `e12f181` (run `45442232986`, job `138616232737`, 2026-11-24) and PR #385 (`4ba8562`, run `45684816209`, job `139454492316`, 2026-11-25) at `tests/test_upgrade.py:965` (`Failed: DID NOT RAISE ProcessLookupError` on `os.kill(child_pid, 0)`), passing on rerun both times.
+**Done when:** `test_keyboard_interrupt_kills_sleeping_process_group_and_reraises` uses bounded `_wait_pid_gone` reap waits matching `_run_timeout_grandchild_check` (Track 150A), fails clearly if `pids_file` never appears before interrupting, cleans up with `_wait_pid_gone` in `finally`, a companion detached-grandchild (`os.setsid()`) check proves the assertion still fails when a descendant escapes the process group, and repeated parallel runs of `tests/test_upgrade.py` plus `./bin/check --affected` pass.
+**Acceptance:**
+1. Replace the immediate `with pytest.raises(ProcessLookupError): os.kill(..., 0)` assertions in `TestFetchTagsGitAdapter124B.test_keyboard_interrupt_kills_sleeping_process_group_and_reraises` with bounded `_wait_pid_gone(..., timeout=...)` polling matching `_run_timeout_grandchild_check` (Track 150A, PR #352). Fail clearly if `pids_file` does not appear before the readiness deadline instead of raising `KeyboardInterrupt` without PIDs, and reap with `_wait_pid_gone` in the `finally` fallback.
+2. Add a companion negative test (mirroring `test_timeout_grandchild_check_fails_when_grandchild_calls_setsid`) proving that a grandchild calling `os.setsid()` to escape the process group still fails the reap check and is cleaned up in `finally`.
+3. Verify `src/mind_meld/upgrade.py::_run_git`'s `KeyboardInterrupt` cleanup path; keep `src/mind_meld/upgrade.py` unchanged unless a concrete defect in `_run_git` itself is reproduced (widen `_touches:` per the drift rule if `_run_git` must change).
+4. Keep the test free of real `git` calls and process-listing utilities, and confirm repeated parallel runs of `tests/test_upgrade.py` and `./bin/check --affected` pass deterministically.
+
+_touches: tests/test_upgrade.py_
+_read-first: tests/test_upgrade.py, src/mind_meld/upgrade.py (_run_git), docs/invariants/auto-upgrade.md, AGENTS.md_
+_verify: ./bin/check --affected_
+
+_Source: encountered CI flake on main e12f181 (2026-11-24) and PR #385 (2026-11-25), verified against tests/test_upgrade.py at 8b98a49._
+
+- **Use bounded reap waits and a readiness guard in the interrupt test.** Replace immediate `os.kill(..., 0)` assertions with `_wait_pid_gone`, fail clearly if `pids_file` is missing when the wait expires, and reap in `finally`. _tests/test_upgrade.py, ~35 lines._ (S)
+- **Pin escaped-grandchild detection for the interrupt path.** Add a detached-grandchild (`os.setsid()`) failure test mirroring `test_timeout_grandchild_check_fails_when_grandchild_calls_setsid` and verify repeated parallel runs of `tests/test_upgrade.py`. _tests/test_upgrade.py, ~25 lines._ (S)
 
 ### Execution Map
 
 ```
-- Group 165 ← {}
+- Group 168 ← {}
 ```
 
 **Total: 1 group, 1 Track remaining.**
@@ -69,7 +67,7 @@ No unstarted Groups queued. Track 165C (Group 165 above) is the only active Trac
 
 ## Future
 
-Deferred: docs/roadmap-future.md (136 items)
+Deferred: docs/roadmap-future.md (151 items)
 
 ## Shipped
 

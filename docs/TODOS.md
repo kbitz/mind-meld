@@ -44,268 +44,53 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Pin the usage line when publication verification raises
-- **ID:** wi-9bd775
-- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The evidence-error fixtures pin the warning and accepted content. Their assertions cover only part of the usage line.
-- **Hypothesis (untested):** When publication reporting next changes, extend both evidence-error fixtures to check the exact final outcome and keep the existing side-effect assertions.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/cli.py`, the early and post-acceptance calls to `_report_usage_publication`.
-- **Evidence:** Track 167A coverage audit C04. Source and fixtures inspected, with no failure reproduced.
-- **Context:** Filed by /review-and-prep on Track 167A at `2c9dee0` (2026-11-25).
-- **Effort:** ?
-
-### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Pin the usage line after an events upload hold
-- **ID:** wi-dd9352
-- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The late upload-hold fixture verifies accepted bytes and the hold. The exact usage receipt for a late-held event file lacks a direct assertion.
-- **Hypothesis (untested):** When the upload hold or receipt code next changes, force the event file to change during upload and check the held line and omission of a claim for that file.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/cli.py`, the event file comparison after upload holds.
-- **Evidence:** Track 167A coverage audit C12. Source and fixtures inspected, with no failure reproduced.
-- **Context:** Filed by /review-and-prep on Track 167A at `2c9dee0` (2026-11-25).
-- **Effort:** ?
-
-### [review:files=src/mind_meld/cli.py|tests/test_integration.py] Test gap: Show a reader deadline beside content accepted without usage
-- **ID:** wi-90be55
-- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The attended CLI fixtures exercise content plus published usage with a deadline, and a deadline on a no-content push. They omit the combination of accepted content and zero accepted usage with a deadline.
-- **Hypothesis (untested):** When the lead message or deadline handling next changes, add that combination to the existing attended fixture and assert the canonical reader name and the no-usage clause.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/cli.py`, the deadline suffix in `_sync_success`.
-- **Evidence:** Track 167A coverage audit U25. Source and fixtures inspected, with no failure reproduced.
-- **Context:** Filed by /review-and-prep on Track 167A at `2c9dee0` (2026-11-25).
-- **Effort:** ?
-
-### [review:files=src/mind_meld/skills/retro_fleet/SKILL.md|tests/test_docs_routing.py] Test gap: Exercise scheduled pricing decisions with synthetic vendor docs
-- **ID:** wi-4dcf5a
-- **Test gap:** no demonstrated defect. Filed under `test-gaps=record`.
-- **Description:** The static pin checks the UTC effective-date instruction and override flag. Agent execution across the date boundary lacks an eval.
-- **Hypothesis (untested):** When the skill next changes its pricing steps, use synthetic vendor documentation for the day before the change, the effective day, and a failed lookup. Inspect the second-pass flags and unknown-price disclosure.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/skills/retro_fleet/SKILL.md`, the Pass 2 pricing check.
-- **Evidence:** Track 167A coverage audit U29. The instruction and test were inspected, with no failure reproduced.
-- **Context:** Filed by /review-and-prep on Track 167A at `2c9dee0` (2026-11-25).
-- **Effort:** ?
-
-### [review:files=src/mind_meld/cli.py|src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py] Test gap: Verify ordinary autopush records complete catch-up recovery
-
-- The recovery tests assert the stored resolution for attended push and the detached worker. The ordinary autopush drain test checks publication.
-- When autopush capture reporting next changes, check that a complete recorded capture writes `resolved_by=autopush` and that a deadline-stopped capture leaves the previous warning visible.
-- Found in the Track 165C coverage audit for [PR #385](https://github.com/kbitz/mind-meld/pull/385) at `291c5c6`. The audit found no demonstrated failure on this path.
-
-### [review:files=src/mind_meld/statusflow.py|tests/test_capture_catchup.py] Test gap: Restore push advice when a queued event file changes
-
-- The status fixture covers matching event bytes and an ordinary user-file edit. A separate case could keep the queued event path while changing its contents.
-- When catch-up advice next changes, check that the digest mismatch restores `Run: mm push`.
-- Found in the Track 165C coverage audit for [PR #385](https://github.com/kbitz/mind-meld/pull/385) at `291c5c6`. The audit found no demonstrated failure on this path.
-
-### [review:files=src/mind_meld/capturecatchup.py|src/mind_meld/events_tail.py|src/mind_meld/statusflow.py] Reconcile Git backlog counts after catch-up
-- **Description:** Compare the reported backlog with the repository cursors when catch-up observes zero remaining repositories or the newest hook lacks deadline evidence for older pending repos.
-- **Revisit:** An owner report of stale pending counts or manual push advice after a covering catch-up. Filed during review of PR #385.
-
-### [review:files=src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py] Test gap: Exercise the detached worker and drain in one regression
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Persistent tests exercise launcher custody and next-push publication separately.
-- **Hypothesis (untested):** Drive the real hook and detached worker in a temporary home, verify one worker, and decrypt the missed commit from the next push's payload.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `tests/test_capture_catchup.py`
-- **Evidence:** The isolated CLI replay passed the full flow, including relative sources and an absolute-source run after removal of the hook's starting directory.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/385 at `4bea5cd` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events.py|src/mind_meld/events_tail.py|src/mind_meld/capturecatchup.py] Verify queued Git reads across a local source change
-- **Description:** Check that already queued repositories honor a local opt-out during a warm walk, and check the command behavior for an incomplete local clone. Existing checks cover cancellation before reads and before the events append.
-- **Revisit:** Exercise both cases with isolated repositories the next time Git fan-out or source cancellation changes. Filed during review of PR #385.
-
-### [review:files=src/mind_meld/events_tail.py] Simplify the host capture copy
-- **Description:** Check whether the host capture result can use `dataclasses.replace` without changing the per-reader deadline fields.
-- **Revisit:** The next edit to the host snapshot result fields. Filed during review of PR #385.
-
-### [review:files=src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py|src/mind_meld/statusflow.py] Verify detached startup and queued state visibility
-- **Description:** Verify the launcher when the hook starts with closed standard descriptors. Check whether a previous result or parent PID is briefly displayed while a replacement child starts. Those states do not establish a second worker.
-- **Revisit:** A report of incorrect startup diagnostics or a change to detached launch. Filed during review of PR #385.
-
-### [review:files=src/mind_meld/capturecatchup.py|tests/test_capture_catchup.py] Observe retained retrigger requests
-- **Description:** A request recorded at the end of the bounded follow-up or under lock contention can wait for the next eligible deadline worker. Check whether concurrent writes can make older request times win.
-- **Revisit:** An owner report of a retained request waiting past the next hook after the worker exits. Preserve the one-worker and one-follow-up bounds. Filed during review of PR #385.
-
-### [review:files=src/mind_meld/identity.py|src/mind_meld/events_tail.py|tests/test_capture_catchup.py] Test gap: Resolve a deferred Git identity in the next ordinary push
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The regression holds an existing Git cursor through a deferral and rereads the owner commit after a successful identity refresh. The ordinary push path could also exercise identity resolution itself.
-- **Hypothesis (untested):** Use a fixture response to the ordinary push's bounded identity query, then check the held cursor and the owner commit through encrypted publication.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `tests/test_capture_catchup.py`
-- **Evidence:** The isolated tests exercised cursor preservation and capture after an explicit refresh. Review found no failure in the ordinary push path.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/385 at `4bea5cd` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=tests/test_capture_catchup.py|src/mind_meld/identity.py] Isolate the delayed breadcrumb fixture from the local GitHub CLI
-- **Description:** The initial `autopush` in the delayed breadcrumb regression can refresh a cold identity cache and contact GitHub when `gh` is available. Seed a fresh fixture baseline or stub that gather at the start of the test.
-- **Revisit:** The next change to breadcrumb tests or identity test isolation. Filed during review of PR #385.
-
-### [review:files=src/mind_meld/cli.py|src/mind_meld/statusflow.py|tests/test_capture_catchup.py] Verify breadcrumb recovery after a wall-clock rollback
-- **Description:** An older wall clock can make a later skip drop an already recorded capture timestamp. The capture row stays recorded, but the superseded status warning can return.
-- **Revisit:** A report of a stale failure after a clock correction, or the next change to timestamped recovery evidence. Filed during review of PR #385.
-
-### [review:files=src/mind_meld/storage/local.py|tests/test_storage_local.py] Test gap: Bounded storage read refusals
-
-- **ID:** wi-087a66
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `LocalBackend.get_bounded` confines the retro's retirement and manifest reads, but only its size limit has a test. Its refusals of a symlinked final component, a non-regular file such as a FIFO, a traversal or empty key part, a missing key, and a file that grows past the limit after `fstat` have none.
-- **Hypothesis (untested):** One direct test per refusal in `tests/test_storage_local.py`, each asserting the documented exception.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/storage/local.py:241`
-- **Evidence:** Track 166A review, cycle 2 testing specialist; code read only, no failure reproduced.
-- **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `56f6699` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events_tail.py|tests/test_events.py] Test gap: device_name on captured event rows
-
-- **ID:** wi-32c09f
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Folding a re-registered machine relies on newly written `mm-push`, sessions, git and host-usage rows carrying `device_name`. Only the `make_*` row builders are tested. Nothing drives the capture paths (`_capture_event_snapshots`, `_capture_git_rows`, `_run_events_tail`, `cli._capture_attended_usage`) to check that a configured name arrives trimmed and that a blank name is left out.
-- **Hypothesis (untested):** Run the events-tail capture with `device.name` set to `"  mac-a "` and assert every emitted row carries `mac-a`; repeat with a blank name and assert the key is absent.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/events_tail.py:1819`
-- **Evidence:** Track 166A review, cycle 2 testing specialist, repeated by cycle 3 reviewers; no failure reproduced.
-- **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `56f6699` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/devicesflow.py|src/mind_meld/core.py|tests/test_devices.py] Test gap: Vanished registry entry warnings in mm devices
-
-- **ID:** wi-1d1986
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `mm devices --format json` now warns on stderr for a registry entry that vanished between listing and reading, while the table format stays quiet. Neither behavior has a test; `tests/test_devices.py` checks only the inventory field.
-- **Hypothesis (untested):** A CLI test that removes an entry between list and read, asserting that the JSON format warns and the table format does not.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/devicesflow.py:49`
-- **Evidence:** Track 166A review, cycle 2 testing specialist; no failure reproduced.
-- **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `56f6699` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/devices.py|tests/test_devices_retire.py] Test gap: Targeted retirement record reads
-
-- **ID:** wi-e2c6f0
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `read_retirement_records(device_ids=...)`, the targeted mode the retro uses, is exercised only through the aggregator's happy path. A skipped invalid device ID, a missing record counted as normal rather than vanished, an oversize or symlinked record landing in `unreadable`, and a mix of good and bad IDs are untested.
-- **Hypothesis (untested):** Direct tests in `tests/test_devices_retire.py`, one per case.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/devices.py:880`
-- **Evidence:** Track 166A review, cycle 2 testing specialist; no failure reproduced.
-- **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `56f6699` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_fleet_aggregator.py] Test gap: Stored-name storage failure in the retro
-
-- **ID:** wi-0b63d7
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** When stored device names cannot be read for storage reasons (`names_unavailable: storage`), the retro's health entries carry an `mm status` remedy. Only the missing-passphrase and rejected-passphrase cases are rendered end to end, and `passphrase-rejected` only through `unregistered_devices`: no test sends it through `fleet_changed`. The fleet-fingerprint mismatch test checks the lookup's return value without rendering it.
-- **Hypothesis (untested):** Render the storage case, for example a mismatched fleet fingerprint with an unnamed superseded push row, asserting `names_unavailable == "storage"` and the `mm status` step.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `tests/test_retro_fleet_aggregator.py:9648`
-- **Evidence:** Track 166A review, cycle 3 testing specialist; no failure reproduced.
-- **Context:** Filed by `/review-and-prep` for Track 166A (branch `mmm/070f6f05`, draft PR not yet opened) at `da9877e` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py] Decide whether a concurrent same-name machine may fold
-
-- **ID:** wi-330c1d
-- **Description:** Folding matches on the normalized device name alone. An unregistered ID that is still active and shares a registered machine's name folds into that machine even when both pushed on the same days. The registered device then wins each overlapping (agent family, day), and the other machine's usage on those days leaves the totals. The retro is read-only, every event stays on disk and each fold is disclosed under `folded_registrations`, so nothing is lost. A temporal guard, folding only IDs whose last event precedes the target's first, would change the plan's approved rule, so this needs an owner decision.
-- **Upstream severity:** P3 (outside challenge, cycle 2); Low (native adversarial, cycle 3)
-- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3703`
-- **Revisit:** An owner decision on name reuse, or a retro that folds a machine that was still running.
-- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py] Disclose partial stored-name reads and a dropped registry match
-
-- **ID:** wi-67acb1
-- **Description:** The review recorded three disclosure gaps as not shown:
-  - An unreadable retirement or manifest record is skipped per record. `names_unavailable` stays None and no remedy appears (`aggregator.py:3585`). The same happens after the passphrase verifies: `retirements.unreadable` and `newer_format` are ignored, and any exception from `read_retirement_records` empties every retired name. A peer-supplied candidate ID that the OS path encoder rejects raises `ValueError`, which the bounded read does not convert, so one bad ID discards every requested record (`aggregator.py:3657`).
-  - While the stored lookup fails, an ID whose event-row name matches still folds. A stored retirement name outranks the event-row name and might name another machine. The fold is disclosed but not marked provisional (`aggregator.py:3732`).
-  - When the dropped registry entry is the match itself, for example an unreadable `devices/dev-cur.json`, no match is blocked. Neither `unregistered_devices` nor `fleet_changed` then says the registry is incomplete. The current machine shows as unregistered, and Claude can double-count (`aggregator.py:5888`, `:5906`). Carrying the raw `registry_incomplete` signal on `FleetState` and disclosing it whenever it is set would close this. The same holds when the stored lookup fails and an ID has no event-row name: no unique match exists, so `registry_blocked` stays false and `fleet_changed` names only the stored-name cause (`aggregator.py:3743`).
-  - Any exception from `verify_passphrase` maps to `passphrase-rejected`. With no `root_salt_fp` in config, a key header from another lineage, or a damaged or newer keycheck blob, is then reported as a wrong passphrase, and the remedy points at the passphrase instead of storage (`aggregator.py:3645`).
-- **Upstream severity:** P2, P3 and INFORMATIONAL (outside voices, native adversarial, state-machines specialist, red team)
-- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3585`
-- **Revisit:** A retro whose stored-name lookup partly fails, or an `mm devices` warning about the current machine's own entry.
-- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|docs/invariants/events-retro.md] Measure the stored-name lookup's key derivation and keyring access
-
-- **ID:** wi-7da076
-- **Description:** Each retro with an unregistered candidate derives the Argon2 master key once (`aggregator.py:3571`, `:3889`). It also reads one manifest per unnamed candidate, with no cap (`:3621`). `docs/invariants/events-retro.md:1233` says the lookup reads without prompting. README already documents that macOS Keychain dialogs, some Linux keyring backends and a stalled D-Bus session can block. A retro started by an agent could therefore wait on a dialog the agent cannot answer. The plan accepts a locked keyring (risk at plan line 144). A changed `MINDMELD_PASSPHRASE` also reaches only an agent session started after the change, so when that variable supplies a rejected passphrase, a re-run in the same session repeats the cause (red team, `src/mind_meld/skills/retro_fleet/SKILL.md:323`). The `passphrase` remedy's second alternative, running `mm retro-fleet` from a desktop terminal, helps only when that terminal reaches a keyring the agent's session cannot, for example over SSH without D-Bus. The lookup is non-interactive, so a terminal run cannot unlock a locked keyring or answer a Keychain dialog (`aggregator.py:5591`; outside structured, native adversarial).
-- **Upstream severity:** P3 (outside voices) and Low (native adversarial)
-- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3571`
-- **Revisit:** A slow retro on a fleet with many superseded IDs, or an unlock dialog during a retro.
-- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py] Keep fold disclosures distinct for non-ASCII and colliding IDs
-
-- **ID:** wi-e60b6b
-- **Description:** `_normalize_device_name` keeps non-ASCII letters, but `_safe_short` strips them. A fold matched on a non-ASCII name therefore renders an empty target name in `MM_HEALTH` and in `--dump-host-usage` (`aggregator.py:5866`, `:2939`). The dump gives colliding superseded IDs distinct aliases. Two other places use plain sanitization, so IDs that sanitize alike look identical there: `folded_registrations` in `MM_HEALTH` (`:5868`) and the dump's `unregistered_devices[].device_id` (`:2954`). The `folded_registrations` entry is also not bounded the way `unregistered_ids` is (`:5876`). Historical session, token and skill gaps are added as extra `sessions_incomplete`, `tokens_incomplete` and `skills_incomplete` entries. A current peer may already carry the same code with an `mm push` remedy, so a skill that keys on the code can merge the two or misattribute that remedy (`:5881`, outside structured).
-- **Upstream severity:** P3 (outside voices, native adversarial); INFORMATIONAL (red team, twice)
-- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:5876`
-- **Revisit:** A device name outside ASCII, or a fold list long enough to crowd `MM_HEALTH`.
-- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py] Decide whether one winner per folded day should cover tokens and skills
-
-- **ID:** wi-cf4c62
-- **Description:** For a folded (canonical, day), the token winner is the highest-ranked member with non-excluded tokens. The skill winner is chosen separately, as the highest-ranked member with skills that day. Plan lines 66-67 direct both rules. So on a day the registered machine reports Claude tokens but no skills, the superseded registration's skills count. When the registered machine has only `COST_EXCLUDED_MODELS` volume, the superseded registration's tokens win. Both outside voices graded this against criterion 1 (only the registered device counts on an overlapping day). They suggested choosing one winner per (canonical, day) from any reported activity and using it for both tokens and skills.
-- **Upstream severity:** P3 (outside challenge and structured, continuation); P2 (outside structured, cycle 2)
-- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3301`
-- **Revisit:** An owner decision on the winner rule, or a retro whose skill counts look high on a re-registration day.
-- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|src/mind_meld/core.py|src/mind_meld/devicesflow.py|docs/invariants/events-retro.md] Make the registry-incomplete signal a contract, not warning text
-
-- **ID:** wi-cd3838
-- **Description:** `get_known_devices` treats any stderr line that starts with the literal `mm: warning: dropped device entry ` as an incomplete registry (`aggregator.py:3467`). That text is produced in `core.py`, and no shared constant or end-to-end test ties the two together. The `mm devices --format=json` contract in `events-retro.md` does not say stderr is part of it. The new vanished-entry warnings (`devicesflow.py:50`) also print on a transient Syncthing replacement. The owner cannot act on those, which conflicts with the O8 output rule.
-- **Upstream severity:** P3 (maintainability, outside voices); Low (native adversarial)
-- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3467`
-- **Revisit:** Any change to the `mm devices` warning text, or a vanished-entry warning during a normal Syncthing pull.
-- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|src/mind_meld/events_tail.py|src/mind_meld/crypto.py|docs/invariants/README.md] Clean up Track 166A's dead helper and compatibility shims
-
-- **ID:** wi-b7e65e
-- **Description:** Cleanups the review kept as advisory:
-  - `_host_family_day_tuples`, `_merge_skill_window` and `_merge_token_window` have no callers after the scoped rewrite (`aggregator.py:805`, `:3319`, `:3353`). `docs/invariants/README.md` still cites the first. Comments at `aggregator.py:892` and `:4072` and the docstring at `tests/test_retro_fleet_aggregator.py:3804` still name `_merge_token_window` as where per-peer clamping happens; `aggregate_sessions` now clamps each peer field with `_safe_int`.
-  - The per-day winner merge in `aggregate_sessions` hand-rolls four-field bucket arithmetic that `token_usage` helpers already provide (`aggregator.py:3268`).
-  - The incomplete-registry cause sentence and `mm devices` step are written out in both `unregistered_devices` and `fleet_changed`, with different triggers (`aggregator.py:6090`).
-  - `devices.read_retirement_records` switches between a full scan and a targeted read on `device_ids is None`. The docstring does not say that `strict` is ignored in the targeted mode (`devices.py:883`).
-  - Production code carries arity shims for old test doubles: the star-unpacks of `get_known_devices()` and `get_unregistered_device_names(...)` (`aggregator.py:3855`), and `device_name` passed through `_accepted_kwargs` at four call sites (`events_tail.py:1649`).
-  - `get_unregistered_device_names` snapshots and restores `crypto`'s private `_SESSION` and `_MASTER_KEY_CACHE` from outside the module (`aggregator.py:3610`).
-  - Every retro validates each host-usage row twice: `aggregate()` runs `_accept_host_row_at` on every host row, registered devices included, and `aggregate_host_usage` repeats it (`aggregator.py:3893`).
-- **Upstream severity:** INFORMATIONAL (simplification and maintainability specialists, outside structured); Low (native adversarial)
-- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:805`
-- **Revisit:** The next change to these call sites, or a test-double sweep.
-- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py] Re-run the attacker-reported fold edge cases
-
-- **ID:** wi-487c8a
-- **Description:** Attacker parts reported these, and the review did not re-run them (`attacker-not-rerun`):
-  - Empty-`source_root` coalescing runs on the raw device before folding, so a superseded registration's v=2 snapshot with an empty root and the target's populated root for the same `claude_dir` may both count (`aggregator.py:3140`).
-  - `_agent_rhythm_view` folds superseded rows into active machines but counts accepted snapshots only from `by_device` (`:4467`).
-  - Legacy counters on a superseded snapshot blame the registered target, so the `legacy_counters` note tells the owner to push or upgrade the current machine. That cannot fix a retired registration's history (`:1099`).
-  - A folded device whose only accepted host snapshot is near-future skew contributes host usage while `devices_in_events` stays 0 (`:3859`).
-  - A new registration that never pushes can stay hidden for up to one window after its old ID retires. The target counts as active when only its superseded ID pushed, so `fleet_incomplete` does not name it (`:3922`).
-  - Cycle 2's family-drift (`:961`) and coverage-note (`:4709`) items, recorded in the stopped run's cycle-2 decision file.
-- **Upstream severity:** INFORMATIONAL and Low (red team, native adversarial)
-- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:3140`
-- **Revisit:** A retro that folds a machine with v=2 snapshots, legacy counters or clock skew.
-- **Context:** Filed by `/review-and-prep` (continuation) for Track 166A (branch `mmm/070f6f05`, draft PR #386) at `d967867` (2026-11-25).
-- **Effort:** ? (user triages in /roadmap)
-
 ## Drain records
+
+### Roadmap regeneration — 2026-11-25 (Tracks 165C, 166A and 167A recorded; 165A/121A accounted for; Track 168A carded; 28 inbox items drained)
+
+Verified against `8b98a49` (v1.12.89). Selected target remains the owner's MVP-1 Syncthing fleet on macOS and Arch Linux, with cross-model memory (O9) accepted on the owner's fleet (`docs/PROGRESS.md` `## Acceptance`, PR #380, `e12f181`). Developer approved this regeneration verbatim (`"1 - sure"`) and closed the two Track 166A retro-fleet edge-case owner decisions (`"2 - close"`). Tracks 164A (v1.12.85, PR #381) and 165B (v1.12.86, PR #383) already had independent receipts in `docs/roadmap-shipped.md` from PR #384 (`7095113`). Tracks 165C (v1.12.87, PR #385), 166A (v1.12.88, PR #386) and 167A (v1.12.89, PR #387) now have independent receipts in `docs/roadmap-shipped.md`, retiring Group 165 from `## In Progress` and tombstoning `165, 166, 167`. Old Track 165A (draft PR #382, split into 165B and 165C on 2026-11-24) was closed unmerged on 2026-11-25 on the owner's word. Track 121A (git-history hostname scrub) was killed by the owner on 2026-11-08 (PR #296, `cf2e127`; PR #295 closed unmerged; `docs/SPEC.md` amended) and remains tombstoned in `docs/ROADMAP.md` (`121`), never shipped. Encountered macOS CI flake `tests/test_upgrade.py::TestFetchTagsGitAdapter124B::test_keyboard_interrupt_kills_sleeping_process_group_and_reraises` (failed on `main` `e12f181` and PR #385, passed on rerun both times) is carded in `## Current Plan` as Group 168 / Track 168A (`wi-22388c`). One Future entry (`Recheck Fable and Mythos 5.2 cards when observed`) was discharged by Track 167A at `8b98a49`. `docs/SPEC.md` and `docs/PROGRESS.md` are untouched.
+
+| Item | Disposition | Evidence or revisit trigger |
+|---|---|---|
+| Tracks 164A and 165B | already shipped (no-op) | Independent receipts already recorded in `docs/roadmap-shipped.md` by PR #384 (`7095113`) for PRs #381 (v1.12.85) and #383 (v1.12.86). |
+| Track 165A (old PR #382) | closed unmerged (recorded) | Split into 165B and 165C on 2026-11-24 (`"split is fine"`); PR #382 closed unmerged 2026-11-25 on the owner's word. |
+| Track 121A (git-history hostname scrub) | already killed (tombstoned) | Killed by the owner on 2026-11-08 (PR #296, `cf2e127`; PR #295 closed unmerged; `docs/SPEC.md` amended); Group 121 stays tombstoned in `docs/ROADMAP.md` and never shipped. |
+| Track 165C (v1.12.87, PR #385) | shipped (`wi-cbd297`) | Independent receipt appended for `2c4f3ce` (v1.12.87); Group 165 retired from `## In Progress` and tombstoned. |
+| Track 166A (v1.12.88, PR #386) | shipped (`wi-377ac1`) | Independent receipt appended for `db24d83` (v1.12.88); prefix 166 tombstoned. |
+| Track 167A (v1.12.89, PR #387) | shipped (`wi-cea7d7`) | Independent receipt appended for `8b98a49` (v1.12.89); prefix 167 tombstoned. |
+| Flaky `test_keyboard_interrupt_kills_sleeping_process_group_and_reraises` | place in 168A (`wi-22388c`) | Encountered macOS CI failures on `main` `e12f181` (job `138616232737`) and PR #385 (job `139454492316`) at `tests/test_upgrade.py:965` (`os.kill(child_pid, 0)` without `_wait_pid_gone`); passed on rerun both times. |
+| Future: Recheck Fable and Mythos 5.2 cards when observed | discharged@8b98a49 | Track 167A (v1.12.89, PR #387) added verified `claude-fable-5-2` and `claude-mythos-5-2` pricing cards to `src/mind_meld/token_usage.py`. |
+| `wi-330c1d`: Decide whether a concurrent same-name machine may fold (166A) | kill | Closed on developer's explicit word, 2026-11-25 (`"2 - close"`). |
+| `wi-cf4c62`: Decide whether one winner per folded day should cover tokens and skills (166A) | kill | Closed on developer's explicit word, 2026-11-25 (`"2 - close"`). |
+| Test gap: Verify ordinary autopush records complete catch-up recovery (165C) | kill | Premise obsolete at `8b98a49`: `resolved_by` and stored catch-up resolution were removed by PR #385's live-backlog refactor (`9038098`) before merge (`2c4f3ce`). |
+| Reconcile Git backlog counts after catch-up (165C) | kill | unobserved; reversible and inconsequential (stale status wording only, and PR #385 commits `9038098`/`006f40d` derive catch-up lines from live pending counts); reopen if it manifests. |
+| Verify queued Git reads across a local source change (165C) | kill | unobserved; reversible and inconsequential (cancellation before reads and before events append is already tested; no observed defect); reopen if it manifests. |
+| Verify detached startup and queued state visibility (165C) | kill | unobserved; reversible and inconsequential (brief diagnostic display only, no second worker); reopen if it manifests. |
+| Observe retained retrigger requests (165C) | kill | unobserved; reversible and inconsequential (worst outcome is waiting for the next eligible push/hook); reopen if it manifests. |
+| Verify breadcrumb recovery after a wall-clock rollback (165C) | kill | unobserved; reversible and inconsequential (and stale at `8b98a49`: `last_capture_at` has no readers in `statusflow.py` after PR #385's live-backlog refactor); reopen if it manifests. |
+| `wi-67acb1`: Disclose partial stored-name reads and a dropped registry match (166A) | kill | unobserved; reversible and inconsequential (four disclosure edge cases marked not shown in review, read-only retro output); reopen if any manifests. |
+| `wi-7da076`: Measure the stored-name lookup's key derivation and keyring access (166A) | kill | unobserved; reversible and inconsequential (unmeasured Argon2/manifest cost, plan-accepted locked-keyring behavior, and remedy wording); reopen if a slow retro or unlock dialog manifests. |
+| `wi-e60b6b`: Keep fold disclosures distinct for non-ASCII and colliding IDs (166A) | kill | unobserved; reversible and inconsequential (display/cosmetic edge cases on non-ASCII names or colliding sanitized IDs in read-only retro output); reopen if any manifests. |
+| `wi-487c8a`: Re-run the attacker-reported fold edge cases (166A) | kill | unobserved; reversible and inconsequential (six unverified attacker-reported read-only retro edge cases; no data loss, exposure or outward action); reopen if any manifests. |
+| `wi-9bd775`: Test gap: Pin the usage line when publication verification raises (167A) | defer | a Track's `_touches:` cover `src/mind_meld/cli.py`, `tests/test_integration.py`. |
+| `wi-dd9352`: Test gap: Pin the usage line after an events upload hold (167A) | defer | a Track's `_touches:` cover `src/mind_meld/cli.py`, `tests/test_integration.py`. |
+| `wi-90be55`: Test gap: Show a reader deadline beside content accepted without usage (167A) | defer | a Track's `_touches:` cover `src/mind_meld/cli.py`, `tests/test_integration.py`. |
+| `wi-4dcf5a`: Test gap: Exercise scheduled pricing decisions with synthetic vendor docs (167A) | defer | a Track's `_touches:` cover `src/mind_meld/skills/retro_fleet/SKILL.md`, `tests/test_docs_routing.py`. |
+| `wi-97f26f`: Test gap: Restore push advice when a queued event file changes (165C) | defer | a Track's `_touches:` cover `src/mind_meld/statusflow.py`, `tests/test_capture_catchup.py`. |
+| `wi-63ba22`: Test gap: Exercise the detached worker and drain in one regression (165C) | defer | a Track's `_touches:` cover `src/mind_meld/capturecatchup.py`, `tests/test_capture_catchup.py`. |
+| `wi-16f372`: Simplify the host capture copy (165C) | defer | a Track's `_touches:` cover `src/mind_meld/events_tail.py`'s `HostUsageCapture` fields. |
+| `wi-5c06fd`: Test gap: Resolve a deferred Git identity in the next ordinary push (165C) | defer | a Track's `_touches:` cover `src/mind_meld/identity.py`, `src/mind_meld/events_tail.py`, `tests/test_capture_catchup.py`. |
+| `wi-156823`: Isolate the delayed breadcrumb fixture from the local GitHub CLI (165C) | defer | a Track's `_touches:` cover `tests/test_capture_catchup.py` or identity test isolation. |
+| `wi-087a66`: Test gap: Bounded storage read refusals (166A) | defer | a Track's `_touches:` cover `src/mind_meld/storage/local.py`, `tests/test_storage_local.py`. |
+| `wi-32c09f`: Test gap: device_name on captured event rows (166A) | defer | a Track's `_touches:` cover `src/mind_meld/events_tail.py`, `tests/test_events.py`. |
+| `wi-1d1986`: Test gap: Vanished registry entry warnings in mm devices (166A) | defer | a Track's `_touches:` cover `src/mind_meld/devicesflow.py`, `src/mind_meld/core.py`, `tests/test_devices.py`. |
+| `wi-e2c6f0`: Test gap: Targeted retirement record reads (166A) | defer | a Track's `_touches:` cover `src/mind_meld/devices.py`, `tests/test_devices_retire.py`. |
+| `wi-0b63d7`: Test gap: Stored-name storage failure in the retro (166A) | defer | a Track's `_touches:` cover `src/mind_meld/skills/retro_fleet/aggregator.py`, `tests/test_retro_fleet_aggregator.py`. |
+| `wi-cd3838`: Make the registry-incomplete signal a contract, not warning text (166A) | defer | a Track changes `mm devices` warning text or JSON contract, or a vanished-entry warning appears during a normal Syncthing pull. |
+| `wi-b7e65e`: Clean up Track 166A's dead helper and compatibility shims (166A) | defer | a Track's `_touches:` cover `src/mind_meld/skills/retro_fleet/aggregator.py` or a hygiene cleanup sweep is scheduled. |
+
+Drained 28 inbox entries (0 placed from inbox, 16 deferred, 12 killed — 2 closed on developer decision, 1 obsolete premise, 9 unobserved defects pruned by the manifestation gate — 0 inbox discharged) plus 1 new Track placed from brief (Track 168A) and 1 Future entry discharged (`discharged@8b98a49`). Authored-false rate: 1 / (1 + 1) = 50% (1 Future discharge against 1 placed Track; 0 inbox discharges). Future moves from 136 to 151 entries (0 missing triggers). No release bump under the SPEC documentation-only policy.
+
 
 ### Roadmap regeneration — 2026-11-24 (Tracks 163A, 164A and 165B recorded; 165C pinned in progress; O9 acceptance reconciled)
 
