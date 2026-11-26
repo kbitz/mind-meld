@@ -982,6 +982,7 @@ class TestFetchTagsGitAdapter124B:
 
         parent_pid: int | None = None
         child_pid: int | None = None
+        parent_reaped = False
         cleanup_verified = False
         try:
             with pytest.raises(KeyboardInterrupt):
@@ -993,6 +994,7 @@ class TestFetchTagsGitAdapter124B:
             assert _wait_pid_gone(parent_pid, timeout=parent_timeout), (
                 f"parent {parent_pid} still alive after {parent_timeout}s"
             )
+            parent_reaped = True
             assert _wait_pid_gone(child_pid, timeout=reap_timeout), (
                 f"grandchild {child_pid} still alive after {reap_timeout}s"
             )
@@ -1004,7 +1006,7 @@ class TestFetchTagsGitAdapter124B:
                     parent_pid = int(recorded["parent"])
                     child_pid = int(recorded["child"])
                 pids_to_clean: list[int] = []
-                for pid in (parent_pid, child_pid):
+                for pid in (None if parent_reaped else parent_pid, child_pid):
                     if pid is not None and pid not in pids_to_clean:
                         pids_to_clean.append(pid)
                 if child_pid_file.exists():
