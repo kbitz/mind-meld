@@ -127,6 +127,7 @@ from mind_meld.storage import get_backend
 from mind_meld.storage.keys import (
     blob_key,
     device_key,
+    is_content_hash,
     manifest_key,
 )
 from mind_meld.storage.local import LocalBackend
@@ -154,6 +155,8 @@ class PushResult:
     content_files: int = 0
     content_accepted: bool = False
     host_usage_published: bool = False
+    usage_published: bool = False
+    catching_up_readers: tuple[str, ...] = ()
     maintenance_failures: int = 0
     total_new: int = 0
     total_modified: int = 0
@@ -843,6 +846,21 @@ def _stored_event_key(files: dict, rel: str) -> str | None:
     return None
 
 
+def _has_new_event_bytes(files: dict, prior: dict, unverified_host_path: str | None) -> bool:
+    """Compare accepted event files against the prior, including recovery sidecars."""
+    for rel, info in files.items():
+        if rel == unverified_host_path:
+            continue
+        if rel not in prior:
+            return True
+        previous = prior[rel]
+        digest = previous.get("sha256") if isinstance(previous, dict) else None
+        # Missing recovery evidence cannot prove that an accepted file changed.
+        if is_content_hash(digest) and digest != info["sha256"]:
+            return True
+    return False
+
+
 def _casefold_selected(rel: str, src: dict) -> bool:
     """Same selection as the walker, ignoring case in configured spellings.
 
@@ -1015,6 +1033,16 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
                 parts = ["project memory published under shared names"]
             else:
                 parts.append("project memory published under shared names")
+        if not result.no_sources:
+            catchup_suffix = (
+                f" ({', '.join(result.catching_up_readers)} catching up)"
+                if result.catching_up_readers
+                else ""
+            )
+            if result.usage_published:
+                parts[0] += f"; usage published{catchup_suffix}"
+            elif parts[0] == "no content changes" or result.catching_up_readers:
+                parts[0] += f"; no new usage{catchup_suffix}"
         if result.held:
             parts.append(core._count(len(result.held), "file held", "files held"))
         if result.left_out_clause:
@@ -1735,6 +1763,24 @@ def _print_usage_push_mode(result: PushResult) -> None:
         )
 
 
+_READER_OUTCOME_LABELS: dict[str, str] = {
+    "codex": "Codex",
+    "grok": "Grok",
+    "muse": "Muse",
+    "agy": "Antigravity",
+}
+
+
+def _catching_up_readers(captured: attemptlog.CaptureOutcome | None) -> tuple[str, ...]:
+    if captured is None:
+        return ()
+    return tuple(
+        _READER_OUTCOME_LABELS[r]
+        for r in events.HOST_USAGE_TOKEN_SOURCES
+        if captured.readers.get(r) == "dropped:deadline"
+    )
+
+
 def _push_result_or_none(
     events_degradations: list[str],
     dry_run: bool,
@@ -1744,6 +1790,7 @@ def _push_result_or_none(
     left_out_clause: str = "",
     left_out_files: int = 0,
     anchor_warnings: list[str] | None = None,
+    catching_up_readers: tuple[str, ...] = (),
 ) -> PushResult | None:
     """Preserve forensic degradations and held files on no-op exits without inventing a capture."""
     if (
@@ -1752,6 +1799,7 @@ def _push_result_or_none(
         or switch_held
         or left_out_clause
         or anchor_warnings
+        or catching_up_readers
     ) and not dry_run:
         return PushResult(
             events_degradations=events_degradations,
@@ -1761,6 +1809,7 @@ def _push_result_or_none(
             left_out_files=left_out_files,
             anchor_warnings=list(anchor_warnings or []),
             capture_deadline_phases=tuple(getattr(events_degradations, "deadline_phases", ())),
+            catching_up_readers=catching_up_readers,
         )
     return None
 
@@ -2162,6 +2211,7 @@ def _push_core(
                 outcome=captured,
             )
     host_row_appended = captured is not None and captured.appended is not None
+    catching_up = _catching_up_readers(captured)
     retro_catchup_pending = attended and not dry_run and _retro_catchup_pending(sources, device_id)
     skipped: list[tuple[str, str]] = []
     skipped_repos: set[str] = set()
@@ -2434,6 +2484,7 @@ def _push_core(
                 anchor_warnings=anchor_warnings,
                 phase_timings=timer.phases(),
                 capture_deadline_phases=tuple(getattr(events_degradations, "deadline_phases", ())),
+                catching_up_readers=catching_up,
             )
             if result_observer is not None:
                 result_observer(result)
@@ -2446,6 +2497,7 @@ def _push_core(
                     verbose=verbose,
                     attempt=attempt,
                 )
+                result.usage_published = result.host_usage_published
             except Exception as e:
                 _warn_publication_evidence_unavailable(
                     e, "User content was already up to date.", attempt=attempt
@@ -2466,6 +2518,7 @@ def _push_core(
             left_out_clause=left_out_note,
             left_out_files=guard.left_out_files,
             anchor_warnings=anchor_warnings,
+            catching_up_readers=catching_up,
         )
 
     # OK, this push will upload bytes. Run the events tail now to capture
@@ -2751,6 +2804,17 @@ def _push_core(
             if result_observer is not None
             else None
         )
+        usage_published = False
+        if result_observer is not None:
+            event_files = _mm_events_files(local_manifest)
+            unverified_host_path = (
+                _stored_event_key(event_files, f"events/{captured.appended[0].name}")
+                if captured is not None and captured.appended is not None
+                else None
+            )
+            usage_published = _has_new_event_bytes(
+                event_files, _mm_events_files(remote_manifest), unverified_host_path
+            )
         # Independent content receipt at the actual acceptance boundary, even when
         # capture was skipped or failed. Maintenance cannot revoke accepted content.
         result = PushResult(
@@ -2763,6 +2827,8 @@ def _push_core(
             content_files=content_files,
             content_accepted=False,
             published_content_files=published_content_files,
+            usage_published=usage_published,
+            catching_up_readers=catching_up,
             metadata_updated=result_observer is not None
             and not published_content_files
             and any(
@@ -2820,6 +2886,8 @@ def _push_core(
             result.host_usage_published = _report_usage_publication(
                 sources, captured.appended, local_manifest, result, verbose=verbose, attempt=attempt
             )
+            if result.host_usage_published:
+                result.usage_published = True
         except Exception as e:
             _warn_publication_evidence_unavailable(e, "Content sync succeeded.", attempt=attempt)
     if captured is not None and captured.appended is not None:

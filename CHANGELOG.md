@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.89] - 2026-11-25
+
+Attended `mm push` now reports usage publication and readers still catching up on its `Push:` line, and `mm retro-fleet` refreshes vendor rate tables and bundled model pricing while `/retro-fleet` applies scheduled price changes.
+
+### Changed
+
+- Attended `mm push` now reports usage publication and any host readers still catching up alongside content changes on its `Push:` outcome line (for example, `Push: no content changes; usage published.`).
+- Attended `mm push` reports accepted usage and names readers still catching up on the `Push:` line.
+- `mm retro-fleet` refreshes all five vendor rate tables to 2026-11-25, adds bundled pricing for `gemini-4-carbon`, `gemini-4-neon`, `grok-4.7-build-fast`, `gpt-6.2-astra`, `gpt-6.2-sol`, `claude-fable-5-2`, `claude-mythos-5-2`, and `claude-opus-5-5-high`, and updates `/retro-fleet` to apply scheduled vendor price changes once their effective date has passed.
+- `mm retro-fleet` refreshes five vendor rate tables and bundles verified rates for eight additional model IDs.
+- `/retro-fleet` applies scheduled rates by UTC effective date during vendor pricing checks and uses xAI’s direct pricing page.
+
+### Upgrade notes
+
+- Run `mm install-skills` (or wait for the next `mm push` skill-store refresh) and restart your agent to load the updated `/retro-fleet` instructions, and update any script matching the exact attended `Push: no content changes.` line.
+
 ## [1.12.88] - 2026-11-25
 
 `mm retro-fleet` now folds superseded registrations of a re-registered machine into the current device so tokens and machine counts are not double-counted, explains when stored names cannot be read, and records `device_name` on new `mm-events` rows.

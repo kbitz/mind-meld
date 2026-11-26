@@ -257,6 +257,13 @@ price. Each card receives today's UTC verification date. Add
 whole-table refresh; it stamps the top-level verification date. A model
 update alone does not mark the table verified.
 
+When vendor pricing docs publish a scheduled price change (for example, an
+introductory or promotional rate ending on a stated date), use the rate
+applicable on the day `retro-fleet` runs (UTC date): once the effective date
+has arrived or passed, apply the scheduled rate via `--set-model-price`; before
+that date, keep the rate currently in effect. Retro costs are estimates, and a
+close current rate beats an unpriced `$0`.
+
 If offline, browsing fails, or docs do not establish a rate, render with the
 available bundled/cache cards and family fallback, preserve the unpriced or
 `pricing_extrapolated` caveat, and **never pass `--mark-pricing-verified`**.

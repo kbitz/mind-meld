@@ -67,8 +67,10 @@ remain unchanged: a walk error does not introduce a new cursor-HOLD rule.
 
 Capture prerequisites, reader loss, no-row, append failure and unverified
 publication remain in the existing capture receipt/status projection while
-content's exit stays independent. Default output shows content's outcome, and
-verbose shows the optional phase; when a non-verbose attended `mm push` records
+content's exit stays independent. The final `Push:` line can report accepted usage
+and name deadline-stopped host readers. See
+[Attended terminal outcome](sync.md#attended-terminal-outcome-track-78a).
+Verbose output shows the optional phase. When a non-verbose attended `mm push` records
 `outcome == "degraded"`, `cli._sync_outcome` inspects `record["degradations"]`
 via `cli._owner_action_detail` and emits one `mm: notice: <detail>` line on
 stderr via `core._notice` immediately before `Push: ...` for the first detail
@@ -813,8 +815,9 @@ File entries are reusable only when the cache version, Antigravity format and
 forces a re-read so changed step rules also update cached skipped-step counts.
 Full per-DB turns remain in the cache; the wire snapshot is trimmed to
 `MAX_BY_DAY_DAYS`. Antigravity models (`gemini-*`) classify as `"agy"` (`host_family()`),
-rendered in the `Antigravity` agent row. Verified API pricing (`gemini-4-argon`, `gemini-3.8-flash`)
-is in `token_usage.py` (`PRICING_GOOGLE_LAST_UPDATED = "2026-10-22"`).
+rendered in the `Antigravity` agent row. Verified API pricing (`gemini-4-carbon`,
+`gemini-4-argon`, `gemini-4-neon`, `gemini-3.8-flash`) is in `token_usage.py`
+(`PRICING_GOOGLE_LAST_UPDATED = "2026-11-25"`).
 
 **Muse terminal ledger (1.x minor, 2026-10-14).** When the `muse` source
 is enabled, `read_muse_usage` walks
@@ -3709,8 +3712,8 @@ models to `PRICING` unless they actually show up in fleet data. Pinned by
 `test_retired_model_prices_at_current_family_tier`.
 
 **`PRICING` is an OVERRIDE table.** It shipped empty at v0.12.13's first
-draft. After Track 58A and Track 128A it carries Opus 5.5, Opus 4/4.0/4.1,
-Sonnet 5.5, Sonnet 4/4.0/4.5/4.6, Haiku 5.5, and Fable/Mythos 5.1 cards
+draft. After Tracks 58A, 128A and 167A it carries Opus 5.5 / 5.5-high, Opus 4/4.0/4.1,
+Sonnet 5.5, Sonnet 4/4.0/4.5/4.6, Haiku 5.5, and Fable/Mythos 5.1/5.2 cards
 whose rates differ from the family fallback. Date-suffix normalization makes
 Opus/Sonnet `-4` reachable; the published `-4-0` aliases remain reachable too.
 A per-model entry that *duplicates* its family recreates the
@@ -3718,7 +3721,7 @@ multi-site drift this release removed: an Opus rate change would need N
 identical edits plus the tier, and missing one would silently price
 some models at the old rate. Add an entry ONLY when a model permanently
 departs from its tier; `test_pricing_holds_no_redundant_entries` fails
-the build if an entry duplicates its family. Opus 5.5 is `$4/$20` with a 0.05x
+the build if an entry duplicates its family. Opus 5.5 and Opus 5.5-high are `$4/$20` with a 0.05x
 cache read (`$0.20/MTok`); Sonnet 5.5 keeps `$2/$10` input/output with a 0.05x
 cache read (`$0.10/MTok`); Haiku 5.5 is `$0.10/$0.50` (standard rate for prompts
 up to 100k tokens). Requests above 100k prompt tokens (including cache reads
@@ -3726,22 +3729,24 @@ and writes) bill at five times every rate in that Haiku card; the retro does
 not apply that tier, so its estimate understates such usage. The owner
 explicitly accepted the standard-rate card on 2026-11-11 and kept tier-aware
 pricing deferred to R6. Sonnet 5's `$2/$10` is now
-standard pricing, verified 2026-09-14 and re-verified 2026-11-11;
+standard pricing, verified 2026-09-14 and re-verified 2026-11-25;
 the scheduled `$3/$15` increase was cancelled. Sonnet 4.x retains `$3/$15`
-overrides. Fable/Mythos 5.1 uses a 0.025x cache read ($0.25/MTok), while
-5.0's family tiers remain at 0.1x ($1/MTok), preserving the conservative
-error direction for a future unverified id.
+overrides. Fable/Mythos 5.1 (`$10/$50`) and 5.2 (`$8/$40`) use a 0.025x cache
+read (`$0.25/MTok` and `$0.20/MTok`), while 5.0's family tiers remain at 0.1x
+(`$1/MTok`), preserving the conservative error direction for a future
+unverified id.
 
 Host model ids (Track 35A) do not go through `model_family`. They resolve
 via the curated alias registry `PRICING_FAMILY_BY_MODEL` (exact-key,
 never substring) onto `VENDOR_FAMILY_TIERS` literal four-field cards, then
 through `vendor_model_family` positional fallback when no alias exists.
 The fallback accepts only `^gpt-\d+(?:\.\d+)?-(astra|terra|sol|luna)$`,
-`^gemini-\d+(?:\.\d+)?-(argon|flash)$`, and
+`^gemini-\d+(?:\.\d+)?-(carbon|argon|neon|flash)$`, and
 `^muse-(wonder|spark)(?:-full)?-\d+(?:\.\d+)?$`. The tiers are
-`gpt-6-astra`, `gpt-5.6-terra`, `gpt-6.1-sol`, `gpt-6-luna`,
-`gemini-4-argon`, `gemini-3.8-flash`, `muse-wonder-1.0` and
-`muse-spark-1.3`. Unknown versions price by that tier and remain unverified.
+`gpt-6.2-astra`, `gpt-5.6-terra`, `gpt-6.2-sol`, `gpt-6-luna`,
+`gemini-4-carbon`, `gemini-4-argon`, `gemini-4-neon`, `gemini-3.8-flash`,
+`muse-wonder-1.0` and `muse-spark-1.3`. Unknown versions price by that tier
+and remain unverified.
 Muse's `muse-wonder-full-1.0` aliases the verified `muse-wonder-1.0` card.
 Do not reach for `_tier` for non-Anthropic rates: its cache multipliers
 are Anthropic-specific. `resolve_prices` stays the single priced-predicate.
@@ -3792,22 +3797,27 @@ policy is inferred. The pin is the census host version, not a compatibility
 proof across intervening releases; CONTRACT keeps earlier fixture provenance.
 The real reader returned complete, 12 days, 3 partial days, 1.94s cold.
 The prior 2026-09-10 census used 1.0.25 (185 ledgers).
-https://docs.x.ai/build/overview establishes the model identity/rate level;
-https://docs.x.ai/developers/models/grok-4.6 establishes the rate cards and
-threshold. The 303-turn `costUsdTicks` census corroborates the rate shape
+The Build overview establishes the model identity, and xAI's pricing page
+supplies the rate cards and threshold.
+[Build overview](https://docs.x.ai/build/overview), [xAI pricing](https://docs.x.ai/developers/pricing).
+
+The 303-turn `costUsdTicks` census corroborates the rate shape
 (modal 1.700e9 ticks per list-USD; 77 turns exactly double), but the CLI
 field is 0.17x list at the documented API unit of 1e10 ticks/USD. Never
 decode it or use a census-calibrated constant to infer request tiers.
 `grok-build-0.1` is a different SKU and a name trap.
 
-**Grok 4.7 list-rate basis on xAI (67A / 109B / 116A).** The exact `grok-4.7` card is
+**Grok 4.7 list-rate basis on xAI (67A / 109B / 116A / 167A).** The exact `grok-4.7` card is
 $2 input / $0.50 cache read / $0 cache write / $6 output per MTok; when a request's
 prompt reaches 200k tokens all its tokens pay $4 / $1 / $0 / $12, a tier per-turn
 aggregates cannot recover, so the estimate is a floor. `grok-4.7-build` aliases in
-`PRICING_FAMILY_BY_MODEL` onto `grok-4.7`. `GROK_47_MODEL_IDS` is those two ids
-(`frozenset({"grok-4.7", "grok-4.7-build"})`), in `VERIFIED_MODEL_IDS`, dated by
-`PRICING_XAI_LAST_UPDATED` (https://docs.x.ai/developers/models/grok-4.7). Retained
-`grok-4.7-fast` and effort ids are unpriced. The dollar column is a list-rate
+`PRICING_FAMILY_BY_MODEL` onto `grok-4.7`. `grok-4.7-build-fast` aliases onto
+`grok-4.7-fast` ($4 / $1 / $0 / $12 base; $6 / $1.50 / $0 / $18 >200k prompt).
+`GROK_47_MODEL_IDS` is those three ids
+(`frozenset({"grok-4.7", "grok-4.7-build", "grok-4.7-build-fast"})`), in
+`VERIFIED_MODEL_IDS`, dated by `PRICING_XAI_LAST_UPDATED`
+(https://docs.x.ai/developers/pricing). Bundled rates leave bare `grok-4.7-fast`
+(retained Cursor) and effort ids unpriced. The dollar column is a list-rate
 equivalent, **not subscription spend**. Included usage and on-demand charges cannot
 be reconstructed from these counters.
 
@@ -3830,18 +3840,25 @@ host delivery and model-scoped at-most contract remain in force, with the
 details carried by `cost_floor` in `MM_HEALTH`.
 
 Provenance is per vendor. Anthropic uses `PRICING_LAST_UPDATED`
-(2026-11-11), OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-10-27), xAI `PRICING_XAI_LAST_UPDATED`
-(2026-11-05), Google `PRICING_GOOGLE_LAST_UPDATED` (2026-10-22), and Muse
-`PRICING_MUSE_LAST_UPDATED` (2026-10-27), with Muse's source in
+(2026-11-25), OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-11-25), xAI `PRICING_XAI_LAST_UPDATED`
+(2026-11-25, https://docs.x.ai/developers/pricing), Google `PRICING_GOOGLE_LAST_UPDATED` (2026-11-25), and Muse
+`PRICING_MUSE_LAST_UPDATED` (2026-11-25), with Muse's source in
 `PRICING_MUSE_SOURCE_URL` (https://dev.meta.ai/docs/pricing-rate-limits).
 Each vendor's date and source URL ride in `MM_HEALTH.pricing`, including
-`muse_verified` and `muse_url`. Literal four-field cards are ordered
-**input, cache read, cache create, output**, in **USD per million tokens**:
-`gpt-6.1-sol` `(2.00, 0.10, 2.50, 10.00)`, `gpt-6-sol`
-`(2.00, 0.20, 2.50, 10.00)`, `gpt-6-luna` `(0.10, 0.01, 0.125, 0.50)`,
+`xai_url` (`https://docs.x.ai/developers/pricing`), `muse_verified`, and `muse_url`.
+Literal four-field cards are ordered **input, cache read, cache create, output**,
+in **USD per million tokens**: `gpt-6.2-astra` `(8.00, 0.40, 10.00, 40.00)`,
+`gpt-6.2-sol` `(2.00, 0.10, 2.50, 10.00)`, `gpt-6.1-sol` `(2.00, 0.10, 2.50, 10.00)`,
+`gpt-6-sol` `(2.00, 0.20, 2.50, 10.00)`, `gpt-6-luna` `(0.10, 0.01, 0.125, 0.50)`,
+`gemini-4-carbon` and `gemini-4-argon` `(2.00, 0.10, 0.00, 10.00)`,
+`gemini-4-neon` `(3.00, 0.15, 0.00, 15.00)`, `gemini-3.8-flash` `(0.75, 0.075, 0.00, 3.75)`,
+`grok-4.7-fast` `(4.00, 1.00, 0.00, 12.00)` (long `(6.00, 1.50, 0.00, 18.00)`),
 Muse Wonder/Wonder Full `(4.00, 0.20, 0.00, 20.00)`, and Muse Spark 1.3
-`(1.25, 0.15, 0.00, 4.25)`. The CLI fetches no rates; the skill can check
-official vendor docs before Pass 2 and pass local verified cards.
+`(1.25, 0.15, 0.00, 4.25)`. For models with a scheduled vendor price change,
+the shipped table carries the rate in effect on the date checked. When
+`/retro-fleet` checks official vendor docs before Pass 2, it uses the run's
+UTC date to select the active rate and passes it via `--set-model-price`.
+The CLI fetches no rates.
 
 **Local pricing overlay.** `PRICING_CACHE_PATH` defaults to
 `~/.config/mind-meld/pricing-cache.json`, with `MM_PRICING_CACHE_PATH` as the
@@ -3860,9 +3877,9 @@ fallback and positional vendor fallback. A `VERIFIED_MODEL_IDS` member's
 cached card is active only when its date is **on or after**
 `_builtin_verified_date(model)`, mapped across all five vendors. Other valid
 cached cards are active without that gate. For Grok aliases
-(`_GROK_OVERRIDE_CARD_BY_MODEL`, Track 111B), a cached card for `grok-4.7`
-reaches `grok-4.7-build`, and one for `grok-4.6` reaches
-`grok-4.6-build`; that alias-reached card is active only when it passes the
+(`_GROK_OVERRIDE_CARD_BY_MODEL`, Track 111B / 167A), a cached card for `grok-4.7`
+reaches `grok-4.7-build`, one for `grok-4.7-fast` reaches `grok-4.7-build-fast`,
+and one for `grok-4.6` reaches `grok-4.6-build`; that alias-reached card is active only when it passes the
 date gate of both the alias id and the card id, and an active exact-id card
 takes precedence. Other curated aliases and positional vendor fallback stay
 exact-id. `active_cached_model_ids` and `cached_model_ids` list only cache ids

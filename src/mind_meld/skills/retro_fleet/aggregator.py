@@ -5537,7 +5537,7 @@ def _render_health_block(
             "openai_verified": token_usage.PRICING_OPENAI_LAST_UPDATED,
             "openai_url": "https://developers.openai.com/api/docs/pricing",
             "xai_verified": token_usage.PRICING_XAI_LAST_UPDATED,
-            "xai_url": "https://docs.x.ai/developers/models",
+            "xai_url": "https://docs.x.ai/developers/pricing",
             "google_verified": token_usage.PRICING_GOOGLE_LAST_UPDATED,
             "google_url": "https://ai.google.dev/gemini-api/docs/pricing",
             "muse_verified": token_usage.PRICING_MUSE_LAST_UPDATED,

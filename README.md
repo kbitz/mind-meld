@@ -281,7 +281,7 @@ mm pull                        # Pull: no changes.           (or N content chang
 
 # On Mac A: create a file and share it
 mkdir -p ~/.gstack/analytics && echo "recipe v1" > ~/.gstack/analytics/mm-recipe.md
-mm push                        # Push: 1 content change published.
+mm push                        # Push: 1 content change published; usage published.
 
 # On Mac B: receive it
 mm pull --verbose              # Includes "flushed N files in X.XXs", then Pull: 1 content change from Mac A.
@@ -290,7 +290,7 @@ cat ~/.gstack/analytics/mm-recipe.md   # recipe v1
 # On Mac A: delete it, preview, publish
 rm ~/.gstack/analytics/mm-recipe.md
 mm push --dry-run              # ... - 1 deleted ... Dry run complete. Nothing was changed except the local lock file.
-mm push                        # Push: 1 content change published.
+mm push                        # Push: 1 content change published; usage published.
 
 # On Mac B: preview, then follow the deletion
 mm pull --dry-run              # delete  analytics/mm-recipe.md   ...   1 would be deleted
@@ -302,7 +302,7 @@ ls ~/.gstack/analytics/mm-recipe.md    # No such file or directory
 scp ~/.config/mind-meld/deleted/<stamp>/gstack/analytics/mm-recipe.md macA:/tmp/mm-recipe.md
 # On Mac A: put it back without overwriting anything newer, then publish
 cp -n /tmp/mm-recipe.md ~/.gstack/analytics/mm-recipe.md
-mm push                        # Push: 1 content change published.
+mm push                        # Push: 1 content change published; usage published.
 
 # On Mac B: the file comes back
 mm pull                        # Pull: 1 content change from Mac A.
@@ -467,17 +467,24 @@ reports the number of ignored files as `ignored storage files`. See
 
 **Host usage snapshot compatibility:** an un-upgraded peer drops incoming `host-usage-snapshot` records carrying `"muse"` or `"agy"` until it updates. Content sync is unaffected; upgrade the peer with `mm update` or `pipx upgrade mind-meld` to include its usage in `retro-fleet`.
 
-**Push and pull output (Tracks 78A / 129B):** attended `mm push` and `mm pull` end
+**Push and pull output (Tracks 78A / 129B / 167A):** attended `mm push` and `mm pull` end
 with one `<Verb>: <what happened>.` outcome line per thing that happened, and
 errors print `mm: error: <what broke>` on stderr followed by `Run: <command>` on
 its own last line (including CLI usage errors, which exit 2 with
-`Run: <command path> --help`). Routine capture, cache, budget, nested-repository, scan,
-push `usage published` and pull `skipped` details live under `--verbose` (and in
-`mm status` / `mm diag`); an attended push that publishes only usage ends with
-`Push: no content changes.`, and a pull that only skips newer local files ends
-with `Pull: no changes.`. Capture failure does not make content sync fail. Actionable and
-data-at-risk warnings still print before the outcome. Successful automatic
-commands stay silent, including when they move files.
+`Run: <command path> --help`). Attended `mm push` reports usage publication
+alongside content changes (`Push: 10 content changes published; usage published.`,
+`Push: no content changes; usage published.`, `Push: no content changes; no new usage.`,
+or `Push: no content changes; usage published (Grok catching up).` when a host reader
+hit its deadline). Routine capture, cache, budget, nested-repository, scan, and
+pull `skipped` details live under `--verbose` (and in `mm status` / `mm diag`);
+a pull that only skips newer local files ends with `Pull: no changes.`. Capture
+failure does not make content sync fail. Actionable and data-at-risk warnings
+still print before the outcome. Successful automatic commands stay silent,
+including when they move files.
+
+Update scripts that match the exact `Push: no content changes.` line to
+accept the usage clause. After upgrading, refresh the `/retro-fleet` skill
+with `mm install-skills` or the next `mm push`, then restart the agent.
 
 **Exit change:** an attended pull with any failed file now exits **1**, replacing
 its previous exit 0. Completed files remain applied. `mm autopull` keeps exit 0
@@ -1180,7 +1187,7 @@ Push/pull, setup, device approval, source toggles, resolution, empty conflict
 listings, status, gc, diff, log, recapture, update notices and the shared error
 helpers use them:
 
-- **Outcome:** `<Verb>: <what happened>.` on stdout, one line per thing that happened (`Push: 3 content changes published.`, `Push: 1 file held.`, `Pull: 1 content change from mac-a, 2 content changes from mac-b (1 conflict copy).`, `Gc: 2 orphaned blobs deleted.`, `Recapture: 14 commit records captured and published across 3 repositories (2026-10-14 → 2026-11-13).`).
+- **Outcome:** `<Verb>: <what happened>.` on stdout, one line per thing that happened (`Push: 10 content changes published; usage published.`, `Push: 1 file held.`, `Pull: 1 content change from mac-a, 2 content changes from mac-b (1 conflict copy).`, `Gc: 2 orphaned blobs deleted.`, `Recapture: 14 commit records captured and published across 3 repositories (2026-10-14 → 2026-11-13).`).
 - **Error:** `mm: error: <what broke>` on stderr, followed by `Run: <command>` on its own last line when a fix command is supplied.
 - **Warning:** `mm: warning: <what is wrong>` on stderr (one line; data-at-risk warnings are never quiet-gated).
 - **Notice:** `mm: notice: <what changed or was skipped>` on stderr (one line).
@@ -1209,12 +1216,12 @@ These examples describe possible results, not commands that guarantee them:
 
 ```text
 $ mm push
-Push: 3 content changes published.
+Push: 10 content changes published; usage published.
 Push: 1 file held.
 $ mm push --verbose
 Building manifest...
 ...scan, capture and upload details...
-Push: 3 content changes published.
+Push: 10 content changes published; usage published.
 Push: 1 file held.
 $ mm pull
 mm: warning: ... — 1 conflicts: ...
@@ -1234,12 +1241,21 @@ because `~/.claude/projects` cannot be listed says
 A held file keeps its previous
 published version, if any, and adds its own outcome line (`Push: 1 file held.` /
 `Push: N files held.`); its paths/reasons appear with `--verbose`.
-Verified usage publication is omitted from the default `mm push` outcome line
-(a push that publishes only usage prints `Push: no content changes.`); inspect
-usage publication with `mm push --verbose` (`Host usage published (manifest accepted).`),
-`mm status`, or `mm diag`. Other explicit outcomes include `Push: no content changes.`,
-`Push: no enabled sources.`, `Pull: no changes.`, `Pull: no peer devices.`
-and `Pull: no enabled sources.`
+When an attended push publishes new or changed `mm-events` data (host usage,
+session, or commit rows), the lead `Push:` line appends `; usage published`
+(for example, `Push: 10 content changes published; usage published.` or
+`Push: no content changes; usage published.`). The receipt uses the accepted
+manifest after file holds and requires publication proof for the captured host
+day file. A `no content changes` lead with no verified new usage prints
+`Push: no content changes; no new usage.`.
+If any attended host usage reader stopped at its deadline, the usage clause names
+the readers still catching up in parentheses (for example,
+`Push: no content changes; usage published (Grok catching up).`). `mm push --verbose`
+keeps `Host usage published (manifest accepted).`, and `mm status` / `mm diag`
+show full publication details. Existing clauses (held files, metadata, source
+selection, manifest repair, failures and `Run:` fix lines) and quiet `mm autopush`
+keep their behavior. Other explicit outcomes include `Push: no enabled sources.`,
+`Pull: no changes.`, `Pull: no peer devices.` and `Pull: no enabled sources.`
 
 When a successful `mm push` records a capture problem that needs your action,
 the default output shows the first remedy as an `mm: notice:` line on stderr
@@ -1283,12 +1299,12 @@ mm: warning: ...named failed file and its remedy...
 mm: error: Pull incomplete [result-degraded]: 12 files applied, 2 failed; completed changes remain; repair the reported failures before one retry.
 Run: mm diag
 $ mm push
-Push: no content changes.
+Push: no content changes; no new usage.
 $ mm status
 ...capture degradation and its action, when capture failed independently...
 $ mm push --verbose
 ...Usage capture (no-row): ...
-Push: no content changes.
+Push: no content changes; no new usage.
 ```
 
 The partial pull exits 1. The degraded-capture push exits 0: consult
@@ -1719,7 +1735,7 @@ An agent with no priceable model shows `—`, never a confident `$0`. A priced m
 
 `--dump-host-usage` carries the per-machine inputs (`tokens_by_day` and coverage); bundled rates and any local pricing overrides are not in the dump.
 
-**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-11-11 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-10-27 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-11-05 ([grok-4.7 rates](https://docs.x.ai/developers/models/grok-4.7), [grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-10-22 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-10-27 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The `/retro-fleet` skill can check vendor docs and supply local overrides before rendering its second pass.
+**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-11-25 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-11-25 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-11-25 ([pricing](https://docs.x.ai/developers/pricing), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-11-25 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-11-25 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The shipped table uses the rate in effect on the date checked; scheduled vendor price changes (`gemini-4-carbon` and `gemini-4-argon` increase from `$2.00/$0.10/$0/$10.00` to `$4.00/$0.20/$0/$20.00` on 2026-12-01; `gemini-3.8-flash` increases from `$0.75/$0.075/$0/$3.75` to `$1.50/$0.15/$0/$7.50` on 2027-01-01; `gpt-5.6-sol` promotional pricing runs through 2026-11-30) take effect on the documented dates. When `/retro-fleet` checks vendor pricing before its second pass, it uses the rate active on the run's UTC date via `--set-model-price`.
 
 **Haiku 5.5 limitation.** The bundled card uses the rates for prompts up to 100,000 tokens. Anthropic charges five times those rates for each request above that threshold, counting all input tokens, including cache reads and writes. The retro does not apply that tier, so its Haiku 5.5 estimate understates such usage. Tier-aware pricing is deferred to R6.
 
@@ -1743,16 +1759,16 @@ Pricing: saved gpt-6.1-sol and marked verified 2026-11-11 in this machine's pric
 
 Overrides live only on this machine in `~/.config/mind-meld/pricing-cache.json` (override the location with `MM_PRICING_CACHE_PATH`); they never sync. The version-1 JSON cache holds a `models` map of four rates and a `verified_date` per model, plus the optional whole-table `verified_date`. Built-in verified IDs accept an override dated on or after their vendor's bundled date; other valid cached cards take precedence over family fallback and count as verified. Reads create no cache or lock. Explicit writes use a flock and retain at most 128 models, evicting oldest `(verified_date, model_id)` first. Model IDs must match `^[a-z0-9][a-z0-9._:-]{0,127}$`; each rate must be finite and between 0 and 1000 inclusive. Invalid input exits 2; cache write failures exit 1 with a fixing command.
 
-An override for `grok-4.7` also reaches `grok-4.7-build`; `grok-4.6` reaches
-`grok-4.6-build`. It must pass the
-bundled-date gate for both the alias and its card ID, wherever those IDs are
-verified. An active exact-ID override wins. Other vendors' overrides remain
-exact-ID. `cached_model_ids` lists only cache IDs whose own card is active,
-not the aliases they reach.
+An override for `grok-4.7` also reaches `grok-4.7-build`, `grok-4.7-fast`
+reaches `grok-4.7-build-fast`, and `grok-4.6` reaches `grok-4.6-build`. It must
+pass the bundled-date gate for both the alias and its card ID, wherever those
+IDs are verified. An active exact-ID override wins. Other vendors' overrides
+remain exact-ID. `cached_model_ids` lists only cache IDs whose own card is
+active, not the aliases they reach.
 
 To reset local pricing, remove `~/.config/mind-meld/pricing-cache.json` (or the file selected by `MM_PRICING_CACHE_PATH`) while no pricing update is running, then rerun the retro. This restores bundled rates and clears the whole-table verification date.
 
-OpenAI `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna`, plus Muse `muse-wonder-1.0`, `muse-wonder-full-1.0`, and `muse-spark-1.3`, have verified cards. Future positional OpenAI, Gemini, and Muse family IDs use their current family tier and remain labelled extrapolated until verified. `codex-*` belongs to Codex; `codex-auto-review` counts token/day activity but is excluded from cost, top-model selection, and pricing-refresh requests.
+OpenAI `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna`, Google `gemini-4-carbon`, `gemini-4-argon`, `gemini-4-neon`, and `gemini-3.8-flash`, xAI `grok-4.7`, `grok-4.7-build`, `grok-4.7-build-fast`, and `grok-4.6-build`, Anthropic `claude-fable-5-2`, `claude-mythos-5-2`, and `claude-opus-5-5-high` (alongside the other listed Claude IDs), plus Muse `muse-wonder-1.0`, `muse-wonder-full-1.0`, and `muse-spark-1.3`, have verified cards. Future positional OpenAI, Gemini, and Muse family IDs use their current family tier and remain labelled extrapolated until verified. `codex-*` belongs to Codex; `codex-auto-review` counts token/day activity but is excluded from cost, top-model selection, and pricing-refresh requests.
 
 Sonnet 5 now uses the standard $2/$10 input/output rates; Sonnet 4.x
 stays at $3/$15. Fable/Mythos 5.1 cache reads are $0.25 per MTok; 5.0 stays
@@ -2469,9 +2485,11 @@ and the push counts it as held (`--verbose` names it as not yet synced;
 [Snapshot failures](#snapshot-failures)). Otherwise it still re-encrypts and
 uploads the growing day file, updates last-seen and rewrites the recovery
 sidecar, so `--verbose` shows an upload even on a converged Mac. The outcome
-line counts no user content change: `Push: no content changes.` Verified
-publication appears with `--verbose` as `Host usage published (manifest accepted).`,
-and in `mm status` / `mm diag`.
+line counts no user content change and reports the usage publication:
+`Push: no content changes; usage published.` (or
+`Push: no content changes; usage published (Grok catching up).` when a host
+reader hit its deadline). Verified publication also appears with `--verbose` as
+`Host usage published (manifest accepted).`, and in `mm status` / `mm diag`.
 A content-changing push records activity once and runs auto-GC. Usage-only
 publication skips this device's blob GC; obsolete blobs wait for the next
 content-changing push or an explicit `mm gc`.
@@ -2846,7 +2864,7 @@ A successful `mm push` publishes a complete snapshot of the **selected** sources
 
 ```text
 $ mm push
-Push: 1 content change published.
+Push: 1 content change published; usage published.
 Push: 2 files held.
 
 $ mm push --verbose
@@ -2855,7 +2873,7 @@ $ mm push --verbose
     gstack:projects/x/log.jsonl
     claude:projects/y/memory/MEMORY.md
   Their previous versions (if any) stay published; they go with a later push.
-Push: 1 content change published.
+Push: 1 content change published; usage published.
 Push: 2 files held.
 
 $ mm status          # after an autopush that held a file

@@ -898,31 +898,64 @@ def test_every_health_code_is_documented_in_skill_md() -> None:
 
 
 def test_readme_prices_all_three_vendors_with_matching_provenance():
+    # Value: protects=README pairs vendor dates and URLs and dates the Carbon increase;
+    # fails_when=a date or link moves to another vendor or Carbon's effective date is detached;
+    # why_new=whole-file matches can be satisfied by other vendors' entries or later text;
+    # seam=none;
+    # no_claim=vendor rates or dates from source pages.
     from mind_meld import token_usage
 
     readme = (ROOT / "README.md").read_text()
-    for vendor, date, url in (
+    provenance = next(
+        part for part in readme.split("\n\n") if part.startswith("**Rate provenance.**")
+    )
+    provenance = " ".join(provenance.split())
+    clauses = re.split(r"[.;]\s+", provenance)
+    for vendor, date_attr, url in (
         (
             "Anthropic",
-            token_usage.PRICING_LAST_UPDATED,
+            "PRICING_LAST_UPDATED",
             "https://platform.claude.com/docs/en/about-claude/pricing",
         ),
         (
             "OpenAI",
-            token_usage.PRICING_OPENAI_LAST_UPDATED,
+            "PRICING_OPENAI_LAST_UPDATED",
             "https://developers.openai.com/api/docs/pricing",
         ),
         (
             "xAI",
-            token_usage.PRICING_XAI_LAST_UPDATED,
-            "https://docs.x.ai/developers/models/grok-4.6",
+            "PRICING_XAI_LAST_UPDATED",
+            "https://docs.x.ai/developers/pricing",
+        ),
+        (
+            "Google",
+            "PRICING_GOOGLE_LAST_UPDATED",
+            "https://ai.google.dev/gemini-api/docs/pricing",
+        ),
+        (
+            "Muse",
+            "PRICING_MUSE_LAST_UPDATED",
+            token_usage.PRICING_MUSE_SOURCE_URL,
         ),
     ):
-        assert vendor in readme
-        assert date in readme
-        assert url in readme
+        date = getattr(token_usage, date_attr)
+        assert any(
+            all(part in clause for part in (vendor, date_attr, date, url)) for clause in clauses
+        ), vendor
+    assert "docs.x.ai/developers/models/grok-4." not in readme
+    assert any("gemini-4-carbon" in clause and "2026-12-01" in clause for clause in clauses), (
+        "Gemini Carbon's scheduled increase needs its effective date"
+    )
     invariant = (ROOT / "docs" / "invariants" / "events-retro.md").read_text()
     assert token_usage.PRICING_LAST_UPDATED in invariant
+    assert "https://docs.x.ai/developers/pricing" in invariant
+    assert "docs.x.ai/developers/models/grok-4." not in invariant
+    skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text()
+    scheduled = next(part for part in skill.split("\n\n") if "scheduled price change" in part)
+    scheduled = " ".join(scheduled.split())
+    assert "on the day `retro-fleet` runs (UTC date)" in scheduled
+    assert "has arrived or passed, apply the scheduled rate via `--set-model-price`" in scheduled
+    assert "before that date, keep the rate currently in effect" in scheduled
     assert "Every attended `mm push` refreshes and publishes consented host usage" in " ".join(
         readme.split()
     )
