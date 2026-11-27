@@ -8912,7 +8912,169 @@ class TestTrack128APricingAndFloorExtrapolation:
         out = aggregator.format_retro(data)
         extrap = _health_entry(out, "pricing_extrapolated")
         assert extrap is not None
-        assert "gpt-6.9-sol" in extrap["detail"]
+        assert "gpt-6.9-sol → gpt-6.2-sol" in extrap["detail"]
+
+    def _agy_table_line(self, out: str) -> str:
+        return next(line for line in out.splitlines() if line.startswith("| Antigravity |"))
+
+    def _health_payload(self, out: str) -> dict:
+        block = out.split("<!-- MM_HEALTH -->", 1)[1].split("```json", 1)[1].split("```", 1)[0]
+        return json.loads(block)
+
+    def test_agy_single_tier_aliases_render_estimate_and_disclose_mapped_targets(self):
+        day = "2026-04-22"
+        neon_bucket = _usage(1_000_000)
+        flash_bucket = _usage(2_000_000)
+        hosts = {"agy": {day: _usage(3_000_000)}}
+        ev = _host_event(
+            "dev-a",
+            "2026-04-28T12:00:00+00:00",
+            hosts=hosts,
+            extra={
+                "tokens_by_day": {
+                    day: {
+                        **_usage(3_000_000),
+                        "by_model": {
+                            "gemini-pro-orchestrator-neon": neon_bucket,
+                            "gemini-flash-worker-agy": flash_bucket,
+                        },
+                    }
+                }
+            },
+        )
+        data = _econ_data([ev])
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        agy_row = next(r for r in usage.rows if r.key == "agy")
+        # 1M input @ $3.00 (gemini-4-neon) + 2M input @ $0.75 (gemini-3.8-flash) = $4.50
+        total, is_floor = aggregator._agent_row_cost(agy_row)
+        assert is_floor is False
+        assert total == pytest.approx(4.50)
+
+        out = aggregator.format_retro(data)
+        assert "| ~$4.50 |" in self._agy_table_line(out)
+        card_out = aggregator.format_retro(data, name="user")
+        # Value: protects=the card's compact estimate; fails_when=the card omits or misstates it;
+        # why_new=the Markdown body is independent; seam=none; no_claim=fixture render only
+        card_row = next(line for line in card_out.splitlines() if line.startswith("║  Antigravity"))
+        assert card_row.rsplit(" · ", 1)[-1].rstrip(" ║") == "~$4"
+        extrap = _health_entry(out, "pricing_extrapolated")
+        assert extrap is not None
+        assert "gemini-flash-worker-agy → gemini-3.8-flash" in extrap["detail"]
+        assert "gemini-pro-orchestrator-neon → gemini-4-neon" in extrap["detail"]
+        assert _health_entry(out, "unpriced_models") is None
+        assert _health_entry(out, "cost_floor") is None
+        assert _health_entry(out, "cost_unavailable") is None
+        pricing = self._health_payload(out)["pricing"]
+        assert pricing["unpriced_model_ids"] == []
+        assert pricing["unverified_model_ids"] == [
+            "gemini-flash-worker-agy",
+            "gemini-pro-orchestrator-neon",
+        ]
+        assert pricing["refresh_due"] is True
+
+    def test_floored_agy_row_excludes_extrapolated_aliases_and_keeps_ambiguous_unpriced(self):
+        day = "2026-04-22"
+        verified_bucket = _usage(1_000_000)
+        neon_alias_bucket = _usage(1_000_000)
+        flash_alias_bucket = _usage(1_000_000)
+        ambiguous_bucket = _usage(1_000_000)
+        hosts = {"agy": {day: _usage(4_000_000)}}
+        ev = _host_event(
+            "dev-a",
+            "2026-04-28T12:00:00+00:00",
+            hosts=hosts,
+            extra={
+                "tokens_by_day": {
+                    day: {
+                        **_usage(4_000_000),
+                        "by_model": {
+                            "gemini-4-neon": verified_bucket,
+                            "gemini-pro-orchestrator-neon": neon_alias_bucket,
+                            "gemini-flash-worker-agy": flash_alias_bucket,
+                            "gemini-4-argon-flash": ambiguous_bucket,
+                        },
+                    }
+                }
+            },
+        )
+        data = _econ_data([ev])
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        agy_row = next(r for r in usage.rows if r.key == "agy")
+        # Verified gemini-4-neon only: 1M input @ $3.00 = $3.00; both aliases excluded from floor.
+        total, is_floor = aggregator._agent_row_cost(agy_row)
+        assert is_floor is True
+        assert total == pytest.approx(3.00)
+
+        out = aggregator.format_retro(data)
+        assert "| ≥$3.00 |" in self._agy_table_line(out)
+        cost_floor = _health_entry(out, "cost_floor")
+        assert cost_floor is not None
+        assert "gemini-4-argon-flash" in cost_floor["detail"]
+        unpriced = _health_entry(out, "unpriced_models")
+        assert unpriced is not None
+        assert "1 unpriced model(s)" in unpriced["detail"]
+        assert "do not estimate" in unpriced["remedy"]
+        assert self._health_payload(out)["pricing"]["unpriced_model_ids"] == [
+            "gemini-4-argon-flash"
+        ]
+        extrap = _health_entry(out, "pricing_extrapolated")
+        assert extrap is not None
+        assert "gemini-flash-worker-agy → gemini-3.8-flash" in extrap["detail"]
+        assert "gemini-pro-orchestrator-neon → gemini-4-neon" in extrap["detail"]
+
+    def test_agy_row_with_only_extrapolated_and_ambiguous_renders_unavailable_not_zero(self):
+        day = "2026-04-22"
+        hosts = {"agy": {day: _usage(2_000_000)}}
+        ev = _host_event(
+            "dev-a",
+            "2026-04-28T12:00:00+00:00",
+            hosts=hosts,
+            extra={
+                "tokens_by_day": {
+                    day: {
+                        **_usage(2_000_000),
+                        "by_model": {
+                            "gemini-pro-orchestrator-neon": _usage(1_000_000),
+                            "gemini-4-argon-flash": _usage(1_000_000),
+                        },
+                    }
+                }
+            },
+        )
+        data = _econ_data([ev])
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        agy_row = next(r for r in usage.rows if r.key == "agy")
+        assert aggregator._agent_row_cost(agy_row) == (None, False)
+
+        out = aggregator.format_retro(data)
+        assert "| — |" in self._agy_table_line(out)
+        assert "≥$0" not in out
+        cost_unavailable = _health_entry(out, "cost_unavailable")
+        assert cost_unavailable is not None
+        assert "gemini-4-argon-flash" in cost_unavailable["detail"]
+        assert _health_entry(out, "cost_floor") is None
+        unpriced = _health_entry(out, "unpriced_models")
+        assert unpriced is not None
+        assert "1 unpriced model(s)" in unpriced["detail"]
+        assert self._health_payload(out)["pricing"]["unpriced_model_ids"] == [
+            "gemini-4-argon-flash"
+        ]
+        extrap = _health_entry(out, "pricing_extrapolated")
+        assert extrap is not None
+        assert "gemini-pro-orchestrator-neon → gemini-4-neon" in extrap["detail"]
+
+    def test_extrapolation_notes_disclose_claude_family_sanitize_and_cap(self):
+        by_model = {
+            "claude-opus-6": _usage(10),
+            "claude-opus-7-\x1b[31mred": _usage(10),
+            **{f"claude-sonnet-{10 + i}": _usage(10) for i in range(10)},
+        }
+        notes = aggregator._extrapolation_notes(by_model, scope="Claude")
+        assert len(notes) == 1
+        note = notes[0]
+        assert "claude-opus-6 → opus family" in note
+        assert "\x1b" not in note
+        assert "(+4 more)" in note
 
     @pytest.mark.parametrize("floor_fixture", [False, True])
     def test_identical_claude_5_5_cost_with_and_without_matching_local_override(

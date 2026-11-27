@@ -928,9 +928,13 @@ class TestResolvePrices:
 
     def test_host_alias_lookup_is_exact_key_never_substring(self) -> None:
         assert tu.resolve_prices("x-gpt-5.6-terra") is None
-        assert tu.resolve_prices("gpt-5.6-terra-extra") is None
         assert tu.resolve_prices("GPT-5.6-terra") is None
+        assert tu.resolve_prices("gpt-5.6-terrax") is None
         assert tu.resolve_prices("gpt-5.6-terra") is not None
+        assert "gpt-5.6-terra-extra" not in tu.PRICING_FAMILY_BY_MODEL
+        assert tu.vendor_model_family("gpt-5.6-terra-extra") == "gpt-5.6-terra"
+        assert tu.resolve_prices("gpt-5.6-terra-extra") == tu.VENDOR_FAMILY_TIERS["gpt-5.6-terra"]
+        assert not tu.is_verified_model("gpt-5.6-terra-extra")
 
     def test_aliases_point_at_existing_vendor_tiers(self) -> None:
         for model, family in tu.PRICING_FAMILY_BY_MODEL.items():
@@ -2778,20 +2782,51 @@ def test_vendor_positional_fallback_is_unverified(model, family):
 
 
 @pytest.mark.parametrize(
+    "model,family",
+    [
+        ("gemini-pro-orchestrator-neon", "gemini-4-neon"),
+        ("gemini-flash-worker-agy", "gemini-3.8-flash"),
+        ("gemini-neon", "gemini-4-neon"),
+        ("gpt-6.1-sol-extra", "gpt-6.2-sol"),
+        ("gpt-5.6-terra-extra", "gpt-5.6-terra"),
+        ("muse-full-wonder-1.1", "muse-wonder-1.0"),
+        ("muse-wonder-full-1.1-tail", "muse-wonder-1.0"),
+    ],
+)
+def test_vendor_single_tier_alias_fallback_is_unverified(model, family):
+    assert tu.vendor_model_family(model) == family
+    assert tu.resolve_prices(model) == tu.VENDOR_FAMILY_TIERS[family]
+    assert not tu.is_verified_model(model)
+
+
+@pytest.mark.parametrize(
     "model",
     [
         "x-gpt-6.1-sol",
-        "gpt-6.1-sol-extra",
         "GPT-6.1-sol",
-        "muse-full-wonder-1.1",
-        "muse-wonder-full-1.1-tail",
         "gemini-4-argon-flash",
         "gpt--sol",
+        "gemini-neonic",
+        "gemini-neon-flash",
+        "gemini-flashy",
+        "gpt-6.1-solar",
+        "gemini-4-Neon",
+        "gemini-neon-",
+        "gpt-6-astra-sol",
+        "muse-wonder-spark-1.0",
+        "gemini-2.5-pro",
+        "gemini-neon-\x1b[31m",
+        "",
     ],
 )
-def test_vendor_fallback_rejects_nonpositional_ids(model):
+def test_vendor_fallback_rejects_invalid_or_ambiguous_ids(model):
     assert tu.vendor_model_family(model) is None
     assert tu.resolve_prices(model) is None
+
+
+@pytest.mark.parametrize("bad_value", [None, 123, ["gemini", "neon"]])
+def test_vendor_model_family_rejects_non_strings(bad_value):
+    assert tu.vendor_model_family(bad_value) is None
 
 
 def _write_pricing_cache(models, verified_date=None):
