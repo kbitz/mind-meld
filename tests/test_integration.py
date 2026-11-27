@@ -17564,6 +17564,29 @@ def test_sync_progress_dumb_terminal_has_only_outcome(
     assert sync_progress_terminal.getvalue() == ""
 
 
+@pytest.mark.parametrize("verb", ["push", "pull"])
+def test_sync_progress_terminal_probe_error_preserves_success(status77, monkeypatch, verb):
+    class BrokenProbe(_SyncTerminalBuffer):
+        def isatty(self):
+            raise OSError("cannot inspect terminal")
+
+    stream = BrokenProbe()
+    console = Console(
+        file=stream,
+        color_system=None,
+        force_interactive=False,
+        _environ={"TERM": "xterm-256color"},
+    )
+    monkeypatch.setattr(cli_module, "console", console)
+    monkeypatch.setattr(core, "console", console)
+
+    result = runner.invoke(app, [verb])
+
+    assert result.exit_code == 0, (result.exception, result.output)
+    assert result.stdout.startswith(f"{verb.title()}:")
+    assert stream.getvalue() == ""
+
+
 def test_track_125a_attended_pushes_resume_stopped_scans_and_clear_catching_up(
     capture61, monkeypatch
 ):
