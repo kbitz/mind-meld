@@ -2096,6 +2096,33 @@ def _record_file(
     }
 
 
+def _progress_scope(rel_dir: str) -> str:
+    """Return up to the first two '/' segments of a relative directory path."""
+    if not rel_dir or rel_dir == ".":
+        return ""
+    parts = [part for part in rel_dir.split("/") if part and part != "."]
+    return "/".join(parts[:2])
+
+
+def _rel_parent(rel_path: str) -> str:
+    return rel_path.rsplit("/", 1)[0] if "/" in rel_path else ""
+
+
+def _dedup_progress(
+    on_progress: Callable[[str], None] | None,
+) -> Callable[[str], None] | None:
+    if on_progress is None:
+        return None
+    seen: set[str] = {""}
+
+    def report(scope: str) -> None:
+        if scope not in seen:
+            seen.add(scope)
+            on_progress(scope)
+
+    return report
+
+
 def walk_claude_source(
     base_dir: str | Path,
     max_file_size: int = 52_428_800,
@@ -2105,6 +2132,7 @@ def walk_claude_source(
     strict: bool = False,
     source_name: str | None = None,
     holds: SourceHolds | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk a Claude ~/.claude directory and build the files dict.
 
@@ -2156,6 +2184,7 @@ def walk_claude_source(
 
     files: dict[str, dict[str, Any]] = {}
     scan_dirs: list[Path] = []
+    report_progress = _dedup_progress(on_progress)
     if strict:
         try:
             with os.scandir(projects_dir) as iterator:
@@ -2220,6 +2249,8 @@ def walk_claude_source(
                     continue
                 scan_dirs.append(subdir)
         for scan_dir in scan_dirs:
+            if report_progress is not None:
+                report_progress(_progress_scope(scan_dir.relative_to(base).as_posix()))
             for path in _collect_regular_files_scandir(
                 scan_dir,
                 base,
@@ -2260,6 +2291,8 @@ def walk_claude_source(
                 scan_dirs.append(subdir)
 
     for scan_dir in scan_dirs:
+        if report_progress is not None:
+            report_progress(_progress_scope(scan_dir.relative_to(base).as_posix()))
         for path in _collect_regular_files_scandir(
             scan_dir, base, strict=False, source_name=source_name, on_skip=on_skip
         ):
@@ -2494,6 +2527,7 @@ def walk_grok_source(
     *,
     strict: bool = False,
     holds: SourceHolds | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk a Grok home and build the files dict.
 
@@ -2581,10 +2615,13 @@ def walk_grok_source(
 
     collected_with_rel = [(_rel_or_name(p, base), p) for p in collected_paths]
     collected_with_rel.sort(key=lambda item: item[0])
+    report_progress = _dedup_progress(on_progress)
     seen: set[tuple[int, int]] = set()
     for rel, path in collected_with_rel:
         if not grok_path_allowed(rel):
             continue
+        if report_progress is not None:
+            report_progress(_progress_scope(_rel_parent(rel)))
         if path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
             if on_skip:
                 on_skip(str(path), "symlink")
@@ -2937,6 +2974,7 @@ def walk_generic_source(
     strict: bool = False,
     diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
     holds: SourceHolds | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk a generic source directory with configurable include_dirs/include_files.
 
@@ -3001,6 +3039,7 @@ def walk_generic_source(
 
     files: dict[str, dict[str, Any]] = {}
     collected_paths: list[Path] = []
+    report_progress = _dedup_progress(on_progress)
 
     for dir_name in include_dirs:
         scan_dir = base / dir_name
@@ -3023,6 +3062,8 @@ def walk_generic_source(
             continue
         if not stat.S_ISDIR(st.st_mode):
             continue
+        if report_progress is not None:
+            report_progress(_progress_scope(dir_name))
         collected_paths.extend(
             _collect_regular_files_scandir(
                 scan_dir,
@@ -3107,6 +3148,8 @@ def walk_generic_source(
             _rel_or_name(path, base), exclude_patterns, skip_prefixes, include_patterns
         ):
             continue
+        if report_progress is not None:
+            report_progress(_progress_scope(_rel_parent(_rel_or_name(path, base))))
         identity = (st.st_dev, st.st_ino)
         if identity in seen:
             continue
@@ -3139,6 +3182,7 @@ def walk_source(
     strict: bool = False,
     diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
     holds: SourceHolds | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
     """Dispatch to the appropriate walker based on source type.
 
@@ -3157,6 +3201,8 @@ def walk_source(
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.
         holds: Optional strict-scan out-parameter (see ``SourceHolds``).
+        on_progress: Optional display-only callback(scope) invoked as sub-scopes
+            are scanned; must not raise and never affects the returned files.
 
     Returns:
         Tuple of (resolved_base_path_str, files_dict).
@@ -3173,9 +3219,17 @@ def walk_source(
             strict=strict,
             source_name=source_config.get("name"),
             holds=holds,
+            on_progress=on_progress,
         )
     elif source_type == "grok":
-        files = walk_grok_source(source_config, max_file_size, on_skip, strict=strict, holds=holds)
+        files = walk_grok_source(
+            source_config,
+            max_file_size,
+            on_skip,
+            strict=strict,
+            holds=holds,
+            on_progress=on_progress,
+        )
     elif source_type == "muse":
         files = walk_muse_source(source_config, max_file_size, on_skip, strict=strict, holds=holds)
     elif source_type == "codex-memory":
@@ -3190,6 +3244,7 @@ def walk_source(
             strict=strict,
             diagnostic_hash=diagnostic_hash,
             holds=holds,
+            on_progress=on_progress,
         )
     else:
         raise ManifestError(f"manifest: unknown source type '{source_type}'")
@@ -3209,6 +3264,7 @@ def build_manifest_v2(
     nested_roots: dict[str, set[str]] | None = None,
     held: dict[str, dict[str, str]] | None = None,
     held_candidates: dict[str, set[str]] | None = None,
+    on_progress: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
     """Build a v2 manifest with multiple sources.
 
@@ -3234,6 +3290,9 @@ def build_manifest_v2(
         held_candidates: Optional companion receiving, per source, enumeration
             entries that vanished before their stat. Only collected alongside
             ``held``; the caller validates them against its prior manifest.
+        on_progress: Optional display-only callback(source, scope) invoked
+            before each source and as sub-scopes are walked; must not raise and
+            never affects the returned manifest.
 
     Returns:
         v2 manifest dict with a "sources" dict keyed by source name.
@@ -3242,6 +3301,8 @@ def build_manifest_v2(
 
     for src_cfg in sources_configs:
         name = src_cfg["name"]
+        if on_progress is not None:
+            on_progress(name, "")
         reported_repos: set[str] = set()
 
         def source_skip(path: str, reason: str) -> None:
@@ -3263,6 +3324,7 @@ def build_manifest_v2(
                     held_candidates.setdefault(name, set()) if held_candidates is not None else None
                 ),
             )
+        source_progress = functools.partial(on_progress, name) if on_progress is not None else None
         base_path, files = walk_source(
             src_cfg,
             max_file_size,
@@ -3270,6 +3332,7 @@ def build_manifest_v2(
             strict=strict,
             diagnostic_hash=diagnostic_hash,
             holds=holds,
+            on_progress=source_progress,
         )
         sources[name] = {
             "base_path": base_path,

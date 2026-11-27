@@ -1103,6 +1103,7 @@ PULL_CORE_DEFINITIONS = frozenset(
     _sync_progress_count
     _sync_progress_ensure_batch
     _sync_progress_phase
+    _sync_progress_scan_callback
     _sync_progress_start_batch
     _sync_warning
     """.split()

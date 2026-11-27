@@ -4181,3 +4181,79 @@ class TestGenerateTombstonesHash91A:
         assert generate_tombstones(local, prior, "dev", skip_mint={("claude", "a.md")}) == {}
         other = generate_tombstones(local, prior, "dev", skip_mint={("gstack", "a.md")})
         assert set(other) == {"claude:a.md"}
+
+
+def test_build_manifest_v2_on_progress_reports_sources_and_scopes_without_changing_result(tmp_path):
+    claude_dir = tmp_path / "claude"
+    (claude_dir / "projects" / "-Users-user-a" / "memory").mkdir(parents=True)
+    (claude_dir / "projects" / "-Users-user-a" / "memory" / "one.md").write_text("a1")
+    (claude_dir / "projects" / "-Users-user-a" / "todos").mkdir(parents=True)
+    (claude_dir / "projects" / "-Users-user-a" / "todos" / "t.json").write_text("{}")
+    (claude_dir / "projects" / "-Users-user-b" / "memory").mkdir(parents=True)
+    (claude_dir / "projects" / "-Users-user-b" / "memory" / "two.md").write_text("b1")
+
+    gstack_dir = tmp_path / "gstack"
+    (gstack_dir / "projects" / "my-slug").mkdir(parents=True)
+    (gstack_dir / "projects" / "my-slug" / "one.md").write_text("g1")
+    (gstack_dir / "projects" / "my-slug" / "two.md").write_text("g2")
+    (gstack_dir / "analytics").mkdir(parents=True)
+    (gstack_dir / "analytics" / "usage.jsonl").write_text("{}\n")
+
+    grok_dir = tmp_path / "grok"
+    (grok_dir / "memory-v2" / "global" / "topics").mkdir(parents=True)
+    (grok_dir / "memory-v2" / "global" / "topics" / "note.md").write_text("grok1")
+    (grok_dir / "memory-v2" / "global" / "topics" / "other.md").write_text("grok2")
+
+    muse_dir = tmp_path / "muse"
+    (muse_dir / "memory").mkdir(parents=True)
+    (muse_dir / "memory" / "m.md").write_text("muse1")
+
+    sources_cfg = [
+        {"name": "claude", "type": "claude", "path": str(claude_dir)},
+        {
+            "name": "gstack",
+            "type": "generic",
+            "path": str(gstack_dir),
+            "include_dirs": ["projects", "analytics"],
+        },
+        {"name": "grok", "type": "grok", "path": str(grok_dir)},
+        {"name": "muse", "type": "muse", "path": str(muse_dir)},
+    ]
+
+    for strict in (True, False):
+        events: list[tuple[str, str]] = []
+        with_cb = build_manifest_v2(
+            "dev-1",
+            "mac-a",
+            sources_cfg,
+            strict=strict,
+            on_progress=lambda src, scope: events.append((src, scope)),
+        )
+        without_cb = build_manifest_v2("dev-1", "mac-a", sources_cfg, strict=strict)
+        assert with_cb["sources"] == without_cb["sources"]
+        expected = [
+            ("claude", ""),
+            ("claude", "projects/-Users-user-a"),
+            ("claude", "projects/-Users-user-b"),
+            ("gstack", ""),
+            ("gstack", "projects"),
+            ("gstack", "analytics"),
+            ("gstack", "projects/my-slug"),
+            ("grok", ""),
+            ("grok", "memory-v2/global"),
+            ("muse", ""),
+        ]
+        if strict:
+            assert events == expected
+        else:
+            assert set(events) == set(expected)
+            assert events[0] == ("claude", "")
+        assert len(events) == len(set(events))
+
+    # Direct walk_source callers with default on_progress=None stay unaffected.
+    _, files_claude = walk_source(sources_cfg[0])
+    assert set(files_claude) == {
+        "projects/-Users-user-a/memory/one.md",
+        "projects/-Users-user-a/todos/t.json",
+        "projects/-Users-user-b/memory/two.md",
+    }

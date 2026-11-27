@@ -17121,6 +17121,309 @@ def test_sync_progress_delayed_start_finishing_after_shutdown_restores_terminal(
             display.stop()
 
 
+def test_sync_progress_scan_note_formatting_phase_reset_and_throttle(monkeypatch):
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        core, "console", Console(file=terminal, force_terminal=True, color_system=None, width=80)
+    )
+    now = [100.0]
+    monkeypatch.setattr(core.time, "monotonic", lambda: now[0])
+    refreshes: list[bool] = []
+    real_update = core.Progress.update
+
+    def spy_update(self, *args, **kwargs):
+        refreshes.append(bool(kwargs.get("refresh", False)))
+        return real_update(self, *args, **kwargs)
+
+    monkeypatch.setattr(core.Progress, "update", spy_update)
+
+    progress = core._SyncProgress(enabled=True, delay=0.0, include_elapsed=True)
+    try:
+        progress.start("Scanning sources")
+        refreshes.clear()
+
+        now[0] = 100.2
+        progress.set_note("claude projects/-Users-user-app")
+        detail = progress._format_detail_locked(progress._state, now[0])
+        assert detail == "claude projects/-Users-user-app · 0.2s"
+
+        # Two notes inside one tick interval refresh once.
+        now[0] = 100.25
+        progress.set_note("claude projects/-Users-user-other")
+        assert sum(1 for r in refreshes if r) == 1
+        assert progress._format_detail_locked(progress._state, now[0]) == (
+            "claude projects/-Users-user-other · 0.2s"
+        )
+
+        # Phase change clears the note and resets the phase timer.
+        now[0] = 101.0
+        progress.set_phase("Recording activity")
+        assert progress._note == ""
+        assert progress._format_detail_locked(progress._state, now[0]) == "· 0.0s"
+
+        # hold_phase_timer keeps elapsed running across sub-phase label updates.
+        now[0] = 102.0
+        with progress.hold_phase_timer():
+            progress.set_phase("Waiting for Syncthing to deliver 3 files")
+            now[0] = 103.5
+            progress.set_phase("Waiting for Syncthing to deliver 1 file")
+            assert progress._format_detail_locked(progress._state, now[0]) == "· 1.5s"
+        now[0] = 104.0
+        progress.set_phase("Reading peer manifests")
+        assert progress._format_detail_locked(progress._state, now[0]) == "· 0.0s"
+    finally:
+        progress.stop()
+
+
+def test_sync_progress_scan_note_sanitization_cap_and_callback(monkeypatch):
+    assert core._scan_note("", "") == ""
+    sanitized = core._scan_note("claude", "projects/a\x1b[2Jb\n")
+    assert "\x1b" not in sanitized
+    assert "\n" not in sanitized
+    assert sanitized.startswith("claude projects/a")
+
+    long_scope = "projects/" + "segment-" * 10 + "tail"
+    capped = core._scan_note("claude", long_scope)
+    assert len(capped) == core._SCAN_NOTE_MAX_CHARS == 48
+    assert capped.startswith("claude …")
+    assert capped.endswith("tail")
+
+    # No _SYNC_OUTPUT -> None
+    assert core._sync_progress_scan_callback() is None
+
+    # Verbose (_enabled=False) -> None
+    monkeypatch.setattr(core, "_console_is_terminal", lambda: True)
+    disabled = core._SyncProgress(enabled=False, delay=0.0)
+    tok = core._SYNC_OUTPUT.set({"progress": disabled})
+    try:
+        assert core._sync_progress_scan_callback() is None
+    finally:
+        core._SYNC_OUTPUT.reset(tok)
+
+    # Non-terminal -> None
+    enabled = core._SyncProgress(enabled=True, delay=0.0)
+    monkeypatch.setattr(core, "_console_is_terminal", lambda: False)
+    tok = core._SYNC_OUTPUT.set({"progress": enabled})
+    try:
+        assert core._sync_progress_scan_callback() is None
+    finally:
+        core._SYNC_OUTPUT.reset(tok)
+
+    # Active terminal -> callable that isolates set_note errors
+    monkeypatch.setattr(core, "_console_is_terminal", lambda: True)
+
+    def boom(_note: str) -> None:
+        raise RuntimeError("display fault")
+
+    monkeypatch.setattr(enabled, "set_note", boom)
+    tok = core._SYNC_OUTPUT.set({"progress": enabled})
+    try:
+        cb = core._sync_progress_scan_callback()
+        assert callable(cb)
+        cb("claude", "projects/-Users-user-app")
+    finally:
+        core._SYNC_OUTPUT.reset(tok)
+
+
+def test_sync_progress_push_renders_scan_note_and_gates_callback(capture61, monkeypatch):
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(core, "_UPDATE_SPINNER_TICK_SECONDS", 0.0)
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    (memory / "scan_note.md").write_text("scan note content")
+    monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "read_codex_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery((), ()),
+    )
+    seen_callbacks: list[object] = []
+    real_build = cli_module.build_manifest_v2
+
+    def spy_build(*args, **kwargs):
+        if "on_progress" in kwargs:
+            seen_callbacks.append(kwargs["on_progress"])
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "build_manifest_v2", spy_build)
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    with monkeypatch.context() as term_patch:
+        for mod in (cli_module, pullflow, core):
+            term_patch.setattr(
+                mod,
+                "console",
+                Console(file=terminal, force_terminal=True, color_system=None, width=80),
+            )
+        result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Push: 1 content change published; usage published.\n"
+    assert result.stderr == f"mm: notice: {events_tail._CURSOR_HOLD_DEGRADATION}\n"
+    assert len(seen_callbacks) == 1 and callable(seen_callbacks[0])
+    output = terminal.getvalue()
+    positions = [
+        output.index("Scanning sources"),
+        output.index("claude projects/-Users-user-myapp"),
+        output.index("Recording activity"),
+    ]
+    assert positions == sorted(positions)
+
+    # Verbose push, piped push, and autopush pass on_progress=None.
+    seen_callbacks.clear()
+    (memory / "scan_note.md").write_text("scan note v2")
+    with monkeypatch.context() as term_patch:
+        for mod in (cli_module, pullflow, core):
+            term_patch.setattr(
+                mod,
+                "console",
+                Console(
+                    file=_SyncTerminalBuffer(),
+                    force_terminal=True,
+                    color_system=None,
+                    width=80,
+                ),
+            )
+        res_verbose = runner.invoke(app, ["push", "--verbose"])
+    assert res_verbose.exit_code == 0, res_verbose.output
+    assert seen_callbacks == [None]
+
+    seen_callbacks.clear()
+    (memory / "scan_note.md").write_text("scan note v3")
+    res_piped = runner.invoke(app, ["push"])
+    assert res_piped.exit_code == 0, res_piped.output
+    assert seen_callbacks == [None]
+
+    seen_callbacks.clear()
+    (memory / "scan_note.md").write_text("scan note v4")
+    res_auto = runner.invoke(app, ["autopush"])
+    assert res_auto.exit_code == 0, res_auto.output
+    assert seen_callbacks == [None]
+
+
+def test_sync_progress_pull_stays_live_through_post_sync_tail(apply_failure_fleet, monkeypatch):
+    from mind_meld import memoryindex, meshflow, upgrade
+
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(cli_module._config_module, "memory_index_enabled", lambda _cfg: True)
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    fleet = apply_failure_fleet
+    fleet.publish({"tail_pull.md": b"from peer"})
+    pull_states: dict[str, tuple[bool, bool]] = {}
+
+    def record_live(name: str) -> None:
+        prog = core._current_sync_progress()
+        assert prog is not None
+        pull_states[name] = (prog.drawing, prog._stopped)
+
+    def spy_mesh(*args, **kwargs):
+        record_live("mesh")
+        return meshflow.MeshResult()
+
+    def spy_pending(*args, **kwargs):
+        record_live("pending_join")
+
+    def spy_refresh(_cfg):
+        record_live("memory_index")
+        return memoryindex.RefreshResult(status="ok")
+
+    def spy_update(*args, **kwargs):
+        record_live("update")
+
+    monkeypatch.setattr(meshflow, "run", spy_mesh)
+    monkeypatch.setattr(pullflow, "notice_pending_syncthing_join", spy_pending)
+    monkeypatch.setattr(memoryindex, "refresh", spy_refresh)
+    monkeypatch.setattr(upgrade, "update_or_nudge", spy_update)
+
+    pull_term = _SyncTerminalBuffer()
+    with monkeypatch.context() as term_patch:
+        for mod in (cli_module, pullflow, core):
+            term_patch.setattr(
+                mod,
+                "console",
+                Console(file=pull_term, force_terminal=True, color_system=None, width=80),
+            )
+        pull_res = runner.invoke(app, ["pull"])
+    assert pull_res.exit_code == 0, pull_res.output
+    assert pull_res.stdout == "Pull: 1 content change from Mac A.\n"
+    assert pull_res.stderr == ""
+    assert pull_states == {
+        "mesh": (True, False),
+        "pending_join": (True, False),
+        "memory_index": (True, False),
+        "update": (True, False),
+    }
+    pull_out = pull_term.getvalue()
+    assert " · " in pull_out
+    assert "\x1b[?25h" in pull_out
+    pull_positions = [
+        pull_out.index("Applying files"),
+        pull_out.index("Finishing pull"),
+        pull_out.index("Refreshing memory index"),
+        pull_out.index("Checking for updates"),
+    ]
+    assert pull_positions == sorted(pull_positions)
+
+
+def test_sync_progress_push_stays_live_through_post_sync_tail(capture61, monkeypatch):
+    from mind_meld import memoryindex, upgrade
+
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(cli_module._config_module, "memory_index_enabled", lambda _cfg: True)
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    (memory / "tail_push.md").write_text("push tail")
+    monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "read_codex_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery((), ()),
+    )
+    push_states: dict[str, tuple[bool, bool]] = {}
+
+    def spy_push_refresh(_cfg):
+        prog = core._current_sync_progress()
+        assert prog is not None
+        push_states["memory_index"] = (prog.drawing, prog._stopped)
+        return memoryindex.RefreshResult(status="ok")
+
+    def spy_push_update(*args, **kwargs):
+        prog = core._current_sync_progress()
+        assert prog is not None
+        push_states["update"] = (prog.drawing, prog._stopped)
+
+    monkeypatch.setattr(memoryindex, "refresh", spy_push_refresh)
+    monkeypatch.setattr(upgrade, "update_or_nudge", spy_push_update)
+
+    push_term = _SyncTerminalBuffer()
+    with monkeypatch.context() as term_patch:
+        for mod in (cli_module, pullflow, core):
+            term_patch.setattr(
+                mod,
+                "console",
+                Console(file=push_term, force_terminal=True, color_system=None, width=80),
+            )
+        push_res = runner.invoke(app, ["push"])
+    assert push_res.exit_code == 0, push_res.output
+    assert push_states == {
+        "memory_index": (True, False),
+        "update": (True, False),
+    }
+    push_out = push_term.getvalue()
+    assert push_out.index("Refreshing memory index") < push_out.index("Checking for updates")
+
+
 def test_track_125a_attended_pushes_resume_stopped_scans_and_clear_catching_up(
     capture61, monkeypatch
 ):

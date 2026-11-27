@@ -4262,3 +4262,164 @@ class TestSyncUpdateDisplay:
         else:
             assert result.exit_code == 1
             assert not manifest_file.exists()
+
+    def test_update_or_nudge_calls_on_upgrade_available_before_install_or_nudge(
+        self, tmp_path, monkeypatch, pipx_install
+    ):
+        from contextlib import contextmanager
+
+        _setup_real_config(tmp_path, monkeypatch)
+        venv = pipx_install()
+        order: list[str] = []
+
+        @contextmanager
+        def spy_installing(label: str):
+            order.append(f"installing:{label}")
+            yield None
+
+        def run(argv, *, on_output=None):
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="upgraded\n")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        display = upgrade.SyncUpdateDisplay(
+            installing=spy_installing,
+            on_upgrade_available=lambda: order.append("stop_sync"),
+        )
+        upgrade.update_or_nudge({}, attended=True, diagnostics=False, display=display)
+        assert order == ["stop_sync", "installing:Updating mm 1.2.0 → 1.3.0"]
+
+        # Current check: callback not called.
+        order.clear()
+        monkeypatch.setattr(
+            upgrade,
+            "check_for_upgrade",
+            lambda _cfg: upgrade.UpgradeCheckResult(
+                state="current", local="1.3.0", latest="1.3.0", install_cmd=None
+            ),
+        )
+        upgrade.update_or_nudge({}, attended=True, diagnostics=False, display=display)
+        assert order == []
+
+        # Skipped check: callback not called.
+        monkeypatch.setattr(
+            upgrade,
+            "check_for_upgrade",
+            lambda _cfg: upgrade.UpgradeCheckResult(
+                state="skip", local="1.2.0", latest=None, install_cmd=None
+            ),
+        )
+        upgrade.update_or_nudge({}, attended=True, diagnostics=False, display=display)
+        assert order == []
+
+        # Raising callback still proceeds to nudge when non-tracking.
+        monkeypatch.setattr(
+            upgrade,
+            "check_for_upgrade",
+            lambda _cfg: upgrade.UpgradeCheckResult(
+                state="upgrade-available",
+                local="1.2.0",
+                latest="1.3.0",
+                install_cmd=upgrade.INSTALL_CMD,
+                should_nudge=True,
+            ),
+        )
+        monkeypatch.setattr(
+            upgrade,
+            "detect_install",
+            lambda: upgrade.InstallInfo(kind="editable", version="1.2.0"),
+        )
+        nudged: list[str] = []
+        monkeypatch.setattr(
+            upgrade,
+            "_nudge_if_due",
+            lambda res, *, failed_install=False: nudged.append(res.latest or ""),
+        )
+
+        def raising_cb() -> None:
+            order.append("raising_stop")
+            raise RuntimeError("stop fault")
+
+        display_err = upgrade.SyncUpdateDisplay(
+            installing=spy_installing, on_upgrade_available=raising_cb
+        )
+        upgrade.update_or_nudge({}, attended=True, diagnostics=False, display=display_err)
+        assert order == ["raising_stop"]
+        assert nudged == ["1.3.0"]
+
+    @pytest.mark.parametrize("command", ["push", "pull"])
+    def test_terminal_sync_checking_for_updates_hands_off_to_installer(
+        self, tmp_path, monkeypatch, pipx_install, command
+    ):
+        from contextlib import contextmanager
+
+        from mind_meld import core
+
+        _setup_real_config(tmp_path, monkeypatch)
+        venv = pipx_install()
+        monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
+
+        sync_stopped_on_install: list[bool] = []
+        real_installer = core._installer_progress
+
+        @contextmanager
+        def spy_installer(label: str):
+            prog = core._current_sync_progress()
+            sync_stopped_on_install.append(prog is not None and prog._stopped)
+            with real_installer(label) as cb:
+                yield cb
+
+        monkeypatch.setattr(core, "_installer_progress", spy_installer)
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            on_output("Downloading mind-meld\n133.4/784.7 kB\r")
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="upgraded\n")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        assert sync_stopped_on_install == [True]
+        term_out = terminal.getvalue()
+        assert term_out.index("Checking for updates") < term_out.index("Updating mm 1.2.0 → 1.3.0")
+        assert "17.0%" in term_out
+        lines = result.stdout.splitlines()
+        assert lines[-1] == "Updated mm 1.2.0 → 1.3.0."
+
+    def test_terminal_pull_non_tracking_stops_spinner_before_nudge(self, tmp_path, monkeypatch):
+        from mind_meld import core
+
+        _setup_real_config(tmp_path, monkeypatch)
+        _set_version(monkeypatch, "1.2.0")
+        _stub_tags(monkeypatch, ["v1.3.0"])
+        monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        term_console = Console(file=terminal, force_terminal=True, color_system=None, width=80)
+        monkeypatch.setattr("mind_meld.cli.console", term_console)
+        monkeypatch.setattr("mind_meld.core.console", term_console)
+        monkeypatch.setattr(
+            upgrade,
+            "detect_install",
+            lambda: upgrade.InstallInfo(kind="editable", version="1.2.0"),
+        )
+        sync_stopped_on_nudge: list[bool] = []
+        real_nudge = upgrade._nudge_if_due
+
+        def spy_nudge(res, *, failed_install=False):
+            prog = core._current_sync_progress()
+            sync_stopped_on_nudge.append(prog is not None and prog._stopped)
+            return real_nudge(res, failed_install=failed_install)
+
+        monkeypatch.setattr(upgrade, "_nudge_if_due", spy_nudge)
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, result.output
+        assert sync_stopped_on_nudge == [True]
+        assert "1.3.0" in result.stderr
+        assert "Pull: no peer devices.\n" == result.stdout

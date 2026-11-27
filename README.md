@@ -1194,13 +1194,19 @@ helpers use them:
 - **Fix command:** `Run: <command>` on its own last line after an error, or ending a one-line warning, notice, or status verdict; CLI usage errors exit **2** with `Run: <command path> --help` instead of a Rich panel.
 
 In an interactive terminal without `--verbose` or `--dry-run`, `mm push` and
-`mm pull` show a transient spinner with live phase labels and progress counters.
-Attended `mm push` shows per-phase counts and elapsed time (`Reading Codex usage
-41/159 · 2.1s`, `Discovering repositories 3/6 · 0.4s`, `Uploading files 50.0%
-1/2 files · 0.2s`), while `mm pull` shows manifest and file counters (`Reading
-peer manifests 50.0% 1/2 manifests`, `Applying files 50.0% 1/2 files` per source
-batch). The spinner pauses cleanly for mid-run warnings or conflict prompts on
-the push/pull paths and clears before the final outcome lines. A successful
+`mm pull` show a transient spinner with live phase labels, progress counters,
+and per-phase elapsed time (`· <elapsed>s`). Attended `mm push` names the
+source and project while scanning (`Scanning sources claude
+projects/-Users-user-myapp · 0.3s`), then shows per-phase counts and elapsed
+time (`Reading Codex usage 41/159 · 2.1s`, `Discovering repositories 3/6 ·
+0.4s`, `Uploading files 50.0% 1/2 files · 0.2s`), while `mm pull` shows
+manifest and file counters with elapsed time (`Reading peer manifests 50.0%
+1/2 manifests · 0.2s`, `Applying files 50.0% 1/2 files · 0.4s` per source
+batch) and keeps its progress live through finishing, Syncthing fleet checks,
+memory-index refresh, and the release check until the final outcome lines
+print. The spinner pauses cleanly for mid-run warnings or conflict prompts on
+the push/pull paths, hands off cleanly to the installer spinner if an automatic
+update runs, and clears before the final outcome lines. A successful
 `mm push --verbose` prints a `Phase timings:` block before the `Push:`
 outcome lines. Each recorded phase shows elapsed milliseconds and, when
 applicable, its allowance. `mm update` and an

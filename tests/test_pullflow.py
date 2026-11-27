@@ -5223,3 +5223,79 @@ def test_multi_source_applied_counts_aggregate_per_peer_device(fleet, monkeypatc
     assert result.total_applied == 3
     assert result.applied_by_device == {PEER: pullflow.AppliedPeer("Peer B", 3)}
     assert pullflow.applied_clause(result) == "3 content changes from Peer B"
+
+
+def test_pull_core_finishing_phase_pauses_summary_and_stops_on_error(fleet, monkeypatch):
+    from contextlib import contextmanager
+
+    _seed(fleet, {"note.md": b"from peer\n"})
+    events: list[str] = []
+
+    class RecordingProgress(core._SyncProgress):
+        def set_phase(self, phase: str) -> None:
+            events.append(f"phase:{phase}")
+            super().set_phase(phase)
+
+        def start_batch(self, phase: str, total: int, unit: str) -> None:
+            events.append(f"batch:{phase}")
+            super().start_batch(phase, total, unit)
+
+        @contextmanager
+        def paused(self):
+            events.append("pause:enter")
+            try:
+                yield
+            finally:
+                events.append("pause:exit")
+
+        def stop(self) -> None:
+            events.append("stop")
+            super().stop()
+
+    real_summary = pullflow._print_pull_summary
+
+    def spy_summary(*args, **kwargs):
+        events.append("summary")
+        return real_summary(*args, **kwargs)
+
+    monkeypatch.setattr(pullflow, "_print_pull_summary", spy_summary)
+
+    # Normal completion: Finishing pull follows Applying files, summary is paused, stop not called.
+    prog = RecordingProgress(enabled=True, delay=0.0, include_elapsed=True)
+    tok = core._SYNC_OUTPUT.set({"verbose": False, "diagnostics": [], "progress": prog})
+    try:
+        result = pullflow._pull_core(fleet.config, PASSPHRASE, MEMORY_KB)
+    finally:
+        core._SYNC_OUTPUT.reset(tok)
+    assert result.total_written == 1
+    assert "stop" not in events
+    summary_idx = events.index("summary")
+    assert events.index("batch:Applying files") < events.index("phase:Finishing pull") < summary_idx
+    assert events[summary_idx - 1] == "pause:enter"
+    assert events[summary_idx + 1] == "pause:exit"
+
+    # Exception in flight: stop runs before summary and original RuntimeError propagates.
+    events.clear()
+    _seed(fleet, {"note.md": b"from peer v2\n"})
+
+    def fail_tidy(*_a, **_kw):
+        raise RuntimeError("boom")
+
+    with monkeypatch.context() as err_patch:
+        err_patch.setattr(pullflow, "_tidy_line_indexes", fail_tidy)
+        prog_err = RecordingProgress(enabled=True, delay=0.0, include_elapsed=True)
+        tok = core._SYNC_OUTPUT.set({"verbose": False, "diagnostics": [], "progress": prog_err})
+        try:
+            with pytest.raises(RuntimeError, match="boom"):
+                pullflow._pull_core(fleet.config, PASSPHRASE, MEMORY_KB)
+        finally:
+            core._SYNC_OUTPUT.reset(tok)
+    assert "stop" in events
+    assert events.index("stop") < events.index("summary")
+
+    # No _SYNC_OUTPUT (autopull shape): behaves identically without error.
+    _seed(fleet, {"note.md": b"from peer v3\n"})
+    res_auto, _, (out_auto, err_auto) = _run(fleet, monkeypatch, "quiet")
+    assert res_auto.total_written == 1
+    assert out_auto == ""
+    assert err_auto == ""
