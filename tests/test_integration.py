@@ -17494,6 +17494,30 @@ def test_sync_progress_update_phase_interrupt_keeps_success(
     assert result.stdout.startswith(f"{verb.title()}:")
 
 
+def test_sync_progress_first_update_frame_interrupt_restores_cursor(
+    sync_progress_terminal, monkeypatch, capsys
+):
+    real_start = core.Progress.start
+
+    def interrupt_after_start(display):
+        real_start(display)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(core.Progress, "start", interrupt_after_start)
+    monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", lambda *a, **kw: None)
+    with cli_module._sync_outcome("push", verbose=False, dry_run=False):
+        progress = core._current_sync_progress()
+        assert progress is not None
+        progress._started_at = core.time.monotonic()
+        cli_module._sync_update({}, verbose=False)
+
+    assert capsys.readouterr().out.startswith("Push:")
+    terminal = sync_progress_terminal.getvalue()
+    assert "\x1b[?25l" in terminal
+    assert "\x1b[?25h" in terminal
+    assert not core.console._live_stack
+
+
 def test_sync_progress_plain_pull_skips_empty_join_pause(
     status77, sync_progress_terminal, monkeypatch
 ):

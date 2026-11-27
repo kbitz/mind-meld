@@ -2804,12 +2804,7 @@ class _SyncProgress:
     def _can_draw(self) -> bool:
         # A closed/replaced stdout makes isatty() raise; that is a display
         # failure, never a sync failure.
-        return (
-            self._enabled
-            and not self._stopped
-            and _console_is_terminal()
-            and not console.is_dumb_terminal
-        )
+        return self._enabled and not self._stopped and _console_is_terminal()
 
     def _delay_elapsed_locked(self) -> bool:
         delay = _SYNC_PROGRESS_DELAY_SECONDS if self._delay is None else self._delay
@@ -2849,12 +2844,14 @@ class _SyncProgress:
         task = progress.add_task(self._state.phase, total=1, detail=detail)
         try:
             progress.start()
-        except (Exception, SystemExit):
+        except (Exception, SystemExit, KeyboardInterrupt) as exc:
             with suppress(Exception, SystemExit):
                 progress.stop()
             with suppress(Exception, SystemExit):
                 console.show_cursor(True)  # A failed start can skip Rich's own restore.
             self._enabled = False
+            if isinstance(exc, KeyboardInterrupt):
+                raise
             return False
         self._progress = progress
         self._task = task

@@ -1283,7 +1283,10 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     if dry_run:
         yield
         return
-    progress = core._SyncProgress(enabled=not verbose, include_elapsed=True)
+    progress = core._SyncProgress(
+        enabled=not verbose and not console.is_dumb_terminal,
+        include_elapsed=True,
+    )
     state = {"verbose": verbose, "diagnostics": events_tail.Degradations(), "progress": progress}
     token = core._SYNC_OUTPUT.set(state)
     error = None
