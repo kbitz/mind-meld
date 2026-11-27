@@ -708,28 +708,27 @@ def _run_inner(
     retirements_complete = retirements_listed and not (
         retirements.unreadable or retirements.vanished or retirements.newer_format
     )
+    join_scope = (
+        set(other_vouched)
+        if joining
+        else {records.by_mm_id[peer_id] for peer_id in known_join_peers & records.by_mm_id.keys()}
+    )
     if folder_ok:
-        pairable = set(other_vouched)
-        if initiating:
-            if not retirements_complete:
-                pairable.clear()
-            else:
-                pairable = {
-                    st_id
-                    for st_id, (mm_id, _) in other_vouched.items()
-                    if st_id not in retirements.by_syncthing_id
-                    and mm_id not in retirements.records
-                    and st_id not in snap.other_folder_device_ids
-                }
-        if joining:
-            potential_adds = sorted(pairable)
-        elif known_join_peers:
-            saved_peers = {
-                records.by_mm_id[peer_id] for peer_id in known_join_peers & records.by_mm_id.keys()
-            }
-            potential_adds = sorted(set(snap.pending_ids) | saved_peers)
-        else:
-            potential_adds = snap.pending_ids
+        ordinary_peers = set(other_vouched) - join_scope
+        join_peers = {
+            st_id
+            for st_id, (mm_id, _) in other_vouched.items()
+            if st_id in join_scope
+            and retirements_complete
+            and st_id not in retirements.by_syncthing_id
+            and mm_id not in retirements.records
+            and st_id not in snap.other_folder_device_ids
+        }
+        pairable = ordinary_peers | join_peers
+        potential_adds = [
+            *(st_id for st_id in snap.pending_ids if st_id in ordinary_peers),
+            *sorted(join_peers),
+        ]
         for dev_id in potential_adds:
             if dev_id not in pairable or dev_id == snap.my_id or dev_id in snap.devices:
                 continue
@@ -749,6 +748,7 @@ def _run_inner(
             if cdev is None or not cdev.writer_shape or cdev.paused:
                 continue
             candidates.append((dev_id, [("sharing the fleet folder", "share_folder")]))
+        candidates.sort(key=lambda candidate: candidate[0] in join_scope)
 
     # 1b. Plan stale introducer-flag clears (only when fleet folder is valid)
     introducer_clears: list[str] = []
@@ -988,7 +988,9 @@ def _run_inner(
             )
             if op_name == "add_device":
                 w_res = step_writer.add_device(
-                    dev_id, name=peer_target_name, join_path=storage_root if initiating else None
+                    dev_id,
+                    name=peer_target_name,
+                    join_path=storage_root if dev_id in join_scope else None,
                 )
             else:
                 w_res = step_writer.share_folder(

@@ -1866,7 +1866,9 @@ def test_authenticated_init_pull_initiates_only_vouched_active_peers(
     assert "Syncthing now shares" in result.output
 
 
-@pytest.mark.parametrize("interruption", ["config-unavailable", "record-in-flight"])
+@pytest.mark.parametrize(
+    "interruption", ["config-unavailable", "record-in-flight", "other-knocker"]
+)
 def test_initialized_joiner_retries_known_peers_on_later_pull(
     fake_syncthing, tmp_path, monkeypatch, interruption
 ):
@@ -1876,14 +1878,25 @@ def test_initialized_joiner_retries_known_peers_on_later_pull(
     config.patch_config_on_disk(
         {"device": {"syncthing_join_device": my_id, "syncthing_join_peers": ["dev-b"]}}
     )
-    if interruption == "config-unavailable":
+    if interruption != "record-in-flight":
         devices.publish_record(backend, "dev-b", peer_id, PASSPHRASE, TEST_MEMORY_KB)
         fake_syncthing.responses["/rest/config"] = 503
+    if interruption == "other-knocker":
+        other = _valid_syncthing_id("C")
+        register_device(backend, "dev-c", "mac-c")
+        devices.publish_record(backend, "dev-c", other, PASSPHRASE, TEST_MEMORY_KB)
+        fake_syncthing.responses["/rest/cluster/pending/devices"] = {other: {"name": "mac-c"}}
 
     first = runner.invoke(app, ["pull"])
 
     assert first.exit_code == 0, first.output
-    assert fake_syncthing.bodies == []
+    if interruption == "other-knocker":
+        assert [
+            body["deviceID"] for method, _, body in fake_syncthing.bodies if method == "POST"
+        ] == [other]
+    else:
+        assert fake_syncthing.bodies == []
+    fake_syncthing.bodies.clear()
     assert config.load_config()["device"]["syncthing_join_peers"] == ["dev-b"]
     if interruption == "record-in-flight":
         devices.publish_record(backend, "dev-b", peer_id, PASSPHRASE, TEST_MEMORY_KB)
