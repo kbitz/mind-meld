@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.91] - 2026-11-27
+
+Version 1.12.91 prices unambiguous retro-fleet vendor model aliases as disclosed estimates and needs a skill refresh after upgrading.
+
+### Changed
+
+- `mm retro-fleet` now prices unambiguous single-tier vendor model aliases (such as `gemini-pro-orchestrator-neon` and `gemini-flash-worker-agy`) as disclosed family-extrapolated `~` estimates naming each mapped target rate card in `MM_HEALTH` `pricing_extrapolated`, and `/retro-fleet` allows disclosed unverified `~` alias mapping for unambiguous unpriced IDs without persisting inferred overrides.
+- Retro-fleet now prices unambiguous OpenAI, Gemini, and Muse aliases as unverified estimates and names their bundled rate card in `MM_HEALTH`.
+- The bundled skill can report a separate alias estimate from documented rates and model-specific token counts while preserving the CLI cost.
+
+### Upgrade notes
+
+- Run `mm install-skills` and restart your agent after upgrading so `/retro-fleet` loads the updated `SKILL.md` alias-judgment rules.
+
 ## [1.12.90] - 2026-11-25
 
 Version 1.12.90 keeps mind-meld commands, skills, and upgrade behavior as they are.
