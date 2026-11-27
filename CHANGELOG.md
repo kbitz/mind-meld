@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.93] - 2026-11-27
+
+Version 1.12.93 stops managed Syncthing from marking fleet peers as introducers and clears flags that earlier releases set, so mutual-introducer warnings can stop once every managed machine has upgraded and synced.
+
+### Changed
+
+- On machines where `mm` manages Syncthing, `mm init`, `mm devices approve` and the sync mesh step no longer mark fleet peers as Syncthing introducers, and the next `mm push` or `mm pull` clears introducer flags that earlier releases set on fleet peers, so Syncthing stops warning about mutual introducers.
+- Managed Syncthing joins connect to vouched fleet peers after one approval without setting introducer flags.
+
+### Fixed
+
+- Managed sync clears stale introducer flags on fleet-only peers and reports confirmed clears even when a pull is incomplete.
+
+### Upgrade notes
+
+- A machine where `mm` manages Syncthing keeps its introducer flags, and keeps setting them on peers it pairs, until it upgrades and runs `mm push` or `mm pull`, so the warnings stop across the fleet only after every such machine has upgraded.
+
 ## [1.12.92] - 2026-11-27
 
 Version 1.12.92 keeps attended sync progress visible until the outcome prints, with elapsed time on pull and each source and project named on push.
