@@ -1310,8 +1310,14 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
         with suppress(Exception, SystemExit):
             print(_compact_sync_trace(error), file=sys.stderr)
     update = state.get("update")
+    mesh_result = state.get("mesh_result")
     if failed:
         _emit_update_lines(update)
+        if mesh_result is not None and mesh_result.cleared:
+            _emit_sync_outcome(
+                (outputstyle._outcome_line(verb, clause) for clause in mesh_result.clear_clauses),
+                failed=False,
+            )
         _emit_sync_outcome(_sync_failure(verb, state, error), failed=True)
     else:
         if verb == "push" and not verbose:
@@ -1330,12 +1336,10 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
                 for timing_line in pushtimings.format_verbose_timings(phases):
                     console.print(timing_line, markup=False)
         lines = _sync_success(verb, result)
-        mesh_outcomes = state.get("mesh_outcomes")
-        if mesh_outcomes:
-            for mesh_clause in mesh_outcomes:
-                lines.append(outputstyle._outcome_line(verb, mesh_clause))
-        elif mesh_clause := state.get("mesh_outcome"):
-            lines.append(outputstyle._outcome_line(verb, mesh_clause))
+        if mesh_result is not None:
+            lines.extend(
+                outputstyle._outcome_line(verb, clause) for clause in mesh_result.outcome_clauses
+            )
         _emit_sync_outcome(lines, failed=False)
         _emit_update_lines(update)
     if isinstance(error, typer.Exit) and error.exit_code == 3:

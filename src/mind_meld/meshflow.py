@@ -70,8 +70,7 @@ def format_outcome_clauses(mesh_result: MeshResult) -> list[str]:
     clauses: list[str] = []
     if mesh_result.shared:
         clauses.append(format_share_summary(mesh_result.shared))
-    for safe_name, st_id in mesh_result.cleared:
-        clauses.append(f"Syncthing cleared the introducer flag on {safe_name} ({st_id[:7]})")
+    clauses.extend(mesh_result.clear_clauses)
     for safe_name, st_id in mesh_result.removed:
         clauses.append(f"Syncthing removed retired device {safe_name} ({st_id[:7]})")
     for safe_name, st_id, is_own in mesh_result.renamed:
@@ -114,10 +113,7 @@ def compose_hook_breadcrumb(
         parts.append(share_summary)
         remaining -= len(share_summary) + 2
     tail_clauses = [
-        *(
-            f"Syncthing cleared the introducer flag on {safe_name} ({st_id[:7]})"
-            for safe_name, st_id in mesh_result.cleared
-        ),
+        *mesh_result.clear_clauses,
         *(
             f"Syncthing removed retired device {safe_name} ({st_id[:7]})"
             for safe_name, st_id in mesh_result.removed
@@ -183,6 +179,13 @@ class MeshResult:
     @property
     def shared_clause(self) -> str:
         return format_share_summary(self.shared)
+
+    @property
+    def clear_clauses(self) -> list[str]:
+        return [
+            f"Syncthing cleared the introducer flag on {safe_name} ({st_id[:7]})"
+            for safe_name, st_id in self.cleared
+        ]
 
     @property
     def outcome_clauses(self) -> list[str]:
@@ -365,13 +368,8 @@ def run(
             pass
         else:
             result.removal_waits_recorded = True
-    if attended:
-        clauses = result.outcome_clauses
-        if clauses:
-            state = core._SYNC_OUTPUT.get()
-            if state is not None:
-                state["mesh_outcome"] = clauses[0]
-                state["mesh_outcomes"] = clauses
+    if attended and (state := core._SYNC_OUTPUT.get()) is not None:
+        state["mesh_result"] = result
     return result
 
 

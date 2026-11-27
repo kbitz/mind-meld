@@ -64,7 +64,9 @@ one `outputstyle._outcome_line(verb, part)` (`<Verb>: <part>.`) on stdout per th
 that happened; on failed/incomplete/interrupted/refused, `_sync_failure` returns
 two lines on stderr (`outputstyle._error_line(...)` followed by `outputstyle._fix_line(...)`,
 i.e., `mm: error: <Verb> <state> [<cause>]: ...` and `Run: <command>` on its own
-last line). Default and verbose share its grammar.
+last line). A confirmed Syncthing introducer clear is printed on stdout even
+when the sync reports a failure, before the two failure lines. Default and
+verbose share the same grammar.
 Flush stdout and stderr before that write, then flush its stream. Delivery to
 a broken pipe is not guaranteed; reporting failure never retries sync or undoes
 known effects. Auth/migration/conflict prompts and read-only previews keep their

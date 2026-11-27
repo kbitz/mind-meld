@@ -1793,6 +1793,31 @@ def test_compose_hook_breadcrumb_several_omitted_details_keeps_priority_and_stat
     assert f"(degraded: {crumb['detail']})" in flat
 
 
+def test_attended_partial_pull_reports_confirmed_introducer_clear(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    storage_dir, backend, _my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    peer_id = _valid_syncthing_id("B")
+    register_device(backend, "dev-b", "mac-b")
+    devices.publish_record(backend, "dev-b", peer_id, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.set_folder(storage_dir, peers=[(peer_id, "mac-b", True)])
+    fake_syncthing.responses["/rest/config/devices"][1]["introducer"] = True
+    monkeypatch.setattr(
+        cli.pullflow, "_pull_core", lambda *args, **kwargs: cli.pullflow.PullResult(total_failed=1)
+    )
+
+    result = runner.invoke(app, ["pull"])
+
+    assert result.exit_code == 1
+    assert fake_syncthing.bodies == [
+        ("PATCH", f"/rest/config/devices/{peer_id}", {"introducer": False})
+    ]
+    clear_line = f"Pull: Syncthing cleared the introducer flag on mac-b ({peer_id[:7]})."
+    assert result.stdout.splitlines().count(clear_line) == 1
+    assert result.output.index(clear_line) < result.output.index("Pull incomplete")
+    assert result.output.splitlines()[-1] == "Run: mm diag"
+
+
 def test_mesh_clears_stale_introducer_flags_on_fleet_peers_only(
     fake_syncthing, tmp_path, monkeypatch
 ):
