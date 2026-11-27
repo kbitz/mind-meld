@@ -906,6 +906,31 @@ class TestCodexMemoryPullAndConfinement:
         env.pull(DEV_B)
         assert not expired.exists()
 
+    def test_last_retired_peer_cleanup_shows_finishing_phase(self, tmp_path, monkeypatch):
+        env = _MultiDeviceCodexMemoryEnv(
+            tmp_path, monkeypatch, ((DEV_A, "Mac A"), (DEV_B, "Linux B"))
+        )
+        source = env.devices[DEV_A].codex / "memories_v2"
+        source.mkdir()
+        (source / "MEMORY.md").write_text("last peer memory\n")
+        env.push(DEV_A)
+        env.pull(DEV_B)
+        devicesflow.retire(DEV_A, yes=True)
+        phases = []
+        cleanup_phases = []
+        cleanup = pullflow._gc_pull_recovery_copies
+
+        def record_cleanup():
+            cleanup_phases.append(phases[-1])
+            return cleanup()
+
+        monkeypatch.setattr(core, "_sync_progress_phase", phases.append)
+        monkeypatch.setattr(pullflow, "_gc_pull_recovery_copies", record_cleanup)
+        result = env.pull(DEV_B)
+
+        assert result.retired_copies_removed == 1
+        assert cleanup_phases == ["Finishing pull"]
+
     def test_edited_copy_conflict_found_by_resolveflow_and_mm_events_ignores_copies(
         self, tmp_path, monkeypatch
     ):

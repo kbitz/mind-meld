@@ -1790,9 +1790,10 @@ KeyboardInterrupt (which still propagate). Empty batches never connect.
 autopush, recapture) is one batch, so per-source upload batches join it.
 A failed flush drops its buffer without retry. `command_scope`, entered before
 config/transition handling, skips every later history write and recovery after
-the first failure: at most one busy timeout per command. Attended push/pull/
-recapture print one plain `mm: notice: history not recorded ...` line; auto commands stay
-silent. History swallows Exception only; the pytest write guard and other
+the first failure: at most one busy timeout per command. Attended push, pull
+and recapture print one plain `mm: notice: history not recorded ...` line. Push
+and pull supply `pause_output=core._pause_sync_progress` so it prints clear of
+the transient line. Auto commands stay silent. History swallows Exception only; the pytest write guard and other
 BaseExceptions propagate. Nothing new is persisted for failure reporting.
 
 Retention keeps the newest 20,000 ids **per known (verb, action) class**, NULL

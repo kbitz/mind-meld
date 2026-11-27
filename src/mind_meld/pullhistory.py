@@ -7,7 +7,8 @@ correctness; buffers lost to a failed flush are dropped, never replayed.
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
+from collections.abc import Callable
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -153,8 +154,12 @@ def failed() -> bool:
 
 
 @contextmanager
-def command_scope(*, attended=False):
-    """One failure budget, entered before configuration/transition handling."""
+def command_scope(
+    *,
+    attended=False,
+    pause_output: Callable[[], AbstractContextManager[None]] = nullcontext,
+):
+    """One failure budget, with an optional pause around the attended notice."""
     state = _Command()
     token = _command.set(state)
     try:
@@ -166,9 +171,11 @@ def command_scope(*, attended=False):
             import typer
 
             try:
-                typer.echo(
-                    safety.safe_terminal_str(explain(HistoryNotRecorded(state.failure))), err=True
-                )
+                with pause_output():
+                    typer.echo(
+                        safety.safe_terminal_str(explain(HistoryNotRecorded(state.failure))),
+                        err=True,
+                    )
             except OSError:
                 pass
 

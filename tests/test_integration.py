@@ -17424,6 +17424,122 @@ def test_sync_progress_push_stays_live_through_post_sync_tail(capture61, monkeyp
     assert push_out.index("Refreshing memory index") < push_out.index("Checking for updates")
 
 
+@pytest.fixture
+def sync_progress_terminal(monkeypatch):
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(core, "_SYNC_PROGRESS_DELAY_SECONDS", 0.0)
+    for module in (cli_module, core, pullflow):
+        monkeypatch.setattr(
+            module,
+            "console",
+            Console(file=terminal, force_terminal=True, color_system=None, width=80),
+        )
+    return terminal
+
+
+@pytest.mark.parametrize("verb", ["push", "pull"])
+def test_sync_progress_tail_notices_clear_live_line(
+    status77, sync_progress_terminal, monkeypatch, verb
+):
+    from mind_meld import meshflow, pullhistory, safety, statedb
+
+    live_notices: list[bool] = []
+    real_format = safety.safe_terminal_str
+
+    def observe_notice(value):
+        if str(value).startswith(
+            ("mm: notice: history not recorded", "mm: notice [run-evidence-write-unavailable]")
+        ):
+            progress = core._current_sync_progress()
+            assert progress is not None and progress._progress is not None
+            live_notices.append(progress._progress.live.is_started)
+        return real_format(value)
+
+    def mesh(*args, **kwargs):
+        pullhistory.record_failure(statedb.StateDBBusy("SQLITE_BUSY"))
+        return meshflow.MeshResult()
+
+    def fail_record(*args, **kwargs):
+        raise OSError(5, "fixture write failure")
+
+    monkeypatch.setattr(safety, "safe_terminal_str", observe_notice)
+    monkeypatch.setattr(meshflow, "run", mesh)
+    monkeypatch.setattr(cli_module.attemptlog, "write_run", fail_record)
+    monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", lambda *a, **kw: None)
+    result = runner.invoke(app, [verb])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith(f"{verb.title()}:")
+    assert result.stderr.count("history not recorded") == 1
+    assert result.stderr.count("run-evidence-write-unavailable") == 1
+    assert live_notices == [False, False]
+
+
+@pytest.mark.parametrize("verb", ["push", "pull"])
+def test_sync_progress_update_phase_interrupt_keeps_success(
+    status77, sync_progress_terminal, monkeypatch, verb
+):
+    phase = core._sync_progress_phase
+
+    def report(label):
+        if label == "Checking for updates":
+            raise KeyboardInterrupt
+        return phase(label)
+
+    monkeypatch.setattr(core, "_sync_progress_phase", report)
+    result = runner.invoke(app, [verb])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith(f"{verb.title()}:")
+
+
+def test_sync_progress_plain_pull_skips_empty_join_pause(
+    status77, sync_progress_terminal, monkeypatch
+):
+    from contextlib import contextmanager
+
+    from mind_meld import meshflow
+
+    pending_checked = False
+    tail_pauses = []
+    real_paused = core._SyncProgress.paused
+
+    def pending(*args, **kwargs):
+        nonlocal pending_checked
+        pending_checked = True
+
+    @contextmanager
+    def record_pause(self):
+        if pending_checked:
+            tail_pauses.append(self._state.phase)
+        with real_paused(self):
+            yield
+
+    monkeypatch.setattr(core._SyncProgress, "paused", record_pause)
+    monkeypatch.setattr(meshflow, "run", lambda *a, **kw: meshflow.MeshResult())
+    monkeypatch.setattr(pullflow, "notice_pending_syncthing_join", pending)
+    monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", lambda *a, **kw: None)
+    result = runner.invoke(app, ["pull"])
+
+    assert result.exit_code == 0, result.output
+    assert pending_checked
+    assert tail_pauses == []
+
+
+def test_sync_progress_dumb_terminal_has_only_outcome(
+    status77, sync_progress_terminal, monkeypatch
+):
+    monkeypatch.setenv("TERM", "dumb")
+    monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", lambda *a, **kw: None)
+    result = runner.invoke(app, ["pull"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Pull: no peer devices.\n"
+    assert result.stderr == ""
+    assert sync_progress_terminal.getvalue() == ""
+
+
 def test_track_125a_attended_pushes_resume_stopped_scans_and_clear_catching_up(
     capture61, monkeypatch
 ):

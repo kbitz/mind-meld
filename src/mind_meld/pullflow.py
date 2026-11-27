@@ -4136,15 +4136,13 @@ def _wait_for_syncthing_delivery(
         )
         deadline = _delivery_now() + wait_ms / 1000.0
         # Verbose pulls skip the usual spinner. Give just this wait its own phase.
-        progress = (
-            core._SyncProgress(enabled=True, delay=0.0, include_elapsed=True)
-            if verbose and wait_ms
-            else None
-        )
+        progress = core._SyncProgress(enabled=True, delay=0.0) if verbose and wait_ms else None
         show_phase = progress.start if progress is not None else core._sync_progress_phase
-        active_progress = progress if progress is not None else core._current_sync_progress()
+        active_progress = core._current_sync_progress() if not verbose else None
         hold_timer = (
-            active_progress.hold_phase_timer() if active_progress is not None else nullcontext()
+            active_progress.hold_phase_timer()
+            if active_progress is not None and _delivery_now() < deadline
+            else nullcontext()
         )
         try:
             with hold_timer:
@@ -4318,6 +4316,7 @@ def _pull_core(
             ):
                 # The last peer can retire, leaving nobody to pull from. The
                 # recovery folders still expire on later Codex memory pulls.
+                core._sync_progress_phase("Finishing pull")
                 recovery_cleanup_failures = _gc_pull_recovery_copies()
                 retired_touched: set[Path] = set()
                 retired_removed, retired_names, retired_folder, retirement_failures = (

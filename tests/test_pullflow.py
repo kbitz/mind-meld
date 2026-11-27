@@ -5299,3 +5299,52 @@ def test_pull_core_finishing_phase_pauses_summary_and_stops_on_error(fleet, monk
     assert res_auto.total_written == 1
     assert out_auto == ""
     assert err_auto == ""
+
+
+def test_syncthing_delivery_verbose_wait_keeps_original_label(fleet, fake_syncthing, monkeypatch):
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    output = Terminal()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        core, "console", Console(file=output, force_terminal=True, color_system=None, width=80)
+    )
+    fake_syncthing.set_folder(fleet.backend.root, state="syncing", need_files=2)
+    now = [20.0]
+
+    def complete_delivery(seconds):
+        now[0] += seconds
+        fake_syncthing.set_folder(fleet.backend.root, state="idle", need_files=0)
+
+    monkeypatch.setattr(pullflow, "_delivery_now", lambda: now[0])
+    monkeypatch.setattr(pullflow, "_delivery_sleep", complete_delivery)
+    assert pullflow._wait_for_syncthing_delivery(fleet.config, mode="wait", verbose=True) == (
+        False,
+        None,
+    )
+    assert "Waiting for Syncthing to deliver 2 files" in output.getvalue()
+    assert " · " not in output.getvalue()
+
+
+def test_syncthing_delivery_zero_wait_keeps_previous_phase_clock(
+    fleet, fake_syncthing, monkeypatch
+):
+    fleet.config["sync"]["pull_syncthing_wait_ms"] = 0
+    fake_syncthing.set_folder(fleet.backend.root, state="syncing", need_files=2)
+    now = [20.0]
+    monkeypatch.setattr(core.time, "monotonic", lambda: now[0])
+    progress = core._SyncProgress(enabled=False, include_elapsed=True)
+    progress.set_phase("Unlocking storage")
+    now[0] += 1
+
+    token = core._SYNC_OUTPUT.set({"progress": progress})
+    try:
+        assert pullflow._wait_for_syncthing_delivery(fleet.config, mode="wait", verbose=False) == (
+            True,
+            2,
+        )
+    finally:
+        core._SYNC_OUTPUT.reset(token)
+    assert progress._format_detail_locked(progress._state, now[0]) == "· 1.0s"

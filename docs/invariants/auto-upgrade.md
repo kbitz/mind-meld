@@ -24,13 +24,16 @@ Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updatep
 
 Attended non-preview push/pull defer their terminal outcome lines until capture
 receipt, unlock, eligible update, history command_scope notice and attended run
-record/notice have finished. On a real terminal without `--verbose`
+record/notice have finished. History and run-evidence notices pause the sync
+spinner for their plain stderr output. On a real terminal without `--verbose`
 (`core._console_is_terminal()`), `_sync_update` sets the sync progress phase to
 `Checking for updates` and passes
-`SyncUpdateDisplay(installing=core._installer_progress, on_upgrade_available=core._stop_sync_progress)` to `update_or_nudge`:
-when a newer release is found, `on_upgrade_available` stops the sync spinner
-before any installer display or nudge prints, then a foreground install shows `Updating mm <old> → <new>` and installer phases in
-the shared transient `_SyncProgress`, then `_emit_update_lines` prints
+`SyncUpdateDisplay(installing=core._installer_progress, on_upgrade_available=core._stop_sync_progress)` to `update_or_nudge`.
+The phase redraw shares the update check's best-effort error and interrupt
+boundary. When a newer release is found, `on_upgrade_available` stops the sync
+spinner before any installer display or nudge prints. A foreground install shows
+`Updating mm <old> → <new>` and installer phases in the shared transient
+`_SyncProgress`. Then `_emit_update_lines` prints
 `Updated mm <old> → <new>.` on stdout or
 `mm: notice: automatic update to <new> did not complete (<reason>). Run: mm update`
 on stderr (`reason` sanitized with `safety.safe_terminal_str`) after a successful

@@ -1212,9 +1212,9 @@ outcome lines. Each recorded phase shows elapsed milliseconds and, when
 applicable, its allowance. `mm update` and an
 automatic update during an attended terminal `mm push` or `mm pull` share the
 same transient spinner (`Updating mm <old> → <new>`, then installer phases and
-counters). Redirected output (even with `FORCE_COLOR`), `--dry-run`, `autopush`,
-and `autopull` omit the spinner. A verbose terminal pull shows it during a
-Syncthing delivery wait.
+counters). Redirected output (even with `FORCE_COLOR`), dumb terminals,
+`--dry-run`, `autopush`, and `autopull` omit the spinner. A verbose interactive
+pull shows a standalone spinner during a Syncthing delivery wait.
 
 Default and verbose commands end with the same final outcome lines; a narrow
 terminal may wrap a line visually. Success is on stdout, failure on stderr.

@@ -986,19 +986,17 @@ def _sync_memory_index(config: dict) -> None:
 def _sync_update(config: dict, *, verbose: bool) -> None:
     state = core._SYNC_OUTPUT.get()
     display: upgrade.SyncUpdateDisplay | None = None
-    if isinstance(state, dict) and not verbose and core._console_is_terminal():
-        display = upgrade.SyncUpdateDisplay(
-            installing=core._installer_progress,
-            on_upgrade_available=core._stop_sync_progress,
-        )
-        state["update"] = display
-        core._sync_progress_phase("Checking for updates")
-    else:
-        core._stop_sync_progress()
     try:
-        if display is not None:
+        if isinstance(state, dict) and not verbose and core._console_is_terminal():
+            display = upgrade.SyncUpdateDisplay(
+                installing=core._installer_progress,
+                on_upgrade_available=core._stop_sync_progress,
+            )
+            state["update"] = display
+            core._sync_progress_phase("Checking for updates")
             upgrade.update_or_nudge(config, attended=True, diagnostics=False, display=display)
         else:
+            core._stop_sync_progress()
             upgrade.update_or_nudge(config, attended=True, diagnostics=verbose)
     except (Exception, KeyboardInterrupt):
         if display is not None:
@@ -1488,17 +1486,15 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
                 code = attemptlog.storage_errno(exc) or (
                     "contended" if isinstance(exc, LockContended) else "unavailable"
                 )
-                with suppress(Exception, SystemExit):
-                    print(
-                        safety.safe_terminal_str(
-                            "mm: notice [run-evidence-write-unavailable]: "
-                            f"{verb} content {effect}; "
-                            f"run evidence unavailable ({code}). "
-                            "Do not repeat sync solely to record it; "
-                            "restore local access/storage if needed, then run: mm diag"
-                        ),
-                        file=sys.stderr,
+                core._stderr_lines(
+                    (
+                        "mm: notice [run-evidence-write-unavailable]: "
+                        f"{verb} content {effect}; "
+                        f"run evidence unavailable ({code}). "
+                        "Do not repeat sync solely to record it; "
+                        "restore local access/storage if needed, then run: mm diag",
                     )
+                )
 
 
 @app.command()
@@ -1536,7 +1532,7 @@ def push(
     with _sync_outcome("push", verbose=verbose, dry_run=dry_run):
         with (
             _attended_sync_run("push", dry_run=dry_run) as run,
-            pullhistory.command_scope(attended=True),
+            pullhistory.command_scope(attended=True, pause_output=core._pause_sync_progress),
         ):
             config = core._get_config(read_only=dry_run)
             core._maybe_prompt_migration(config, read_only=dry_run)
@@ -3057,7 +3053,7 @@ def _attended_pull(
                     if v is not None
                 },
             ) as run,
-            pullhistory.command_scope(attended=True),
+            pullhistory.command_scope(attended=True, pause_output=core._pause_sync_progress),
         ):
             config = core._get_config(read_only=dry_run)
             core._maybe_prompt_migration(config, read_only=dry_run)
@@ -3170,9 +3166,10 @@ def _attended_pull(
                                 mesh_res.superseded_registrations if mesh_res is not None else ()
                             ),
                         )
-                with core._pause_sync_progress():
-                    join_setup.close()
-                if finish_memory_setup is None and not pulled.total_failed:
+                if finish_memory_setup is not None:
+                    with core._pause_sync_progress():
+                        join_setup.close()
+                elif not pulled.total_failed:
                     _sync_memory_index(config)
                 _sync_update(config, verbose=verbose)
 

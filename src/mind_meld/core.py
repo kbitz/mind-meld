@@ -2804,7 +2804,12 @@ class _SyncProgress:
     def _can_draw(self) -> bool:
         # A closed/replaced stdout makes isatty() raise; that is a display
         # failure, never a sync failure.
-        return self._enabled and not self._stopped and _console_is_terminal()
+        return (
+            self._enabled
+            and not self._stopped
+            and _console_is_terminal()
+            and not console.is_dumb_terminal
+        )
 
     def _delay_elapsed_locked(self) -> bool:
         delay = _SYNC_PROGRESS_DELAY_SECONDS if self._delay is None else self._delay
@@ -3215,7 +3220,7 @@ def _scan_note(source: str, scope: str) -> str:
 def _sync_progress_scan_callback() -> Callable[[str, str], None] | None:
     """Return a read-only scan progress callback when attended terminal progress is active."""
     progress = _current_sync_progress()
-    if progress is None or not progress._enabled or not _console_is_terminal():
+    if progress is None or not progress._can_draw():
         return None
 
     def report(source: str, scope: str) -> None:
