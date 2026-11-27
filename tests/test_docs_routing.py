@@ -1508,3 +1508,35 @@ def test_no_test_file_is_named_after_a_track_or_review():
         if pattern.search(p.stem)
     ]
     assert offenders == [], f"test files named after a Track or review: {offenders}"
+
+
+def test_retro_fleet_skill_step4_bounded_alias_judgment_contract():
+    """Track 169B: SKILL.md Step 4 permits disclosed unverified ~ alias mapping
+    for unambiguous unpriced IDs without persisting inferred overrides."""
+    text = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    step4_start = text.index("## Step 4:")
+    step5_start = text.index("## Step 5:", step4_start)
+    step4 = " ".join(text[step4_start:step5_start].split())
+
+    step4_lower = step4.lower()
+    assert "never infer a rate from a model name" not in step4_lower
+    # Value: protects=unresolved alias prerequisite and disclosure; fails_when=either is removed;
+    # why_new=the estimate phrase alone is insufficient; seam=none; no_claim=written prompt only
+    assert (
+        "unambiguously names a documented model or tier that the CLI's deterministic "
+        "fallback did not resolve" in step4
+    )
+    assert "extrapolated `~` estimate" in step4
+    assert (
+        "explicitly name the alias-to-model mapping in the report and never call it verified"
+        in step4_lower
+    )
+    assert "separate extrapolated `~` estimate" in step4
+    assert "alias's own input, cache read, cache write, and output token counts" in step4
+    assert "preserve the cli's `≥` floor or unavailable cost as rendered" in step4_lower
+    assert "exception to the `unpriced_models` remedy applies only to unambiguous aliases" in step4
+    assert "never persist an inferred alias guess via `--set-model-price`" in step4_lower
+    assert "never pass `--mark-pricing-verified` on that basis" in step4_lower
+    assert "ambiguous model ids and subscription prices stay unpriced" in step4_lower

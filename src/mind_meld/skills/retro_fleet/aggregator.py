@@ -4099,12 +4099,27 @@ def _section_costs(by_model: dict, *, floor: bool) -> tuple[float, dict[str, flo
 
 
 def _priced_by_extrapolation(model: str) -> bool:
-    """Return whether ``model`` resolves only through unverified family/positional fallback."""
+    """Return whether ``model`` resolves only through unverified family fallback."""
     return (
         model not in token_usage.COST_EXCLUDED_MODELS
         and token_usage.resolve_prices(model) is not None
         and not token_usage.is_verified_model(model)
     )
+
+
+def _extrapolation_target(model: str) -> str | None:
+    """Return the documented model or family rate card name used for fallback."""
+    if model in token_usage.PRICING:
+        return None
+    family = token_usage.model_family(model)
+    if family is not None:
+        return f"{family} family"
+    vendor_family = token_usage.PRICING_FAMILY_BY_MODEL.get(
+        model
+    ) or token_usage.vendor_model_family(model)
+    if vendor_family is not None and vendor_family in token_usage.VENDOR_FAMILY_TIERS:
+        return vendor_family
+    return None
 
 
 def _floor_costs(by_model: dict, costs: dict) -> tuple[float, dict[str, float]]:
@@ -4172,6 +4187,24 @@ def _format_unpriced_model_ids(models: tuple[str, ...] | list[str]) -> str:
     return text
 
 
+def _format_extrapolated_model_ids(models: Iterable[str]) -> str:
+    """Sanitize, pair with mapped rate target, deduplicate, sort, and cap."""
+    entries: set[str] = set()
+    for model in models:
+        if not model:
+            continue
+        safe = _safe_short(model)
+        target = _extrapolation_target(model)
+        entries.add(f"{safe} → {target}" if target is not None else safe)
+    ordered = sorted(entries)
+    shown = ordered[:_UNPRICED_MODEL_NOTE_CAP]
+    text = ", ".join(shown)
+    extra = len(ordered) - len(shown)
+    if extra:
+        text += f" (+{extra} more)"
+    return text
+
+
 def _extrapolation_notes(by_model: dict, *, scope: str) -> list[str]:
     models = [
         m
@@ -4184,7 +4217,7 @@ def _extrapolation_notes(by_model: dict, *, scope: str) -> list[str]:
             "Models priced by family extrapolation ("
             + _safe_short(scope)
             + "): "
-            + _format_unpriced_model_ids(models)
+            + _format_extrapolated_model_ids(models)
             + ". These ids were not verified on the bundled rate date; upgrade the rendering "
             "machine for newly verified rates. `~` estimates use the family rate; `≥` floors "
             "leave these models out."
