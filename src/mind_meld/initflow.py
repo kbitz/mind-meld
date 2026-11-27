@@ -1534,6 +1534,11 @@ def init(
             "root_salt_fp": root_salt_fingerprint(root_salt),
         },
     }
+    if not new_fleet and setup.record is not None:
+        config["device"]["syncthing_join_device"] = setup.record.device_id
+        config["device"]["syncthing_join_peers"] = sorted(
+            entry["device_id"] for entry in existing_devices
+        )
     if memory_index_answer is not None:
         config["memory_index"] = {
             "enabled": memory_index_answer,

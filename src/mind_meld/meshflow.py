@@ -383,6 +383,17 @@ def _registered_ids(inventory: devices.DeviceInventory) -> set[str]:
     )
 
 
+def _save_join_progress(
+    known_peers: set[str],
+    records: devices.FleetSyncthingRecords,
+    retirements: devices.FleetRetirementRecords,
+) -> None:
+    """Retain only saved registrations whose Syncthing records are still outstanding."""
+    remaining = known_peers - records.by_mm_id.keys() - retirements.records.keys()
+    if remaining != known_peers:
+        _config_module.patch_config_on_disk({"device": {"syncthing_join_peers": sorted(remaining)}})
+
+
 def _note_introducer_hold(
     result: MeshResult,
     *,
@@ -461,6 +472,16 @@ def _run_inner(
     own_mm_id = dev_cfg.get("id") if isinstance(dev_cfg, dict) else None
     if not isinstance(own_mm_id, str) or not own_mm_id:
         return result
+    raw_join_peers = dev_cfg.get("syncthing_join_peers")
+    known_join_peers = set()
+    if (
+        recorded_id
+        and dev_cfg.get("syncthing_join_device") == recorded_id
+        and isinstance(raw_join_peers, list)
+        and all(isinstance(peer_id, str) and peer_id for peer_id in raw_join_peers)
+    ):
+        known_join_peers = set(raw_join_peers)
+    initiating = joining or bool(known_join_peers)
 
     try:
         records = devices.read_fleet_records(
@@ -505,7 +526,7 @@ def _run_inner(
             backend,
             passphrase,
             memory_kb,
-            strict=joining,
+            strict=initiating,
         )
     except (OSError, StorageError) as exc:
         retirements_listed = False
@@ -684,12 +705,13 @@ def _run_inner(
 
     # 1. Plan pairing steps (only when fleet folder is valid)
     candidates: list[tuple[str, list[tuple[str, str]]]] = []
+    retirements_complete = retirements_listed and not (
+        retirements.unreadable or retirements.vanished or retirements.newer_format
+    )
     if folder_ok:
         pairable = set(other_vouched)
-        if joining:
-            if not retirements_listed or (
-                retirements.unreadable or retirements.vanished or retirements.newer_format
-            ):
+        if initiating:
+            if not retirements_complete:
                 pairable.clear()
             else:
                 pairable = {
@@ -699,7 +721,15 @@ def _run_inner(
                     and mm_id not in retirements.records
                     and st_id not in snap.other_folder_device_ids
                 }
-        potential_adds = sorted(pairable) if joining else snap.pending_ids
+        if joining:
+            potential_adds = sorted(pairable)
+        elif known_join_peers:
+            saved_peers = {
+                records.by_mm_id[peer_id] for peer_id in known_join_peers & records.by_mm_id.keys()
+            }
+            potential_adds = sorted(set(snap.pending_ids) | saved_peers)
+        else:
+            potential_adds = snap.pending_ids
         for dev_id in potential_adds:
             if dev_id not in pairable or dev_id == snap.my_id or dev_id in snap.devices:
                 continue
@@ -920,6 +950,8 @@ def _run_inner(
         + len(peer_renames)
     )
     if total_steps == 0:
+        if known_join_peers and folder_ok and retirements_complete:
+            _save_join_progress(known_join_peers, records, retirements)
         return result
 
     completed_steps = 0
@@ -956,7 +988,7 @@ def _run_inner(
             )
             if op_name == "add_device":
                 w_res = step_writer.add_device(
-                    dev_id, name=peer_target_name, join_path=storage_root if joining else None
+                    dev_id, name=peer_target_name, join_path=storage_root if initiating else None
                 )
             else:
                 w_res = step_writer.share_folder(
@@ -1022,6 +1054,9 @@ def _run_inner(
 
         if not folder_ok:
             break
+
+    if known_join_peers and folder_ok and retirements_complete:
+        _save_join_progress(known_join_peers, records, retirements)
 
     # Execute 1b: Clear stale introducer flags
     for dev_id in introducer_clears if folder_ok else ():

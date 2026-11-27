@@ -1866,6 +1866,41 @@ def test_authenticated_init_pull_initiates_only_vouched_active_peers(
     assert "Syncthing now shares" in result.output
 
 
+@pytest.mark.parametrize("interruption", ["config-unavailable", "record-in-flight"])
+def test_initialized_joiner_retries_known_peers_on_later_pull(
+    fake_syncthing, tmp_path, monkeypatch, interruption
+):
+    _storage, backend, my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    peer_id = _valid_syncthing_id("B")
+    register_device(backend, "dev-b", "mac-b")
+    config.patch_config_on_disk(
+        {"device": {"syncthing_join_device": my_id, "syncthing_join_peers": ["dev-b"]}}
+    )
+    if interruption == "config-unavailable":
+        devices.publish_record(backend, "dev-b", peer_id, PASSPHRASE, TEST_MEMORY_KB)
+        fake_syncthing.responses["/rest/config"] = 503
+
+    first = runner.invoke(app, ["pull"])
+
+    assert first.exit_code == 0, first.output
+    assert fake_syncthing.bodies == []
+    assert config.load_config()["device"]["syncthing_join_peers"] == ["dev-b"]
+    if interruption == "record-in-flight":
+        devices.publish_record(backend, "dev-b", peer_id, PASSPHRASE, TEST_MEMORY_KB)
+    else:
+        del fake_syncthing.responses["/rest/config"]
+
+    retry = runner.invoke(app, ["pull"])
+
+    assert retry.exit_code == 0, retry.output
+    assert [(method, path) for method, path, _ in fake_syncthing.bodies] == [
+        ("POST", "/rest/config/devices"),
+        ("PATCH", "/rest/config/folders/mind-meld"),
+    ]
+    assert fake_syncthing.bodies[0][2]["deviceID"] == peer_id
+    assert config.load_config()["device"]["syncthing_join_peers"] == []
+
+
 def test_mesh_clears_stale_introducer_flags_on_fleet_peers_only(
     fake_syncthing, tmp_path, monkeypatch
 ):
