@@ -1075,13 +1075,14 @@ def _run_inner(
             budget=remaining,
             deadline=deadline,
         )
-        w_res = step_writer.clear_introducer(dev_id)
+        w_res = step_writer.clear_introducer(dev_id, expected_path=storage_root)
         if w_res.outcome == "ok":
             completed_steps += 1
             result.cleared.append((safe_name, dev_id))
             continue
         if w_res.outcome == "unchanged" or (
-            w_res.outcome == "refused" and w_res.cause == "device-not-configured"
+            w_res.outcome == "refused"
+            and w_res.cause in ("device-not-configured", "shared-in-other-folder")
         ):
             completed_steps += 1
             continue

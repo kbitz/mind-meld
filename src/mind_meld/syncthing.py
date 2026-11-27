@@ -2351,7 +2351,7 @@ class SyncthingWriter:
         )
         return WriteResult(w_out, w_cause, write_attempted=True)
 
-    def clear_introducer(self, device_id: str) -> WriteResult:
+    def clear_introducer(self, device_id: str, *, expected_path: Path | None = None) -> WriteResult:
         if not isinstance(self._record, ManagedRecord) or not is_device_id(self._record.device_id):
             return WriteResult("refused", "not-managed")
         if not is_device_id(device_id):
@@ -2372,6 +2372,30 @@ class SyncthingWriter:
             return WriteResult("refused", "device-not-configured")
         if target_dev.get("introducer") is not True:
             return WriteResult("unchanged", None)
+
+        if expected_path is not None:
+            folders, folder_err = self._get_list(
+                endpoint, "/rest/config/folders", timeout=per_req_timeout, deadline=deadline
+            )
+            if folder_err is not None or folders is None:
+                return folder_err or WriteResult("error", "bad-response")
+            fleet = None
+            for folder in folders:
+                folder_id = folder.get("id")
+                members = _folder_device_ids(folder)
+                if not isinstance(folder_id, str) or not folder_id.strip() or members is None:
+                    return WriteResult("error", "bad-response")
+                if folder_id == "mind-meld":
+                    fleet = folder
+                elif device_id in members:
+                    return WriteResult("refused", "shared-in-other-folder")
+            if fleet is None:
+                return WriteResult("refused", "no-folder")
+            binding = _existing_folder_result(
+                [fleet], "mind-meld", expected_path, {my_id, device_id}
+            )
+            if binding is None or binding.outcome != "unchanged":
+                return WriteResult("refused", "not-mm-folder")
 
         w_out, w_cause = _send_json(
             endpoint,

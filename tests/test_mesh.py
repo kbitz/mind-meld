@@ -2037,3 +2037,36 @@ def test_mesh_clears_stale_introducer_flags_on_fleet_peers_only(
         in crumb["detail"]
     )
     assert ("PATCH", f"/rest/config/devices/{my_id}", {"name": "mac-a"}) in fake_syncthing.bodies
+
+
+def test_mesh_preserves_introducer_when_another_folder_is_shared_during_pairing(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    storage, backend, _my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    introducer = _valid_syncthing_id("B")
+    pending = _valid_syncthing_id("C")
+    for label, name, peer_id in (("dev-b", "mac-b", introducer), ("dev-c", "mac-c", pending)):
+        register_device(backend, label, name)
+        devices.publish_record(backend, label, peer_id, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.set_folder(storage, peers=[(introducer, "mac-b", True)])
+    fake_syncthing.responses["/rest/config/devices"][1]["introducer"] = True
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {pending: {"name": "mac-c"}}
+    other = {
+        **fake_syncthing.stock_folder(tmp_path / "other", shared_with=[introducer]),
+        "id": "other",
+    }
+
+    def share_during_add(method, route, _body):
+        if (method, route) == ("POST", "/rest/config/devices"):
+            fake_syncthing.responses["/rest/config/folders"].append(other)
+
+    fake_syncthing.on_write = share_during_add
+    result = runner.invoke(app, ["pull"])
+
+    assert result.exit_code == 0, result.output
+    assert [(method, route) for method, route, _ in fake_syncthing.bodies] == [
+        ("POST", "/rest/config/devices"),
+        ("PATCH", "/rest/config/folders/mind-meld"),
+    ]
+    assert fake_syncthing.responses["/rest/config/devices"][1]["introducer"] is True
+    assert "cleared the introducer flag" not in result.output
