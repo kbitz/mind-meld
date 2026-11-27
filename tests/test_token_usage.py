@@ -2819,7 +2819,7 @@ def test_vendor_single_tier_alias_fallback_is_unverified(model, family):
         "",
     ],
 )
-def test_vendor_fallback_rejects_nonpositional_ids(model):
+def test_vendor_fallback_rejects_invalid_or_ambiguous_ids(model):
     assert tu.vendor_model_family(model) is None
     assert tu.resolve_prices(model) is None
 

@@ -258,12 +258,14 @@ update alone does not mark the table verified.
 
 When an unpriced model ID unambiguously names a documented model or tier that
 the CLI's deterministic fallback did not resolve, you may apply that documented
-model or tier rate in the report as an extrapolated `~` estimate. Explicitly
-name the alias-to-model mapping in the report and never call it verified. Never
-persist an inferred alias guess as a verified `--set-model-price` override, and
-never pass `--mark-pricing-verified` on that basis. Ambiguous model IDs and
-subscription prices stay unpriced — never infer a rate from an ambiguous ID or
-from a subscription price.
+model or tier rate as a separate extrapolated `~` estimate in the report. Use
+the alias's own input, cache read, cache write, and output token counts. Preserve
+the CLI's `≥` floor or unavailable cost as rendered. This report-only exception
+to the `unpriced_models` remedy applies only to unambiguous aliases. Explicitly
+name the alias-to-model mapping in the report and never call it verified.
+Never persist an inferred alias guess via `--set-model-price` and never pass
+`--mark-pricing-verified` on that basis. Ambiguous model IDs and subscription
+prices stay unpriced.
 
 When vendor pricing docs publish a scheduled price change (for example, an
 introductory or promotional rate ending on a stated date), use the rate

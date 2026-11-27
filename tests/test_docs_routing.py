@@ -1526,9 +1526,10 @@ def test_retro_fleet_skill_step4_bounded_alias_judgment_contract():
     assert "extrapolated `~` estimate" in step4
     assert "alias-to-model mapping" in step4
     assert "never call it verified" in step4_lower
-    assert (
-        "never persist an inferred alias guess as a verified `--set-model-price` override"
-        in step4_lower
-    )
+    assert "separate extrapolated `~` estimate" in step4
+    assert "alias's own input, cache read, cache write, and output token counts" in step4
+    assert "preserve the cli's `≥` floor or unavailable cost as rendered" in step4_lower
+    assert "exception to the `unpriced_models` remedy applies only to unambiguous aliases" in step4
+    assert "never persist an inferred alias guess via `--set-model-price`" in step4_lower
     assert "never pass `--mark-pricing-verified` on that basis" in step4_lower
     assert "ambiguous model ids and subscription prices stay unpriced" in step4_lower

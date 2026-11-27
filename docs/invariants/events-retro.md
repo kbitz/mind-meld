@@ -3978,15 +3978,7 @@ to the `≥` figure, while still being named with their mapped targets under
 extrapolated (or whose non-extrapolated priced models have zero volume) renders
 `—` and emits `cost_unavailable`, never `≥$0`.
 
-**SKILL.md Step 4 bounded alias judgment (Track 169B).** When an unpriced model
-ID unambiguously names a documented model or tier that the CLI's deterministic
-fallback did not resolve, `/retro-fleet`'s LLM layer may apply that documented
-rate in the report as an extrapolated `~` estimate, explicitly naming the
-alias-to-model mapping and never calling it verified. `--set-model-price` and
-`--mark-pricing-verified` remain strictly for rates established by official
-vendor pricing docs; inferred alias guesses must never be persisted via
-`--set-model-price` or used to pass `--mark-pricing-verified`. Ambiguous model
-IDs and subscription prices stay unpriced. Since 1.1 host tokens are summed
+Since 1.1 host tokens are summed
 fleet-wide per agent rather than kept as per-machine subtotals; see the
 unified-agents renderer contract for the possible-overlap detector and its
 limits. Floors are computed per AGENT row. Model-specific pricing causes stay
@@ -4000,6 +3992,17 @@ longer renders; the same definitions live in `MM_HEALTH`'s `pricing.basis`.
 `tokens_incomplete` names missing Claude coverage and its remedy; `cost_floor`
 names an available priced lower bound, while `cost_unavailable` names a missing
 priced basis. Neither claims to measure pre-v2 omissions.
+
+**SKILL.md Step 4 bounded alias judgment (Track 169B).** When an unpriced model
+ID unambiguously names a documented model or tier that the CLI's deterministic
+fallback did not resolve, `/retro-fleet`'s LLM layer may apply that documented
+rate to the alias's own token counts and report a separate extrapolated `~`
+estimate. It names the alias-to-model mapping and preserves the CLI's floor or
+unavailable cost. The `unpriced_models` remedy still applies outside this
+report-only exception. `--set-model-price` and `--mark-pricing-verified` remain
+strictly for rates established by official vendor pricing docs. Inferred alias
+guesses must never be persisted or used to mark pricing verified. Ambiguous
+model IDs and subscription prices stay unpriced.
 
 `window_bounds` rejects instant-stale snapshots before inclusive day slicing;
 `contributes_in_window` is shared by the unified rows, host-only coverage view,
