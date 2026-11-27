@@ -658,7 +658,7 @@ def init(
     optional qmd memory index, semantic-search embeddings, and agent
     instruction pointer line first, and saves those answers locally (never the
     passphrase). On a default
-    Syncthing configuration it adds the fleet device as introducer, prints this
+    Syncthing configuration it adds the fleet device, prints this
     machine's device ID and short ID with both 'mm devices approve' commands
     to run on the fleet machine, waits up to 10 minutes for approval, accepts the 'mind-meld'
     folder offer once shared, and waits up to two minutes for Syncthing to
@@ -1310,8 +1310,14 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
         with suppress(Exception, SystemExit):
             print(_compact_sync_trace(error), file=sys.stderr)
     update = state.get("update")
+    mesh_result = state.get("mesh_result")
     if failed:
         _emit_update_lines(update)
+        if mesh_result is not None and mesh_result.cleared:
+            _emit_sync_outcome(
+                (outputstyle._outcome_line(verb, clause) for clause in mesh_result.clear_clauses),
+                failed=False,
+            )
         _emit_sync_outcome(_sync_failure(verb, state, error), failed=True)
     else:
         if verb == "push" and not verbose:
@@ -1330,12 +1336,10 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
                 for timing_line in pushtimings.format_verbose_timings(phases):
                     console.print(timing_line, markup=False)
         lines = _sync_success(verb, result)
-        mesh_outcomes = state.get("mesh_outcomes")
-        if mesh_outcomes:
-            for mesh_clause in mesh_outcomes:
-                lines.append(outputstyle._outcome_line(verb, mesh_clause))
-        elif mesh_clause := state.get("mesh_outcome"):
-            lines.append(outputstyle._outcome_line(verb, mesh_clause))
+        if mesh_result is not None:
+            lines.extend(
+                outputstyle._outcome_line(verb, clause) for clause in mesh_result.outcome_clauses
+            )
         _emit_sync_outcome(lines, failed=False)
         _emit_update_lines(update)
     if isinstance(error, typer.Exit) and error.exit_code == 3:
@@ -3126,6 +3130,7 @@ def _attended_pull(
                         memory_kb,
                         verb="pull",
                         attended=True,
+                        joining=join,
                         verbose=verbose,
                         backend=backend,
                         trace_formatter=_compact_sync_trace,
@@ -3286,9 +3291,9 @@ def devices_approve(
     terminal), a device name, a short Syncthing device-ID prefix (at least 4
     base32 characters; terminal required), or the full 56-character Syncthing
     device ID (works with or without a terminal, and finishes an earlier
-    half-finished approval). Adds the device, marks it as introducer, and shares
-    the fleet folder with it. Never automatic; owner-managed machines approve by
-    hand in Syncthing's GUI.
+    half-finished approval). Adds the device and shares the fleet folder with
+    it. Never automatic; owner-managed machines approve by hand in Syncthing's
+    GUI.
     """
     devicesflow.approve(device_id)
 

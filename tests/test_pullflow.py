@@ -4427,7 +4427,7 @@ def test_attended_pull_notices_pending_syncthing_join_by_count_without_id_or_nam
                 "deviceID": joining_a,
                 "name": "Peer C",
                 "addresses": ["dynamic"],
-                "introducer": True,
+                "introducer": False,
                 "autoAcceptFolders": False,
                 "paused": False,
             }

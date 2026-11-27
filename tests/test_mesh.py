@@ -439,7 +439,7 @@ def test_mesh_pass_steady_state_request_ceiling_and_unvouched_or_own_or_paused_s
                 "deviceID": vouched_shared,
                 "name": "mac-b",
                 "addresses": ["dynamic"],
-                "introducer": True,
+                "introducer": False,
                 "autoAcceptFolders": False,
                 "paused": False,
             },
@@ -474,7 +474,7 @@ def test_mesh_pass_steady_state_request_ceiling_and_unvouched_or_own_or_paused_s
 
 
 # Value: protects=invalid folder options prevent every mesh write even at the correct path;
-# fails_when=the snapshot lets add and introducer writes run before the share guard;
+# fails_when=the snapshot lets add writes run before the share guard;
 # why_new=the existing wrong-path case cannot catch an omitted option check; seam=none;
 # no_claim=option enforcement by real Syncthing (loopback stand-in).
 def test_mesh_pass_folder_binding_and_managed_id_mismatch_gates(
@@ -553,7 +553,6 @@ def test_mesh_rechecks_folder_path_when_sharing(fake_syncthing, tmp_path, monkey
     assert "Syncthing mesh step stopped (not-mm-folder). Run: mm diag" in res.output
     assert [path for _, path, _ in fake_syncthing.bodies] == [
         "/rest/config/devices",
-        f"/rest/config/devices/{peer}",
     ]
 
 
@@ -615,7 +614,7 @@ def test_breadcrumb_uses_only_remaining_space_for_complete_mesh_details():
     assert result.compose_breadcrumb(()) == ("degraded", detail)
 
 
-@pytest.mark.parametrize("lost_step", [0, 1, 2], ids=["add", "introducer", "share"])
+@pytest.mark.parametrize("lost_step", [0, 1], ids=["add", "share"])
 def test_mesh_pass_resume_lost_response_late_record_and_outage_convergence(
     fake_syncthing, tmp_path, monkeypatch, lost_step
 ):
@@ -649,10 +648,9 @@ def test_mesh_pass_resume_lost_response_late_record_and_outage_convergence(
     real_send = syncthing._send_json
     writes = [
         ("POST", "/rest/config/devices"),
-        ("PATCH", f"/rest/config/devices/{peer_b}"),
         ("PATCH", "/rest/config/folders/mind-meld"),
     ]
-    step_names = ("adding device", "marking as introducer", "sharing the fleet folder")
+    step_names = ("adding device", "sharing the fleet folder")
 
     def lose_response(endpoint, method, path, body, **kwargs):
         outcome, cause = real_send(endpoint, method, path, body, **kwargs)
@@ -781,7 +779,7 @@ def test_attended_pull_pending_notice_counts_only_unvouched_even_after_partial_p
 def test_dx4_cause_table_rows_status_rendering_and_unexpected_exception(
     fake_syncthing, tmp_path, monkeypatch
 ):
-    _storage_dir, backend, _my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    storage_dir, backend, _my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
     peer_b = _valid_syncthing_id("B")
     peer_c = _valid_syncthing_id("C")
     register_device(backend, "dev-b", "mac-b")
@@ -789,11 +787,27 @@ def test_dx4_cause_table_rows_status_rendering_and_unexpected_exception(
     devices.publish_record(backend, "dev-b", peer_b, PASSPHRASE, TEST_MEMORY_KB)
     devices.publish_record(backend, "dev-c", peer_c, PASSPHRASE, TEST_MEMORY_KB)
 
-    # 1. Hook adds peer_b and hits an unconfirmed write on peer_c -> both share and
-    # degradation appear in rendered `mm status`, with degradation first
+    # 1. Hook adds peer_b and hits an unconfirmed clear write on shared peer_c -> both
+    # share and degradation appear in rendered `mm status`, with degradation first
+    ok_folder = {
+        **fake_syncthing.stock_folder(storage_dir, shared_with=[peer_c]),
+        "id": "mind-meld",
+    }
+    fake_syncthing.set_config(
+        devices=[
+            {
+                "deviceID": peer_c,
+                "name": "linux-c",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            }
+        ],
+        folders=[ok_folder],
+    )
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {
         peer_b: {"name": "mac-b"},
-        peer_c: {"name": "linux-c"},
     }
     for cause in ("unauthorized", "config-unreadable"):
         if cause == "unauthorized":
@@ -826,17 +840,17 @@ def test_dx4_cause_table_rows_status_rendering_and_unexpected_exception(
     crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["pull"]
     assert crumb["outcome"] == "degraded"
     assert len(crumb["detail"]) <= 300
-    deg_idx = crumb["detail"].index("Syncthing did not confirm marking as introducer")
+    deg_idx = crumb["detail"].index("Syncthing did not confirm clearing the introducer flag")
     share_idx = crumb["detail"].index("Syncthing now shares the fleet folder with 1 fleet machine")
     assert deg_idx < share_idx
 
     res_status = runner.invoke(app, ["status"])
     assert res_status.exit_code == 0, res_status.output
     flat_status = " ".join(res_status.output.split())
-    assert "Syncthing did not confirm marking as introducer" in flat_status
+    assert "Syncthing did not confirm clearing the introducer flag" in flat_status
     assert "Syncthing now shares the fleet folder with 1 fleet machine" in flat_status
 
-    # 2. Hook that finishes peer_c without degradation -> status shows success detail
+    # 2. Hook that finishes clearing peer_c without degradation -> status shows success detail
     fake_syncthing.write_responses.clear()
     res_hook_ok = runner.invoke(app, ["autopull"])
     assert res_hook_ok.exit_code == 0
@@ -844,10 +858,7 @@ def test_dx4_cause_table_rows_status_rendering_and_unexpected_exception(
     res_status_ok = runner.invoke(app, ["status"])
     assert res_status_ok.exit_code == 0, res_status_ok.output
     flat_status_ok = " ".join(res_status_ok.output.split())
-    assert (
-        f"Syncthing now shares the fleet folder with 1 fleet machine: linux-c ({peer_c[:7]})"
-        in flat_status_ok
-    )
+    assert f"Syncthing cleared the introducer flag on linux-c ({peer_c[:7]})" in flat_status_ok
 
     # 3. Newer-format and unreadable records -> attended notice + rendered status
     valid_cipher = backend.get(syncthing_record_key("dev-b"))
@@ -1120,7 +1131,16 @@ def test_mesh_pass_retirement_removals_holds_introducer_and_device_renames(
         "mm: notice: Syncthing device removals wait for cachyos (dev-unpub) to publish "
         "its Syncthing ID; run 'mm update' and 'mm push' on cachyos"
     ) in res_hold.output
-    # Renames still run even while removals hold!
+    # Clears and renames still run even while removals hold!
+    assert (
+        "PATCH",
+        f"/rest/config/devices/{peer_b_st_id}",
+        {"introducer": False},
+    ) in fake_syncthing.bodies
+    assert (
+        f"Pull: Syncthing cleared the introducer flag on mac-b-renamed ({peer_b_st_id[:7]})."
+        in res_hold.output
+    )
     assert "Pull: Syncthing named this device mac-a" in res_hold.output
     assert "Pull: Syncthing renamed mac-b-renamed" in res_hold.output
     assert not any(m == "DELETE" for m, _, _ in fake_syncthing.bodies)
@@ -1166,8 +1186,47 @@ def test_mesh_pass_retirement_removals_holds_introducer_and_device_renames(
     # Remove the superseded registration so holds clear
     backend.delete(device_key("dev-unpub"))
 
-    # 3. Introducer rule (E8): ret_st_id has introducedBy = peer_b_st_id (active vouched peer)
+    # 3a. Narrowed introducer rule: ret_st_id has historical introducedBy = peer_b_st_id,
+    # whose introducer flag was cleared in step 1 -> removal proceeds without hold.
     fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = peer_b_st_id
+    fake_syncthing.bodies.clear()
+    res_cleared_intro = runner.invoke(app, ["pull"])
+    assert res_cleared_intro.exit_code == 0, res_cleared_intro.output
+    assert ("DELETE", f"/rest/config/devices/{ret_st_id}", None) in fake_syncthing.bodies
+    assert (
+        f"Pull: Syncthing removed retired device mac-retired ({ret_st_id[:7]})."
+        in res_cleared_intro.output
+    )
+
+    # 3b. Active introducer sharing another folder (not cleared by mm): hold stays in force.
+    extra_peer_folder = {
+        **fake_syncthing.stock_folder(tmp_path / "other-peer", shared_with=[peer_b_st_id]),
+        "id": "other-peer-folder",
+    }
+    fake_syncthing.set_config(
+        devices=[
+            {
+                "deviceID": ret_st_id,
+                "name": "mac-retired",
+                "addresses": ["dynamic"],
+                "introducer": False,
+                "autoAcceptFolders": False,
+                "paused": False,
+                "introducedBy": peer_b_st_id,
+            },
+            {
+                "deviceID": peer_b_st_id,
+                "name": "mac-b-renamed",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            },
+        ],
+        folders=[ok_folder, extra_peer_folder],
+    )
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = "mac-a"
+    fake_syncthing.bodies.clear()
     res_intro = runner.invoke(app, ["pull"])
     assert res_intro.exit_code == 0, res_intro.output
     assert (
@@ -1175,7 +1234,11 @@ def test_mesh_pass_retirement_removals_holds_introducer_and_device_renames(
         in res_intro.output
     )
     assert fake_syncthing.bodies == []
+
+    # Reset peer_b to non-introducer and single fleet folder for subcases 4-6.
     fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = ""
+    fake_syncthing.responses["/rest/config/devices"][2]["introducer"] = False
+    fake_syncthing.responses["/rest/config/folders"] = [ok_folder]
 
     # 4. Connected device refusal (device-connected)
     fake_syncthing.responses["/rest/system/connections"]["connections"][ret_st_id] = {
@@ -1226,12 +1289,30 @@ def test_mesh_pass_retirement_removals_holds_introducer_and_device_renames(
     assert ret_st_id not in {
         d["deviceID"] for d in fake_syncthing.responses["/rest/config/folders"][0]["devices"]
     }
-    # An introducer can reinsert the retired device between two mesh passes.
-    fake_syncthing.set_folder(
-        storage_dir,
-        peers=[(ret_st_id, "mac-retired", False), (peer_b_st_id, "mac-b-renamed", True)],
+    # An active introducer sharing another folder can still reinsert a retired device.
+    fake_syncthing.set_config(
+        devices=[
+            {
+                "deviceID": ret_st_id,
+                "name": "mac-retired",
+                "addresses": ["dynamic"],
+                "introducer": False,
+                "autoAcceptFolders": False,
+                "paused": False,
+                "introducedBy": peer_b_st_id,
+            },
+            {
+                "deviceID": peer_b_st_id,
+                "name": "mac-b-renamed",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            },
+        ],
+        folders=[ok_folder, extra_peer_folder],
     )
-    fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = peer_b_st_id
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = "mac-a"
     fake_syncthing.bodies.clear()
     res_again = runner.invoke(app, ["pull"])
     assert res_again.exit_code == 0, res_again.output
@@ -1324,6 +1405,9 @@ def test_retirement_rechecks_eligibility_after_initial_snapshot(
             fake_syncthing.responses["/rest/config/folders"] = []
         elif late_change == "introducer":
             fake_syncthing.responses["/rest/config/devices"][1]["introducedBy"] = current_id
+            for dev in fake_syncthing.responses["/rest/config/devices"]:
+                if dev["deviceID"] == current_id:
+                    dev["introducer"] = True
         elif late_change == "registration":
             register_device(backend, "dev-ret", "retired")
             devices.publish_record(backend, "dev-ret", retired_id, PASSPHRASE, TEST_MEMORY_KB)
@@ -1642,7 +1726,7 @@ def test_compose_hook_breadcrumb_several_omitted_details_keeps_priority_and_stat
     id_d = _valid_syncthing_id("E")
     long_a, long_b, long_c, long_d = (letter * 128 for letter in "abcd")
     diagnostics = [
-        f"Syncthing did not confirm marking as introducer for {long_a} ({id_a[:7]}); "
+        f"Syncthing did not confirm clearing the introducer flag for {long_a} ({id_a[:7]}); "
         "it may have applied; the next push or pull reconciles it",
         f"Syncthing mesh step did not finish for {long_b} ({id_b[:7]}); "
         "the next push or pull reconciles it",
@@ -1656,7 +1740,7 @@ def test_compose_hook_breadcrumb_several_omitted_details_keeps_priority_and_stat
         removed=[(long_d, id_d)],
         renamed=[(long_c, id_c, False)],
     )
-    existing = ["events walk exceeded its 250ms budget"]
+    existing = ["events walk hit 250ms budget"]
     outcome, detail = meshflow.compose_hook_breadcrumb(existing, rich_mesh)
     assert outcome == "degraded"
     assert len(detail) <= meshflow.BREADCRUMB_BUDGET_CHARS
@@ -1707,3 +1791,282 @@ def test_compose_hook_breadcrumb_several_omitted_details_keeps_priority_and_stat
     flat = " ".join(res_status.output.split())
     assert "Last auto-pull:" in flat
     assert f"(degraded: {crumb['detail']})" in flat
+
+
+def test_attended_partial_pull_reports_confirmed_introducer_clear(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    storage_dir, backend, _my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    peer_id = _valid_syncthing_id("B")
+    register_device(backend, "dev-b", "mac-b")
+    devices.publish_record(backend, "dev-b", peer_id, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.set_folder(storage_dir, peers=[(peer_id, "mac-b", True)])
+    fake_syncthing.responses["/rest/config/devices"][1]["introducer"] = True
+    monkeypatch.setattr(
+        cli.pullflow, "_pull_core", lambda *args, **kwargs: cli.pullflow.PullResult(total_failed=1)
+    )
+
+    result = runner.invoke(app, ["pull"])
+
+    assert result.exit_code == 1
+    assert fake_syncthing.bodies == [
+        ("PATCH", f"/rest/config/devices/{peer_id}", {"introducer": False})
+    ]
+    clear_line = f"Pull: Syncthing cleared the introducer flag on mac-b ({peer_id[:7]})."
+    assert result.stdout.splitlines().count(clear_line) == 1
+    assert result.output.index(clear_line) < result.output.index("Pull incomplete")
+    assert result.output.splitlines()[-1] == "Run: mm diag"
+
+
+def test_authenticated_init_pull_initiates_only_vouched_active_peers(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    _storage_dir, backend, _my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    eligible = _valid_syncthing_id("B")
+    ignored = _valid_syncthing_id("C")
+    retired = _valid_syncthing_id("D")
+    paused = _valid_syncthing_id("E")
+    unvouched = _valid_syncthing_id("F")
+    for label, peer_id in (
+        ("dev-b", eligible),
+        ("dev-c", ignored),
+        ("dev-d", retired),
+        ("dev-e", paused),
+    ):
+        register_device(backend, label, label)
+        devices.publish_record(backend, label, peer_id, PASSPHRASE, TEST_MEMORY_KB)
+    devices.write_retirement_record(backend, "dev-d", "dev-d", retired, PASSPHRASE, TEST_MEMORY_KB)
+    configured = fake_syncthing.responses["/rest/config/devices"]
+    configured.append({"deviceID": paused, "name": "dev-e", "paused": True})
+    fake_syncthing.responses["/rest/config"] = {
+        "devices": configured,
+        "folders": fake_syncthing.responses["/rest/config/folders"],
+        "remoteIgnoredDevices": [{"deviceID": ignored}],
+    }
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {unvouched: {"name": "unvouched"}}
+
+    normal = runner.invoke(app, ["pull"])
+    assert normal.exit_code == 0, normal.output
+    assert fake_syncthing.bodies == []
+
+    def verified_join(*, new_fleet, pull_join):
+        assert not new_fleet
+        assert pull_join is not None
+        pull_join(PASSPHRASE, lambda incomplete: None)
+
+    monkeypatch.setattr(cli.initflow, "init", verified_join)
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    (method, route, body), (share_method, share_route, share) = fake_syncthing.bodies
+    assert (method, route) == ("POST", "/rest/config/devices")
+    assert body["deviceID"] == eligible and body["introducer"] is False
+    assert (share_method, share_route) == ("PATCH", "/rest/config/folders/mind-meld")
+    assert share["devices"][-1] == {"deviceID": eligible}
+    assert "Syncthing now shares" in result.output
+
+
+@pytest.mark.parametrize(
+    "interruption", ["config-unavailable", "record-in-flight", "other-knocker"]
+)
+def test_initialized_joiner_retries_known_peers_on_later_pull(
+    fake_syncthing, tmp_path, monkeypatch, interruption
+):
+    _storage, backend, my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    peer_id = _valid_syncthing_id("B")
+    register_device(backend, "dev-b", "mac-b")
+    config.patch_config_on_disk(
+        {"device": {"syncthing_join_device": my_id, "syncthing_join_peers": ["dev-b"]}}
+    )
+    if interruption != "record-in-flight":
+        devices.publish_record(backend, "dev-b", peer_id, PASSPHRASE, TEST_MEMORY_KB)
+        fake_syncthing.responses["/rest/config"] = 503
+    if interruption == "other-knocker":
+        other = _valid_syncthing_id("C")
+        register_device(backend, "dev-c", "mac-c")
+        devices.publish_record(backend, "dev-c", other, PASSPHRASE, TEST_MEMORY_KB)
+        fake_syncthing.responses["/rest/cluster/pending/devices"] = {other: {"name": "mac-c"}}
+
+    first = runner.invoke(app, ["pull"])
+
+    assert first.exit_code == 0, first.output
+    if interruption == "other-knocker":
+        assert [
+            body["deviceID"] for method, _, body in fake_syncthing.bodies if method == "POST"
+        ] == [other]
+    else:
+        assert fake_syncthing.bodies == []
+    fake_syncthing.bodies.clear()
+    assert config.load_config()["device"]["syncthing_join_peers"] == ["dev-b"]
+    if interruption == "record-in-flight":
+        devices.publish_record(backend, "dev-b", peer_id, PASSPHRASE, TEST_MEMORY_KB)
+    else:
+        del fake_syncthing.responses["/rest/config"]
+
+    retry = runner.invoke(app, ["pull"])
+
+    assert retry.exit_code == 0, retry.output
+    assert [(method, path) for method, path, _ in fake_syncthing.bodies] == [
+        ("POST", "/rest/config/devices"),
+        ("PATCH", "/rest/config/folders/mind-meld"),
+    ]
+    assert fake_syncthing.bodies[0][2]["deviceID"] == peer_id
+    assert config.load_config()["device"]["syncthing_join_peers"] == []
+
+
+def test_mesh_clears_stale_introducer_flags_on_fleet_peers_only(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    storage_dir, backend, my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    fleet_only = _valid_syncthing_id("B")
+    multi_folder = _valid_syncthing_id("C")
+    unvouched = _valid_syncthing_id("D")
+    unshared_vouched = _valid_syncthing_id("E")
+
+    register_device(backend, "dev-b", "mac-b")
+    register_device(backend, "dev-c", "linux-c")
+    register_device(backend, "dev-e", "mac-e")
+    devices.publish_record(backend, "dev-b", fleet_only, PASSPHRASE, TEST_MEMORY_KB)
+    devices.publish_record(backend, "dev-c", multi_folder, PASSPHRASE, TEST_MEMORY_KB)
+    devices.publish_record(backend, "dev-e", unshared_vouched, PASSPHRASE, TEST_MEMORY_KB)
+
+    ok_folder = {
+        **fake_syncthing.stock_folder(
+            storage_dir, shared_with=[fleet_only, multi_folder, unvouched]
+        ),
+        "id": "mind-meld",
+    }
+    other_folder = {
+        **fake_syncthing.stock_folder(tmp_path / "other", shared_with=[multi_folder]),
+        "id": "other-folder",
+    }
+    fake_syncthing.set_config(
+        devices=[
+            {
+                "deviceID": fleet_only,
+                "name": "mac-b",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            },
+            {
+                "deviceID": multi_folder,
+                "name": "linux-c",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            },
+            {
+                "deviceID": unvouched,
+                "name": "stranger",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            },
+            {
+                "deviceID": unshared_vouched,
+                "name": "mac-e",
+                "addresses": ["dynamic"],
+                "introducer": True,
+                "autoAcceptFolders": False,
+                "paused": False,
+            },
+        ],
+        folders=[ok_folder, other_folder],
+    )
+    fake_syncthing.responses["/rest/config/devices"][0]["name"] = "mac-a"
+    fake_syncthing.bodies.clear()
+
+    # Attended pull: clears fleet_only, shares mind-meld with unshared_vouched,
+    # leaves multi_folder and unvouched untouched.
+    res = runner.invoke(app, ["pull"])
+    assert res.exit_code == 0, res.output
+    clear_patches = [
+        (m, p, b)
+        for m, p, b in fake_syncthing.bodies
+        if m == "PATCH" and p.startswith("/rest/config/devices/")
+    ]
+    assert clear_patches == [("PATCH", f"/rest/config/devices/{fleet_only}", {"introducer": False})]
+    assert any(
+        m == "PATCH"
+        and p == "/rest/config/folders/mind-meld"
+        and {"deviceID": unshared_vouched} in b["devices"]
+        for m, p, b in fake_syncthing.bodies
+    )
+    clear_line = f"Pull: Syncthing cleared the introducer flag on mac-b ({fleet_only[:7]})."
+    assert res.output.count(clear_line) == 1
+
+    # Next pull clears unshared_vouched (now sharing mind-meld); after that, steady state is quiet.
+    fake_syncthing.bodies.clear()
+    res_unshared = runner.invoke(app, ["pull"])
+    assert res_unshared.exit_code == 0, res_unshared.output
+    assert fake_syncthing.bodies == [
+        ("PATCH", f"/rest/config/devices/{unshared_vouched}", {"introducer": False})
+    ]
+
+    fake_syncthing.bodies.clear()
+    res_steady = runner.invoke(app, ["pull"])
+    assert res_steady.exit_code == 0, res_steady.output
+    assert fake_syncthing.bodies == []
+    assert "cleared the introducer flag" not in res_steady.output
+
+    res_auto = runner.invoke(app, ["autopull"])
+    assert res_auto.exit_code == 0, res_auto.output
+    assert res_auto.output == ""
+    assert fake_syncthing.bodies == []
+
+    # 500 on clear PATCH (hook run): exits 0, records degradation in breadcrumb,
+    # and the pass still reaches renames.
+    for dev in fake_syncthing.responses["/rest/config/devices"]:
+        if dev["deviceID"] == fleet_only:
+            dev["introducer"] = True
+        if dev["deviceID"] == my_id:
+            dev["name"] = "stale-mac-a"
+    fake_syncthing.write_responses[("PATCH", f"/rest/config/devices/{fleet_only}")] = 500
+    fake_syncthing.bodies.clear()
+    res_fail = runner.invoke(app, ["autopull"])
+    assert res_fail.exit_code == 0
+    assert res_fail.output == ""
+    crumb = json.loads(cli.core._autorun_breadcrumb_path().read_text())["pull"]
+    assert crumb["outcome"] == "degraded"
+    assert (
+        f"Syncthing did not confirm clearing the introducer flag for mac-b ({fleet_only[:7]})"
+        in crumb["detail"]
+    )
+    assert ("PATCH", f"/rest/config/devices/{my_id}", {"name": "mac-a"}) in fake_syncthing.bodies
+
+
+def test_mesh_preserves_introducer_when_another_folder_is_shared_during_pairing(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    storage, backend, _my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    introducer = _valid_syncthing_id("B")
+    pending = _valid_syncthing_id("C")
+    for label, name, peer_id in (("dev-b", "mac-b", introducer), ("dev-c", "mac-c", pending)):
+        register_device(backend, label, name)
+        devices.publish_record(backend, label, peer_id, PASSPHRASE, TEST_MEMORY_KB)
+    fake_syncthing.set_folder(storage, peers=[(introducer, "mac-b", True)])
+    fake_syncthing.responses["/rest/config/devices"][1]["introducer"] = True
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {pending: {"name": "mac-c"}}
+    other = {
+        **fake_syncthing.stock_folder(tmp_path / "other", shared_with=[introducer]),
+        "id": "other",
+    }
+
+    def share_during_add(method, route, _body):
+        if (method, route) == ("POST", "/rest/config/devices"):
+            fake_syncthing.responses["/rest/config/folders"].append(other)
+
+    fake_syncthing.on_write = share_during_add
+    result = runner.invoke(app, ["pull"])
+
+    assert result.exit_code == 0, result.output
+    assert [(method, route) for method, route, _ in fake_syncthing.bodies] == [
+        ("POST", "/rest/config/devices"),
+        ("PATCH", "/rest/config/folders/mind-meld"),
+    ]
+    assert fake_syncthing.responses["/rest/config/devices"][1]["introducer"] is True
+    assert "cleared the introducer flag" not in result.output

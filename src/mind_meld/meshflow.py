@@ -66,10 +66,11 @@ def format_share_summary(
 
 
 def format_outcome_clauses(mesh_result: MeshResult) -> list[str]:
-    """Return shared-style outcome clauses for shares, removals and renames."""
+    """Return shared-style outcome clauses for shares, clears, removals and renames."""
     clauses: list[str] = []
     if mesh_result.shared:
         clauses.append(format_share_summary(mesh_result.shared))
+    clauses.extend(mesh_result.clear_clauses)
     for safe_name, st_id in mesh_result.removed:
         clauses.append(f"Syncthing removed retired device {safe_name} ({st_id[:7]})")
     for safe_name, st_id, is_own in mesh_result.renamed:
@@ -90,7 +91,7 @@ def compose_hook_breadcrumb(
     """Compose a hook breadcrumb ``(outcome, detail)`` within ``budget`` characters.
 
     Existing non-mesh sync/capture degradations are preserved intact; mesh
-    degradations come before the mesh share, removal and rename summaries
+    degradations come before the mesh share, clear, removal and rename summaries
     within the remaining budget with ``+N more``; any degradation makes the
     outcome ``degraded``.
     """
@@ -112,6 +113,7 @@ def compose_hook_breadcrumb(
         parts.append(share_summary)
         remaining -= len(share_summary) + 2
     tail_clauses = [
+        *mesh_result.clear_clauses,
         *(
             f"Syncthing removed retired device {safe_name} ({st_id[:7]})"
             for safe_name, st_id in mesh_result.removed
@@ -155,6 +157,7 @@ class MeshResult:
     """Outcome of one publish check and Syncthing mesh pass."""
 
     shared: list[tuple[str, str]] = field(default_factory=list)
+    cleared: list[tuple[str, str]] = field(default_factory=list)
     removed: list[tuple[str, str]] = field(default_factory=list)
     renamed: list[tuple[str, str, bool]] = field(default_factory=list)
     partial: list[tuple[str, str, str]] = field(default_factory=list)
@@ -176,6 +179,13 @@ class MeshResult:
     @property
     def shared_clause(self) -> str:
         return format_share_summary(self.shared)
+
+    @property
+    def clear_clauses(self) -> list[str]:
+        return [
+            f"Syncthing cleared the introducer flag on {safe_name} ({st_id[:7]})"
+            for safe_name, st_id in self.cleared
+        ]
 
     @property
     def outcome_clauses(self) -> list[str]:
@@ -317,6 +327,7 @@ def run(
     *,
     verb: Literal["push", "pull"],
     attended: bool,
+    joining: bool = False,
     verbose: bool = False,
     backend: LocalBackend | None = None,
     log_unexpected: Callable[[str, BaseException], None] | None = None,
@@ -332,6 +343,7 @@ def run(
             memory_kb=memory_kb,
             verb=verb,
             attended=attended,
+            joining=joining,
             backend=backend,
         )
     except Exception as exc:
@@ -358,13 +370,8 @@ def run(
             pass
         else:
             result.removal_waits_recorded = True
-    if attended:
-        clauses = result.outcome_clauses
-        if clauses:
-            state = core._SYNC_OUTPUT.get()
-            if state is not None:
-                state["mesh_outcome"] = clauses[0]
-                state["mesh_outcomes"] = clauses
+    if attended and (state := core._SYNC_OUTPUT.get()) is not None:
+        state["mesh_result"] = result
     return result
 
 
@@ -374,6 +381,17 @@ def _registered_ids(inventory: devices.DeviceInventory) -> set[str]:
         | {did for key, _ in inventory.dropped if (did := devices.parse_device_key(key))}
         | set(inventory.vanished)
     )
+
+
+def _save_join_progress(
+    known_peers: set[str],
+    records: devices.FleetSyncthingRecords,
+    retirements: devices.FleetRetirementRecords,
+) -> None:
+    """Retain only saved registrations whose Syncthing records are still outstanding."""
+    remaining = known_peers - records.by_mm_id.keys() - retirements.records.keys()
+    if remaining != known_peers:
+        _config_module.patch_config_on_disk({"device": {"syncthing_join_peers": sorted(remaining)}})
 
 
 def _note_introducer_hold(
@@ -426,6 +444,7 @@ def _run_inner(
     memory_kb: int,
     verb: Literal["push", "pull"],
     attended: bool,
+    joining: bool = False,
     backend: LocalBackend | None,
 ) -> MeshResult:
     req_timeout = ATTENDED_REQUEST_TIMEOUT_S if attended else HOOK_REQUEST_TIMEOUT_S
@@ -453,6 +472,16 @@ def _run_inner(
     own_mm_id = dev_cfg.get("id") if isinstance(dev_cfg, dict) else None
     if not isinstance(own_mm_id, str) or not own_mm_id:
         return result
+    raw_join_peers = dev_cfg.get("syncthing_join_peers")
+    known_join_peers = set()
+    if (
+        recorded_id
+        and dev_cfg.get("syncthing_join_device") == recorded_id
+        and isinstance(raw_join_peers, list)
+        and all(isinstance(peer_id, str) and peer_id for peer_id in raw_join_peers)
+    ):
+        known_join_peers = set(raw_join_peers)
+    initiating = joining or bool(known_join_peers)
 
     try:
         records = devices.read_fleet_records(
@@ -497,6 +526,7 @@ def _run_inner(
             backend,
             passphrase,
             memory_kb,
+            strict=initiating,
         )
     except (OSError, StorageError) as exc:
         retirements_listed = False
@@ -675,30 +705,64 @@ def _run_inner(
 
     # 1. Plan pairing steps (only when fleet folder is valid)
     candidates: list[tuple[str, list[tuple[str, str]]]] = []
+    retirements_complete = retirements_listed and not (
+        retirements.unreadable or retirements.vanished or retirements.newer_format
+    )
+    join_scope = (
+        set(other_vouched)
+        if joining
+        else {records.by_mm_id[peer_id] for peer_id in known_join_peers & records.by_mm_id.keys()}
+    )
     if folder_ok:
-        for dev_id in snap.pending_ids:
-            if dev_id in other_vouched and dev_id != snap.my_id and dev_id not in snap.devices:
-                candidates.append(
-                    (
-                        dev_id,
-                        [
-                            ("adding device", "add_device"),
-                            ("marking as introducer", "mark_introducer"),
-                            ("sharing the fleet folder", "share_folder"),
-                        ],
-                    )
+        ordinary_peers = set(other_vouched) - join_scope
+        join_peers = {
+            st_id
+            for st_id, (mm_id, _) in other_vouched.items()
+            if st_id in join_scope
+            and retirements_complete
+            and st_id not in retirements.by_syncthing_id
+            and mm_id not in retirements.records
+            and st_id not in snap.other_folder_device_ids
+        }
+        pairable = ordinary_peers | join_peers
+        potential_adds = [
+            *(st_id for st_id in snap.pending_ids if st_id in ordinary_peers),
+            *sorted(join_peers),
+        ]
+        for dev_id in potential_adds:
+            if dev_id not in pairable or dev_id == snap.my_id or dev_id in snap.devices:
+                continue
+            candidates.append(
+                (
+                    dev_id,
+                    [
+                        ("adding device", "add_device"),
+                        ("sharing the fleet folder", "share_folder"),
+                    ],
                 )
-        for dev_id in sorted(other_vouched):
+            )
+        for dev_id in sorted(pairable):
             if dev_id == snap.my_id or dev_id in snap.folder_device_ids:
                 continue
             cdev = snap.devices.get(dev_id)
             if cdev is None or not cdev.writer_shape or cdev.paused:
                 continue
-            steps: list[tuple[str, str]] = []
-            if not cdev.introducer:
-                steps.append(("marking as introducer", "mark_introducer"))
-            steps.append(("sharing the fleet folder", "share_folder"))
-            candidates.append((dev_id, steps))
+            candidates.append((dev_id, [("sharing the fleet folder", "share_folder")]))
+        candidates.sort(key=lambda candidate: candidate[0] in join_scope)
+
+    # 1b. Plan stale introducer-flag clears (only when fleet folder is valid)
+    introducer_clears: list[str] = []
+    if folder_ok:
+        introducer_clears = [
+            dev_id
+            for dev_id in sorted(other_vouched)
+            if dev_id != snap.my_id
+            and (cdev := snap.devices.get(dev_id)) is not None
+            and cdev.introducer
+            and dev_id in snap.folder_device_ids
+            and dev_id not in snap.other_folder_device_ids
+        ]
+    introducer_clear_set = frozenset(introducer_clears)
 
     # 2. Plan retirement removal steps (only when fleet folder is valid)
     executable_removals: list[tuple[str, str, str]] = []
@@ -832,11 +896,17 @@ def _run_inner(
                     for rec, st_id in candidate_removals:
                         cdev = snap.devices.get(st_id)
                         ret_name = _safe_peer_name(rec.device_name, rec.mm_device_id)
+                        intro_dev = (
+                            snap.devices.get(cdev.introduced_by)
+                            if cdev is not None and cdev.introduced_by
+                            else None
+                        )
                         if (
                             cdev is not None
-                            and cdev.introduced_by
-                            and cdev.introduced_by in snap.devices
+                            and intro_dev is not None
+                            and intro_dev.introducer
                             and cdev.introduced_by in other_vouched
+                            and cdev.introduced_by not in introducer_clear_set
                         ):
                             intro_mm_id, intro_raw_name = other_vouched[cdev.introduced_by]
                             intro_name = _safe_peer_name(intro_raw_name, intro_mm_id)
@@ -874,11 +944,14 @@ def _run_inner(
 
     total_steps = (
         sum(len(steps) for _, steps in candidates)
+        + len(introducer_clears)
         + len(executable_removals)
         + (1 if need_own_rename else 0)
         + len(peer_renames)
     )
     if total_steps == 0:
+        if known_join_peers and folder_ok and retirements_complete:
+            _save_join_progress(known_join_peers, records, retirements)
         return result
 
     completed_steps = 0
@@ -914,9 +987,11 @@ def _run_inner(
                 deadline=deadline,
             )
             if op_name == "add_device":
-                w_res = step_writer.add_device(dev_id, name=peer_target_name)
-            elif op_name == "mark_introducer":
-                w_res = step_writer.mark_introducer(dev_id, require_writer_shape=True)
+                w_res = step_writer.add_device(
+                    dev_id,
+                    name=peer_target_name,
+                    join_path=storage_root if dev_id in join_scope else None,
+                )
             else:
                 w_res = step_writer.share_folder(
                     _config_module.SYNCTHING_FOLDER_ID, dev_id, expected_path=storage_root
@@ -981,6 +1056,68 @@ def _run_inner(
 
         if not folder_ok:
             break
+
+    if known_join_peers and folder_ok and retirements_complete:
+        _save_join_progress(known_join_peers, records, retirements)
+
+    # Execute 1b: Clear stale introducer flags
+    for dev_id in introducer_clears if folder_ok else ():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _stop_pass(result, "timeout", completed_steps, total_steps, attended=attended)
+            return result
+        mm_id, raw_name = other_vouched[dev_id]
+        safe_name = _safe_peer_name(raw_name, mm_id)
+        peer_label = f"{safe_name} ({dev_id[:7]})"
+        step_writer = syncthing.SyncthingWriter(
+            managed,
+            timeout=min(req_timeout, remaining),
+            budget=remaining,
+            deadline=deadline,
+        )
+        w_res = step_writer.clear_introducer(dev_id, expected_path=storage_root)
+        if w_res.outcome == "ok":
+            completed_steps += 1
+            result.cleared.append((safe_name, dev_id))
+            continue
+        if w_res.outcome == "unchanged" or (
+            w_res.outcome == "refused"
+            and w_res.cause in ("device-not-configured", "shared-in-other-folder")
+        ):
+            completed_steps += 1
+            continue
+        if w_res.outcome in ("unreachable", "not-found"):
+            diagnostic_cause = "timeout" if w_res.cause == "timeout" else "unreachable"
+            _stop_pass(
+                result,
+                diagnostic_cause,
+                completed_steps,
+                total_steps,
+                attended=attended,
+                write_uncertain=w_res.write_attempted,
+            )
+            return result
+        if w_res.outcome in ("unauthorized", "config-unreadable", "address-unsupported"):
+            result.stop_cause = w_res.outcome
+            result.stops.append(w_res.outcome)
+            _record_degradation(
+                result,
+                f"Syncthing mesh step stopped ({w_res.outcome}). Run: mm diag",
+                attended=attended,
+                notice=True,
+            )
+            return result
+        if w_res.write_attempted:
+            detail = (
+                f"Syncthing did not confirm clearing the introducer flag for {peer_label}; "
+                "it may have applied; the next push or pull reconciles it"
+            )
+        else:
+            detail = (
+                f"Syncthing mesh step did not finish for {peer_label}; "
+                "the next push or pull reconciles it"
+            )
+        _record_degradation(result, detail, attended=attended, notice=False)
 
     # Execute 2: Retirement removals
     def still_retired(mm_id: str, st_id: str, ret_name: str, introduced_by: str) -> bool:

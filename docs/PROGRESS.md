@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.93 | 2026-11-27 | Version 1.12.93 stops managed Syncthing from marking fleet peers as introducers and clears flags that earlier releases set, so mutual-introducer warnings can stop once every managed machine has upgraded and synced. |
 | 1.12.92 | 2026-11-27 | Version 1.12.92 keeps attended sync progress visible until the outcome prints, with elapsed time on pull and each source and project named on push. |
 | 1.12.91 | 2026-11-27 | Version 1.12.91 prices unambiguous retro-fleet vendor model aliases as disclosed estimates and needs a skill refresh after upgrading. |
 | 1.12.90 | 2026-11-25 | Version 1.12.90 keeps mind-meld commands, skills, and upgrade behavior as they are. |

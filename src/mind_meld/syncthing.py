@@ -1819,7 +1819,9 @@ class SyncthingWriter:
             deadline=deadline,
         )
 
-    def add_device(self, device_id: str, name: str = "") -> WriteResult:
+    def add_device(
+        self, device_id: str, name: str = "", *, join_path: Path | None = None
+    ) -> WriteResult:
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()
         if err is not None or endpoint is None or my_id is None:
             return err or WriteResult("refused", "not-managed")
@@ -1834,7 +1836,46 @@ class SyncthingWriter:
         if dev_err is not None or devices is None:
             return dev_err or WriteResult("error", "bad-response")
         if any(d.get("deviceID") == device_id for d in devices):
-            return WriteResult("unchanged", None)
+            return (
+                WriteResult("refused", "device-changed") if join_path else WriteResult("unchanged")
+            )
+
+        if join_path is not None:
+            # There is no separate REST resource for the local Ignore device list.
+            out, state, cause = _get_json(
+                endpoint.norm_addr,
+                "/rest/config",
+                header_val=endpoint.header_val,
+                tls_context=endpoint.tls_context,
+                timeout=per_req_timeout,
+                deadline=deadline,
+            )
+            if out != "ok":
+                return WriteResult(out, cause)
+            if not isinstance(state, dict):
+                return WriteResult("error", "bad-response")
+            ignored = state.get("remoteIgnoredDevices")
+            folders = state.get("folders")
+            current_devices = state.get("devices")
+            if (
+                not isinstance(ignored, list)
+                or not all(
+                    isinstance(row, dict) and is_device_id(row.get("deviceID")) for row in ignored
+                )
+                or not isinstance(folders, list)
+                or not all(isinstance(row, dict) for row in folders)
+                or not isinstance(current_devices, list)
+                or not all(isinstance(row, dict) for row in current_devices)
+            ):
+                return WriteResult("error", "bad-response")
+            if any(row.get("deviceID") == device_id for row in (*ignored, *current_devices)):
+                return WriteResult("refused", "device-changed")
+            fleet = next((row for row in folders if row.get("id") == "mind-meld"), None)
+            if fleet is None:
+                return WriteResult("refused", "no-folder")
+            bound = _existing_folder_result([fleet], "mind-meld", join_path, {my_id})
+            if bound is None or bound.outcome != "unchanged" or fleet.get("paused") is True:
+                return WriteResult("refused", "not-mm-folder")
 
         post_body = {
             "deviceID": device_id,
@@ -2220,6 +2261,12 @@ class SyncthingWriter:
         expected_path: Path | None = None,
         still_retired: Callable[[str], bool] | None = None,
     ) -> WriteResult:
+        """Remove a disconnected retired device after live safety rechecks.
+
+        When ``still_retired`` is provided, it receives the ``deviceID`` of the
+        device's ``introducedBy`` peer only when that peer is configured locally
+        with ``introducer: True``; otherwise it receives ``""``.
+        """
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()
         if err is not None or endpoint is None or my_id is None:
             return err or WriteResult("refused", "not-managed")
@@ -2240,7 +2287,10 @@ class SyncthingWriter:
         introducer = target_dev.get("introducedBy", "")
         if not isinstance(introducer, str):
             return WriteResult("error", "bad-response")
-        if not any(entry.get("deviceID") == introducer for entry in devices):
+        if not any(
+            entry.get("deviceID") == introducer and entry.get("introducer") is True
+            for entry in devices
+        ):
             introducer = ""
         if still_retired is not None and not still_retired(introducer):
             return WriteResult("refused", "retirement-held")
@@ -2301,12 +2351,14 @@ class SyncthingWriter:
         )
         return WriteResult(w_out, w_cause, write_attempted=True)
 
-    def mark_introducer(self, device_id: str, *, require_writer_shape: bool = False) -> WriteResult:
+    def clear_introducer(self, device_id: str, *, expected_path: Path | None = None) -> WriteResult:
+        if not isinstance(self._record, ManagedRecord) or not is_device_id(self._record.device_id):
+            return WriteResult("refused", "not-managed")
+        if not is_device_id(device_id):
+            return WriteResult("refused", "bad-device-id")
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()
         if err is not None or endpoint is None or my_id is None:
             return err or WriteResult("refused", "not-managed")
-        if not is_device_id(device_id):
-            return WriteResult("refused", "bad-device-id")
         if device_id == my_id:
             return WriteResult("refused", "own-device")
 
@@ -2318,16 +2370,38 @@ class SyncthingWriter:
         target_dev = next((d for d in devices if d.get("deviceID") == device_id), None)
         if target_dev is None:
             return WriteResult("refused", "device-not-configured")
-        if require_writer_shape and not _has_writer_shape(target_dev):
-            return WriteResult("refused", "device-changed")
-        if target_dev.get("introducer") is True:
+        if target_dev.get("introducer") is not True:
             return WriteResult("unchanged", None)
+
+        if expected_path is not None:
+            folders, folder_err = self._get_list(
+                endpoint, "/rest/config/folders", timeout=per_req_timeout, deadline=deadline
+            )
+            if folder_err is not None or folders is None:
+                return folder_err or WriteResult("error", "bad-response")
+            fleet = None
+            for folder in folders:
+                folder_id = folder.get("id")
+                members = _folder_device_ids(folder)
+                if not isinstance(folder_id, str) or not folder_id.strip() or members is None:
+                    return WriteResult("error", "bad-response")
+                if folder_id == "mind-meld":
+                    fleet = folder
+                elif device_id in members:
+                    return WriteResult("refused", "shared-in-other-folder")
+            if fleet is None:
+                return WriteResult("refused", "no-folder")
+            binding = _existing_folder_result(
+                [fleet], "mind-meld", expected_path, {my_id, device_id}
+            )
+            if binding is None or binding.outcome != "unchanged":
+                return WriteResult("refused", "not-mm-folder")
 
         w_out, w_cause = _send_json(
             endpoint,
             "PATCH",
             f"/rest/config/devices/{device_id}",
-            {"introducer": True},
+            {"introducer": False},
             timeout=per_req_timeout,
             deadline=deadline,
         )

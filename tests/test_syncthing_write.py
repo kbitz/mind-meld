@@ -42,8 +42,8 @@ def _call_op(writer: syncthing.SyncthingWriter, op_name: str, peer_id: str, fold
         return writer.set_device_name(peer_id, "mac-b")
     if op_name == "remove_device":
         return writer.remove_device(peer_id)
-    if op_name == "mark_introducer":
-        return writer.mark_introducer(peer_id)
+    if op_name == "clear_introducer":
+        return writer.clear_introducer(peer_id)
     if op_name == "remove_default_folder":
         return writer.remove_default_folder()
     raise AssertionError(f"unknown op {op_name}")
@@ -60,7 +60,7 @@ _ALL_OPS = (
     "set_own_device_name",
     "set_device_name",
     "remove_device",
-    "mark_introducer",
+    "clear_introducer",
     "remove_default_folder",
 )
 
@@ -772,28 +772,127 @@ def test_set_device_name_and_remove_device_validations_and_mutations(fake_syncth
     assert fake_syncthing.bodies == []
 
 
-def test_mark_introducer_validations_and_patch(fake_syncthing, isolated_home):
+def test_clear_introducer_validations_and_patch(fake_syncthing, isolated_home):
     writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(fake_syncthing.my_id))
     fake_syncthing.set_config(devices=(), folders=())
 
-    assert writer.mark_introducer(fake_syncthing.peer_id) == syncthing.WriteResult(
+    assert writer.clear_introducer("not-a-valid-id") == syncthing.WriteResult(
+        "refused", "bad-device-id"
+    )
+    assert writer.clear_introducer(fake_syncthing.my_id) == syncthing.WriteResult(
+        "refused", "own-device"
+    )
+    assert fake_syncthing.bodies == []
+
+    assert writer.clear_introducer(fake_syncthing.peer_id) == syncthing.WriteResult(
         "refused", "device-not-configured"
     )
+    assert fake_syncthing.bodies == []
 
     fake_syncthing.set_config(
-        devices=[{"deviceID": fake_syncthing.peer_id, "name": "mac-b", "introducer": False}],
+        devices=[
+            {"deviceID": fake_syncthing.peer_id, "name": "mac-b", "introducer": True},
+            {"deviceID": fake_syncthing.peer2_id, "name": "linux-b"},
+        ],
         folders=(),
     )
-    res = writer.mark_introducer(fake_syncthing.peer_id)
-    assert res == syncthing.WriteResult("ok", None)
+    res = writer.clear_introducer(fake_syncthing.peer_id)
+    assert res == syncthing.WriteResult("ok", None, write_attempted=True)
     assert fake_syncthing.bodies == [
-        ("PATCH", f"/rest/config/devices/{fake_syncthing.peer_id}", {"introducer": True})
+        ("PATCH", f"/rest/config/devices/{fake_syncthing.peer_id}", {"introducer": False})
     ]
+    peer_entry = next(
+        d
+        for d in fake_syncthing.responses["/rest/config/devices"]
+        if d["deviceID"] == fake_syncthing.peer_id
+    )
+    assert peer_entry["introducer"] is False
 
-    # Already set -> unchanged
-    res2 = writer.mark_introducer(fake_syncthing.peer_id)
-    assert res2 == syncthing.WriteResult("unchanged", None)
+    # Already cleared -> unchanged, no new write
+    assert writer.clear_introducer(fake_syncthing.peer_id) == syncthing.WriteResult(
+        "unchanged", None
+    )
+    # Absent introducer key -> unchanged, no new write
+    assert writer.clear_introducer(fake_syncthing.peer2_id) == syncthing.WriteResult(
+        "unchanged", None
+    )
     assert len(fake_syncthing.bodies) == 1
+    for method, path, _body in fake_syncthing.bodies:
+        assert syncthing._write_route_ok(method, path)
+
+
+def test_remove_device_passes_only_an_active_introducer_to_still_retired(
+    fake_syncthing, isolated_home
+):
+    writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(fake_syncthing.my_id))
+    target = isolated_home / "Sync" / "mind-meld"
+    ok_folder = {
+        **fake_syncthing.stock_folder(target),
+        "id": "mind-meld",
+        "devices": [
+            {"deviceID": fake_syncthing.my_id},
+            {"deviceID": fake_syncthing.peer_id},
+            {"deviceID": fake_syncthing.peer2_id},
+        ],
+    }
+    fake_syncthing.responses["/rest/system/connections"] = {
+        "connections": {
+            fake_syncthing.peer_id: {"connected": False},
+            fake_syncthing.peer2_id: {"connected": False},
+        }
+    }
+
+    # Active local introducer (introducer: True) -> callback receives its ID; False holds DELETE
+    fake_syncthing.set_config(
+        devices=[
+            {
+                "deviceID": fake_syncthing.peer_id,
+                "name": "mac-old",
+                "introducedBy": fake_syncthing.peer2_id,
+            },
+            {
+                "deviceID": fake_syncthing.peer2_id,
+                "name": "mac-b",
+                "introducer": True,
+            },
+        ],
+        folders=[ok_folder],
+    )
+    seen: list[str] = []
+
+    def hold_if_introducer(introducer_id: str) -> bool:
+        seen.append(introducer_id)
+        return not introducer_id
+
+    res_held = writer.remove_device(fake_syncthing.peer_id, still_retired=hold_if_introducer)
+    assert res_held == syncthing.WriteResult("refused", "retirement-held")
+    assert seen == [fake_syncthing.peer2_id]
+    assert fake_syncthing.bodies == []
+
+    # Peer with introducer: False -> callback receives "" and DELETE runs
+    for peer2_entry in (
+        {"deviceID": fake_syncthing.peer2_id, "name": "mac-b", "introducer": False},
+        {"deviceID": fake_syncthing.peer2_id, "name": "mac-b"},
+    ):
+        fake_syncthing.bodies.clear()
+        seen.clear()
+        fake_syncthing.set_config(
+            devices=[
+                {
+                    "deviceID": fake_syncthing.peer_id,
+                    "name": "mac-old",
+                    "introducedBy": fake_syncthing.peer2_id,
+                },
+                peer2_entry,
+            ],
+            folders=[ok_folder],
+        )
+        res_ok = writer.remove_device(fake_syncthing.peer_id, still_retired=hold_if_introducer)
+        assert res_ok == syncthing.WriteResult("ok", None, write_attempted=True)
+        assert seen == [""]
+        assert fake_syncthing.bodies == [
+            ("DELETE", f"/rest/config/devices/{fake_syncthing.peer_id}", None)
+        ]
 
 
 def test_remove_default_folder_guards_and_delete(fake_syncthing, isolated_home, tmp_path):
@@ -988,7 +1087,7 @@ def test_scripted_o2_flows_and_credential_never_exposed(fake_syncthing, isolated
     results.extend([r1, r2])
     assert (r1.outcome, r2.outcome) == ("ok", "ok")
 
-    # Flow 2: join (add_device, mark_introducer, accept_folder_offer)
+    # Flow 2: join (add_device, accept_folder_offer)
     fake_syncthing.set_config(devices=(), folders=())
     fake_syncthing.responses[f"/rest/cluster/pending/folders?device={fake_syncthing.peer_id}"] = {
         "mind-meld": {
@@ -1003,12 +1102,11 @@ def test_scripted_o2_flows_and_credential_never_exposed(fake_syncthing, isolated
         }
     }
     r3 = writer.add_device(fake_syncthing.peer_id, "mac-b")
-    r4 = writer.mark_introducer(fake_syncthing.peer_id)
     r5 = writer.accept_folder_offer("mind-meld", fake_syncthing.peer_id, "Mind Meld", mm_dir)
-    results.extend([r3, r4, r5])
-    assert (r3.outcome, r4.outcome, r5.outcome) == ("ok", "ok", "ok")
+    results.extend([r3, r5])
+    assert (r3.outcome, r5.outcome) == ("ok", "ok")
 
-    # Flow 3: approve (pending_devices, add_device, share_folder, mark_introducer)
+    # Flow 3: approve (pending_devices, add_device, share_folder)
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {
         fake_syncthing.peer2_id: {
             "name": "linux-b",
@@ -1019,9 +1117,8 @@ def test_scripted_o2_flows_and_credential_never_exposed(fake_syncthing, isolated
     r6 = writer.pending_devices()
     r7 = writer.add_device(fake_syncthing.peer2_id, "linux-b")
     r8 = writer.share_folder("mind-meld", fake_syncthing.peer2_id)
-    r9 = writer.mark_introducer(fake_syncthing.peer2_id)
-    results.extend([r6, r7, r8, r9])
-    assert (r6.outcome, r7.outcome, r8.outcome, r9.outcome) == ("ok", "ok", "ok", "ok")
+    results.extend([r6, r7, r8])
+    assert (r6.outcome, r7.outcome, r8.outcome) == ("ok", "ok", "ok")
 
     # Every non-GET request passed _write_route_ok and no PUT was sent
     assert fake_syncthing.bodies
@@ -1112,21 +1209,7 @@ def test_approval_state_fields_and_get_only(fake_syncthing, isolated_home):
     )
     assert fake_syncthing.bodies == []
 
-    # After mark_introducer -> introducer True, writer_shape still True
-    assert writer.mark_introducer(fake_syncthing.peer_id) == syncthing.WriteResult("ok", None)
-    fake_syncthing.bodies.clear()
-    assert writer.approval_state("mind-meld", fake_syncthing.peer_id) == syncthing.ApprovalState(
-        outcome="ok",
-        cause=None,
-        folder="ok",
-        configured=True,
-        introducer=True,
-        shared=False,
-        writer_shape=True,
-    )
-    assert fake_syncthing.bodies == []
-
-    # After share_folder -> shared True
+    # After share_folder -> shared True, introducer stays False
     assert writer.share_folder("mind-meld", fake_syncthing.peer_id) == syncthing.WriteResult(
         "ok", None
     )
@@ -1136,7 +1219,7 @@ def test_approval_state_fields_and_get_only(fake_syncthing, isolated_home):
         cause=None,
         folder="ok",
         configured=True,
-        introducer=True,
+        introducer=False,
         shared=True,
         writer_shape=True,
     )
@@ -1186,7 +1269,7 @@ def test_standin_drops_pending_device_on_add_and_stop_after_restarts(fake_syncth
     bodies_after_add = list(fake_syncthing.bodies)
 
     # Next writer call fails as unreachable and records no request or body
-    assert writer.mark_introducer(fake_syncthing.peer_id) == syncthing.WriteResult(
+    assert writer.clear_introducer(fake_syncthing.peer_id) == syncthing.WriteResult(
         "unreachable", "refused"
     )
     assert fake_syncthing.requests == reqs_after_add
