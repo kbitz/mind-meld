@@ -331,6 +331,12 @@ class FakeSyncthing:
                     return
                 with outer._lock:
                     spec = outer.responses.get(self.path)
+                    if spec is None and self.path == "/rest/config":
+                        spec = {
+                            "devices": outer.responses.get("/rest/config/devices", []),
+                            "folders": outer.responses.get("/rest/config/folders", []),
+                            "remoteIgnoredDevices": [],
+                        }
                     if spec is None and "?" in self.path:
                         spec = outer.responses.get(self.path.split("?", 1)[0])
                 if spec is None:

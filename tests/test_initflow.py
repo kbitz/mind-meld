@@ -2535,7 +2535,7 @@ def test_new_fleet_and_join_publish_encrypted_syncthing_record_and_keep_devices_
     config.syncthing_record_path().unlink(missing_ok=True)
     fake_syncthing.my_id = joiner_id
     fake_syncthing.set_shape()
-    fake_syncthing.responses["/rest/cluster/pending/devices"] = {third_id: {"name": "peer-e"}}
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {}
     fake_syncthing.responses[f"/rest/cluster/pending/folders?device={my_id}"] = {
         "mind-meld": {
             "offeredBy": {
