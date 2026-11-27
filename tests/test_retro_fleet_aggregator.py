@@ -8953,7 +8953,10 @@ class TestTrack128APricingAndFloorExtrapolation:
         out = aggregator.format_retro(data)
         assert "| ~$4.50 |" in self._agy_table_line(out)
         card_out = aggregator.format_retro(data, name="user")
-        assert "~$4.50" in card_out.split("AGENTS", 1)[1].split("```", 1)[0]
+        # Value: protects=the card's compact estimate; fails_when=the card omits or misstates it;
+        # why_new=the Markdown body is independent; seam=none; no_claim=fixture render only
+        card_row = next(line for line in card_out.splitlines() if line.startswith("║  Antigravity"))
+        assert card_row.rsplit(" · ", 1)[-1].rstrip(" ║") == "~$4"
         extrap = _health_entry(out, "pricing_extrapolated")
         assert extrap is not None
         assert "gemini-flash-worker-agy → gemini-3.8-flash" in extrap["detail"]

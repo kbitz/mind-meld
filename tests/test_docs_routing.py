@@ -1522,10 +1522,17 @@ def test_retro_fleet_skill_step4_bounded_alias_judgment_contract():
 
     step4_lower = step4.lower()
     assert "never infer a rate from a model name" not in step4_lower
-    assert "unambiguously names a documented model or tier" in step4
+    # Value: protects=unresolved alias prerequisite and disclosure; fails_when=either is removed;
+    # why_new=the estimate phrase alone is insufficient; seam=none; no_claim=written prompt only
+    assert (
+        "unambiguously names a documented model or tier that the CLI's deterministic "
+        "fallback did not resolve" in step4
+    )
     assert "extrapolated `~` estimate" in step4
-    assert "alias-to-model mapping" in step4
-    assert "never call it verified" in step4_lower
+    assert (
+        "explicitly name the alias-to-model mapping in the report and never call it verified"
+        in step4_lower
+    )
     assert "separate extrapolated `~` estimate" in step4
     assert "alias's own input, cache read, cache write, and output token counts" in step4
     assert "preserve the cli's `≥` floor or unavailable cost as rendered" in step4_lower
