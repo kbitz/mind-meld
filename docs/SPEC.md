@@ -140,7 +140,19 @@ one Linux machine (developer, 2026-11-27: of O4's folder inspection, "two
 machines, one of each type is adequate"; asked whether that applies to all of
 O1 to O4 or only O4, "all"). O1.4, O2.7, O4.1 and the 2.0.0 stage-version
 line in Release policy follow. Audience, target, outcomes, other
-release-policy lines and O6 to O9 are unchanged.
+release-policy lines and O6 to O9 are unchanged. Amended again 2026-11-27 by
+`/project-spec` so mm stops marking peers as Syncthing introducers on
+machines where mm manages Syncthing (developer, 2026-11-27: asked "Syncthing's
+mutual-introducer warnings: stop mm marking introducers on machines it
+manages and rely on the mesh step (SPEC O2 amendment, then a card)?",
+answered "yes, stop marking"). Mutual introducer flags produced Syncthing log
+warnings across the owner's fleet while yielding no join-time introductions,
+and the encrypted-record mesh step already pairs every managed fleet machine.
+O2, the retired-introducer note in Constraints and the Syncthing Non-goal
+follow; the README-guide path for an owner-managed machine (marking one fleet
+machine as introducer there) stays, since it is one-way once managed machines
+stop marking peers as introducers. Audience, target, release policy and all
+other outcomes are unchanged.
 Earlier text lives in
 `git log -- docs/SPEC.md`.
 
@@ -261,7 +273,9 @@ when Syncthing still has its default configuration; joining takes one pasted
 device ID on each side; every fleet machine links to every other. Owner
 decisions of 2026-11-18: a join is one `mm init` run that waits for the
 approval, a stopped join resumes with the answers already given, and one
-approval on one fleet machine is the only approval a new machine needs.
+approval on one fleet machine is the only approval a new machine needs. Owner
+decision of 2026-11-27: on mm-managed machines, mm does not mark peers as
+Syncthing introducers and relies on approval and the mesh step instead.
 1. **Default configuration.** Syncthing has its default configuration when it
    has no paired device and no folder except its stock Default Folder,
    unshared and empty. Changes to the GUI or other options do not count. Any
@@ -302,17 +316,20 @@ approval on one fleet machine is the only approval a new machine needs.
    member can vouch for a device. On a machine where mm manages Syncthing,
    the next `mm push` or `mm pull` (the agent hooks included) adds a device
    that is asking to connect when a fleet member's encrypted record names
-   it, shares the fleet folder with it, keeps this machine's and each
+   it, shares the fleet folder with it, clears any stale Syncthing introducer
+   flag on existing fleet peers mm paired, keeps this machine's and each
    configured vouched peer's Syncthing device name aligned with `config.toml` /
    `devices/<id>.json`, and removes eligible disconnected devices after
-   `mm devices retire <name|id>`. The pass checks current fleet registrations,
-   introducers and folder shares before removing a device named in an encrypted
+   `mm devices retire <name|id>`. The pass checks current fleet registrations
+   and folder shares before removing a device named in an encrypted
    retirement record (`retired/<id>.enc`). mm never accepts a device that
-   no approval and no such record names. The paired machines also mark each
-   other as Syncthing introducers. mm promises this mesh only among machines
+   no approval and no such record names. On machines where mm manages
+   Syncthing, mm does not mark peers as Syncthing introducers; pairing comes
+   from approval and the mesh step. mm promises this mesh only among machines
    where it manages Syncthing; for a machine where the owner manages
    Syncthing, the README guide has the owner mark one fleet machine as
-   introducer there, so it learns of later machines.
+   introducer there, so it learns of later machines (one-way, because managed
+   machines do not mark it back).
 4. **Pre-existing configuration.** On a machine whose Syncthing has a
    pre-existing configuration, mm changes nothing in Syncthing and points the
    owner to the README guide for configuring Syncthing to work with mm
@@ -342,12 +359,12 @@ approval on one fleet machine is the only approval a new machine needs.
 6. `mm status` and `mm diag` read and report Syncthing's state (connected
    peers, the folder's sync state and the folder options mm relies on).
    mm writes Syncthing configuration only during managed setup, approval,
-   and the mesh step that pairs fleet members, removes retired devices and
-   corrects fleet device names.
+   and the mesh step that pairs fleet members, clears stale introducer flags
+   on fleet peers, removes retired devices and corrects fleet device names.
 7. Evidence: tests against a stand-in for Syncthing's local API cover setup,
    approval, ambiguous-match refusal, the pre-existing-configuration guide,
-   the join's wait, stop and resume, and mesh pairing, retirement and name
-   correction. An integration test joins a machine that holds iCloud-era state
+   the join's wait, stop and resume, and mesh pairing, introducer-flag
+   clearing, retirement and name correction. An integration test joins a machine that holds iCloud-era state
    to a fresh fleet without losing a file. On one Mac and one Linux machine,
    the owner observes a join that finishes in one `mm init` run after one approval,
    records the time from the joiner's approval line to approval, and checks
@@ -535,8 +552,9 @@ index. mm never copies a memory into another agent's store. Design:
   should be found (O9); and adding O9's pointer line by hand to an
   instruction file that is a symlink.
   Managed peers can pair a removed device again while its Mind Meld
-  registration still vouches for it. An owner-managed introducer that still
-  lists a retired device can reintroduce it until removed there.
+  registration still vouches for it. On a machine where the owner marked a
+  peer as a Syncthing introducer, that introducer can reintroduce a retired
+  device until removed there.
 - Known limits: a project outside the home folder with no network git
   `origin` stays machine-specific. Grok Build memory for a repository with
   no `origin`, or for a folder that is not a repository, reaches other
@@ -559,11 +577,10 @@ index. mm never copies a memory into another agent's store. Design:
   to join the fleet.
 - Multi-user collaboration, a GUI, real-time file watching, syncing session
   transcripts, walking a host home root. Unchanged exclusions.
-- mm-managed Syncthing beyond O2's setup, approval, introducers and mesh
-  step: invite codes, relays, changing a pre-existing Syncthing
-  configuration, and scan requests after push. Revisit when the fleet grows
-  past a handful of machines, or pairing or folder settings cause an
-  observed missed sync.
+- mm-managed Syncthing beyond O2's setup, approval and mesh step: invite
+  codes, relays, changing a pre-existing Syncthing configuration, and scan
+  requests after push. Revisit when the fleet grows past a handful of
+  machines, or pairing or folder settings cause an observed missed sync.
 - A migration tool or fleet-wide cutover from iCloud Drive, and carrying the
   iCloud store's usage history into the Syncthing fleet (owner, 2026-11-07:
   "we don't need a migrate tool, because i'm the only user"). Revisit when a
