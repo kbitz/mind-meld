@@ -2798,6 +2798,8 @@ class _SyncProgress:
         self._show_percent = True
         self._include_elapsed = include_elapsed
         self._last_render_at = 0.0
+        self._note = ""
+        self._hold_phase_timer_depth = 0
 
     def _can_draw(self) -> bool:
         # A closed/replaced stdout makes isatty() raise; that is a display
@@ -2809,13 +2811,14 @@ class _SyncProgress:
         return self._started_at is not None and time.monotonic() - self._started_at >= delay
 
     def _format_detail_locked(self, state: updateprogress.UpdateProgress, now: float) -> str:
-        base = ""
+        count = ""
         if state.total and state.completed is not None:
-            base = (
+            count = (
                 f"{100 * state.completed / state.total:.1f}% {state.detail}".rstrip()
                 if self._show_percent
                 else state.detail.rstrip()
             )
+        base = " ".join(part for part in (self._note, count) if part)
         if not self._include_elapsed:
             return base
         elapsed = max(0.0, now - self._phase_started_at)
@@ -2841,12 +2844,14 @@ class _SyncProgress:
         task = progress.add_task(self._state.phase, total=1, detail=detail)
         try:
             progress.start()
-        except (Exception, SystemExit):
+        except (Exception, SystemExit, KeyboardInterrupt) as exc:
             with suppress(Exception, SystemExit):
                 progress.stop()
             with suppress(Exception, SystemExit):
                 console.show_cursor(True)  # A failed start can skip Rich's own restore.
             self._enabled = False
+            if isinstance(exc, KeyboardInterrupt):
+                raise
             return False
         self._progress = progress
         self._task = task
@@ -2872,9 +2877,11 @@ class _SyncProgress:
         started_at: float | None = None,
     ) -> None:
         now = time.monotonic()
+        if state.phase != self._state.phase:
+            self._note = ""
         if started_at is not None:
             self._phase_started_at = started_at
-        elif state.phase != self._state.phase:
+        elif state.phase != self._state.phase and self._hold_phase_timer_depth == 0:
             self._phase_started_at = now
         self._state = state
         if not self._enabled or self._pause_depth > 0:
@@ -2912,7 +2919,9 @@ class _SyncProgress:
             if self._started_at is None:
                 self._started_at = now
             if phase != self._state.phase:
-                self._phase_started_at = now
+                if self._hold_phase_timer_depth == 0:
+                    self._phase_started_at = now
+                self._note = ""
             self._show_percent = True
             self._state = updateprogress.UpdateProgress(phase)
             self._batch_total = 0
@@ -2963,6 +2972,26 @@ class _SyncProgress:
             self._batch_total = 0
             self._show_percent = True
             self._render_locked(updateprogress.UpdateProgress(phase), force=True)
+
+    def set_note(self, note: str) -> None:
+        with self._lock:
+            if note == self._note:
+                return
+            self._note = note
+            self._render_locked(self._state)
+
+    @contextmanager
+    def hold_phase_timer(self):
+        """Keep the current phase elapsed clock running across sub-phase label updates."""
+        with self._lock:
+            self._hold_phase_timer_depth += 1
+            if self._hold_phase_timer_depth == 1:
+                self._phase_started_at = time.monotonic()
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._hold_phase_timer_depth = max(0, self._hold_phase_timer_depth - 1)
 
     def show(self, state: updateprogress.UpdateProgress) -> None:
         with self._lock:
@@ -3160,6 +3189,42 @@ def _sync_progress_count(
     progress = _current_sync_progress()
     if progress is not None:
         progress.set_count(phase, completed, total, unit, started_at=started_at)
+
+
+_SCAN_NOTE_MAX_CHARS = 48
+
+
+def _scan_note(source: str, scope: str) -> str:
+    """Format a bounded single-line scan note for the terminal progress line."""
+    src = safety.safe_terminal_str(source).strip()
+    scp = safety.safe_terminal_str(scope).strip()
+    if not src and not scp:
+        return ""
+    if not scp:
+        return src if len(src) <= _SCAN_NOTE_MAX_CHARS else "…" + src[-(_SCAN_NOTE_MAX_CHARS - 1) :]
+    if not src:
+        return scp if len(scp) <= _SCAN_NOTE_MAX_CHARS else "…" + scp[-(_SCAN_NOTE_MAX_CHARS - 1) :]
+    combined = f"{src} {scp}"
+    if len(combined) <= _SCAN_NOTE_MAX_CHARS:
+        return combined
+    prefix = f"{src} …"
+    tail_budget = _SCAN_NOTE_MAX_CHARS - len(prefix)
+    if tail_budget > 0:
+        return f"{prefix}{scp[-tail_budget:]}"
+    return src[:_SCAN_NOTE_MAX_CHARS]
+
+
+def _sync_progress_scan_callback() -> Callable[[str, str], None] | None:
+    """Return a read-only scan progress callback when attended terminal progress is active."""
+    progress = _current_sync_progress()
+    if progress is None or not progress._can_draw():
+        return None
+
+    def report(source: str, scope: str) -> None:
+        with suppress(Exception):
+            progress.set_note(_scan_note(source, scope))
+
+    return report
 
 
 def _stop_sync_progress() -> None:

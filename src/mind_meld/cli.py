@@ -976,6 +976,8 @@ def _report_usage_publication(
 
 def _sync_memory_index(config: dict) -> None:
     try:
+        if _config_module.memory_index_enabled(config):
+            core._sync_progress_phase("Refreshing memory index")
         memoryindex.refresh(config)
     except Exception:
         return
@@ -984,13 +986,17 @@ def _sync_memory_index(config: dict) -> None:
 def _sync_update(config: dict, *, verbose: bool) -> None:
     state = core._SYNC_OUTPUT.get()
     display: upgrade.SyncUpdateDisplay | None = None
-    if isinstance(state, dict) and not verbose and core._console_is_terminal():
-        display = upgrade.SyncUpdateDisplay(installing=core._installer_progress)
-        state["update"] = display
     try:
-        if display is not None:
+        if isinstance(state, dict) and not verbose and core._console_is_terminal():
+            display = upgrade.SyncUpdateDisplay(
+                installing=core._installer_progress,
+                on_upgrade_available=core._stop_sync_progress,
+            )
+            state["update"] = display
+            core._sync_progress_phase("Checking for updates")
             upgrade.update_or_nudge(config, attended=True, diagnostics=False, display=display)
         else:
+            core._stop_sync_progress()
             upgrade.update_or_nudge(config, attended=True, diagnostics=verbose)
     except (Exception, KeyboardInterrupt):
         if display is not None:
@@ -1277,7 +1283,11 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     if dry_run:
         yield
         return
-    progress = core._SyncProgress(enabled=not verbose, include_elapsed=verb == "push")
+    try:
+        progress_enabled = not verbose and not console.is_dumb_terminal
+    except (Exception, SystemExit):
+        progress_enabled = False
+    progress = core._SyncProgress(enabled=progress_enabled, include_elapsed=True)
     state = {"verbose": verbose, "diagnostics": events_tail.Degradations(), "progress": progress}
     token = core._SYNC_OUTPUT.set(state)
     error = None
@@ -1480,17 +1490,15 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
                 code = attemptlog.storage_errno(exc) or (
                     "contended" if isinstance(exc, LockContended) else "unavailable"
                 )
-                with suppress(Exception, SystemExit):
-                    print(
-                        safety.safe_terminal_str(
-                            "mm: notice [run-evidence-write-unavailable]: "
-                            f"{verb} content {effect}; "
-                            f"run evidence unavailable ({code}). "
-                            "Do not repeat sync solely to record it; "
-                            "restore local access/storage if needed, then run: mm diag"
-                        ),
-                        file=sys.stderr,
+                core._stderr_lines(
+                    (
+                        "mm: notice [run-evidence-write-unavailable]: "
+                        f"{verb} content {effect}; "
+                        f"run evidence unavailable ({code}). "
+                        "Do not repeat sync solely to record it; "
+                        "restore local access/storage if needed, then run: mm diag",
                     )
+                )
 
 
 @app.command()
@@ -1528,7 +1536,7 @@ def push(
     with _sync_outcome("push", verbose=verbose, dry_run=dry_run):
         with (
             _attended_sync_run("push", dry_run=dry_run) as run,
-            pullhistory.command_scope(attended=True),
+            pullhistory.command_scope(attended=True, pause_output=core._pause_sync_progress),
         ):
             config = core._get_config(read_only=dry_run)
             core._maybe_prompt_migration(config, read_only=dry_run)
@@ -1676,7 +1684,8 @@ def push(
                 stop_cause, stop_errno = "interrupted", None
                 raise
             finally:
-                core._stop_sync_progress()
+                if sys.exception() is not None:
+                    core._stop_sync_progress()
                 try:
                     if not dry_run and attempt.outcome is not None:
                         if not core_finished:
@@ -2244,6 +2253,7 @@ def _push_core(
     # an upload, but only user-content changes then warrant activity capture.
     # With no host row, the existing substantive-change gate stays in force.
     core._sync_progress_phase("Scanning sources")
+    scan_progress = core._sync_progress_scan_callback() if attended else None
     if show:
         console.print("[bold]Building manifest...[/bold]")
     with timer.measure("manifest_scan", "Manifest scan"):
@@ -2257,7 +2267,10 @@ def _push_core(
             nested_roots=nested_roots,
             held=held,
             held_candidates=held_candidates,
+            on_progress=scan_progress,
         )
+    if scan_progress is not None:
+        scan_progress("", "")
 
     # Track 90A: the one decision about the project-name format, from the own
     # prior as recovered (before the consumer filters below copy it).
@@ -3044,7 +3057,7 @@ def _attended_pull(
                     if v is not None
                 },
             ) as run,
-            pullhistory.command_scope(attended=True),
+            pullhistory.command_scope(attended=True, pause_output=core._pause_sync_progress),
         ):
             config = core._get_config(read_only=dry_run)
             core._maybe_prompt_migration(config, read_only=dry_run)
@@ -3119,7 +3132,8 @@ def _attended_pull(
                     )
                 if join and (not_placed := pullflow.not_placed_line(pulled)):
                     # A join adds the line once, ahead of its one outcome line.
-                    console.print(safe_str(not_placed))
+                    with core._pause_sync_progress():
+                        console.print(safe_str(not_placed))
                 if dry_run:
                     console.print(core.DRY_RUN_COMPLETE)
                     console.print(pullflow.PULL_NOT_PREVIEWED)
@@ -3128,7 +3142,8 @@ def _attended_pull(
                     core._error(str(e) + refusal_suffix)
                 raise
             finally:
-                core._stop_sync_progress()
+                if sys.exception() is not None:
+                    core._stop_sync_progress()
                 core._release_sync_lock()
 
             # Seam 2 — interactive pull tail: self-update, or the nudge. Runs AFTER
@@ -3155,8 +3170,10 @@ def _attended_pull(
                                 mesh_res.superseded_registrations if mesh_res is not None else ()
                             ),
                         )
-                join_setup.close()
-                if finish_memory_setup is None and not pulled.total_failed:
+                if finish_memory_setup is not None:
+                    with core._pause_sync_progress():
+                        join_setup.close()
+                elif not pulled.total_failed:
                     _sync_memory_index(config)
                 _sync_update(config, verbose=verbose)
 

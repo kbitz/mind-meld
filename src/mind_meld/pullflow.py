@@ -29,7 +29,7 @@ import sys
 import time
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Sequence
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -4138,27 +4138,34 @@ def _wait_for_syncthing_delivery(
         # Verbose pulls skip the usual spinner. Give just this wait its own phase.
         progress = core._SyncProgress(enabled=True, delay=0.0) if verbose and wait_ms else None
         show_phase = progress.start if progress is not None else core._sync_progress_phase
+        active_progress = core._current_sync_progress() if not verbose else None
+        hold_timer = (
+            active_progress.hold_phase_timer()
+            if active_progress is not None and _delivery_now() < deadline
+            else nullcontext()
+        )
         try:
-            while _delivery_now() < deadline:
-                files = syncthing.delivery_files(state.files_to_fetch)
-                show_phase(f"Waiting for Syncthing to deliver {files}")
-                _delivery_sleep(min(1.0, max(0.0, deadline - _delivery_now())))
-                remaining = deadline - _delivery_now()
-                if remaining <= 0:
-                    break
-                observed = syncthing.read_state(
-                    storage_root, timeout=1.0, budget=min(budget, remaining)
-                )
-                # A poll cut short by our wait deadline leaves the prior observation in place.
-                if (
-                    remaining < budget
-                    and observed.state == "unreachable"
-                    and observed.cause == "timeout"
-                ):
-                    break
-                if not syncthing.delivery_pending(observed):
-                    return False, None
-                state = observed
+            with hold_timer:
+                while _delivery_now() < deadline:
+                    files = syncthing.delivery_files(state.files_to_fetch)
+                    show_phase(f"Waiting for Syncthing to deliver {files}")
+                    _delivery_sleep(min(1.0, max(0.0, deadline - _delivery_now())))
+                    remaining = deadline - _delivery_now()
+                    if remaining <= 0:
+                        break
+                    observed = syncthing.read_state(
+                        storage_root, timeout=1.0, budget=min(budget, remaining)
+                    )
+                    # A poll cut short by our wait deadline leaves the prior observation in place.
+                    if (
+                        remaining < budget
+                        and observed.state == "unreachable"
+                        and observed.cause == "timeout"
+                    ):
+                        break
+                    if not syncthing.delivery_pending(observed):
+                        return False, None
+                    state = observed
         finally:
             if progress is not None:
                 progress.stop()
@@ -4309,6 +4316,7 @@ def _pull_core(
             ):
                 # The last peer can retire, leaving nobody to pull from. The
                 # recovery folders still expire on later Codex memory pulls.
+                core._sync_progress_phase("Finishing pull")
                 recovery_cleanup_failures = _gc_pull_recovery_copies()
                 retired_touched: set[Path] = set()
                 retired_removed, retired_names, retired_folder, retirement_failures = (
@@ -4817,6 +4825,7 @@ def _pull_core(
                             core._warning(f"manifest conflict-copy cleanup failed for {dname}: {e}")
 
             if not dry_run:
+                core._sync_progress_phase("Finishing pull")
                 # Hooks never run `mm gc`; copies only grow when a pull deletes.
                 maintenance_failures += _gc_pull_recovery_copies()
                 blocked = {
@@ -5021,19 +5030,22 @@ def _pull_core(
                 with suppress(Exception, SystemExit):
                     result_observer(_partial_result)
             exception_in_flight = sys.exc_info()[0] is not None
-            core._stop_sync_progress()
+            if exception_in_flight:
+                core._stop_sync_progress()
             try:
-                _print_pull_summary(
-                    _partial_result,
-                    corrupt_peers=corrupt_peers,
-                    unknown_sources=unknown_sources,
-                    fsync_warnings=fsync_warnings,
-                    per_source_results=per_source_results,
-                    quiet=quiet or not show,
-                    verbose=verbose,
-                    interruption=interruption,
-                    dry_run=dry_run,
-                )
+                summary_ctx = nullcontext() if exception_in_flight else core._pause_sync_progress()
+                with summary_ctx:
+                    _print_pull_summary(
+                        _partial_result,
+                        corrupt_peers=corrupt_peers,
+                        unknown_sources=unknown_sources,
+                        fsync_warnings=fsync_warnings,
+                        per_source_results=per_source_results,
+                        quiet=quiet or not show,
+                        verbose=verbose,
+                        interruption=interruption,
+                        dry_run=dry_run,
+                    )
             except (Exception, SystemExit):
                 if not exception_in_flight:
                     raise

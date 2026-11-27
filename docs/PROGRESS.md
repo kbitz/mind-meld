@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.92 | 2026-11-27 | Version 1.12.92 keeps attended sync progress visible until the outcome prints, with elapsed time on pull and each source and project named on push. |
 | 1.12.91 | 2026-11-27 | Version 1.12.91 prices unambiguous retro-fleet vendor model aliases as disclosed estimates and needs a skill refresh after upgrading. |
 | 1.12.90 | 2026-11-25 | Version 1.12.90 keeps mind-meld commands, skills, and upgrade behavior as they are. |
 | 1.12.89 | 2026-11-25 | Attended `mm push` now reports usage publication and readers still catching up on its `Push:` line, and `mm retro-fleet` refreshes vendor rate tables and bundled model pricing while `/retro-fleet` applies scheduled price changes. |

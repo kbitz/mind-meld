@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.92] - 2026-11-27
+
+Version 1.12.92 keeps attended sync progress visible until the outcome prints, with elapsed time on pull and each source and project named on push.
+
+### Changed
+
+- Attended `mm pull` keeps its progress line, with per-step elapsed time, until its outcome lines print, and attended `mm push` names each source and project on its `Scanning sources` line.
+- Attended `mm pull` shows per-phase elapsed time through finishing, and both sync commands keep progress visible through post-sync checks before clearing it for update output.
+- Attended `mm push` shows the source and scan scope on its `Scanning sources` line.
+
+### Fixed
+
+- Interrupted sync progress startup restores the cursor.
+- Sync stays isolated from terminal capability probe errors.
+
 ## [1.12.91] - 2026-11-27
 
 Version 1.12.91 prices unambiguous retro-fleet vendor model aliases as disclosed estimates and needs a skill refresh after upgrading.

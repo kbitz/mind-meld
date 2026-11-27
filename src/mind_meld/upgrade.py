@@ -68,7 +68,7 @@ import termios
 import threading
 import time
 from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1796,6 +1796,8 @@ class SyncUpdateDisplay:
 
     The caller prints `outcomes` and `problems` after successful sync outcomes
     or before sync failure lines. `installing` must not raise for a display failure.
+    `on_upgrade_available`, when set, is called once after the release check finds
+    a newer release, before any install, nudge or other output.
     """
 
     installing: Callable[
@@ -1803,6 +1805,7 @@ class SyncUpdateDisplay:
     ]
     outcomes: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+    on_upgrade_available: Callable[[], None] | None = None
 
 
 def update_or_nudge(
@@ -1830,6 +1833,9 @@ def update_or_nudge(
         result = check_for_upgrade(config)
         if result.state != "upgrade-available" or result.latest is None:
             return
+        if display is not None and display.on_upgrade_available is not None:
+            with suppress(Exception):
+                display.on_upgrade_available()
         stage = "install"
         try:
             handled, failed = _auto_install(
