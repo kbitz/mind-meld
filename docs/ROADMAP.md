@@ -29,7 +29,7 @@ None declared (2026-11-27). No branch, session or open pull request is active fo
 
 _tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 92, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170_
 
-None. Tracks 169B (v1.12.91, [PR #394](https://github.com/kbitz/mind-meld/pull/394), `4562a8c`), 169A (v1.12.92, [PR #395](https://github.com/kbitz/mind-meld/pull/395), `5957cef`), and 170A (v1.12.93, [PR #396](https://github.com/kbitz/mind-meld/pull/396), `86e1bcd`) merged, and Groups 169 and 170 are retired (removing Track 170A's work-item-ID dependency line). All 20 review test-gap intake records under `docs/todos/` were drained to Future, and re-checking the 47 existing Future entries found no encountered reproducible bug with a cause found in the code and no met revisit trigger that admits a Track. The owner will choose the next Track, and the path to 2.0, after using the Syncthing fleet.
+None. Tracks 169B (v1.12.91, [PR #394](https://github.com/kbitz/mind-meld/pull/394), `4562a8c`), 169A (v1.12.92, [PR #395](https://github.com/kbitz/mind-meld/pull/395), `5957cef`), and 170A (v1.12.93, [PR #396](https://github.com/kbitz/mind-meld/pull/396), `86e1bcd`) merged, and Groups 169 and 170 are retired (removing Track 170A's work-item-ID dependency line). All 20 review test-gap intake records under `docs/todos/` were drained under the PR #391 prune rule (7 Syncthing write-safety gaps deferred to Future; 13 outside data-at-risk, crypto, and storage-format paths killed), and re-checking the 47 existing Future entries found no encountered reproducible bug with a cause found in the code and no met revisit trigger that admits a Track. The owner will choose the next Track, and the path to 2.0, after using the Syncthing fleet.
 
 ### Execution Map
 
@@ -41,7 +41,7 @@ No Groups remain.
 
 ## Future
 
-Deferred: docs/roadmap-future.md (67 items)
+Deferred: docs/roadmap-future.md (54 items)
 
 ## Shipped
 
