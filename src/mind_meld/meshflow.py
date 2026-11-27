@@ -327,6 +327,7 @@ def run(
     *,
     verb: Literal["push", "pull"],
     attended: bool,
+    joining: bool = False,
     verbose: bool = False,
     backend: LocalBackend | None = None,
     log_unexpected: Callable[[str, BaseException], None] | None = None,
@@ -342,6 +343,7 @@ def run(
             memory_kb=memory_kb,
             verb=verb,
             attended=attended,
+            joining=joining,
             backend=backend,
         )
     except Exception as exc:
@@ -431,6 +433,7 @@ def _run_inner(
     memory_kb: int,
     verb: Literal["push", "pull"],
     attended: bool,
+    joining: bool = False,
     backend: LocalBackend | None,
 ) -> MeshResult:
     req_timeout = ATTENDED_REQUEST_TIMEOUT_S if attended else HOOK_REQUEST_TIMEOUT_S
@@ -502,6 +505,7 @@ def _run_inner(
             backend,
             passphrase,
             memory_kb,
+            strict=joining,
         )
     except (OSError, StorageError) as exc:
         retirements_listed = False
@@ -681,18 +685,34 @@ def _run_inner(
     # 1. Plan pairing steps (only when fleet folder is valid)
     candidates: list[tuple[str, list[tuple[str, str]]]] = []
     if folder_ok:
-        for dev_id in snap.pending_ids:
-            if dev_id in other_vouched and dev_id != snap.my_id and dev_id not in snap.devices:
-                candidates.append(
-                    (
-                        dev_id,
-                        [
-                            ("adding device", "add_device"),
-                            ("sharing the fleet folder", "share_folder"),
-                        ],
-                    )
+        pairable = set(other_vouched)
+        if joining:
+            if not retirements_listed or (
+                retirements.unreadable or retirements.vanished or retirements.newer_format
+            ):
+                pairable.clear()
+            else:
+                pairable = {
+                    st_id
+                    for st_id, (mm_id, _) in other_vouched.items()
+                    if st_id not in retirements.by_syncthing_id
+                    and mm_id not in retirements.records
+                    and st_id not in snap.other_folder_device_ids
+                }
+        potential_adds = sorted(pairable) if joining else snap.pending_ids
+        for dev_id in potential_adds:
+            if dev_id not in pairable or dev_id == snap.my_id or dev_id in snap.devices:
+                continue
+            candidates.append(
+                (
+                    dev_id,
+                    [
+                        ("adding device", "add_device"),
+                        ("sharing the fleet folder", "share_folder"),
+                    ],
                 )
-        for dev_id in sorted(other_vouched):
+            )
+        for dev_id in sorted(pairable):
             if dev_id == snap.my_id or dev_id in snap.folder_device_ids:
                 continue
             cdev = snap.devices.get(dev_id)
@@ -935,7 +955,9 @@ def _run_inner(
                 deadline=deadline,
             )
             if op_name == "add_device":
-                w_res = step_writer.add_device(dev_id, name=peer_target_name)
+                w_res = step_writer.add_device(
+                    dev_id, name=peer_target_name, join_path=storage_root if joining else None
+                )
             else:
                 w_res = step_writer.share_folder(
                     _config_module.SYNCTHING_FOLDER_ID, dev_id, expected_path=storage_root

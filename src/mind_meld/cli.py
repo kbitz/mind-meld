@@ -3130,6 +3130,7 @@ def _attended_pull(
                         memory_kb,
                         verb="pull",
                         attended=True,
+                        joining=join,
                         verbose=verbose,
                         backend=backend,
                         trace_formatter=_compact_sync_trace,

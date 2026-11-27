@@ -1818,6 +1818,54 @@ def test_attended_partial_pull_reports_confirmed_introducer_clear(
     assert result.output.splitlines()[-1] == "Run: mm diag"
 
 
+def test_authenticated_init_pull_initiates_only_vouched_active_peers(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    _storage_dir, backend, _my_id = _setup_fleet(fake_syncthing, tmp_path, monkeypatch)
+    eligible = _valid_syncthing_id("B")
+    ignored = _valid_syncthing_id("C")
+    retired = _valid_syncthing_id("D")
+    paused = _valid_syncthing_id("E")
+    unvouched = _valid_syncthing_id("F")
+    for label, peer_id in (
+        ("dev-b", eligible),
+        ("dev-c", ignored),
+        ("dev-d", retired),
+        ("dev-e", paused),
+    ):
+        register_device(backend, label, label)
+        devices.publish_record(backend, label, peer_id, PASSPHRASE, TEST_MEMORY_KB)
+    devices.write_retirement_record(backend, "dev-d", "dev-d", retired, PASSPHRASE, TEST_MEMORY_KB)
+    configured = fake_syncthing.responses["/rest/config/devices"]
+    configured.append({"deviceID": paused, "name": "dev-e", "paused": True})
+    fake_syncthing.responses["/rest/config"] = {
+        "devices": configured,
+        "folders": fake_syncthing.responses["/rest/config/folders"],
+        "remoteIgnoredDevices": [{"deviceID": ignored}],
+    }
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {unvouched: {"name": "unvouched"}}
+
+    normal = runner.invoke(app, ["pull"])
+    assert normal.exit_code == 0, normal.output
+    assert fake_syncthing.bodies == []
+
+    def verified_join(*, new_fleet, pull_join):
+        assert not new_fleet
+        assert pull_join is not None
+        pull_join(PASSPHRASE, lambda incomplete: None)
+
+    monkeypatch.setattr(cli.initflow, "init", verified_join)
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    (method, route, body), (share_method, share_route, share) = fake_syncthing.bodies
+    assert (method, route) == ("POST", "/rest/config/devices")
+    assert body["deviceID"] == eligible and body["introducer"] is False
+    assert (share_method, share_route) == ("PATCH", "/rest/config/folders/mind-meld")
+    assert share["devices"][-1] == {"deviceID": eligible}
+    assert "Syncthing now shares" in result.output
+
+
 def test_mesh_clears_stale_introducer_flags_on_fleet_peers_only(
     fake_syncthing, tmp_path, monkeypatch
 ):
