@@ -134,7 +134,13 @@ machine and is not searchable there (developer, 2026-11-24: "I think B is
 expected behavior", and "1 - yes" to adding this line): cross-machine search
 on a machine covers memory from projects present on that machine plus each
 agent's machine-wide memory. Audience, target, release policy and the other
-outcomes are unchanged.
+outcomes are unchanged. Amended 2026-11-27 by `/project-spec` to set the
+owner's observation scope for O1 to O4 acceptance evidence to one Mac and
+one Linux machine (developer, 2026-11-27: of O4's folder inspection, "two
+machines, one of each type is adequate"; asked whether that applies to all of
+O1 to O4 or only O4, "all"). O1.4, O2.7, O4.1 and the 2.0.0 stage-version
+line in Release policy follow. Audience, target, outcomes, other
+release-policy lines and O6 to O9 are unchanged.
 Earlier text lives in
 `git log -- docs/SPEC.md`.
 
@@ -244,8 +250,8 @@ holds the same synced files.
    published version and goes out with a later push; it never stops the rest
    of the push.
 4. Evidence: integration tests over a local folder that delivers files late
-   and out of order, and the owner's own observation on one Mac and both
-   Linux machines with real hooks once each has moved onto the Syncthing
+   and out of order, and the owner's own observation on one Mac and one
+   Linux machine with real hooks once each has moved onto the Syncthing
    fleet (O2.5), recorded in PROGRESS.md `## Acceptance`. Problems are fixed
    as they appear.
 
@@ -342,8 +348,8 @@ approval on one fleet machine is the only approval a new machine needs.
    approval, ambiguous-match refusal, the pre-existing-configuration guide,
    the join's wait, stop and resume, and mesh pairing, retirement and name
    correction. An integration test joins a machine that holds iCloud-era state
-   to a fresh fleet without losing a file. On their own machines, the owner
-   observes a join that finishes in one `mm init` run after one approval,
+   to a fresh fleet without losing a file. On one Mac and one Linux machine,
+   the owner observes a join that finishes in one `mm init` run after one approval,
    records the time from the joiner's approval line to approval, and checks
    that the new machine connects to each managed peer. The owner observes a
    retired device and its fleet-folder share disappear on managed peers and
@@ -362,7 +368,7 @@ approval on one fleet machine is the only approval a new machine needs.
    AES-256-GCM before they reach the folder. Only the fleet's key-derivation
    header (salt, KDF parameters, key check) and the device registry (machine
    names, mm versions, last-seen times) are plaintext. Proven by tests and by
-   inspecting the folder on the owner's machines.
+   the owner inspecting the folder on one Mac and one Linux machine.
 
 O5 (restore, clone and fork safety) was removed on 2026-10-19 with the
 store-v2 design: re-joining a restored or cloned machine is an accepted
@@ -615,7 +621,7 @@ index. mm never copies a memory into another agent's store. Design:
   2.0.0's other conditions are met, and 2.0.0 never awards it again.
 - Stage versions: MVP-1 on iCloud (macOS) = 1.0.0, achieved. MVP-1 on
   Syncthing (macOS and Linux) = **2.0.0**: O1 to O4 accepted on the
-  owner's own observation on one Mac and both Linux machines in the
+  owner's own observation on one Mac and one Linux machine in the
   Syncthing fleet, O9 accepted (its criterion 6), with O6 to O8 holding,
   the bootstrap script and O2's Syncthing setup and approval shipped. MAJOR
   because the transport changes. A Mac not yet moved keeps running on iCloud
