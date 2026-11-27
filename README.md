@@ -441,8 +441,9 @@ error (decrypt, write, permission).
 Before reading peer manifests, `mm pull` checks delivery for the whole folder
 through Syncthing's local read-only API, including on owner-managed folders.
 The initial probe has a 2 s REST budget. If delivery is pending, a terminal
-pull shows a transient `Waiting for Syncthing to deliver N files` line while
-waiting up to `[sync] pull_syncthing_wait_ms` (default 15,000 ms) after the probe.
+pull waits up to `[sync] pull_syncthing_wait_ms` (default 15,000 ms) after the
+probe. The transient progress phase is `Waiting for Syncthing to deliver N files`.
+See [Sync outcomes](#sync-outcomes) for when the spinner appears.
 A non-terminal pull or a pull with the setting at `0` proceeds after one probe.
 If delivery still appears pending, pull applies what has arrived and adds
 `Pull: Syncthing is still delivering N files. Run: mm pull.` Pending delivery
@@ -1194,19 +1195,20 @@ helpers use them:
 - **Fix command:** `Run: <command>` on its own last line after an error, or ending a one-line warning, notice, or status verdict; CLI usage errors exit **2** with `Run: <command path> --help` instead of a Rich panel.
 
 In an interactive terminal without `--verbose` or `--dry-run`, `mm push` and
-`mm pull` show a transient spinner with live phase labels, progress counters,
-and per-phase elapsed time (`· <elapsed>s`). Attended `mm push` names the
-source and project while scanning (`Scanning sources claude
-projects/-Users-user-myapp · 0.3s`), then shows per-phase counts and elapsed
+`mm pull` show a transient spinner after three seconds of sync work, with live
+phase labels, progress counters, and per-phase elapsed time (`· <elapsed>s`).
+During a scan, `mm push` names the source and, when available, the project or
+scope (`Scanning sources claude projects/-Users-user-myapp · 0.3s`), then
+shows per-phase counts and elapsed
 time (`Reading Codex usage 41/159 · 2.1s`, `Discovering repositories 3/6 ·
 0.4s`, `Uploading files 50.0% 1/2 files · 0.2s`), while `mm pull` shows
 manifest and file counters with elapsed time (`Reading peer manifests 50.0%
 1/2 manifests · 0.2s`, `Applying files 50.0% 1/2 files · 0.4s` per source
-batch) and keeps its progress live through finishing, Syncthing fleet checks,
-memory-index refresh, and the release check until the final outcome lines
-print. The spinner pauses cleanly for mid-run warnings or conflict prompts on
-the push/pull paths, hands off cleanly to the installer spinner if an automatic
-update runs, and clears before the final outcome lines. A successful
+batch). Pull keeps the spinner active through finishing and Syncthing fleet
+checks. Both commands keep it active through any memory-index refresh and the
+release check. The spinner pauses for mid-run warnings or conflict prompts and
+clears before the final outcome lines. If the check finds a newer release, it
+clears before any installer spinner or upgrade notice. A successful
 `mm push --verbose` prints a `Phase timings:` block before the `Push:`
 outcome lines. Each recorded phase shows elapsed milliseconds and, when
 applicable, its allowance. `mm update` and an
