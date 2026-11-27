@@ -4,8 +4,8 @@
 `--format=json` array consumed by `retro-fleet`. `approve` pairs a joining
 machine on an mm-managed Syncthing instance (with no argument, by device name,
 by short-ID prefix, or by full Syncthing device ID; or finishes an earlier
-half-finished approval by full ID), marks it as introducer and shares the fleet
-folder with it. `retire` records an encrypted retirement record under
+half-finished approval by full ID) and shares the fleet folder with it.
+`retire` records an encrypted retirement record under
 `retired/<mm-id>.enc` and removes the machine's `syncthing/<id>.enc` and
 `devices/<id>.json` records under the mm lock.
 
@@ -164,10 +164,10 @@ def _stop_partial(
 ) -> None:
     """Exit 1 after an approval write failed, naming what Syncthing confirmed.
 
-    ``written`` is the last confirmed step: ``"nothing"``, ``"added"`` or
-    ``"introducer"``. A write whose response was lost may still have applied, so
-    the failed step is reported as unconfirmed, never as not done; a rerun reads
-    Syncthing's state and finishes either way.
+    ``written`` is the last confirmed step: ``"nothing"`` or ``"added"``. A
+    write whose response was lost may still have applied, so the failed step is
+    reported as unconfirmed, never as not done; a rerun reads Syncthing's state
+    and finishes either way.
     """
     id_s = safe_terminal_str(candidate)
     out_s = safe_terminal_str(outcome)
@@ -179,13 +179,8 @@ def _stop_partial(
         )
     elif written == "added":
         prefix = (
-            f"devices approve: Syncthing added {id_s} but did not confirm marking it as "
-            f"introducer or sharing the fleet folder with it ({out_s}/{cause_s})."
-        )
-    elif written == "introducer":
-        prefix = (
-            f"devices approve: Syncthing added {id_s} and marked it as introducer, "
-            f"but did not confirm sharing the fleet folder with it ({out_s}/{cause_s})."
+            f"devices approve: Syncthing added {id_s} but did not confirm sharing the "
+            f"fleet folder with it ({out_s}/{cause_s})."
         )
     else:
         raise ValueError(f"unknown approval step {written!r}")
@@ -413,57 +408,33 @@ def approve(device_id: str | None = None) -> None:
                         outcome=add_res.outcome,
                         cause=add_res.cause,
                     )
-                intro_res = writer.mark_introducer(candidate)
-                if intro_res.outcome not in ("ok", "unchanged"):
-                    _stop_partial(
-                        candidate,
-                        written="added",
-                        outcome=intro_res.outcome,
-                        cause=intro_res.cause,
-                    )
                 share_res = writer.share_folder(_config_module.SYNCTHING_FOLDER_ID, candidate)
                 if share_res.outcome not in ("ok", "unchanged"):
                     _stop_partial(
                         candidate,
-                        written="introducer",
+                        written="added",
                         outcome=share_res.outcome,
                         cause=share_res.cause,
                     )
                 _print_approved(
                     f"approved {safe_terminal_str(candidate)}: Syncthing here shares the "
-                    "fleet folder with it and marks it as introducer"
+                    "fleet folder with it"
                 )
                 return
 
             if state.configured and not state.shared and state.writer_shape:
-                intro_res = writer.mark_introducer(candidate)
-                if intro_res.outcome not in ("ok", "unchanged"):
-                    _stop_partial(
-                        candidate,
-                        written="added",
-                        outcome=intro_res.outcome,
-                        cause=intro_res.cause,
-                    )
                 share_res = writer.share_folder(_config_module.SYNCTHING_FOLDER_ID, candidate)
                 if share_res.outcome not in ("ok", "unchanged"):
                     _stop_partial(
                         candidate,
-                        written="introducer",
+                        written="added",
                         outcome=share_res.outcome,
                         cause=share_res.cause,
                     )
-                if intro_res.outcome == "unchanged":
-                    _print_approved(
-                        f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
-                        "now shares the fleet folder with it (it was already added and "
-                        "marked as introducer)"
-                    )
-                else:
-                    _print_approved(
-                        f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
-                        "now marks it as introducer and shares the fleet folder with it "
-                        "(it was already added)"
-                    )
+                _print_approved(
+                    f"finished approving {safe_terminal_str(candidate)}: Syncthing here "
+                    "now shares the fleet folder with it (it was already added)"
+                )
                 return
 
             if state.configured:
@@ -791,28 +762,19 @@ def approve(device_id: str | None = None) -> None:
             outcome=add_res.outcome,
             cause=add_res.cause,
         )
-    intro_res = writer.mark_introducer(full_id, require_writer_shape=True)
-    if intro_res.outcome not in ("ok", "unchanged"):
-        _stop_partial(
-            full_id,
-            written="added",
-            outcome=intro_res.outcome,
-            cause=intro_res.cause,
-        )
     share_res = writer.share_folder(
         _config_module.SYNCTHING_FOLDER_ID, full_id, expected_path=approved_path
     )
     if share_res.outcome not in ("ok", "unchanged"):
         _stop_partial(
             full_id,
-            written="introducer",
+            written="added",
             outcome=share_res.outcome,
             cause=share_res.cause,
         )
     _print_approved(
         f"approved {safe_terminal_str(target_candidate.display_name)} "
-        f"({safe_terminal_str(full_id)}): Syncthing here shares the fleet folder with it "
-        "and marks it as introducer"
+        f"({safe_terminal_str(full_id)}): Syncthing here shares the fleet folder with it"
     )
 
 

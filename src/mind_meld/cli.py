@@ -658,7 +658,7 @@ def init(
     optional qmd memory index, semantic-search embeddings, and agent
     instruction pointer line first, and saves those answers locally (never the
     passphrase). On a default
-    Syncthing configuration it adds the fleet device as introducer, prints this
+    Syncthing configuration it adds the fleet device, prints this
     machine's device ID and short ID with both 'mm devices approve' commands
     to run on the fleet machine, waits up to 10 minutes for approval, accepts the 'mind-meld'
     folder offer once shared, and waits up to two minutes for Syncthing to
@@ -3286,9 +3286,9 @@ def devices_approve(
     terminal), a device name, a short Syncthing device-ID prefix (at least 4
     base32 characters; terminal required), or the full 56-character Syncthing
     device ID (works with or without a terminal, and finishes an earlier
-    half-finished approval). Adds the device, marks it as introducer, and shares
-    the fleet folder with it. Never automatic; owner-managed machines approve by
-    hand in Syncthing's GUI.
+    half-finished approval). Adds the device and shares the fleet folder with
+    it. Never automatic; owner-managed machines approve by hand in Syncthing's
+    GUI.
     """
     devicesflow.approve(device_id)
 

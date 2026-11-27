@@ -2220,6 +2220,12 @@ class SyncthingWriter:
         expected_path: Path | None = None,
         still_retired: Callable[[str], bool] | None = None,
     ) -> WriteResult:
+        """Remove a disconnected retired device after live safety rechecks.
+
+        When ``still_retired`` is provided, it receives the ``deviceID`` of the
+        device's ``introducedBy`` peer only when that peer is configured locally
+        with ``introducer: True``; otherwise it receives ``""``.
+        """
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()
         if err is not None or endpoint is None or my_id is None:
             return err or WriteResult("refused", "not-managed")
@@ -2240,7 +2246,10 @@ class SyncthingWriter:
         introducer = target_dev.get("introducedBy", "")
         if not isinstance(introducer, str):
             return WriteResult("error", "bad-response")
-        if not any(entry.get("deviceID") == introducer for entry in devices):
+        if not any(
+            entry.get("deviceID") == introducer and entry.get("introducer") is True
+            for entry in devices
+        ):
             introducer = ""
         if still_retired is not None and not still_retired(introducer):
             return WriteResult("refused", "retirement-held")
@@ -2301,12 +2310,14 @@ class SyncthingWriter:
         )
         return WriteResult(w_out, w_cause, write_attempted=True)
 
-    def mark_introducer(self, device_id: str, *, require_writer_shape: bool = False) -> WriteResult:
+    def clear_introducer(self, device_id: str) -> WriteResult:
+        if not isinstance(self._record, ManagedRecord) or not is_device_id(self._record.device_id):
+            return WriteResult("refused", "not-managed")
+        if not is_device_id(device_id):
+            return WriteResult("refused", "bad-device-id")
         endpoint, my_id, per_req_timeout, deadline, err = self._begin()
         if err is not None or endpoint is None or my_id is None:
             return err or WriteResult("refused", "not-managed")
-        if not is_device_id(device_id):
-            return WriteResult("refused", "bad-device-id")
         if device_id == my_id:
             return WriteResult("refused", "own-device")
 
@@ -2318,16 +2329,14 @@ class SyncthingWriter:
         target_dev = next((d for d in devices if d.get("deviceID") == device_id), None)
         if target_dev is None:
             return WriteResult("refused", "device-not-configured")
-        if require_writer_shape and not _has_writer_shape(target_dev):
-            return WriteResult("refused", "device-changed")
-        if target_dev.get("introducer") is True:
+        if target_dev.get("introducer") is not True:
             return WriteResult("unchanged", None)
 
         w_out, w_cause = _send_json(
             endpoint,
             "PATCH",
             f"/rest/config/devices/{device_id}",
-            {"introducer": True},
+            {"introducer": False},
             timeout=per_req_timeout,
             deadline=deadline,
         )

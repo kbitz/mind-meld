@@ -452,7 +452,6 @@ def _managed_join(setup: _SyncthingSetup, full_path: Path, fleet_id: str, device
         "name this device in Syncthing",
     )
     _require_syncthing(writer.add_device(fleet_id), "add the fleet device")
-    _require_syncthing(writer.mark_introducer(fleet_id), "mark the fleet device as introducer")
     local_id = setup.local_id or setup.record.device_id
     short_id = syncthing.short_device_id(local_id)
     safe_local_id = safe_str(local_id)

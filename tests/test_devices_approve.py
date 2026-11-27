@@ -49,9 +49,7 @@ def _setup_managed_fleet(fake_syncthing, tmp_path: Path, monkeypatch: pytest.Mon
     return my_id, peer_id, joining_id
 
 
-def test_approve_pending_device_adds_marks_introducer_and_shares_folder(
-    fake_syncthing, tmp_path, monkeypatch
-):
+def test_approve_pending_device_adds_and_shares_folder(fake_syncthing, tmp_path, monkeypatch):
     my_id, peer_id, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
     fake_syncthing.responses["/rest/cluster/pending/devices"] = {
         joining_id: {"name": "peer-host\x1b[31m", "address": "192.0.2.9:22000"}
@@ -61,8 +59,8 @@ def test_approve_pending_device_adds_marks_introducer_and_shares_folder(
 
     assert res.exit_code == 0, res.output
     assert res.output == (
-        f"Approve: approved {joining_id}: Syncthing here shares the fleet folder with it "
-        f"and marks it as introducer. {JOIN_CONTINUES}\n"
+        f"Approve: approved {joining_id}: Syncthing here shares the fleet folder with it. "
+        f"{JOIN_CONTINUES}\n"
     )
     assert fake_syncthing.bodies == [
         (
@@ -77,7 +75,6 @@ def test_approve_pending_device_adds_marks_introducer_and_shares_folder(
                 "paused": False,
             },
         ),
-        ("PATCH", f"/rest/config/devices/{joining_id}", {"introducer": True}),
         (
             "PATCH",
             "/rest/config/folders/mind-meld",
@@ -107,11 +104,10 @@ def test_approve_accepts_lowercase_and_dashless_pending_id(
     assert res.exit_code == 0, res.output
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
         ("POST", "/rest/config/devices"),
-        ("PATCH", f"/rest/config/devices/{joining_id}"),
         ("PATCH", "/rest/config/folders/mind-meld"),
     ]
     assert fake_syncthing.bodies[0][2]["deviceID"] == joining_id
-    assert fake_syncthing.bodies[2][2]["devices"] == [
+    assert fake_syncthing.bodies[1][2]["devices"] == [
         {"deviceID": my_id},
         {"deviceID": peer_id},
         {"deviceID": joining_id},
@@ -243,15 +239,15 @@ def test_approve_resumes_after_syncthing_stops_between_add_and_share(
     assert first.exit_code == 1
     text1 = " ".join(first.output.split())
     assert (
-        f"devices approve: Syncthing added {joining_id} but did not confirm marking it as "
-        "introducer or sharing the fleet folder with it (unreachable/"
+        f"devices approve: Syncthing added {joining_id} but did not confirm sharing the "
+        "fleet folder with it (unreachable/"
     ) in text1
     assert f"Start Syncthing, then run 'mm devices approve {joining_id}' again to finish." in text1
     assert text1.endswith(f"Run: {core._syncthing_start_command()}")
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [("POST", "/rest/config/devices")]
     assert joining_id not in fake_syncthing.responses["/rest/cluster/pending/devices"]
 
-    # Restart Syncthing on the same port and state; the rerun finishes introducer + share.
+    # Restart Syncthing on the same port and state; the rerun finishes sharing only.
     fake_syncthing.start()
     fake_syncthing.bodies.clear()
     writer = syncthing.SyncthingWriter(syncthing.ManagedRecord(device_id=my_id))
@@ -265,12 +261,11 @@ def test_approve_resumes_after_syncthing_stops_between_add_and_share(
 
     assert second.exit_code == 0, second.output
     assert second.output == (
-        f"Approve: finished approving {joining_id}: Syncthing here now marks it as "
-        "introducer and shares the fleet folder with it (it was already added). "
+        f"Approve: finished approving {joining_id}: Syncthing here now shares the "
+        "fleet folder with it (it was already added). "
         f"{JOIN_CONTINUES}\n"
     )
     assert fake_syncthing.bodies == [
-        ("PATCH", f"/rest/config/devices/{joining_id}", {"introducer": True}),
         (
             "PATCH",
             "/rest/config/folders/mind-meld",
@@ -291,51 +286,6 @@ def test_approve_resumes_after_syncthing_stops_between_add_and_share(
     assert fake_syncthing.bodies == []
 
 
-def test_approve_resumes_after_syncthing_stops_between_introducer_and_share(
-    fake_syncthing, tmp_path, monkeypatch
-):
-    my_id, peer_id, joining_id = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
-    fake_syncthing.responses["/rest/cluster/pending/devices"] = {
-        joining_id: {"name": "joining-box"}
-    }
-    fake_syncthing.stop_after("PATCH", f"/rest/config/devices/{joining_id}")
-
-    first = runner.invoke(app, ["devices", "approve", joining_id])
-
-    assert first.exit_code == 1
-    text1 = " ".join(first.output.split())
-    assert (
-        f"devices approve: Syncthing added {joining_id} and marked it as introducer, "
-        "but did not confirm sharing the fleet folder with it (unreachable/"
-    ) in text1
-    assert text1.endswith(f"Run: {core._syncthing_start_command()}")
-
-    fake_syncthing.start()
-    fake_syncthing.bodies.clear()
-
-    second = runner.invoke(app, ["devices", "approve", joining_id])
-
-    assert second.exit_code == 0, second.output
-    assert second.output == (
-        f"Approve: finished approving {joining_id}: Syncthing here now shares the "
-        "fleet folder with it (it was already added and marked as introducer). "
-        f"{JOIN_CONTINUES}\n"
-    )
-    assert fake_syncthing.bodies == [
-        (
-            "PATCH",
-            "/rest/config/folders/mind-meld",
-            {
-                "devices": [
-                    {"deviceID": my_id},
-                    {"deviceID": peer_id},
-                    {"deviceID": joining_id},
-                ]
-            },
-        )
-    ]
-
-
 def test_approve_share_http_500_reports_mm_diag_and_rerun_finishes_share_only(
     fake_syncthing, tmp_path, monkeypatch
 ):
@@ -350,8 +300,8 @@ def test_approve_share_http_500_reports_mm_diag_and_rerun_finishes_share_only(
     assert first.exit_code == 1
     text1 = " ".join(first.output.split())
     assert (
-        f"devices approve: Syncthing added {joining_id} and marked it as introducer, "
-        "but did not confirm sharing the fleet folder with it (error/http-500)."
+        f"devices approve: Syncthing added {joining_id} but did not confirm sharing the "
+        "fleet folder with it (error/http-500)."
     ) in text1
     assert (
         f"Once Syncthing accepts the change, run 'mm devices approve {joining_id}' "
@@ -367,7 +317,7 @@ def test_approve_share_http_500_reports_mm_diag_and_rerun_finishes_share_only(
     assert second.exit_code == 0, second.output
     assert second.output == (
         f"Approve: finished approving {joining_id}: Syncthing here now shares the "
-        "fleet folder with it (it was already added and marked as introducer). "
+        "fleet folder with it (it was already added). "
         f"{JOIN_CONTINUES}\n"
     )
     assert fake_syncthing.bodies == [
@@ -419,11 +369,9 @@ def test_approve_add_response_lost_after_apply_reports_unconfirmed_and_rerun_fin
 
     assert second.exit_code == 0, second.output
     assert second.output.startswith(
-        f"Approve: finished approving {joining_id}: Syncthing here now marks it as introducer "
-        "and shares the fleet folder"
+        f"Approve: finished approving {joining_id}: Syncthing here now shares the fleet folder"
     )
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
-        ("PATCH", f"/rest/config/devices/{joining_id}"),
         ("PATCH", "/rest/config/folders/mind-meld"),
     ]
 
@@ -458,7 +406,6 @@ def test_approve_add_rejected_by_syncthing_reports_unconfirmed_and_rerun_approve
     assert second.output.startswith(f"Approve: approved {joining_id}:")
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
         ("POST", "/rest/config/devices"),
-        ("PATCH", f"/rest/config/devices/{joining_id}"),
         ("PATCH", "/rest/config/folders/mind-meld"),
     ]
 
@@ -494,7 +441,7 @@ def test_approve_add_stopped_before_sending_changes_nothing(
 
 
 @pytest.mark.parametrize("preset_introducer", [False, True])
-@pytest.mark.parametrize("failing", ["mark_introducer", "share_folder"])
+@pytest.mark.parametrize("failing", ["share_folder"])
 def test_approve_resume_write_failure_reports_unconfirmed_step_and_rerun_finishes(
     fake_syncthing, tmp_path, monkeypatch, preset_introducer, failing
 ):
@@ -522,16 +469,10 @@ def test_approve_resume_write_failure_reports_unconfirmed_step_and_rerun_finishe
 
     assert first.exit_code == 1
     text1 = " ".join(first.output.split())
-    if failing == "mark_introducer":
-        assert (
-            f"devices approve: Syncthing added {joining_id} but did not confirm marking it as "
-            "introducer or sharing the fleet folder with it (error/http-500)."
-        ) in text1
-    else:
-        assert (
-            f"devices approve: Syncthing added {joining_id} and marked it as introducer, "
-            "but did not confirm sharing the fleet folder with it (error/http-500)."
-        ) in text1
+    assert (
+        f"devices approve: Syncthing added {joining_id} but did not confirm sharing the "
+        "fleet folder with it (error/http-500)."
+    ) in text1
     assert f"run 'mm devices approve {joining_id}' again to finish" in text1
     assert text1.endswith("Run: mm diag")
     assert not any(m == "POST" for m, _p, _b in fake_syncthing.bodies)
@@ -545,21 +486,11 @@ def test_approve_resume_write_failure_reports_unconfirmed_step_and_rerun_finishe
         "/rest/config/folders/mind-meld",
         {"devices": [{"deviceID": my_id}, {"deviceID": peer_id}, {"deviceID": joining_id}]},
     )
-    if preset_introducer or failing == "share_folder":
-        assert second.output.startswith(
-            f"Approve: finished approving {joining_id}: Syncthing here now shares the "
-            "fleet folder with it (it was already added and marked as introducer)."
-        )
-        assert fake_syncthing.bodies == [folder_patch]
-    else:
-        assert second.output.startswith(
-            f"Approve: finished approving {joining_id}: Syncthing here now marks it as "
-            "introducer and shares the fleet folder with it (it was already added)."
-        )
-        assert fake_syncthing.bodies == [
-            ("PATCH", f"/rest/config/devices/{joining_id}", {"introducer": True}),
-            folder_patch,
-        ]
+    assert second.output.startswith(
+        f"Approve: finished approving {joining_id}: Syncthing here now shares the "
+        "fleet folder with it (it was already added)."
+    )
+    assert fake_syncthing.bodies == [folder_patch]
 
 
 @pytest.mark.parametrize(
@@ -905,7 +836,7 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
         "approval_state",
         "mesh_snapshot",
         "add_device",
-        "mark_introducer",
+        "clear_introducer",
         "share_folder",
         "accept_folder_offer",
         "remove_device",
@@ -921,23 +852,55 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
     }
     call_sites: set[tuple[str, str]] = set()
     entry_refs: set[tuple[str, str, str]] = set()
+    clear_sites: set[tuple[str, str]] = set()
     for path in sorted(src_root.rglob("*.py")):
         rel = str(path.relative_to(src_root))
+        source = path.read_text(encoding="utf-8")
         sites, refs = _scan_pairing_reach(
             rel,
-            path.read_text(encoding="utf-8"),
+            source,
             pairing_methods=pairing_methods,
             raw_writes=raw_writes,
             entry_points=entry_points,
         )
         call_sites.update(sites)
         entry_refs.update(refs)
+        c_sites, _ = _scan_pairing_reach(
+            rel,
+            source,
+            pairing_methods={"clear_introducer"},
+            raw_writes=set(),
+            entry_points=entry_points,
+        )
+        clear_sites.update(c_sites)
+
+        # No source file may define/reference mark_introducer or write {"introducer": True}.
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                assert node.name != "mark_introducer", f"{rel} defines mark_introducer"
+            elif isinstance(node, ast.Attribute):
+                assert node.attr != "mark_introducer", f"{rel} references mark_introducer"
+            elif isinstance(node, ast.Name):
+                assert node.id != "mark_introducer", f"{rel} references mark_introducer"
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                assert node.value != "mark_introducer", f"{rel} names mark_introducer"
+            elif isinstance(node, ast.Dict):
+                for key_node, val_node in zip(node.keys, node.values, strict=False):
+                    if (
+                        isinstance(key_node, ast.Constant)
+                        and key_node.value == "introducer"
+                        and isinstance(val_node, ast.Constant)
+                        and val_node.value is True
+                    ):
+                        raise AssertionError(f"{rel} constructs {{'introducer': True}}")
 
     assert call_sites == {
         ("devicesflow.py", "approve"),
         ("initflow.py", "_managed_join"),
         ("meshflow.py", "_run_inner"),
     }
+    assert clear_sites == {("meshflow.py", "_run_inner")}
     # The three pairing paths are reachable only from their authorized callers.
     assert entry_refs == {
         ("cli.py", "devices_approve", "devicesflow.approve"),
@@ -1008,8 +971,8 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
 
     # Behavioral check 2: on an initialized fleet with a managed record and two
     # pending devices (one named by a fleet record, one not), push, pull,
-    # autopush and autopull each add, mark introducer and share the folder with
-    # the first and leave the second pending with no write.
+    # autopush and autopull each add and share the folder with the first
+    # (never setting introducer) and leave the second pending with no write.
     storage_dir = tmp_path / "sync"
     claude_dir = tmp_path / "claude"
     (claude_dir / "projects").mkdir(parents=True, exist_ok=True)
@@ -1088,7 +1051,6 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
                     "paused": False,
                 },
             ),
-            ("PATCH", f"/rest/config/devices/{vouched_id}", {"introducer": True}),
             (
                 "PATCH",
                 "/rest/config/folders/mind-meld",
@@ -1100,7 +1062,7 @@ def test_no_push_pull_or_auto_command_ever_accepts_a_device(fake_syncthing, tmp_
                 },
             ),
         ], f"{cmd} bodies mismatch"
-        assert lock_held_during_writes == [True, True, True], cmd
+        assert lock_held_during_writes == [True, True], cmd
         assert unvouched_id in fake_syncthing.responses["/rest/cluster/pending/devices"]
         assert vouched_id not in fake_syncthing.responses["/rest/cluster/pending/devices"]
 
@@ -1131,8 +1093,8 @@ def test_approve_outcome_lines_emit_no_ansi_under_forced_terminal(
 
     lines = buf.getvalue().splitlines()
     assert lines == [
-        f"Approve: approved {joining_id}: Syncthing here shares the fleet folder with it "
-        f"and marks it as introducer. {JOIN_CONTINUES}",
+        f"Approve: approved {joining_id}: Syncthing here shares the fleet folder with it. "
+        f"{JOIN_CONTINUES}",
         f"Approve: {joining_id} is already approved: Syncthing on this machine already "
         "shares the fleet folder with it.",
     ]
@@ -1205,7 +1167,7 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
     assert f"Approve cachyos ({joining_id[:7]})? [y/n] (Enter = y)" in res_short.output
     assert f"Approve: approved cachyos ({joining_id})" in res_short.output
     assert res_short.output.rstrip().endswith(JOIN_CONTINUES)
-    assert len(fake_syncthing.bodies) == 3
+    assert len(fake_syncthing.bodies) == 2
 
     # 6. Configured & already shared device queried by name or short ID -> already approved (exit 0)
     fake_syncthing.bodies.clear()
@@ -1277,7 +1239,7 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
     assert res_choose_ok.exit_code == 0, res_choose_ok.output
     assert "Enter one listed device name or short ID" in res_choose_ok.output
     assert f"Approve: approved twin-box ({joining_2})" in res_choose_ok.output
-    assert len(fake_syncthing.bodies) == 3
+    assert len(fake_syncthing.bodies) == 2
 
     # 10. Fleet context: vouched knocker explained & filtered, unpublished fleet labeled,
     # retired knocker flagged (retired) and refused by name/short-ID
@@ -1358,7 +1320,7 @@ def test_approve_no_arg_name_short_id_ambiguity_and_fleet_context(
     res_ret_full = runner.invoke(app, ["devices", "approve", retired_id])
     assert res_ret_full.exit_code == 0, res_ret_full.output
     assert f"Approve: approved {retired_id}" in res_ret_full.output
-    assert len(fake_syncthing.bodies) == 3
+    assert len(fake_syncthing.bodies) == 2
 
 
 def test_short_approval_rechecks_pending_request_after_confirmation(
@@ -1407,7 +1369,31 @@ def test_pending_approval_accepts_enter_when_optional_context_is_unavailable(
     assert result.exit_code == 0, result.output
     assert f"Approve linux-b ({joining[:7]})? [y/n] (Enter = y)" in result.output
     assert result.output.count("could not read fleet records") == (0 if argument else 1)
-    assert [method for method, _, _ in fake_syncthing.bodies] == ["POST", "PATCH", "PATCH"]
+    assert [method for method, _, _ in fake_syncthing.bodies] == ["POST", "PATCH"]
+
+
+def test_interactive_approve_stops_on_device_changed_when_paused_before_share(
+    fake_syncthing, tmp_path, monkeypatch
+):
+    _, _, joining = _setup_managed_fleet(fake_syncthing, tmp_path, monkeypatch)
+    fake_syncthing.responses["/rest/cluster/pending/devices"] = {joining: {"name": "linux-b"}}
+    monkeypatch.setattr(core, "_both_streams_are_terminals", lambda: True)
+
+    def pause_after_add(method, path, _body):
+        if method == "POST" and path == "/rest/config/devices":
+            for dev in fake_syncthing.responses["/rest/config/devices"]:
+                if dev["deviceID"] == joining:
+                    dev["paused"] = True
+
+    fake_syncthing.on_write = pause_after_add
+    res = runner.invoke(app, ["devices", "approve", "linux-b"], input="\n")
+    assert res.exit_code == 1
+    text = " ".join(res.output.split())
+    assert (
+        f"devices approve: Syncthing added {joining} but did not confirm sharing the "
+        "fleet folder with it (refused/device-changed)."
+    ) in text
+    assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [("POST", "/rest/config/devices")]
 
 
 @pytest.mark.parametrize("dashless", [False, True])

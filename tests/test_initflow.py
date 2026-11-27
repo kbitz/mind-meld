@@ -996,7 +996,7 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     stock_root, my_id, peer_id = _setup_default_syncthing(fake_syncthing, tmp_path, monkeypatch)
     storage = stock_root / "mind-meld"
 
-    # Run 1: peer has not shared the folder yet -> add device, mark introducer,
+    # Run 1: peer has not shared the folder yet -> add device,
     # remove Default Folder, poll for approval and stop on timeout with saved answers.
     run1, text1 = _run(f"join\n{storage}\n{peer_id}\nMac B\n{SOURCES_CLAUDE_ONLY}")
     assert run1.exit_code == 1, run1.output
@@ -1023,13 +1023,11 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
         ("PATCH", f"/rest/config/devices/{my_id}"),
         ("POST", "/rest/config/devices"),
-        ("PATCH", f"/rest/config/devices/{peer_id}"),
         ("DELETE", "/rest/config/folders/default"),
     ]
     assert fake_syncthing.bodies[0][2] == {"name": "Mac B"}
     assert fake_syncthing.bodies[1][2]["deviceID"] == peer_id
     assert fake_syncthing.bodies[1][2]["introducer"] is False
-    assert fake_syncthing.bodies[2][2] == {"introducer": True}
     assert not config.CONFIG_PATH.exists()
     assert not (storage / "mm-crypto-init").exists()
     assert not (storage / ".stignore").exists()
@@ -1059,8 +1057,8 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
         "entry, config or key header was written. Run: mm init"
     ) in text2
     assert text2.endswith("Run: mm init")
-    assert len(fake_syncthing.bodies) == 5
-    post_method, post_path, post_body = fake_syncthing.bodies[4]
+    assert len(fake_syncthing.bodies) == 4
+    post_method, post_path, post_body = fake_syncthing.bodies[3]
     assert (post_method, post_path) == ("POST", "/rest/config/folders")
     assert post_body["id"] == "mind-meld"
     assert post_body["devices"] == [
@@ -1094,12 +1092,11 @@ def test_managed_join_three_runs_no_offer_then_accepted_then_header_arrived(
     assert config.CONFIG_PATH.is_file()
     assert not config.join_record_path().exists()
     assert len(_device_keys(backend)) == 2
-    # Across all three runs: one own-name PATCH, one device POST, one
-    # introducer PATCH, one Default Folder DELETE, and one folder POST.
+    # Across all three runs: one own-name PATCH, one device POST,
+    # one Default Folder DELETE, and one folder POST.
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
         ("PATCH", f"/rest/config/devices/{my_id}"),
         ("POST", "/rest/config/devices"),
-        ("PATCH", f"/rest/config/devices/{peer_id}"),
         ("DELETE", "/rest/config/folders/default"),
         ("POST", "/rest/config/folders"),
     ]
@@ -1372,7 +1369,6 @@ def test_managed_join_writer_failures_stop_with_their_fixing_command(
         expected_tail = "Run: mm init"
         expected_writes.extend(
             [
-                ("PATCH", f"/rest/config/devices/{peer_id}"),
                 ("DELETE", "/rest/config/folders/default"),
             ]
         )
@@ -1386,7 +1382,7 @@ def test_managed_join_writer_failures_stop_with_their_fixing_command(
     assert result.exit_code == 1, result.output
     assert expected_message in text
     if kind == "transport":
-        assert "mark the fleet device as introducer" in text
+        assert "remove the Default Folder" in text
     assert text.endswith(expected_tail)
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == expected_writes
     assert config.load_syncthing_record() == my_id
@@ -1502,7 +1498,6 @@ def test_stale_record_on_default_syncthing_is_replaced_before_first_write(
         assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
             ("PATCH", f"/rest/config/devices/{my_id}"),
             ("POST", "/rest/config/devices"),
-            ("PATCH", f"/rest/config/devices/{peer_id}"),
             ("DELETE", "/rest/config/folders/default"),
         ]
         _assert_nothing_written(storage, before)
@@ -1522,7 +1517,7 @@ def test_managed_join_stops_when_default_folder_becomes_occupied_or_shared(
     before = _tree(storage)
 
     def make_default_in_use(method, path, _body):
-        if method == "PATCH" and path == f"/rest/config/devices/{peer_id}":
+        if method == "POST" and path == "/rest/config/devices":
             if reason == "occupied":
                 stock_root.mkdir(parents=True, exist_ok=True)
                 (stock_root / "existing.txt").write_text("busy", encoding="utf-8")
@@ -1540,7 +1535,6 @@ def test_managed_join_stops_when_default_folder_becomes_occupied_or_shared(
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
         ("PATCH", f"/rest/config/devices/{my_id}"),
         ("POST", "/rest/config/devices"),
-        ("PATCH", f"/rest/config/devices/{peer_id}"),
     ]
     assert not config.CONFIG_PATH.exists()
     assert not storage.exists()
@@ -2193,7 +2187,6 @@ def test_managed_join_completes_in_one_run_when_offer_and_header_arrive_during_w
     assert [(m, p) for m, p, _ in fake_syncthing.bodies] == [
         ("PATCH", f"/rest/config/devices/{my_id}"),
         ("POST", "/rest/config/devices"),
-        ("PATCH", f"/rest/config/devices/{peer_id}"),
         ("DELETE", "/rest/config/folders/default"),
         ("POST", "/rest/config/folders"),
     ]
