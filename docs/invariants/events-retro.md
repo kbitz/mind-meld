@@ -3736,17 +3736,28 @@ read (`$0.25/MTok` and `$0.20/MTok`), while 5.0's family tiers remain at 0.1x
 (`$1/MTok`), preserving the conservative error direction for a future
 unverified id.
 
-Host model ids (Track 35A) do not go through `model_family`. They resolve
-via the curated alias registry `PRICING_FAMILY_BY_MODEL` (exact-key,
-never substring) onto `VENDOR_FAMILY_TIERS` literal four-field cards, then
-through `vendor_model_family` positional fallback when no alias exists.
-The fallback accepts only `^gpt-\d+(?:\.\d+)?-(astra|terra|sol|luna)$`,
-`^gemini-\d+(?:\.\d+)?-(carbon|argon|neon|flash)$`, and
-`^muse-(wonder|spark)(?:-full)?-\d+(?:\.\d+)?$`. The tiers are
-`gpt-6.2-astra`, `gpt-5.6-terra`, `gpt-6.2-sol`, `gpt-6-luna`,
-`gemini-4-carbon`, `gemini-4-argon`, `gemini-4-neon`, `gemini-3.8-flash`,
-`muse-wonder-1.0` and `muse-spark-1.3`. Unknown versions price by that tier
-and remain unverified.
+Host model ids (Track 35A, widened in Track 169B) do not go through `model_family`
+(which preserves its positional `claude-<family>-<non-empty>` trust boundary for
+Claude IDs). Host IDs resolve via the curated alias registry
+`PRICING_FAMILY_BY_MODEL` (exact-key, never substring) onto `VENDOR_FAMILY_TIERS`
+literal four-field cards, then through `vendor_model_family` when no curated alias
+exists. `vendor_model_family` accepts lowercase dash-delimited IDs with a known
+vendor prefix (`gpt`, `gemini`, `muse`), at least one tail segment, every tail
+segment non-empty and matching `[a-z0-9][a-z0-9._:]*`, and **exactly one**
+distinct known tier segment for that vendor: `gpt` (`astra` → `gpt-6.2-astra`,
+`terra` → `gpt-5.6-terra`, `sol` → `gpt-6.2-sol`, `luna` → `gpt-6-luna`),
+`gemini` (`carbon` → `gemini-4-carbon`, `argon` → `gemini-4-argon`, `neon` →
+`gemini-4-neon`, `flash` → `gemini-3.8-flash`), and `muse` (`wonder` →
+`muse-wonder-1.0`, `spark` → `muse-spark-1.3`). For example,
+`gemini-pro-orchestrator-neon` resolves to `gemini-4-neon` and
+`gemini-flash-worker-agy` resolves to `gemini-3.8-flash`. Empty segments
+(`gpt--sol`, `gemini-neon-`), wrong prefixes (`x-gpt-6.1-sol`), uppercase or case
+variants (`GPT-6.1-sol`, `gemini-4-Neon`), invalid characters (whitespace,
+slashes, control/escape sequences), non-segment substrings (`gemini-neonic`,
+`gpt-5.6-terrax`), zero-tier/unknown IDs (`gemini-2.5-pro`, `gpt-5.7-whatever`),
+multi-tier/ambiguous IDs (`gemini-4-argon-flash`, `gemini-neon-flash`,
+`gpt-6-astra-sol`, `muse-wonder-spark-1.0`), and Grok IDs all return `None`.
+Every fallback-resolved ID stays unverified (`is_verified_model` returns `False`).
 Muse's `muse-wonder-full-1.0` aliases the verified `muse-wonder-1.0` card.
 Do not reach for `_tier` for non-Anthropic rates: its cache multipliers
 are Anthropic-specific. `resolve_prices` stays the single priced-predicate.
@@ -3873,7 +3884,7 @@ skewed writing clock must not pin an override or suppress refresh). IDs match
 `(resolved_path, st_mtime_ns, st_size)`, and never create files or locks.
 
 Active cached cards precede `PRICING`, curated vendor aliases, Claude family
-fallback and positional vendor fallback. A `VERIFIED_MODEL_IDS` member's
+fallback and single-tier vendor family fallback. A `VERIFIED_MODEL_IDS` member's
 cached card is active only when its date is **on or after**
 `_builtin_verified_date(model)`, mapped across all five vendors. Other valid
 cached cards are active without that gate. For Grok aliases
@@ -3881,7 +3892,7 @@ cached cards are active without that gate. For Grok aliases
 reaches `grok-4.7-build`, one for `grok-4.7-fast` reaches `grok-4.7-build-fast`,
 and one for `grok-4.6` reaches `grok-4.6-build`; that alias-reached card is active only when it passes the
 date gate of both the alias id and the card id, and an active exact-id card
-takes precedence. Other curated aliases and positional vendor fallback stay
+takes precedence. Other curated aliases and vendor family fallback stay
 exact-id. `active_cached_model_ids` and `cached_model_ids` list only cache ids
 whose own card is active. `is_verified_model` accepts
 built-in verified IDs and active cached IDs; `resolve_prices` remains the
@@ -3949,20 +3960,33 @@ separate explicit set covering every override and currently verified family
 id, plus the curated vendor ids at their respective dates. It does not gate
 pricing. `is_verified_model` also recognizes active local cache cards.
 A priced id outside both gets a bounded, sanitized "Models priced by
-family extrapolation" detail under `pricing_extrapolated` in `MM_HEALTH`,
-never an unpriced label.
+family extrapolation" detail under `pricing_extrapolated` in `MM_HEALTH`
+naming each mapped rate target (`<model> → <target>` for vendor cards such as
+`gemini-pro-orchestrator-neon → gemini-4-neon`, and `<model> → <family> family`
+for Claude family fallback, capped at `_UNPRICED_MODEL_NOTE_CAP`), never an
+unpriced label.
 
 `floor_prices` lives beside `resolve_prices`: Anthropic uses the minimum 5m
 cache-write rate (1.25x input), vendor literal cards are unchanged. One floor
 condition makes **every verified priced model in that agent row** use floor cards;
 `_section_costs` computes models and total from that same basis. Under a floor
-(`≥`), models priced by family or positional extrapolation (`_priced_by_extrapolation`:
+(`≥`), models priced by family extrapolation (`_priced_by_extrapolation`:
 `resolve_prices(m) is not None and not is_verified_model(m)`, excluding
 `COST_EXCLUDED_MODELS`) are left out of `_floor_costs` and contribute nothing
-to the `≥` figure, while still being named under `pricing_extrapolated` in
-`MM_HEALTH`; a floor row whose only priced volume is extrapolated (or whose
-non-extrapolated priced models have zero volume) renders `—` and emits
-`cost_unavailable`, never `≥$0`. Since 1.1 host tokens are summed
+to the `≥` figure, while still being named with their mapped targets under
+`pricing_extrapolated` in `MM_HEALTH`; a floor row whose only priced volume is
+extrapolated (or whose non-extrapolated priced models have zero volume) renders
+`—` and emits `cost_unavailable`, never `≥$0`.
+
+**SKILL.md Step 4 bounded alias judgment (Track 169B).** When an unpriced model
+ID unambiguously names a documented model or tier that the CLI's deterministic
+fallback did not resolve, `/retro-fleet`'s LLM layer may apply that documented
+rate in the report as an extrapolated `~` estimate, explicitly naming the
+alias-to-model mapping and never calling it verified. `--set-model-price` and
+`--mark-pricing-verified` remain strictly for rates established by official
+vendor pricing docs; inferred alias guesses must never be persisted via
+`--set-model-price` or used to pass `--mark-pricing-verified`. Ambiguous model
+IDs and subscription prices stay unpriced. Since 1.1 host tokens are summed
 fleet-wide per agent rather than kept as per-machine subtotals; see the
 unified-agents renderer contract for the possible-overlap detector and its
 limits. Floors are computed per AGENT row. Model-specific pricing causes stay

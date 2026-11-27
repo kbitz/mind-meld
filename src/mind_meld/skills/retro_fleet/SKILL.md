@@ -246,16 +246,24 @@ interpolate it into a shell command. If the second-pass command fails with an
 unknown-option error (an older `mm` on this machine), retry the render
 without the pricing flags and note the pricing refresh remains due.
 
-For rates established by those docs, add repeatable
+For rates established by official vendor pricing docs, add repeatable
 `--set-model-price 'MODEL=IN,CACHE_READ,CACHE_CREATE,OUT'` arguments to the
 second-pass command. All four rates are **USD per million tokens**, in
 **input, cache read, cache create, output** order. For example:
 `--set-model-price 'gpt-6.1-sol=2.00,0.10,2.50,10.00'`.
-Use documented rates, never infer a rate from a model name or subscription
-price. Each card receives today's UTC verification date. Add
-`--mark-pricing-verified` only after the vendor docs were checked for the
-whole-table refresh; it stamps the top-level verification date. A model
+Each card receives today's UTC verification date. Add
+`--mark-pricing-verified` only after official vendor pricing docs were checked
+for the whole-table refresh; it stamps the top-level verification date. A model
 update alone does not mark the table verified.
+
+When an unpriced model ID unambiguously names a documented model or tier that
+the CLI's deterministic fallback did not resolve, you may apply that documented
+model or tier rate in the report as an extrapolated `~` estimate. Explicitly
+name the alias-to-model mapping in the report and never call it verified. Never
+persist an inferred alias guess as a verified `--set-model-price` override, and
+never pass `--mark-pricing-verified` on that basis. Ambiguous model IDs and
+subscription prices stay unpriced — never infer a rate from an ambiguous ID or
+from a subscription price.
 
 When vendor pricing docs publish a scheduled price change (for example, an
 introductory or promotional rate ending on a stated date), use the rate

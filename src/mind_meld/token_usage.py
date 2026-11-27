@@ -420,7 +420,7 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
 }
 
 # Curated alias registry (Track 35A): exact observed host model id →
-# pricing-family key. Exact aliases precede positional vendor-tier fallback.
+# pricing-family key. Exact aliases precede single-tier vendor family fallback.
 # Maps today's identity to today's rate and reprices history.
 #
 # Do NOT reach for ``_tier`` here. Its multipliers are Anthropic
@@ -945,40 +945,44 @@ def is_default_pricing_cache_path() -> bool:
     return PRICING_CACHE_PATH.expanduser() == _DEFAULT_PRICING_CACHE_PATH.expanduser()
 
 
+_VENDOR_SEGMENT_RE = re.compile(r"[a-z0-9][a-z0-9._:]*")
+_VENDOR_TIER_BY_PREFIX: dict[str, dict[str, str]] = {
+    "gpt": {
+        "astra": "gpt-6.2-astra",
+        "terra": "gpt-5.6-terra",
+        "sol": "gpt-6.2-sol",
+        "luna": "gpt-6-luna",
+    },
+    "gemini": {
+        "carbon": "gemini-4-carbon",
+        "argon": "gemini-4-argon",
+        "neon": "gemini-4-neon",
+        "flash": "gemini-3.8-flash",
+    },
+    "muse": {
+        "wonder": "muse-wonder-1.0",
+        "spark": "muse-spark-1.3",
+    },
+}
+
+
 def vendor_model_family(model: str) -> str | None:
-    """Resolve only positional vendor/version/tier grammars, never substrings."""
-    grammars = (
-        (
-            r"gpt-\d+(?:\.\d+)?-(astra|terra|sol|luna)",
-            {
-                "astra": "gpt-6.2-astra",
-                "terra": "gpt-5.6-terra",
-                "sol": "gpt-6.2-sol",
-                "luna": "gpt-6-luna",
-            },
-        ),
-        (
-            r"gemini-\d+(?:\.\d+)?-(carbon|argon|neon|flash)",
-            {
-                "carbon": "gemini-4-carbon",
-                "argon": "gemini-4-argon",
-                "neon": "gemini-4-neon",
-                "flash": "gemini-3.8-flash",
-            },
-        ),
-        (
-            r"muse-(wonder|spark)(?:-full)?-\d+(?:\.\d+)?",
-            {
-                "wonder": "muse-wonder-1.0",
-                "spark": "muse-spark-1.3",
-            },
-        ),
-    )
-    for pattern, tiers in grammars:
-        match = re.fullmatch(pattern, model)
-        if match:
-            return tiers[match[1]]
-    return None
+    """Resolve lowercase vendor-prefixed IDs with one unambiguous tier segment."""
+    if not isinstance(model, str) or not model:
+        return None
+    parts = model.split("-")
+    if len(parts) < 2:
+        return None
+    tiers = _VENDOR_TIER_BY_PREFIX.get(parts[0])
+    if tiers is None:
+        return None
+    tail = parts[1:]
+    if not all(seg and _VENDOR_SEGMENT_RE.fullmatch(seg) for seg in tail):
+        return None
+    matched = {seg for seg in tail if seg in tiers}
+    if len(matched) != 1:
+        return None
+    return tiers[next(iter(matched))]
 
 
 def _builtin_verified_date(model: str) -> str:
@@ -1233,7 +1237,8 @@ def resolve_prices(model: str) -> dict[str, float] | None:
     card id); else exact ``PRICING`` entry; else the Claude family tier via
     ``model_family``; else the curated host alias
     ``PRICING_FAMILY_BY_MODEL`` → ``VENDOR_FAMILY_TIERS``; else ``None``.
-    Host aliases are exact-key; vendor fallback uses positional grammars.
+    Host aliases are exact-key; vendor fallback matches lowercase
+    dash-delimited IDs with one unambiguous known tier segment.
 
     Returns a COPY. The rate cards are module-level and shared; handing
     out the live dict lets one careless caller mutate pricing for the
@@ -2022,7 +2027,7 @@ def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, f
 
     Returns ``(total_usd, per_model_usd)``. Rates come from
     ``resolve_prices`` (active local cache overlay, exact id, Claude
-    family tier, then vendor alias/positional fallback). Models that
+    family tier, then vendor alias/single-tier family fallback). Models that
     resolve to none contribute to raw token counts elsewhere but DO NOT
     contribute here. Same for ``COST_EXCLUDED_MODELS``.
 

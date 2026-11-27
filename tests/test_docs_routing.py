@@ -1508,3 +1508,27 @@ def test_no_test_file_is_named_after_a_track_or_review():
         if pattern.search(p.stem)
     ]
     assert offenders == [], f"test files named after a Track or review: {offenders}"
+
+
+def test_retro_fleet_skill_step4_bounded_alias_judgment_contract():
+    """Track 169B: SKILL.md Step 4 permits disclosed unverified ~ alias mapping
+    for unambiguous unpriced IDs without persisting inferred overrides."""
+    text = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    step4_start = text.index("## Step 4:")
+    step5_start = text.index("## Step 5:", step4_start)
+    step4 = " ".join(text[step4_start:step5_start].split())
+
+    step4_lower = step4.lower()
+    assert "never infer a rate from a model name" not in step4_lower
+    assert "unambiguously names a documented model or tier" in step4
+    assert "extrapolated `~` estimate" in step4
+    assert "alias-to-model mapping" in step4
+    assert "never call it verified" in step4_lower
+    assert (
+        "never persist an inferred alias guess as a verified `--set-model-price` override"
+        in step4_lower
+    )
+    assert "never pass `--mark-pricing-verified` on that basis" in step4_lower
+    assert "ambiguous model ids and subscription prices stay unpriced" in step4_lower
