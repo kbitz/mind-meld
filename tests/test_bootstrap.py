@@ -622,8 +622,8 @@ class TestBootstrapContract:
 
     def test_readme_install_section_points_to_bootstrap_on_latest(self) -> None:
         text = README.read_text(encoding="utf-8")
-        match = re.search(r"^## Install\n(?P<body>.*?)(?=^## |\Z)", text, re.M | re.S)
-        assert match is not None, "## Install section missing from README.md"
+        match = re.search(r"^## Quick start\n(?P<body>.*?)(?=^## |\Z)", text, re.M | re.S)
+        assert match is not None, "## Quick start section missing from README.md"
         body = match.group("body")
         assert README_BOOTSTRAP_CMD in body
         url_match = re.search(

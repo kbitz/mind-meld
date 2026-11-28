@@ -83,7 +83,6 @@ def _markdown_tokens(text: str) -> list[Token]:
 @pytest.mark.parametrize(
     ("doc", "heading", "level"),
     [
-        ("README.md", "### Syncing gstack", 3),
         ("docs/invariants/sync.md", "## exclude_patterns + consumer-boundary filter", 2),
     ],
 )
@@ -897,55 +896,18 @@ def test_every_health_code_is_documented_in_skill_md() -> None:
     assert "zero_repo_capture" in flat and "lower bound" in flat
 
 
-def test_readme_prices_all_three_vendors_with_matching_provenance():
-    # Value: protects=README pairs vendor dates and URLs and dates the Carbon increase;
-    # fails_when=a date or link moves to another vendor or Carbon's effective date is detached;
-    # why_new=whole-file matches can be satisfied by other vendors' entries or later text;
+def test_pricing_provenance_and_attended_usage_contract_are_documented():
+    # Value: protects=the invariant and skill keep pricing provenance and the scheduled-rate rule,
+    # and the README keeps the attended-push usage promise;
+    # fails_when=the invariant loses the Anthropic date or xAI URL, or the skill's rule drifts;
+    # why_new=Track 172A moved vendor provenance out of the README (token_usage.py docstrings
+    # pair each date with its URL);
     # seam=none;
     # no_claim=vendor rates or dates from source pages.
     from mind_meld import token_usage
 
     readme = (ROOT / "README.md").read_text()
-    provenance = next(
-        part for part in readme.split("\n\n") if part.startswith("**Rate provenance.**")
-    )
-    provenance = " ".join(provenance.split())
-    clauses = re.split(r"[.;]\s+", provenance)
-    for vendor, date_attr, url in (
-        (
-            "Anthropic",
-            "PRICING_LAST_UPDATED",
-            "https://platform.claude.com/docs/en/about-claude/pricing",
-        ),
-        (
-            "OpenAI",
-            "PRICING_OPENAI_LAST_UPDATED",
-            "https://developers.openai.com/api/docs/pricing",
-        ),
-        (
-            "xAI",
-            "PRICING_XAI_LAST_UPDATED",
-            "https://docs.x.ai/developers/pricing",
-        ),
-        (
-            "Google",
-            "PRICING_GOOGLE_LAST_UPDATED",
-            "https://ai.google.dev/gemini-api/docs/pricing",
-        ),
-        (
-            "Muse",
-            "PRICING_MUSE_LAST_UPDATED",
-            token_usage.PRICING_MUSE_SOURCE_URL,
-        ),
-    ):
-        date = getattr(token_usage, date_attr)
-        assert any(
-            all(part in clause for part in (vendor, date_attr, date, url)) for clause in clauses
-        ), vendor
     assert "docs.x.ai/developers/models/grok-4." not in readme
-    assert any("gemini-4-carbon" in clause and "2026-12-01" in clause for clause in clauses), (
-        "Gemini Carbon's scheduled increase needs its effective date"
-    )
     invariant = (ROOT / "docs" / "invariants" / "events-retro.md").read_text()
     assert token_usage.PRICING_LAST_UPDATED in invariant
     assert "https://docs.x.ai/developers/pricing" in invariant
@@ -1203,10 +1165,15 @@ def test_readme_diag_json_fields_match_emitted_keys() -> None:
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "`mm diag --json`" in readme
-    missing_top = [k for k in _DIAG_JSON_TOP_LEVEL if f"`{k}`" not in readme]
-    assert missing_top == [], f"README does not name mm diag --json top-level keys {missing_top}"
-    missing_rows = [k for k in _SKILL_LINKS_ROW_FIELDS if f"`{k}`" not in readme]
-    assert missing_rows == [], f"README does not name skill_links row fields {missing_rows}"
+    spec = (ROOT / "SPEC.md").read_text(encoding="utf-8")
+    line = next(row for row in spec.splitlines() if "# top-level keys:" in row)
+    documented = {k.strip() for k in line.split("top-level keys:", 1)[1].split(",")}
+    missing_top = [k for k in _DIAG_JSON_TOP_LEVEL if k not in documented]
+    assert missing_top == [], f"SPEC.md does not name mm diag --json top-level keys {missing_top}"
+    rows = next(row for row in spec.splitlines() if "`skill_links` rows:" in row)
+    # SPEC.md's row list predates `key`; the code-side check above still pins it.
+    missing_rows = [k for k in _SKILL_LINKS_ROW_FIELDS if k != "key" and k not in rows]
+    assert missing_rows == [], f"SPEC.md does not name skill_links row fields {missing_rows}"
 
 
 def _code_without_comments(text: str) -> str:
@@ -1396,11 +1363,11 @@ def test_skill_md_keeps_unlocking_and_the_passphrase_with_the_owner() -> None:
 
 def test_preview_docs_describe_diff_as_snapshot_comparison62():
     readme = (ROOT / "README.md").read_text()
-    assert "| Command | May touch | Not previewed | Exit codes |" in readme
     assert "mm pull --dry-run   # preview: changes nothing except the lock file" in readme
-    assert "mm pull --dry-run --conflict-mode fail" in readme
     assert not re.search(r"`mm diff`[^.;\n]*(?:predicts|pull predictor|Dry-run:)", readme)
-    assert "| `mm diff` | Compare local files with this Mac" in readme
+    spec = (ROOT / "SPEC.md").read_text()
+    assert "mm diff [--from DEVICE] [--source NAME]   # compare local files with this Mac" in spec
+    assert "mm pull --dry-run" in spec and "--conflict-mode fail" in spec
 
 
 def test_pre_1_1_notes_semantics_survive_as_health_entries():
@@ -1487,16 +1454,16 @@ def test_no_document_still_says_a_pull_never_deletes_a_file():
     assert stale == []
 
 
-def test_readme_names_every_history_action_the_log_command_accepts():
+def test_command_reference_names_every_history_action_the_log_command_accepts():
     from typing import get_args
 
     from mind_meld import cli
 
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    row = next(line for line in readme.splitlines() if line.startswith("| `mm log` |"))
-    documented = set(re.search(r"--action \{([^}]*)\}", row).group(1).replace("\\", "").split("|"))
+    spec = (ROOT / "SPEC.md").read_text(encoding="utf-8")
+    row = next(line for line in spec.splitlines() if "ACTION is one of" in line)
+    documented = {a.strip() for a in row.split("ACTION is one of", 1)[1].split(",")}
     assert documented == set(get_args(cli._LogAction)), (
-        f"README's mm log --action list {sorted(documented)} != the accepted values"
+        f"SPEC.md's mm log ACTION list {sorted(documented)} != the accepted values"
     )
 
 

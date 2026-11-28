@@ -501,10 +501,40 @@ def test_host_scan_reads_the_next_day_a_rolled_back_clock_would_write(tmp_path, 
     assert scan.rows["host-usage-snapshot"]["ts"] == row["ts"]
 
 
-@pytest.mark.parametrize("example", ["healthy", "mixed-empty", "failed-refresh", "unverified"])
-def test_readme_host_usage_recipe_matches_fixed_width_console(tmp_path, monkeypatch, example):
+_HOST_USAGE_EXAMPLES = {
+    "healthy": """\
+Host usage last recorded capture: 2026-09-21T12:00:00+00:00 (0d ago)
+  Publication: published (accepted manifest evidence)
+  codex: contributed
+  Antigravity: contributed
+  Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — published""",
+    "mixed-empty": """\
+Host usage last recorded capture: 2026-09-21T12:00:00+00:00 (0d ago)
+  Publication: published (accepted manifest evidence)
+  codex: contributed
+  Antigravity: completed, no usage in snapshot
+  Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — published
+    codex contributed; agy completed, no usage in snapshot""",
+    "failed-refresh": """\
+Host usage last recorded capture: 2026-09-21T11:00:00+00:00 (0d ago)
+  Publication: published (accepted manifest evidence)
+  codex: contributed
+  Antigravity: contributed
+  Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — no-row
+    codex dropped (unsupported); agy dropped (deadline)""",
+    "unverified": """\
+Host usage last recorded capture: unknown (~/.local/share/mind-meld/events/local-2026-09-21.jsonl)
+  Publication: unverified (oversized-line) (accepted manifest evidence)
+  codex: contributed
+  Antigravity: contributed
+  Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — unverified (oversized-line)
+  Usage refresh: Attended mm push refreshes and publishes host usage automatically.""",
+}
+
+
+@pytest.mark.parametrize("example", sorted(_HOST_USAGE_EXAMPLES))
+def test_host_usage_status_matches_fixed_width_console(tmp_path, monkeypatch, example):
     import io
-    import re
     import textwrap
 
     from rich.console import Console
@@ -547,10 +577,7 @@ def test_readme_host_usage_recipe_matches_fixed_width_console(tmp_path, monkeypa
         cli.statusflow, "console", Console(file=output, width=160, height=40, color_system=None)
     )
     cli.statusflow._print_host_publication(state, reader_states={})
-    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
-    match = re.search(rf"<!-- usage-example:{example} -->\n```text\n(.*?)\n```", readme, re.S)
-    assert match is not None, f"missing README example {example}"
-    assert textwrap.dedent(output.getvalue()).rstrip() == match[1]
+    assert textwrap.dedent(output.getvalue()).rstrip() == _HOST_USAGE_EXAMPLES[example]
 
 
 @pytest.mark.parametrize(
