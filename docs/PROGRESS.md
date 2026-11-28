@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.95 | 2026-11-28 | Version 1.12.95 rewrites the Mind Meld guide as a walkthrough of setup, daily sync, and recovery, archives historical upgrades, and installs missing keyring packages when bootstrap runs on Arch. |
 | 1.12.94 | 2026-11-27 | Version 1.12.94 reports `usage published` from an attended `mm push` only when this device publishes changed usage totals or queued catch-up data. |
 | 1.12.93 | 2026-11-27 | Version 1.12.93 stops managed Syncthing from marking fleet peers as introducers and clears flags that earlier releases set, so mutual-introducer warnings can stop once every managed machine has upgraded and synced. |
 | 1.12.92 | 2026-11-27 | Version 1.12.92 keeps attended sync progress visible until the outcome prints, with elapsed time on pull and each source and project named on push. |
