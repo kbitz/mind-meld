@@ -8,8 +8,8 @@
 Status: shape approved by the owner on 2026-10-29; planned after 2.0 as
 [docs/SPEC.md](../SPEC.md) O9. Implementation waits for the qualification
 below. This design supersedes the cross-agent design in
-[memory continuity](../designs/memory-continuity.md), which with the
-[Codex memory contract](../designs/codex-memory-contract.md) stays as Track 68A evidence
+[memory continuity](memory-continuity.md), which with the
+[Codex memory contract](codex-memory-contract.md) stays as Track 68A evidence
 (NO QUALIFIED ROUTE, measured on Codex 0.159.0).
 
 ## Goal

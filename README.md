@@ -188,6 +188,8 @@ auto_install = false   # still tell me about new releases
 auto_check = false     # never check
 ```
 
+If `/retro-fleet` looks empty or out of date, check `command -v mm` and `mm --version`. Update `mm` if needed, run `mm install-skills`, then restart the agent so it reloads the skill. If `mm diag` shows `maintain_links: disabled` for that agent, run `mm install-skills --agent <agent>` to enable its link.
+
 To roll back to a release that supports your shared folder's format, run `UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@vX.Y.Z`. It stays pinned until you run `mm update`. If you use `/retro-fleet`, move `~/.local/share/mind-meld/agent-skills/retro-fleet` aside as a backup, then run `mm install-skills` to install the matching skill.
 
 ## Troubleshooting
