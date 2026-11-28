@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Owner-fleet acceptance for O1 through O4, O7, and O9 is recorded in [PROGRESS.md](PROGRESS.md#acceptance), with O6 through O8 holding and bootstrap plus O2 setup shipped; one encountered bug Track remains in Current Plan before the 2.0.0 release.
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Grok Build, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Each machine moves on its own schedule by reinstalling mm and joining the Syncthing fleet; a Mac not yet moved keeps running on iCloud Drive (SPEC O2). Owner-fleet acceptance for O1 through O4, O7, and O9 is recorded in [PROGRESS.md](PROGRESS.md#acceptance), with O6 through O8 holding and bootstrap plus O2 setup shipped; two Tracks remain in Current Plan before the 2.0.0 release: an encountered `mm push` usage-reporting bug fix (Track 171A) followed by the 2.0 documentation pass (Track 172A).
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -59,6 +59,37 @@ _Source: developer bug report relayed by Factory Manager, 2026-11-28 ("it seems 
 - **Set `PushResult.usage_published` only when published usage totals changed since the last published snapshot.** Compare published usage totals against this machine's last published snapshot in `events.py` / `cli.py` (and `events_tail.py` if needed) without breaking `host_usage_published`, `attemptlog`, `mm status`/`mm diag` receipts, `catching_up_readers`, `--verbose`, or silent `autopush`. _src/mind_meld/cli.py, src/mind_meld/events.py, src/mind_meld/events_tail.py, ~65 lines._ (M)
 - **Add back-to-back idle-push regression tests and update invariant docs and README.** Pin idle consecutive pushes, real usage growth, content-only pushes with unchanged usage, and catching-up readers without new usage, and align `docs/invariants/{sync,events-retro,README}.md` and `README.md`. _tests/test_integration.py, tests/test_reader_publication.py, tests/test_events.py, docs/invariants/README.md, docs/invariants/sync.md, docs/invariants/events-retro.md, README.md, ~45 lines._ (S)
 
+### Group 172: 2.0 documentation pass (README, design archives, and AGENTS.md)
+
+_Depends on: Group 171_
+
+**This group delivers:** a concise, clear, newcomer-ready `README.md` covering every shipped feature in the developer's voice, superseded design and plan documents archived under `docs/archive/` with updated links, and a tightened `AGENTS.md` well inside the 12 KiB budget — docs only, waiting on the developer's review of the `README.md` diff before merge.
+
+#### Track 172A: Complete the 2.0 documentation pass (README hard pass, archive old designs, tighten AGENTS.md)
+_3 tasks . ~240 LOC . low risk . 19 files_
+_id: wi-88c669_
+_tier: standard_
+**Outcome:** A newcomer on macOS or Arch Linux can follow `README.md` end to end — concise, clear, free of repetition, current with 1.12.9x output, highlighting every shipped feature, and written in the developer's voice (using the supplied voice brief); superseded design and plan documents are archived under `docs/archive/` with active links updated; and `AGENTS.md` is shorter, current, and free of stale pointers while staying under the 12 KiB test ceiling.
+**Supports:** [SPEC](SPEC.md) Audience and target (`potentially-public`: "the README stays readable by a newcomer"), O1–O4 and O6–O9 documentation accuracy, and pre-2.0.0 release readiness; developer requests, 2026-11-28 (`"can you make sure the longshoremen takes a hard pass on our readme, archives old designs, we tighten up agents.md, etc? I would like to review the readme before we merge and make sure it's in good shape for someone to follow, highlights all the features, etc"` and `"readme needs to be concise and clear; not verbose and repetitive"`).
+**Done when:** `README.md` is concise, clear, non-repetitive, written in the developer's voice (per the supplied voice brief), covers end-to-end macOS and Arch Linux usage (what `mm` is, install/bootstrap, first machine, joining with `mm init` + `mm devices approve`, retiring with `mm devices retire`, everyday `push`/`pull`/`status`/`diag`, conflicts and recovery, sources, `retro-fleet`, the cross-model memory index, auto commands and updates, and troubleshooting including restarting Syncthing with `syncthing cli operations restart`), highlights every shipped feature with current 1.12.9x examples (including Track 171A's updated `Push:` usage clause), and cuts or moves stale/duplicated/historical material; `roadmap-audit`'s `ARCHIVE_CANDIDATES` and SPEC-superseded design/plan docs are archived under `docs/archive/` with active links updated; `AGENTS.md` is tightened, current, free of stale pointers, and well below the 12 KiB ceiling (with `CLAUDE.md -> AGENTS.md` preserved); docs only with no code changes and no version bump unless the release policy says otherwise; `./bin/check --affected` (including `tests/test_docs_routing.py` and `tests/test_reader_publication.py` README pins) and `bin/roadmap-audit` (`ARCHIVE_CANDIDATES` clean) pass; and the developer has reviewed the `README.md` diff before merge (PR waits for that review).
+
+Verified at `6bc10d1`: `README.md` is 3,096 lines (288 KiB) with ~680 lines of historical v0.x–v1.x upgrade notes preceding `## Quick Start` and no `syncthing cli operations restart` troubleshooting entry; `AGENTS.md` is 12,208 bytes (80 bytes under `tests/test_docs_routing.py`'s 12,288-byte hard limit); `roadmap-audit` flags four `ARCHIVE_CANDIDATES` under `docs/designs/` (`codex-memory-contract.md`, `host-parity.md`, `memory-continuity.md`, `sync-gstack-context.md`, plus `track-37A.md` shipped and cited only in `.conductor/settings.toml`). `tests/test_docs_routing.py` enforces README anchors for `errors.py`, `### Syncing gstack`, `mm diag --json` keys, `mm log --action` values, `mm diff` preview table, uninstall skill paths, vendor pricing URLs/dates, relative links, and `AGENTS.md` invariants.
+
+1. Rewrite and tighten `README.md` in the developer's voice (per the supplied voice brief): make it concise, clear, and free of repetition so a newcomer can follow it end to end on macOS and Arch Linux — covering what `mm` is, install/bootstrap, first machine, joining (`mm init` + `mm devices approve`), retiring (`mm devices retire`), everyday `push`/`pull`/`status`/`diag`, conflicts and recovery, sources, `retro-fleet`, the cross-model memory index (`qmd`), auto commands and updates, and troubleshooting (including `syncthing cli operations restart`); highlight every shipped feature, refresh examples to current 1.12.9x output (reflecting Track 171A), cut or relocate stale/duplicated/historical upgrade prose, and preserve every pinned anchor/contract tested by `tests/test_docs_routing.py` and `tests/test_reader_publication.py`.
+2. Archive superseded design and plan docs into `docs/archive/` (starting from `roadmap-audit`'s four `ARCHIVE_CANDIDATES`: `docs/designs/codex-memory-contract.md`, `docs/designs/host-parity.md`, `docs/designs/memory-continuity.md`, `docs/designs/sync-gstack-context.md`, plus anything `docs/SPEC.md` marks superseded and evaluating `docs/designs/track-37A.md` with a redirect if needed so no config file changes) with top-of-file superseded notices, and update all active links across `docs/SPEC.md` (`## Supporting documents`), `AGENTS.md`, `README.md`, `SPEC.md`, `docs/invariants/sync.md`, `docs/invariants/events-retro.md`, and `docs/designs/cross-model-memory.md`.
+3. Tighten `AGENTS.md` to be shorter, current, and free of stale pointers while preserving the `CLAUDE.md -> AGENTS.md` symlink, `<!-- roadmap:parallelism_cap=8 -->`, `[docs/invariants/README.md](docs/invariants/README.md)`, `./bin/check` in `## Testing`, `## Product scope and releases`, and comfortable headroom under the 12 KiB test limit; verify docs-only scope (no code changes, no version bump unless release policy requires one), pass `./bin/check --affected` and `bin/roadmap-audit`, and hold the PR for the developer's review of the `README.md` diff before merge.
+
+_touches: README.md, AGENTS.md, SPEC.md, docs/SPEC.md, docs/invariants/README.md, docs/invariants/sync.md, docs/invariants/events-retro.md, docs/designs/codex-memory-contract.md, docs/designs/host-parity.md, docs/designs/memory-continuity.md, docs/designs/sync-gstack-context.md, docs/designs/cross-model-memory.md, docs/designs/track-37A.md, docs/archive/codex-memory-contract.md (new), docs/archive/host-parity.md (new), docs/archive/memory-continuity.md (new), docs/archive/sync-gstack-context.md (new), docs/archive/track-37A.md (new), docs/archive/upgrading-1x.md (new)_
+_blocked-by: 171A_
+_read-first: docs/SPEC.md, AGENTS.md, README.md, tests/test_docs_routing.py, tests/test_reader_publication.py, src/mind_meld/errors.py, docs/invariants/README.md, docs/invariants/sync.md, docs/invariants/events-retro.md_
+_verify: ./bin/check --affected_
+
+_Source: developer requests, 2026-11-28 ("can you make sure the longshoremen takes a hard pass on our readme, archives old designs, we tighten up agents.md, etc? I would like to review the readme before we merge and make sure it's in good shape for someone to follow, highlights all the features, etc" and "readme needs to be concise and clear; not verbose and repetitive"); verified against 6bc10d1._
+
+- **Hard pass on `README.md` for 2.0 in the developer's voice.** Rewrite for conciseness, clarity, and zero repetition (per supplied voice brief) covering macOS and Arch Linux end to end, every shipped feature, 1.12.9x examples, and Syncthing restart troubleshooting (`syncthing cli operations restart`), cutting or relocating stale/historical prose while keeping all `test_docs_routing.py` / `test_reader_publication.py` pins green; hold PR for developer README review. _README.md, docs/archive/upgrading-1x.md (new), ~120 lines._ (M)
+- **Archive superseded design and plan docs and update active links.** Move `ARCHIVE_CANDIDATES` (`codex-memory-contract.md`, `host-parity.md`, `memory-continuity.md`, `sync-gstack-context.md`) and any other SPEC-superseded designs (evaluating `track-37A.md`) into `docs/archive/` with notices and update links across `docs/SPEC.md`, `AGENTS.md`, `README.md`, `SPEC.md`, `docs/invariants/`, and `docs/designs/cross-model-memory.md`. _docs/designs/codex-memory-contract.md, docs/designs/host-parity.md, docs/designs/memory-continuity.md, docs/designs/sync-gstack-context.md, docs/designs/cross-model-memory.md, docs/designs/track-37A.md, docs/archive/codex-memory-contract.md (new), docs/archive/host-parity.md (new), docs/archive/memory-continuity.md (new), docs/archive/sync-gstack-context.md (new), docs/archive/track-37A.md (new), docs/SPEC.md, SPEC.md, docs/invariants/sync.md, docs/invariants/events-retro.md, ~60 lines._ (S)
+- **Tighten `AGENTS.md` and verify all doc-routing and audit gates.** Trim stale pointers and prose in `AGENTS.md` well below the 12 KiB budget while preserving all required directives and `CLAUDE.md` symlink, and verify docs-only scope with `./bin/check --affected` and `bin/roadmap-audit`. _AGENTS.md, docs/invariants/README.md, ~60 lines._ (S)
+
 ### Execution Map
 
 A Group may launch when every Group in its ← set has landed, regardless
@@ -67,15 +98,19 @@ of document order; document order is priority, not gating.
 Adjacency list (from the packer / GROUP_DEPS — not document order):
 ```
 - Group 171 ← {}
+- Group 172 ← {171}
 ```
 
 Track detail per group:
 ```
 Group 171: Accurate usage-published reporting on attended `mm push`
   +-- Track 171A ........... ~M . 3 tasks
+
+Group 172: 2.0 documentation pass (README, design archives, and AGENTS.md)
+  +-- Track 172A ........... ~M . 3 tasks
 ```
 
-**Total: 1 group . 1 track remaining.**
+**Total: 2 groups . 2 tracks remaining.**
 
 ---
 
