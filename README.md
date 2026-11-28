@@ -123,7 +123,9 @@ There is no automated migration tool. Move each Mac on its own schedule — Macs
 1. Close agent sessions so hooks stay idle. Optionally run one last `mm push` to iCloud. Back up `~/.config/mind-meld/config.toml` and any custom-excluded files outside your sync sources. A join pulls before you can reapply your exclusions.
 2. Run `pipx uninstall mind-meld`. Keep `~/.config/mind-meld` for the pull ledger and recovery copies. Move `~/.local/share/mind-meld/events` outside the source, for example to `~/mind-meld-icloud-events`, to keep old event history out of the new fleet.
 3. Reinstall with the [bootstrap script](#install). Run `mm init --new-fleet` for the first Syncthing machine or [join](#setting-up-another-machine) with `mm init`. Use the Syncthing path, confirm replacing the config, and decline previously disabled sources.
-4. Reapply your settings and exclusions, restore excluded files from backup, and run `mm push`. If interrupted after init starts, resume at step 3 and retain the original backups.
+4. Reapply your settings and exclusions, restore excluded files from backup, and run `mm push`.
+
+If init stops, keep the original backups. For an interrupted join, rerun `mm init` and use its saved answers. For a new fleet, retry `mm init --new-fleet` only if the folder is still empty of fleet data. If init already wrote `mm-crypto-init` but has yet to save the new config, run plain `mm init`, choose join, and use the same folder and passphrase. Once the Syncthing config is saved, continue at step 4.
 
 Your agent files merge under the normal [pull conflict rules](#handling-conflicts). iCloud and Syncthing remain separate stores. Save the iCloud folder until every Mac has moved.
 
@@ -481,7 +483,9 @@ Managed peers wait for the device to disconnect. On owner-managed peers, remove 
 
 ### Newer or damaged storage format
 
-If `mm` reports a newer format, leave the key headers in place and run `mm update`. Verify with `mm --version` and retry. If the latest release still reports damage, wait for Syncthing to finish and get a known-good `mm-crypto-init` from a working machine or backup. Back up every header outside the shared folder, then move the damaged canonical file aside and restore the known-good header to `mm-crypto-init` without overwriting an existing file. Verify with `mm pull`. Keep the backups. If no valid header is available, stop before changing the store.
+If `mm` reports a newer format, leave the key headers in place and run `mm update`. Verify with `mm --version` and retry. If the latest release still reports damage, run `mm diag` to identify the affected object. For a damaged manifest, investigate on its publishing machine and let `mm push` try its normal recovery.
+
+If diagnostics identify a missing or unreadable key header, wait for Syncthing to finish. Get a known-good `mm-crypto-init` from a machine that can still sync **this same fleet folder** or from a verified backup of that fleet. Back up every header outside the shared folder. Move any damaged canonical file aside, then restore the verified copy to `mm-crypto-init` without overwriting another file. Check with `mm pull` and keep the backups. If you cannot verify a copy belongs to this fleet, stop before changing its storage.
 
 ### Key header copies differ
 
