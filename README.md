@@ -8,9 +8,9 @@ Mind Meld (`mm`) keeps your AI coding agents' memory, skills and instructions th
 
 ## Quick start
 
-On macOS, install [Homebrew](https://brew.sh/) first. On Arch Linux, install `gnome-keyring` and `libsecret`, then unlock your login keyring in the desktop session.
+On macOS, install [Homebrew](https://brew.sh/) first.
 
-1. Install `mm`. The script adds Python 3.11+, `pipx` and Syncthing 2.1+ where they are missing, and tries to install `qmd`:
+1. Install `mm`. The script adds Python 3.11+, `pipx` and Syncthing 2.1+ where they are missing (plus `gnome-keyring` and `libsecret` on Arch), and tries to install `qmd`:
 
    ```bash
    mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap) && sh -c "$mm_bootstrap"
@@ -188,17 +188,6 @@ auto_check = false     # never check
 
 To go back to an older release, run `UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@vX.Y.Z`. It stays pinned until you run `mm update`.
 
-### Move a Mac from iCloud Drive
-
-Each Mac moves on its own schedule. Macs still on iCloud Drive keep syncing with each other until they move.
-
-1. Close agent sessions. Back up `~/.config/mind-meld/config.toml` and any files you had excluded from sync.
-2. Run `pipx uninstall mind-meld`. Move `~/.local/share/mind-meld/events` out of the way (for example to `~/mind-meld-icloud-events`) so old usage history stays out of the new fleet.
-3. Install with the [bootstrap command](#quick-start), then run `mm init --new-fleet` on the first Syncthing machine or [`mm init`](#add-a-machine) to join. Choose the Syncthing path and confirm replacing the config.
-4. Reapply your settings and exclusions, then run `mm push`.
-
-Keep the iCloud folder until every Mac has moved.
-
 ## Troubleshooting
 
 ### Syncthing stalled
@@ -216,7 +205,7 @@ mm status
 
 ### Auto commands skip: keyring locked or unavailable
 
-On Linux, the hooks never open a keyring prompt. Unlock your login keyring in the desktop session. On macOS, run `mm pull` in a terminal and choose **Always Allow** in the Keychain dialog.
+The hooks never open an unlock prompt, so they skip while the keyring is locked and `mm status` records it. Run `mm pull` in a terminal in your desktop session. On Linux, unlock the login keyring when asked; a login manager that unlocks it at sign-in saves this step. On macOS, choose **Always Allow** in the Keychain dialog.
 
 ### Pull incomplete / could not pull a file
 
