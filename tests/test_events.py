@@ -5325,6 +5325,9 @@ def test_verified_event_bytes_refuses_oversized_final_partial_line(tmp_path, mon
     payload = b"{}\n" + b" " * 16
     path.write_bytes(payload)
     monkeypatch.setattr(token_usage, "MAX_JSONL_LINE_BYTES", 8)
-    assert events.read_verified_event_bytes(
-        path, hashlib.sha256(payload).hexdigest(), max_bytes=len(payload)
-    ) is None
+    assert (
+        events.read_verified_event_bytes(
+            path, hashlib.sha256(payload).hexdigest(), max_bytes=len(payload)
+        )
+        is None
+    )
