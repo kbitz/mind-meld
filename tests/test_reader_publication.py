@@ -32,6 +32,127 @@ def publication(row, readers=("codex", "agy")):
     return events.project_host_publication(scan, readers, None, now=NOW)
 
 
+@pytest.mark.parametrize("unchanged_alias", [True, False], ids=["case-alias", "unknown-prefix"])
+def test_171a_only_new_rows_in_a_previously_accepted_day(tmp_path, unchanged_alias):
+    """An old catch-up row must not count again when only the filename or receipt changes."""
+    rel = f"events/dev-a-{TODAY}.jsonl"
+    dayfile = tmp_path / rel
+    dayfile.parent.mkdir()
+    catchup = {"type": "git-snapshot", "origin": "catchup", "projects": []}
+    raw = (json.dumps(catchup) + "\n").encode()
+    dayfile.write_bytes(raw)
+    previous = raw if unchanged_alias else b"{}\n" + raw
+
+    def manifest(path, rows):
+        return {
+            "sources": {
+                "mm-events": {
+                    "files": {path: {"sha256": hashlib.sha256(rows).hexdigest(), "size": len(rows)}}
+                }
+            }
+        }
+
+    prior_rel = rel.replace("events/", "Events/") if unchanged_alias else rel
+    assert not cli._published_usage_changed(
+        [{"name": "mm-events", "path": str(tmp_path)}],
+        "dev-a",
+        manifest(rel, raw),
+        manifest(prior_rel, previous),
+        cli._PublishedUsageBaseline(),
+        None,
+        False,
+        max_file_size=1024,
+    )
+
+
+def test_usage_baseline_stops_after_verified_winners(tmp_path, monkeypatch):
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz)
+
+    monkeypatch.setattr(cli, "datetime", FixedClock)
+    (tmp_path / "events").mkdir()
+    files = {}
+    for delta in (0, 1):
+        stamp = NOW - timedelta(days=delta)
+        rel = f"events/dev-a-{stamp.date().isoformat()}.jsonl"
+        rows = [
+            {**host_row(), "ts": stamp.isoformat()},
+            {"type": "sessions-snapshot", "ts": stamp.isoformat(), "projects": []},
+        ]
+        raw = b"".join((json.dumps(row) + "\n").encode() for row in rows)
+        (tmp_path / rel).write_bytes(raw)
+        files[rel] = {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
+
+    reads = []
+    read_verified = events.read_verified_event_bytes
+
+    def record_read(path, *args, **kwargs):
+        reads.append(path.name)
+        return read_verified(path, *args, **kwargs)
+
+    monkeypatch.setattr(events, "read_verified_event_bytes", record_read)
+    baseline = cli._read_published_usage_baseline(
+        cli.LocalBackend(tmp_path / "storage"),
+        "dev-a",
+        "",
+        8192,
+        [{"name": "mm-events", "path": str(tmp_path)}],
+        {"sources": {"mm-events": {"files": files}}},
+        max_file_size=100_000,
+    )
+    assert baseline.host_row is not None
+    assert baseline.sessions_row is not None
+    assert reads == [f"dev-a-{TODAY}.jsonl"]
+
+
+@pytest.mark.parametrize("queued", [False, True], ids=["old-rows", "new-catchup"])
+def test_usage_delta_reads_a_rewritten_older_day_on_demand(tmp_path, queued):
+    rel = f"events/dev-a-{OLD}.jsonl"
+    path = tmp_path / rel
+    path.parent.mkdir()
+    row = {"type": "git-snapshot", "origin": "catchup", "ts": f"{OLD}T00:00:00Z"}
+    previous = (json.dumps(row) + "\n").encode()
+    raw = b"\n" + previous
+    if queued:
+        raw += (json.dumps({**row, "ts": f"{OLD}T01:00:00Z"}) + "\n").encode()
+    path.write_bytes(raw)
+
+    def manifest(data):
+        return {
+            "sources": {
+                "mm-events": {
+                    "files": {rel: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}}
+                }
+            }
+        }
+
+    requested = []
+
+    def read_prior(digest):
+        requested.append(digest)
+        return previous
+
+    baseline = cli._PublishedUsageBaseline()
+    assert (
+        cli._published_usage_changed(
+            [{"name": "mm-events", "path": str(tmp_path)}],
+            "dev-a",
+            manifest(raw),
+            manifest(previous),
+            baseline,
+            None,
+            False,
+            max_file_size=1024,
+            read_prior_blob=read_prior,
+        )
+        is queued
+    )
+    assert requested == [hashlib.sha256(previous).hexdigest()]
+    assert baseline.blob_attempted
+
+
 @pytest.mark.parametrize(
     "hosts,usage_days,expected",
     [
@@ -580,3 +701,63 @@ def test_winner_in_a_failing_file_before_the_margin_is_uncertain(tmp_path, monke
     )
     assert "host-usage-snapshot" in scan.uncertain_types
     assert events.project_host_publication(scan, ["codex"], None, now=NOW)["state"] == "unknown"
+
+
+def test_unchanged_reappended_host_row_still_verifies_publication_171a(tmp_path, monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    from mind_meld import attemptlog
+
+    first_row = {
+        **host_row(),
+        "ts": NOW.isoformat(),
+        "hosts": {
+            "codex": {
+                "2026-09-01": {"input": 100, "cache_create": 0, "cache_read": 0, "output": 50}
+            }
+        },
+        "counter_semantics": events.COUNTER_SEMANTICS_DISJOINT_V1,
+    }
+    second_row = {
+        **first_row,
+        "ts": (NOW + timedelta(minutes=5)).isoformat(),
+    }
+    assert events.host_usage_changed(second_row, first_row) is False
+
+    path = tmp_path / "local-2026-09-01.jsonl"
+    payload = (
+        json.dumps(first_row, sort_keys=True) + "\n" + json.dumps(second_row, sort_keys=True) + "\n"
+    ).encode()
+    path.write_bytes(payload)
+    rel = f"events/{path.name}"
+    manifest = {
+        "sources": {"mm-events": {"files": {rel: {"sha256": hashlib.sha256(payload).hexdigest()}}}}
+    }
+    out = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=out, width=1000, height=40, color_system=None))
+    attempt = attemptlog.Attempt(outcome=attemptlog.CaptureOutcome())
+    published = cli._report_usage_publication(
+        [{"name": "mm-events", "include_dirs": ["events"]}],
+        (path, second_row),
+        manifest,
+        cli.PushResult(),
+        verbose=True,
+        attempt=attempt,
+    )
+    assert published is True
+    assert "Host usage published (manifest accepted)." in out.getvalue()
+    assert (attempt.outcome.kind, attempt.outcome.cause) == ("published", None)
+
+    scan = events.latest_event_rows(
+        tmp_path,
+        "local",
+        {"host-usage-snapshot"},
+        now=NOW + timedelta(minutes=5),
+        selectors={"host-usage-snapshot": lambda item: ((item["ts"],), item)},
+        day_margins={"host-usage-snapshot": timedelta(hours=24)},
+    )
+    pub = events.project_host_publication(scan, ["codex"], manifest, now=NOW + timedelta(minutes=5))
+    assert pub["state"] == "recorded"
+    assert pub["publication"] == "published"

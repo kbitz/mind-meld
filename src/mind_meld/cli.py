@@ -19,7 +19,7 @@ from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -846,18 +846,277 @@ def _stored_event_key(files: dict, rel: str) -> str | None:
     return None
 
 
-def _has_new_event_bytes(files: dict, prior: dict, unverified_host_path: str | None) -> bool:
-    """Compare accepted event files against the prior, including recovery sidecars."""
+@dataclass
+class _PublishedUsageBaseline:
+    host_row: dict[str, Any] | None = None
+    sessions_row: dict[str, Any] | None = None
+    host_comparable: bool = True
+    sessions_comparable: bool = True
+    blob_attempted: bool = False
+    files: dict[str, tuple[int, bytes | None]] = field(default_factory=dict)
+
+
+# Allow for the encryption envelope and gzip overhead over the plaintext cap.
+_EVENT_BLOB_OVERHEAD_BYTES = 65_536
+
+
+def _read_published_event_blob(
+    backend: LocalBackend,
+    device_id: str,
+    digest: str,
+    passphrase: str,
+    memory_kb: int,
+    max_file_size: int,
+) -> bytes | None:
+    try:
+        enc = backend.get_bounded(
+            blob_key(device_id, digest),
+            max_bytes=max_file_size * 2 + _EVENT_BLOB_OVERHEAD_BYTES,
+        )
+        raw = crypto.decrypt(
+            enc, passphrase, memory_kb=memory_kb, max_plaintext_bytes=max_file_size
+        )
+        return raw if events.event_bytes_match(raw, digest) else None
+    except (OSError, MindMeldError, ValueError):
+        return None
+
+
+def _read_published_usage_baseline(
+    backend: LocalBackend,
+    device_id: str,
+    passphrase: str,
+    memory_kb: int,
+    sources: list[dict],
+    prior_manifest: dict | None,
+    *,
+    max_file_size: int,
+) -> _PublishedUsageBaseline:
+    """Capture this machine's last published usage baseline from ``prior_manifest``.
+
+    Check the local accepted bytes first, including an unchanged prefix when
+    capture catch-up has appended to a published day. Allow one bounded blob
+    read for a missing or rewritten revision. An unread day that could contain
+    the latest snapshot leaves that comparison inconclusive.
+    """
+    baseline = _PublishedUsageBaseline()
+    try:
+        mm_src = next((s for s in sources if s["name"] == "mm-events"), None)
+        if mm_src is None or not prior_manifest:
+            return baseline
+        prior_files = _mm_events_files(prior_manifest)
+        if not prior_files:
+            return baseline
+        from mind_meld.skills.retro_fleet import aggregator
+
+        base_path = Path(mm_src["path"])
+        now = datetime.now(timezone.utc)
+        host_order = sessions_order = None
+        newest_unread = None
+
+        for delta in range(-1, events.CURSOR_SCAN_DAYS + 1):
+            day = now.date() - timedelta(days=delta)
+            # A row cannot be written into a day earlier than its UTC
+            # timestamp. Older files cannot displace either confirmed winner.
+            if (
+                host_order is not None
+                and sessions_order is not None
+                and sessions_order[0] == 1
+                and day < host_order[0].astimezone(timezone.utc).date()
+            ):
+                break
+            rel_default = f"events/{events.device_event_filename(device_id, day)}"
+            stored = _stored_event_key(prior_files, rel_default)
+            if stored is None:
+                continue
+            info = prior_files[stored]
+            prior_sha = info.get("sha256") if isinstance(info, dict) else None
+            if not is_content_hash(prior_sha):
+                if newest_unread is None:
+                    newest_unread = delta
+                continue
+
+            size = info.get("size")
+            prefix_size = size if type(size) is int else None
+            raw = events.read_verified_event_bytes(
+                base_path / stored, prior_sha, max_bytes=max_file_size, prefix_size=prefix_size
+            )
+            prior_bytes = None
+            if raw is None and not baseline.blob_attempted:
+                baseline.blob_attempted = True
+                raw = prior_bytes = _read_published_event_blob(
+                    backend, device_id, prior_sha, passphrase, memory_kb, max_file_size
+                )
+            if raw is None:
+                if newest_unread is None:
+                    newest_unread = delta
+                continue
+            baseline.files[stored] = (len(raw), prior_bytes)
+
+            for index, row in enumerate(
+                events.iter_jsonl_bytes(raw, {"host-usage-snapshot", "sessions-snapshot"})
+            ):
+                kind = row["type"]
+                if kind == "host-usage-snapshot":
+                    cand = aggregator.local_host_capture_candidate(row, until=now)
+                    if cand is not None:
+                        order_rank = cand[0]
+                        if host_order is None or order_rank > host_order:
+                            host_order = order_rank
+                            baseline.host_row = row
+                elif kind == "sessions-snapshot":
+                    row_ts = events.parse_aware_ts(row.get("ts"))
+                    valid = int(row_ts is not None and row_ts <= now)
+                    if delta < 0 and not valid:
+                        continue
+                    order_rank = (valid, -delta, index)
+                    if sessions_order is None or order_rank > sessions_order:
+                        sessions_order = order_rank
+                        baseline.sessions_row = row
+
+        if newest_unread is not None:
+            missing_day = now.date() - timedelta(days=newest_unread)
+            baseline.host_comparable = (
+                host_order is not None
+                and missing_day < host_order[0].astimezone(timezone.utc).date()
+            )
+            baseline.sessions_comparable = (
+                sessions_order is not None
+                and sessions_order[0] == 1
+                and newest_unread > -sessions_order[1]
+            )
+    except Exception:
+        baseline.host_comparable = baseline.sessions_comparable = False
+    return baseline
+
+
+def _changed_own_event_files(
+    files: dict,
+    prior: dict,
+    device_id: str,
+    unverified_host_path: str | None,
+) -> list[tuple[str, dict, str | None]]:
+    """Return accepted own-device mm-events files whose bytes changed vs prior."""
+    changed: list[tuple[str, dict, str | None]] = []
+    prior_folded = {rel.casefold() for rel in prior if isinstance(rel, str)}
     for rel, info in files.items():
-        if rel == unverified_host_path:
+        if not isinstance(rel, str) or not isinstance(info, dict):
             continue
-        if rel not in prior:
-            return True
-        previous = prior[rel]
+        if unverified_host_path is not None and rel.casefold() == unverified_host_path.casefold():
+            continue
+        if not events.is_device_event_file(rel, device_id):
+            continue
+        prior_rel = _stored_event_key(prior, rel)
+        if prior_rel is None:
+            if rel.casefold() not in prior_folded:
+                changed.append((rel, info, None))
+            continue
+        previous = prior[prior_rel]
         digest = previous.get("sha256") if isinstance(previous, dict) else None
         # Missing recovery evidence cannot prove that an accepted file changed.
-        if is_content_hash(digest) and digest != info["sha256"]:
-            return True
+        if is_content_hash(digest) and digest != info.get("sha256"):
+            changed.append((rel, info, prior_rel))
+    return changed
+
+
+def _published_usage_changed(
+    sources: list[dict],
+    device_id: str,
+    local_manifest: dict,
+    remote_manifest: dict | None,
+    baseline: _PublishedUsageBaseline,
+    captured_appended: tuple[Path, dict] | None,
+    host_usage_published: bool,
+    *,
+    max_file_size: int,
+    read_prior_blob: Callable[[str], bytes | None] | None = None,
+) -> bool:
+    """Return True iff newly published own-device mm-events rows changed usage."""
+    accepted_files = _mm_events_files(local_manifest)
+    prior_files = _mm_events_files(remote_manifest)
+    unverified_host_path = (
+        f"events/{captured_appended[0].name}"
+        if captured_appended is not None and not host_usage_published
+        else None
+    )
+    changed_files = _changed_own_event_files(
+        accepted_files, prior_files, device_id, unverified_host_path
+    )
+    if not changed_files:
+        return False
+    if (
+        captured_appended is not None
+        and host_usage_published
+        and baseline.host_comparable
+        and events.host_usage_changed(captured_appended[1], baseline.host_row)
+    ):
+        return True
+
+    mm_src = next((s for s in sources if s["name"] == "mm-events"), None)
+    if mm_src is None:
+        return False
+    from mind_meld.skills.retro_fleet import aggregator
+
+    base_path = Path(mm_src["path"])
+    now = datetime.now(timezone.utc)
+    for rel, info, prior_rel in changed_files:
+        expected_sha = info.get("sha256")
+        if not is_content_hash(expected_sha):
+            continue
+        raw = events.read_verified_event_bytes(
+            base_path / rel, expected_sha, max_bytes=max_file_size
+        )
+        if raw is None:
+            continue
+        if prior_rel is None:
+            delta_bytes = raw
+        else:
+            prior_info = prior_files[prior_rel]
+            prior_size, prior_bytes = baseline.files.get(prior_rel, (prior_info.get("size"), None))
+            if (
+                type(prior_size) is int
+                and 0 <= prior_size <= len(raw)
+                and hashlib.sha256(raw[:prior_size]).hexdigest() == prior_info["sha256"]
+            ):
+                delta_bytes = raw[prior_size:]
+            else:
+                # A rewritten older day can be outside the snapshot search.
+                # Spend the shared fallback here only if it is still available.
+                if (
+                    prior_bytes is None
+                    and read_prior_blob is not None
+                    and not baseline.blob_attempted
+                ):
+                    baseline.blob_attempted = True
+                    prior_bytes = read_prior_blob(prior_info["sha256"])
+                if prior_bytes is None:
+                    continue  # Unknown prior bytes cannot prove which rows are new.
+                prior_counts = Counter(prior_bytes.splitlines(keepends=True))
+                new_lines: list[bytes] = []
+                for line in raw.splitlines(keepends=True):
+                    if prior_counts[line] > 0:
+                        prior_counts[line] -= 1
+                    else:
+                        new_lines.append(line)
+                delta_bytes = b"".join(new_lines)
+        for row in events.iter_jsonl_bytes(
+            delta_bytes, {"host-usage-snapshot", "sessions-snapshot", "git-snapshot"}
+        ):
+            kind = row["type"]
+            if kind == "host-usage-snapshot":
+                if (
+                    baseline.host_comparable
+                    and aggregator.local_host_capture_candidate(row, until=now) is not None
+                    and events.host_usage_changed(row, baseline.host_row)
+                ):
+                    return True
+            elif kind == "sessions-snapshot":
+                if baseline.sessions_comparable and events.sessions_usage_changed(
+                    row, baseline.sessions_row
+                ):
+                    return True
+            elif kind == "git-snapshot":
+                if events.git_snapshot_counts_as_usage(row):
+                    return True
     return False
 
 
@@ -2209,6 +2468,19 @@ def _push_core(
 
     # Evaluate prerequisites against the final set, including recovered Grok.
     # Keep skipped custom roots in this view so "unavailable" is not "disabled".
+    usage_baseline = (
+        _read_published_usage_baseline(
+            backend,
+            device_id,
+            passphrase,
+            memory_kb,
+            sources,
+            remote_manifest,
+            max_file_size=max_file_size,
+        )
+        if result_observer is not None and not dry_run
+        else _PublishedUsageBaseline()
+    )
     captured = None
     capture_attempted = attended and not dry_run
     if capture_attempted:
@@ -2514,7 +2786,12 @@ def _push_core(
                     verbose=verbose,
                     attempt=attempt,
                 )
-                result.usage_published = result.host_usage_published
+                result.usage_published = bool(
+                    result_observer is not None
+                    and result.host_usage_published
+                    and usage_baseline.host_comparable
+                    and events.host_usage_changed(captured.appended[1], usage_baseline.host_row)
+                )
             except Exception as e:
                 _warn_publication_evidence_unavailable(
                     e, "User content was already up to date.", attempt=attempt
@@ -2821,17 +3098,6 @@ def _push_core(
             if result_observer is not None
             else None
         )
-        usage_published = False
-        if result_observer is not None:
-            event_files = _mm_events_files(local_manifest)
-            unverified_host_path = (
-                _stored_event_key(event_files, f"events/{captured.appended[0].name}")
-                if captured is not None and captured.appended is not None
-                else None
-            )
-            usage_published = _has_new_event_bytes(
-                event_files, _mm_events_files(remote_manifest), unverified_host_path
-            )
         # Independent content receipt at the actual acceptance boundary, even when
         # capture was skipped or failed. Maintenance cannot revoke accepted content.
         result = PushResult(
@@ -2844,7 +3110,7 @@ def _push_core(
             content_files=content_files,
             content_accepted=False,
             published_content_files=published_content_files,
-            usage_published=usage_published,
+            usage_published=False,
             catching_up_readers=catching_up,
             metadata_updated=result_observer is not None
             and not published_content_files
@@ -2903,10 +3169,25 @@ def _push_core(
             result.host_usage_published = _report_usage_publication(
                 sources, captured.appended, local_manifest, result, verbose=verbose, attempt=attempt
             )
-            if result.host_usage_published:
-                result.usage_published = True
         except Exception as e:
             _warn_publication_evidence_unavailable(e, "Content sync succeeded.", attempt=attempt)
+    if result_observer is not None:
+        try:
+            result.usage_published = _published_usage_changed(
+                sources,
+                device_id,
+                local_manifest,
+                remote_manifest,
+                usage_baseline,
+                captured.appended if captured is not None else None,
+                result.host_usage_published,
+                max_file_size=max_file_size,
+                read_prior_blob=lambda digest: _read_published_event_blob(
+                    backend, device_id, digest, passphrase, memory_kb, max_file_size
+                ),
+            )
+        except Exception:
+            pass
     if captured is not None and captured.appended is not None:
         try:
             if show and not retro_catchup_pending:

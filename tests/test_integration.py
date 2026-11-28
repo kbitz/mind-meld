@@ -4363,7 +4363,7 @@ class TestGCSafety:
         assert healed.exit_code == 0, healed.output
         assert "Push: no content changes" not in healed.output
         healed_flat = " ".join(healed.output.split())
-        assert "Push: manifest repaired; usage published." in healed_flat
+        assert "Push: manifest repaired." in healed_flat
         fetched = core._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
         assert fetched.status == "ok" and not fetched.conflict_copies_only
         assert not conflict.exists()
@@ -6219,7 +6219,7 @@ def test_no_content_push_capture_usage_refreshes_once(capture61, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Usage capture:" not in result.stdout
     assert "Host usage published" not in result.stdout
-    assert result.stdout == "Push: no content changes; usage published.\n"
+    assert result.stdout == "Push: no content changes; no new usage.\n"
     added = [json.loads(line) for line in env["dayfile"].read_text().splitlines()[len(before) :]]
     rows = [r for r in added if r["type"] == "host-usage-snapshot"]
     assert len(rows) == len(calls) == 1
@@ -6271,7 +6271,7 @@ def test_usage_only_refresh_twice_preserves_retro_and_skips_all_activity(capture
         result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
         assert result.exit_code == 0, result.output
         flat = " ".join(result.stdout.split())  # the mode line wraps at 80 columns
-        assert flat.endswith("Push: no content changes; usage published.")
+        assert flat.endswith("Push: no content changes; no new usage.")
         # The usage-only mode explanation moved to --verbose; it is not removed.
         assert ("Git cursor unchanged" in flat) is verbose
         assert ("mm recapture 30d" in flat) is verbose
@@ -6336,7 +6336,7 @@ def test_content_refresh_counts_once_and_preserves_next_bare_push(
     assert counted.zero_repo_captures == {"dev-a": (1, 1)}
     committed = path.read_bytes()
     bare = runner.invoke(app, ["push"])
-    assert bare.exit_code == 0 and bare.stdout == "Push: no content changes; usage published.\n", (
+    assert bare.exit_code == 0 and bare.stdout == "Push: no content changes; no new usage.\n", (
         bare.output
     )
     more = [json.loads(line) for line in path.read_bytes()[len(committed) :].splitlines()]
@@ -6963,6 +6963,15 @@ def test_conflict_only_repair_does_not_count_restored_usage_167a(
     backend = capture61["backend"]
     key = storage_keys.manifest_key("dev-a")
     stale_copy = backend.get(key)
+    day = datetime.now(timezone.utc).date().isoformat()
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "read_codex_usage",
+        lambda **_kw: _mm_host_usage.HostUsageResult(
+            {"codex": {day: {"input": 10, "cache_create": 0, "cache_read": 0, "output": 5}}},
+            complete=True,
+        ),
+    )
     pushed = runner.invoke(app, ["push"])
     assert pushed.exit_code == 0 and "usage published" in pushed.stdout, pushed.output
     prior = cli_module._mm_events_files(_accepted(capture61))
@@ -7359,12 +7368,7 @@ class TestTrack7BEventsTail:
         # Nothing changed since the first push → no-op.
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0
-        expected_push = (
-            "Push: no content changes; usage published.\n"
-            if consented
-            else "Push: no content changes; no new usage.\n"
-        )
-        assert result.stdout == expected_push
+        assert result.stdout == "Push: no content changes; no new usage.\n"
         assert "Host usage published" not in result.output
         assert calls == (["codex"] if consented else [])
 
@@ -15478,24 +15482,24 @@ def test_sync78_real_push_accepted_grammar(status77, monkeypatch, verbose, chang
     if change == "files":
         file.write_text("changed")
         (memory / "new78.md").write_text("new")
-        expected = "Push: 2 content changes published; usage published."
+        expected = "Push: 2 content changes published."
     elif change == "metadata":
         stamp = file.stat().st_mtime + 2
         os.utime(file, (stamp, stamp))
-        expected = "Push: metadata updated; usage published."
+        expected = "Push: metadata updated."
     elif change == "selection":
         cfg = env["cfg"]
         extra = env["path"].parent / "empty78"
         extra.mkdir()
         cfg["sync"]["sources"].append({"name": "empty78", "type": "generic", "path": str(extra)})
         save_config(cfg, env["path"])
-        expected = "Push: source selection updated; usage published."
+        expected = "Push: source selection updated."
     else:
         backend = env["backend"]
         key = storage_keys.manifest_key("dev-a")
         (backend.root / Path(key).with_name("manifest.json 2.enc")).write_bytes(backend.get(key))
         backend.delete(key)
-        expected = "Push: manifest repaired; usage published."
+        expected = "Push: manifest repaired."
     result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
     assert result.exit_code == 0, result.output
     assert result.output.splitlines()[-1] == expected
@@ -15712,11 +15716,7 @@ cli.app(args=["push", *(["--verbose"] if sys.argv[2] == "yes" else [])])
         assert "MINDMELD_PASSPHRASE" in lines[-2] and "no content published" in lines[-2]
         assert last == "Run: mm diag"
     else:
-        expected_last = (
-            "Push: 1 content change published; usage published."
-            if mode == "degraded"
-            else "Push: 1 content change published."
-        )
+        expected_last = "Push: 1 content change published."
         assert last == expected_last
         if mode == "success" and not verbose:
             assert child.stdout == last + "\n"
@@ -16365,7 +16365,7 @@ def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capt
         )
         result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Push: 2 content changes published; usage published.\n"
+    assert result.stdout == "Push: 2 content changes published.\n"
     assert "Host usage published" not in result.output
     assert result.stderr == f"mm: notice: {events_tail._CURSOR_HOLD_DEGRADATION}\n"
     output = terminal.getvalue()
@@ -16393,7 +16393,7 @@ def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capt
     verbose = runner.invoke(app, ["push", "-v"])
     assert verbose.exit_code == 0, verbose.output
     assert "Host usage published (manifest accepted)." in verbose.stdout
-    assert verbose.stdout.splitlines()[-1] == "Push: 2 content changes published; usage published."
+    assert verbose.stdout.splitlines()[-1] == "Push: 2 content changes published."
     assert "Push complete" not in verbose.output
 
 
@@ -17262,7 +17262,7 @@ def test_sync_progress_push_renders_scan_note_and_gates_callback(capture61, monk
             )
         result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Push: 1 content change published; usage published.\n"
+    assert result.stdout == "Push: 1 content change published.\n"
     assert result.stderr == f"mm: notice: {events_tail._CURSOR_HOLD_DEGRADATION}\n"
     assert len(seen_callbacks) == 1 and callable(seen_callbacks[0])
     output = terminal.getvalue()
@@ -18272,7 +18272,16 @@ def test_push_outcome_line_usage_grammar_167a(result, expected):
     assert cli_module._sync_success("push", result) == expected
 
 
-def test_attended_push_reports_ten_content_changes_and_usage_published_167a(capture61):
+def test_attended_push_reports_ten_content_changes_and_usage_published_167a(capture61, monkeypatch):
+    day = datetime.now(timezone.utc).date().isoformat()
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "read_codex_usage",
+        lambda **_kw: _mm_host_usage.HostUsageResult(
+            {"codex": {day: {"input": 100, "cache_create": 0, "cache_read": 0, "output": 20}}},
+            complete=True,
+        ),
+    )
     memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
     for i in range(10):
         (memory / f"note_{i}.md").write_text(f"note {i}\n")
@@ -18332,8 +18341,25 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
         lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
     )
 
+    day = datetime.now(timezone.utc).date().isoformat()
+    usage_counter = [0]
+
     def reader_ok(**_kw):
-        return _mm_host_usage.HostUsageResult({}, complete=True)
+        return _mm_host_usage.HostUsageResult(
+            {
+                "codex": {
+                    day: {
+                        "input": usage_counter[0],
+                        "cache_create": 0,
+                        "cache_read": 0,
+                        "output": 0,
+                    }
+                }
+            }
+            if usage_counter[0]
+            else {},
+            complete=True,
+        )
 
     def grok_deadline(**_kw):
         return _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
@@ -18344,17 +18370,24 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
     def grok_unsupported(**_kw):
         return _mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported")
 
-    # 1. Partial capture: Codex succeeds, Grok hits deadline -> usage published (Grok catching up).
+    # 0. Partial capture with unchanged usage -> no new usage (Grok catching up).
     monkeypatch.setattr(
         events_tail,
         "_default_host_readers",
         lambda *a, **k: (("codex", reader_ok), ("grok", grok_deadline)),
     )
+    r0 = runner.invoke(app, ["push"])
+    assert r0.exit_code == 0, r0.output
+    assert r0.stdout == "Push: no content changes; no new usage (Grok catching up).\n"
+
+    # 1. Partial capture with growth: Codex grows, Grok hits deadline -> usage published.
+    usage_counter[0] = 100
     r1 = runner.invoke(app, ["push"])
     assert r1.exit_code == 0, r1.output
     assert r1.stdout == "Push: no content changes; usage published (Grok catching up).\n"
 
-    # 2. Content changes + partial capture -> content + usage + Grok catching up.
+    # 2. Content changes + partial capture with growth -> content + usage + Grok catching up.
+    usage_counter[0] = 200
     memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
     (memory / "c1.md").write_text("one\n")
     (memory / "c2.md").write_text("two\n")
@@ -18362,6 +18395,7 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
     assert r2.exit_code == 0, r2.output
     assert r2.stdout == "Push: 2 content changes published; usage published (Grok catching up).\n"
 
+    usage_counter[0] = 300
     monkeypatch.setattr(
         events_tail,
         "_default_host_readers",
@@ -18394,6 +18428,7 @@ def test_attended_push_partial_capture_catching_up_readers_167a(capture61, monke
     )
 
     # 4. Non-deadline reader failure does not emit catching up.
+    usage_counter[0] = 400
     monkeypatch.setattr(
         events_tail,
         "_default_host_readers",
@@ -18433,3 +18468,261 @@ def test_autopush_stays_quiet_with_and_without_usage_167a(capture61):
     new_rows = [json.loads(line)["type"] for line in after[len(previous_bytes) :].splitlines()]
     assert "host-usage-snapshot" in new_rows
     assert accepted[rel]["sha256"] == hashlib.sha256(after).hexdigest()
+
+
+def test_attended_push_idle_and_growth_and_midnight_rollover_171a(capture61, monkeypatch):
+    day = datetime.now(timezone.utc).date().isoformat()
+    usage_val = [100]
+
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "read_codex_usage",
+        lambda **_kw: _mm_host_usage.HostUsageResult(
+            {
+                "codex": {
+                    day: {"input": usage_val[0], "cache_create": 0, "cache_read": 0, "output": 20}
+                }
+            },
+            complete=True,
+        ),
+    )
+    # 1. Real usage growth -> usage published.
+    r_grow = runner.invoke(app, ["push"])
+    assert r_grow.exit_code == 0, r_grow.output
+    assert r_grow.stdout == "Push: no content changes; usage published.\n"
+
+    # 2. Immediate idle push on same UTC day -> no new usage; verbose & status stay published.
+    r_idle = runner.invoke(app, ["push", "--verbose"])
+    assert r_idle.exit_code == 0, r_idle.output
+    assert "Host usage published (manifest accepted)." in r_idle.stdout
+    assert r_idle.stdout.splitlines()[-1] == "Push: no content changes; no new usage."
+    diag = runner.invoke(app, ["diag", "--json"])
+    pub = json.loads(diag.stdout)["host_publication"]
+    assert pub["publication"] == "published"
+    assert pub["latest_attempt"] == "published"
+    status = runner.invoke(app, ["status"])
+    assert "Publication: published" in status.output
+
+    # 3. Across UTC midnight rollover with unchanged usage -> still no new usage.
+    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+
+    class NextDay(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return tomorrow
+
+    monkeypatch.setattr(_mm_events, "datetime", NextDay)
+    monkeypatch.setattr(cli_module, "datetime", NextDay)
+    r_midnight = runner.invoke(app, ["push"])
+    assert r_midnight.exit_code == 0, r_midnight.output
+    assert r_midnight.stdout == "Push: no content changes; no new usage.\n"
+
+
+def test_attended_push_content_only_vs_claude_sessions_and_git_commits_171a(capture61, monkeypatch):
+    # 1. Ten content changes with unchanged usage -> omits usage clause.
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    for i in range(10):
+        (memory / f"quiet_note_{i}.md").write_text(f"quiet {i}\n")
+    r_content = runner.invoke(app, ["push"])
+    assert r_content.exit_code == 0, r_content.output
+    assert r_content.stdout == "Push: 10 content changes published.\n"
+
+    # 2. Content change + new Claude session usage -> includes ; usage published.
+    monkeypatch.setattr(
+        _mm_events,
+        "walk_session_metadata",
+        lambda *a, **kw: [
+            {
+                "projects": [
+                    {
+                        "source_root": "/Users/user/myapp",
+                        "claude_dir": "-Users-user-myapp",
+                        "sessions": 1,
+                        "tokens_by_day": {"2026-11-27": {"input": 50, "output": 25}},
+                    }
+                ]
+            }
+        ],
+    )
+    (memory / "with_session.md").write_text("session change\n")
+    r_sess = runner.invoke(app, ["push"])
+    assert r_sess.exit_code == 0, r_sess.output
+    assert r_sess.stdout == "Push: 1 content change published; usage published.\n"
+
+    # 3. Content change + new Git commit -> includes ; usage published.
+    monkeypatch.setattr(_mm_events, "walk_session_metadata", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **kw: _mm_events.GitRootDiscovery((capture61["claude"],), (), False),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "walk_git_projects",
+        lambda *a, **kw: [
+            {
+                "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                "type": "git-snapshot",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "device": "dev-a",
+                "projects": [
+                    {"remote": "github.com/user/myapp", "commits": [{"sha": "deadbeef01"}]}
+                ],
+            }
+        ],
+    )
+    (memory / "with_git.md").write_text("git change\n")
+    r_git = runner.invoke(app, ["push"])
+    assert r_git.exit_code == 0, r_git.output
+    assert r_git.stdout == "Push: 1 content change published; usage published.\n"
+
+
+def test_attended_push_same_day_queued_catchup_uses_prior_blob_baseline_171a(
+    capture61, monkeypatch
+):
+    day = datetime.now(timezone.utc).date().isoformat()
+    dayfile = capture61["dayfile"]
+
+    # An append preserves the published prefix and adds a same-day catch-up row.
+    catchup_git = {
+        "v": _mm_events.EVENTS_SCHEMA_VERSION,
+        "type": "git-snapshot",
+        "device": "dev-a",
+        "origin": _mm_events.GIT_SNAPSHOT_ORIGIN_CATCHUP,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "projects": [],
+    }
+    with open(dayfile, "ab") as f:
+        f.write((json.dumps(catchup_git, sort_keys=True) + "\n").encode("utf-8"))
+    r_git_cu = runner.invoke(app, ["push"])
+    assert r_git_cu.exit_code == 0, r_git_cu.output
+    assert r_git_cu.stdout == "Push: no content changes; usage published.\n"
+
+    # A rewrite removes the prefix proof, so compare the queued host totals with
+    # the stored blob. The live reader already sees the same growth as the queue.
+    dayfile.write_bytes(b"\n" + dayfile.read_bytes())
+    grown_usage = {
+        "codex": {day: {"input": 500, "cache_create": 0, "cache_read": 0, "output": 100}}
+    }
+    queued_host = _mm_events.make_host_usage_snapshot(
+        device="dev-a",
+        hosts=grown_usage,
+        token_sources=["codex"],
+        usage_days={"codex": [day]},
+    )
+    with open(dayfile, "ab") as f:
+        f.write((json.dumps(queued_host, sort_keys=True) + "\n").encode("utf-8"))
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "read_codex_usage",
+        lambda **_kw: _mm_host_usage.HostUsageResult(grown_usage, complete=True),
+    )
+    r_host_cu = runner.invoke(app, ["push"])
+    assert r_host_cu.exit_code == 0, r_host_cu.output
+    assert r_host_cu.stdout == "Push: no content changes; usage published.\n"
+
+    # Follow-up idle push with the same totals -> no new usage.
+    r_after = runner.invoke(app, ["push"])
+    assert r_after.exit_code == 0, r_after.output
+    assert r_after.stdout == "Push: no content changes; no new usage.\n"
+
+
+def test_attended_push_reader_dropout_on_deadline_does_not_claim_usage_published_171a(
+    capture61, monkeypatch
+):
+    from mind_meld import host_registry
+
+    day = datetime.now(timezone.utc).date().isoformat()
+    monkeypatch.setattr(events_tail, "_warm_host_cache_with_notice", lambda *a, **k: None)
+    monkeypatch.setattr(
+        host_registry,
+        "warm_host_cache_inline",
+        lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
+    )
+
+    codex_usage = {"codex": {day: {"input": 100, "cache_create": 0, "cache_read": 0, "output": 50}}}
+    grok_usage = {"grok": {day: {"input": 80, "cache_create": 0, "cache_read": 0, "output": 20}}}
+
+    monkeypatch.setattr(
+        events_tail,
+        "_default_host_readers",
+        lambda *a, **k: (
+            ("codex", lambda **_kw: _mm_host_usage.HostUsageResult(codex_usage, complete=True)),
+            ("grok", lambda **_kw: _mm_host_usage.HostUsageResult(grok_usage, complete=True)),
+        ),
+    )
+    r_both = runner.invoke(app, ["push"])
+    assert r_both.exit_code == 0, r_both.output
+    assert r_both.stdout == "Push: no content changes; usage published.\n"
+
+    # Grok drops out on deadline while Codex is unchanged -> no new usage (Grok catching up).
+    monkeypatch.setattr(
+        events_tail,
+        "_default_host_readers",
+        lambda *a, **k: (
+            ("codex", lambda **_kw: _mm_host_usage.HostUsageResult(codex_usage, complete=True)),
+            (
+                "grok",
+                lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
+            ),
+        ),
+    )
+    r_drop = runner.invoke(app, ["push"])
+    assert r_drop.exit_code == 0, r_drop.output
+    assert r_drop.stdout == "Push: no content changes; no new usage (Grok catching up).\n"
+
+    # Codex grows while Grok still hits deadline -> usage published (Grok catching up).
+    codex_grown = {"codex": {day: {"input": 150, "cache_create": 0, "cache_read": 0, "output": 60}}}
+    monkeypatch.setattr(
+        events_tail,
+        "_default_host_readers",
+        lambda *a, **k: (
+            ("codex", lambda **_kw: _mm_host_usage.HostUsageResult(codex_grown, complete=True)),
+            (
+                "grok",
+                lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
+            ),
+        ),
+    )
+    r_grow = runner.invoke(app, ["push"])
+    assert r_grow.exit_code == 0, r_grow.output
+    assert r_grow.stdout == "Push: no content changes; usage published (Grok catching up).\n"
+
+
+def test_attended_push_ignores_peer_event_files_171a(capture61):
+    day = datetime.now(timezone.utc).date().isoformat()
+    # The peer shares our ID prefix, but its event day is still its own.
+    peer = "dev-a-2"
+    peer_file = capture61["dayfile"].with_name(f"{peer}-{day}.jsonl")
+    row = _mm_events.make_host_usage_snapshot(
+        device=peer,
+        ts=datetime.now(timezone.utc),
+        hosts={"codex": {day: {"input": 999, "cache_create": 0, "cache_read": 0, "output": 99}}},
+        token_sources=["codex"],
+    )
+    data = (json.dumps(row) + "\n").encode()
+    _publish_peer62(capture61, peer, {("mm-events", f"events/{peer_file.name}"): (data, None)})
+    pulled = runner.invoke(app, ["pull"])
+    assert pulled.exit_code == 0, pulled.output
+    assert peer_file.read_bytes() == data
+    res = runner.invoke(app, ["push"])
+    assert res.exit_code == 0, res.output
+    assert res.stdout == "Push: no content changes; no new usage.\n"
+
+
+def test_autopush_stays_quiet_with_grown_usage_171a(capture61, monkeypatch):
+    day = datetime.now(timezone.utc).date().isoformat()
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "read_codex_usage",
+        lambda **_kw: _mm_host_usage.HostUsageResult(
+            {"codex": {day: {"input": 250, "cache_create": 0, "cache_read": 0, "output": 50}}},
+            complete=True,
+        ),
+    )
+    memory = capture61["claude"] / "projects/-Users-user-myapp/memory"
+    (memory / "auto_growth.md").write_text("growth\n")
+    res = runner.invoke(app, ["autopush"])
+    assert res.exit_code == 0
+    assert res.stdout == ""
+    assert res.stderr == ""

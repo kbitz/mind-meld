@@ -5021,3 +5021,315 @@ def test_discover_git_roots_and_walk_session_metadata_emit_monotonic_progress_16
     assert all(
         disc_progress[i][0] <= disc_progress[i + 1][0] for i in range(len(disc_progress) - 1)
     )
+
+
+def test_is_device_event_file_171a() -> None:
+    assert events.is_device_event_file("events/dev-a-2026-11-27.jsonl", "dev-a") is True
+    assert events.is_device_event_file("Events/dev-a-2026-11-27.jsonl", "dev-a") is True
+    assert events.is_device_event_file("Events/dev-a-2026-11-27.JSONL", "dev-a") is True
+    assert events.is_device_event_file("events/dev-b-2026-11-27.jsonl", "dev-a") is False
+    assert events.is_device_event_file("events/dev-a-2-2026-11-27.jsonl", "dev-a") is False
+    assert events.is_device_event_file("other/dev-a-2026-11-27.jsonl", "dev-a") is False
+    assert events.is_device_event_file("events/dev-a-2026-11-27.txt", "dev-a") is False
+    assert events.is_device_event_file("", "dev-a") is False
+    assert events.is_device_event_file("events/dev_a_1-2026-11-27.jsonl", "dev/a:1") is True
+
+
+def test_host_usage_changed_171a() -> None:
+    day = "2026-11-27"
+    empty_row = {
+        "type": "host-usage-snapshot",
+        "ts": "2026-11-27T10:00:00+00:00",
+        "token_sources": ["codex"],
+        "hosts": {},
+        "counter_semantics": events.COUNTER_SEMANTICS_DISJOINT_V1,
+    }
+    base_row = {
+        "type": "host-usage-snapshot",
+        "ts": "2026-11-27T10:00:00+00:00",
+        "device_name": "mac-a",
+        "token_sources": ["codex"],
+        "hosts": {
+            "codex": {day: {"input": 100, "cache_create": 0, "cache_read": 10, "output": 50}}
+        },
+        "tokens_by_day": {
+            day: {
+                "input": 100,
+                "cache_create": 0,
+                "cache_read": 10,
+                "output": 50,
+                "by_model": {
+                    "gpt-5.4": {"input": 100, "cache_create": 0, "cache_read": 10, "output": 50}
+                },
+            }
+        },
+        "counter_semantics": events.COUNTER_SEMANTICS_DISJOINT_V1,
+    }
+
+    # First-ever snapshot: empty -> False, non-empty -> True.
+    assert events.host_usage_changed(empty_row, None) is False
+    assert events.host_usage_changed(base_row, None) is True
+
+    # Metadata/coverage/timestamp-only changes do not count.
+    refreshed = {
+        **base_row,
+        "ts": "2026-11-27T11:00:00+00:00",
+        "device_name": "mac-a-renamed",
+        "token_sources": ["codex", "grok"],
+        "empty_sources": ["grok"],
+        "degraded_sources": ["muse"],
+        "pending_left": {"muse": 2},
+        "partial_sources": ["codex"],
+    }
+    assert events.host_usage_changed(refreshed, base_row) is False
+    assert not events.host_usage_changed(
+        {**base_row, "hosts": {**base_row["hosts"], "grok": {}}}, base_row
+    )
+
+    # Real growth, new day, new by_model entry, and counter_semantics upgrade on non-empty hosts.
+    grown = {
+        **base_row,
+        "hosts": {
+            "codex": {day: {"input": 120, "cache_create": 0, "cache_read": 10, "output": 50}}
+        },
+    }
+    assert events.host_usage_changed(grown, base_row) is True
+
+    new_day = {
+        **base_row,
+        "hosts": {
+            "codex": {
+                day: {"input": 100, "cache_create": 0, "cache_read": 10, "output": 50},
+                "2026-11-28": {"input": 1, "cache_create": 0, "cache_read": 0, "output": 1},
+            }
+        },
+    }
+    assert events.host_usage_changed(new_day, base_row) is True
+
+    new_model = {
+        **base_row,
+        "tokens_by_day": {
+            day: {
+                "input": 100,
+                "cache_create": 0,
+                "cache_read": 10,
+                "output": 50,
+                "by_model": {
+                    "gpt-5.4": {"input": 80, "cache_create": 0, "cache_read": 10, "output": 40},
+                    "gpt-5.4-mini": {"input": 20, "cache_create": 0, "cache_read": 0, "output": 10},
+                },
+            }
+        },
+    }
+    assert events.host_usage_changed(new_model, base_row) is True
+
+    legacy_prior = {k: v for k, v in base_row.items() if k != "counter_semantics"}
+    assert events.host_usage_changed(base_row, legacy_prior) is True
+    legacy_empty = {k: v for k, v in empty_row.items() if k != "counter_semantics"}
+    assert events.host_usage_changed(empty_row, legacy_empty) is False
+
+    # Previously contributing reader drops out on deadline:
+    two_readers = {
+        **base_row,
+        "token_sources": ["codex", "grok"],
+        "hosts": {
+            "codex": {day: {"input": 100, "cache_create": 0, "cache_read": 10, "output": 50}},
+            "grok": {day: {"input": 40, "cache_create": 0, "cache_read": 0, "output": 20}},
+        },
+        "tokens_by_day": {
+            day: {
+                "input": 140,
+                "cache_create": 0,
+                "cache_read": 10,
+                "output": 70,
+                "by_model": {
+                    "gpt-5.4": {"input": 100, "cache_create": 0, "cache_read": 10, "output": 50},
+                    "grok-3": {"input": 40, "cache_create": 0, "cache_read": 0, "output": 20},
+                },
+            }
+        },
+    }
+    # Grok drops out, Codex unchanged -> False.
+    assert events.host_usage_changed(base_row, two_readers) is False
+    # A deadline can leave a reader contributing a smaller, partial total.
+    partial = {
+        **two_readers,
+        "partial_sources": ["grok"],
+        "hosts": {
+            **two_readers["hosts"],
+            "grok": {day: {"input": 20, "cache_create": 0, "cache_read": 0, "output": 10}},
+        },
+    }
+    assert not events.host_usage_changed(partial, two_readers)
+    # Grok drops out, Codex grew -> True.
+    assert events.host_usage_changed(grown, two_readers) is True
+    # Later Grok recovers its totals -> True.
+    assert events.host_usage_changed(two_readers, base_row) is True
+
+
+def test_sessions_usage_changed_171a() -> None:
+    proj_a = {
+        "source_root": "/Users/user/a",
+        "claude_dir": "-Users-user-a",
+        "sessions": 2,
+        "tokens_by_day": {"2026-11-27": {"input": 10, "output": 5}},
+        "skills_by_day": {"2026-11-27": {"ship": 1}},
+    }
+    proj_b = {
+        "source_root": "/Users/user/b",
+        "claude_dir": "-Users-user-b",
+        "sessions": 1,
+        "tokens_by_day": {"2026-11-27": {"input": 20, "output": 10}},
+    }
+    prior = {"type": "sessions-snapshot", "projects": [proj_a, proj_b]}
+
+    # prior=None: empty -> False, non-empty -> True.
+    assert (
+        events.sessions_usage_changed({"type": "sessions-snapshot", "projects": []}, None) is False
+    )
+    assert events.sessions_usage_changed(prior, None) is True
+
+    # Rotated order with identical totals -> False.
+    rotated = {"type": "sessions-snapshot", "projects": [proj_b, proj_a]}
+    assert events.sessions_usage_changed(rotated, prior) is False
+
+    # Skipped token/skill walk -> False.
+    no_usage = {
+        "type": "sessions-snapshot",
+        "projects": [
+            {"source_root": "/Users/user/a", "claude_dir": "-Users-user-a", "sessions": 2},
+            {"source_root": "/Users/user/b", "claude_dir": "-Users-user-b", "sessions": 1},
+        ],
+    }
+    assert events.sessions_usage_changed(no_usage, prior) is False
+
+    # New project, increased sessions, changed tokens_by_day, changed skills_by_day -> True.
+    proj_c = {"source_root": "/Users/user/c", "claude_dir": "-Users-user-c", "sessions": 1}
+    assert (
+        events.sessions_usage_changed(
+            {"type": "sessions-snapshot", "projects": [proj_a, proj_b, proj_c]}, prior
+        )
+        is True
+    )
+    assert (
+        events.sessions_usage_changed(
+            {"type": "sessions-snapshot", "projects": [{**proj_a, "sessions": 3}, proj_b]}, prior
+        )
+        is True
+    )
+    assert (
+        events.sessions_usage_changed(
+            {
+                "type": "sessions-snapshot",
+                "projects": [
+                    {**proj_a, "tokens_by_day": {"2026-11-27": {"input": 15, "output": 5}}},
+                    proj_b,
+                ],
+            },
+            prior,
+        )
+        is True
+    )
+    assert (
+        events.sessions_usage_changed(
+            {
+                "type": "sessions-snapshot",
+                "projects": [
+                    {**proj_a, "skills_by_day": {"2026-11-27": {"ship": 2}}},
+                    proj_b,
+                ],
+            },
+            prior,
+        )
+        is True
+    )
+
+
+def test_git_snapshot_counts_as_usage_171a() -> None:
+    assert events.git_snapshot_counts_as_usage({"type": "mm-push"}) is False
+    assert events.git_snapshot_counts_as_usage({"type": "git-snapshot", "projects": []}) is False
+    for origin in (events.GIT_SNAPSHOT_ORIGIN_INIT, events.GIT_SNAPSHOT_ORIGIN_RECAPTURE):
+        assert (
+            events.git_snapshot_counts_as_usage(
+                {"type": "git-snapshot", "origin": origin, "projects": []}
+            )
+            is False
+        )
+    assert (
+        events.git_snapshot_counts_as_usage(
+            {
+                "type": "git-snapshot",
+                "origin": events.GIT_SNAPSHOT_ORIGIN_CATCHUP,
+                "projects": [],
+            }
+        )
+        is True
+    )
+    assert (
+        events.git_snapshot_counts_as_usage(
+            {
+                "type": "git-snapshot",
+                "projects": [{"remote": "github.com/user/repo", "commits": [{"sha": "abc123"}]}],
+            }
+        )
+        is True
+    )
+
+
+def test_read_verified_event_bytes_and_iter_jsonl_bytes_171a(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+
+    from mind_meld import token_usage
+
+    path = tmp_path / "dev-a-2026-11-27.jsonl"
+    row1 = {"type": "mm-push", "ts": "2026-11-27T00:00:00+00:00"}
+    row2 = {"type": "git-snapshot", "projects": []}
+    payload = (json.dumps(row1) + "\nnot-json\n" + json.dumps(row2) + "\n").encode("utf-8")
+    path.write_bytes(payload)
+    good_sha = hashlib.sha256(payload).hexdigest()
+
+    verified = events.read_verified_event_bytes(path, good_sha, max_bytes=len(payload) + 10)
+    assert verified == payload
+    assert list(events.iter_jsonl_bytes(verified, {"git-snapshot"})) == [row2]
+
+    # Digest mismatch, oversized max_bytes, missing file -> None.
+    assert events.read_verified_event_bytes(path, "0" * 64, max_bytes=len(payload) + 10) is None
+    assert events.read_verified_event_bytes(path, good_sha, max_bytes=len(payload) - 1) is None
+    assert (
+        events.read_verified_event_bytes(tmp_path / "missing.jsonl", good_sha, max_bytes=1024)
+        is None
+    )
+
+    # Oversized line skipped by iter_bounded_lines -> None.
+    monkeypatch.setattr(token_usage, "MAX_JSONL_LINE_BYTES", 8)
+    assert events.read_verified_event_bytes(path, good_sha, max_bytes=len(payload) + 10) is None
+    monkeypatch.undo()
+
+    # Concurrent file change between open and closing stat -> None.
+    real_iter = token_usage.iter_bounded_lines
+
+    def mutating_iter(*args, **kwargs):
+        yield from real_iter(*args, **kwargs)
+        path.write_bytes(payload + b"\n")
+
+    monkeypatch.setattr(token_usage, "iter_bounded_lines", mutating_iter)
+    assert events.read_verified_event_bytes(path, good_sha, max_bytes=len(payload) + 100) is None
+
+
+def test_verified_event_bytes_refuses_oversized_final_partial_line(tmp_path, monkeypatch):
+    import hashlib
+
+    from mind_meld import token_usage
+
+    path = tmp_path / "dev-a-2026-11-27.jsonl"
+    payload = b"{}\n" + b" " * 16
+    path.write_bytes(payload)
+    monkeypatch.setattr(token_usage, "MAX_JSONL_LINE_BYTES", 8)
+    assert (
+        events.read_verified_event_bytes(
+            path, hashlib.sha256(payload).hexdigest(), max_bytes=len(payload)
+        )
+        is None
+    )

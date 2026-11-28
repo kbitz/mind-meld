@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import os
 import stat
 from contextlib import closing
@@ -259,12 +260,21 @@ def _encrypt_with_master_key(plaintext: bytes, master_key: bytes) -> bytes:
     return bytes([FORMAT_VERSION]) + salt + nonce + ciphertext
 
 
-def decrypt(blob: bytes, passphrase: str, memory_kb: int = 65_536) -> bytes:
+def decrypt(
+    blob: bytes,
+    passphrase: str,
+    memory_kb: int = 65_536,
+    *,
+    max_plaintext_bytes: int | None = None,
+) -> bytes:
     """Decrypt a v2-format blob. Requires an active session.
 
     v1 blobs (format byte 0x01) predated v0.6 and never reached user storage.
     They remain recognized and refused; 1.0 retains the v2 format.
+    Callers inspecting a size-bounded object can also bound decompression.
     """
+    if max_plaintext_bytes is not None and max_plaintext_bytes < 0:
+        raise ValueError("decrypt: plaintext size limit must be non-negative.")
     session_root_salt, session_memory_kb = _current_session_or_raise()
     if memory_kb != session_memory_kb:
         raise CryptoError(
@@ -272,7 +282,7 @@ def decrypt(blob: bytes, passphrase: str, memory_kb: int = 65_536) -> bytes:
             f"{session_memory_kb}. Config drifted from mm-crypto-init."
         )
     master_key = load_master_key(passphrase, session_root_salt, session_memory_kb)
-    return _decrypt_with_master_key(blob, master_key)
+    return _decrypt_with_master_key(blob, master_key, max_plaintext_bytes=max_plaintext_bytes)
 
 
 def _newer_version(data: bytes) -> int | None:
@@ -308,7 +318,9 @@ def decrypt_manifest(blob: bytes, passphrase: str, memory_kb: int = 65_536) -> b
     return decrypt(blob, passphrase, memory_kb)
 
 
-def _decrypt_with_master_key(blob: bytes, master_key: bytes) -> bytes:
+def _decrypt_with_master_key(
+    blob: bytes, master_key: bytes, *, max_plaintext_bytes: int | None = None
+) -> bytes:
     """Decrypt with an already-derived master_key. Used by decrypt() and verify."""
     if (newer := _newer_version(blob)) is not None:
         raise NewerFormatError(newer)
@@ -345,9 +357,15 @@ def _decrypt_with_master_key(blob: bytes, master_key: bytes) -> bytes:
         )
 
     try:
-        return gzip.decompress(compressed)
+        if max_plaintext_bytes is None:
+            return gzip.decompress(compressed)
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+            plaintext = stream.read(max_plaintext_bytes + 1)
     except Exception:
         raise CryptoError("decrypt: decompression failed — data may be corrupt.")
+    if len(plaintext) > max_plaintext_bytes:
+        raise CryptoError("decrypt: plaintext exceeds the size limit.")
+    return plaintext
 
 
 # ── mm-crypto-init: bootstrap + fetch + verify ───────────────────────
