@@ -80,7 +80,7 @@ To approve a join from a fleet machine where you manage Syncthing, accept the ne
 
 <a id="retiring-a-dead-machine"></a>
 
-1. Run `mm pull` on a machine with the same home folder path. Check that the retiring machine's last project memory and any other files you still need have arrived before retiring it. Leave its manifests and blobs in the shared folder.
+1. Run `mm pull` on a machine with the same home folder path. Check that the files you still need have arrived. Save any Codex memory copies you want to keep outside Mind Meld's managed copy directory. After retirement, the next pull with Codex sync enabled moves those copies into [30-day recovery](#recovering-a-deleted-file). Leave the retiring machine's manifests and blobs in the shared folder.
 2. Shut the old machine down, or stop its hooks and Syncthing. A later push from it registers it again.
 3. On an active machine, retire it by name, or by the 8-character ID that `mm devices` lists:
 
@@ -238,7 +238,7 @@ cp -n "$copies/$source_name/$copy_path" "$source_dir/$origin_path"
 mm push
 ```
 
-If many files were deleted by mistake, pause pull hooks on unaffected machines. Restore and push on the origin, then wait for Syncthing to deliver the new manifest. Resume pulls and hooks once `mm pull --dry-run --verbose` on each peer shows that it would leave the restored files in place. Save recovery copies you still need before `mm gc` or a later pull clears copies older than 30 days.
+If many files were deleted by mistake, pause pull hooks on unaffected machines. Restore and push on the origin, then wait for the new manifest to reach each peer's shared folder. Resume pulls and hooks once `mm pull --dry-run --verbose` on each peer shows that it would leave the restored files in place. Save recovery copies you still need before `mm gc` or a later pull clears copies older than 30 days.
 
 <a id="history-database"></a>
 ### History database (state.db)
