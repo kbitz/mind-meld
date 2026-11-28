@@ -5247,12 +5247,13 @@ def test_sessions_usage_changed_171a() -> None:
 def test_git_snapshot_counts_as_usage_171a() -> None:
     assert events.git_snapshot_counts_as_usage({"type": "mm-push"}) is False
     assert events.git_snapshot_counts_as_usage({"type": "git-snapshot", "projects": []}) is False
-    assert (
-        events.git_snapshot_counts_as_usage(
-            {"type": "git-snapshot", "origin": events.GIT_SNAPSHOT_ORIGIN_INIT, "projects": []}
+    for origin in (events.GIT_SNAPSHOT_ORIGIN_INIT, events.GIT_SNAPSHOT_ORIGIN_RECAPTURE):
+        assert (
+            events.git_snapshot_counts_as_usage(
+                {"type": "git-snapshot", "origin": origin, "projects": []}
+            )
+            is False
         )
-        is False
-    )
     assert (
         events.git_snapshot_counts_as_usage(
             {
