@@ -2,6 +2,25 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [2.0.0] - 2026-11-28
+
+Version 2.0.0 syncs agent context over a Syncthing folder across macOS and Arch Linux machines, replacing the 1.x iCloud Drive transport.
+
+### Highlights
+
+These shipped across the 1.12.x releases since 1.12.0:
+
+- **Syncthing setup and one-approval join.** `mm init` sets up a default Syncthing, asks whether to start or join a fleet, and waits for one `mm devices approve` on a fleet machine; the new machine then connects to every other fleet machine that is online without another approval.
+- **Retirement.** `mm devices retire` removes a machine from the fleet, and managed peers drop it from Syncthing on their next push or pull.
+- **Fleet usage reports.** `mm retro-fleet` and `/retro-fleet` total commits, tokens and estimated cost for Claude Code, Codex, Grok Build, Muse and Antigravity across every machine.
+- **Cross-model memory index.** An opt-in local `qmd` index lets any agent search the memories every agent on every machine has synced.
+- **Quiet output.** Commands print one line per outcome, end errors with the command that fixes them, and keep routine detail in `mm status` and `mm diag`.
+- **Bootstrap installer.** One command readies macOS or Arch Linux, installing Python, `pipx`, Syncthing and `mm`, plus the keyring packages on Arch and `qmd` where it can.
+
+### Upgrading
+
+- To move a Mac still on iCloud Drive, uninstall `mm`, reinstall it with the bootstrap command and join the Syncthing fleet with `mm init` (or start one with `mm init --new-fleet`). See [Quick start](README.md#quick-start) and [Add a machine](README.md#add-a-machine). Until it moves, that Mac keeps syncing over iCloud Drive with the machines still there; the two stores exchange nothing. Notes for older releases are in [docs/archive/upgrading-1x.md](docs/archive/upgrading-1x.md).
+
 ## [1.12.95] - 2026-11-28
 
 Version 1.12.95 rewrites the Mind Meld guide as a walkthrough of setup, daily sync, and recovery, archives historical upgrades, and installs missing keyring packages when bootstrap runs on Arch.
