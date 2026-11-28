@@ -3885,7 +3885,9 @@ in **USD per million tokens**: `gpt-6.2-astra` `(8.00, 0.40, 10.00, 40.00)`,
 Muse Wonder/Wonder Full `(4.00, 0.20, 0.00, 20.00)`, and Muse Spark 1.3
 `(1.25, 0.15, 0.00, 4.25)`. For models with a scheduled vendor price change,
 the shipped table carries the rate in effect on the date checked. At the check
-above, `gemini-4-carbon` and `gemini-4-argon` had increases scheduled for 2026-12-01.
+above, `gpt-5.6-sol` had promotional pricing through 2026-11-30,
+`gemini-4-carbon` and `gemini-4-argon` had increases scheduled for 2026-12-01,
+and `gemini-3.8-flash` had an increase scheduled for 2027-01-01.
 When `/retro-fleet` checks official vendor docs before Pass 2, it uses the run's
 UTC date to select the active rate and passes it via `--set-model-price`.
 The CLI fetches no rates.

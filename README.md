@@ -4,7 +4,7 @@ Mind Meld (`mm`) keeps your AI coding agents' memory, skills and instructions th
 
 ## Is it safe for my setup?
 
-`mm` encrypts your synced files and file lists with AES-256-GCM before they reach the shared folder. The key header and device registry are readable, including machine names, `mm` versions and last-seen times. `mm` syncs an allowlist: agent memory, skills, rules, instruction files and gstack project state. Session transcripts, session databases, credentials and whole-file settings stay on the machine, and <a id="nested-git-repositories"></a>git checkouts nested inside a synced folder are skipped. It runs on macOS and Arch-based Linux, moves files through one [Syncthing](https://syncthing.net/) folder and has no server. It is built for one person's machines.
+`mm` encrypts your synced files and file lists with AES-256-GCM before they reach the shared folder. The key header and device registry are readable, including machine names, `mm` versions and last-seen times. `mm` syncs an allowlist: agent memory, skills, rules, instruction files and gstack project state. Synced memory can include facts learned in conversations. Session transcripts, session databases, credentials and whole-file settings stay on the machine, and <a id="nested-git-repositories"></a>git checkouts nested inside a synced folder are skipped. It runs on macOS and Arch-based Linux, moves files through one [Syncthing](https://syncthing.net/) folder and has no server. It is built for one person's machines.
 
 ## Quick start
 
@@ -33,7 +33,7 @@ Then [add your other machines](#add-a-machine). If you already run Syncthing wit
 ## Features
 
 - <a id="syncing-gstack"></a>**Agent context sync** for Claude Code, Codex, Grok Build, Muse, Antigravity, gstack and gstack-extend. [docs/SPEC.md](docs/SPEC.md#what-mm-syncs-and-reports) lists what each one syncs.
-- **Project memory follows the repository.** Claude Code project memory matches across machines by git `origin`, so `/Users/user/code/app` and `/home/user/src/app` share one memory.
+- **Project memory follows the repository.** Claude Code project memory matches across machines by git `origin`, so `/Users/user/code/app` and `/home/user/src/app` share one memory. If `mm` reports `Not placed here`, clone the project and run `mm pull` inside the checkout.
 - **Conflicts kept both ways.** Another machine's edit to a file you haven't changed applies directly, and `.jsonl` files and `MEMORY.md` merge line by line. Any other clash keeps your copy and saves the peer's beside it as a `.sync-conflict-*` file until you run `mm resolve`.
 - **30-day recovery.** When another machine deletes a file, `mm pull` moves your unchanged copy to `~/.config/mind-meld/deleted/` for 30 days.
 - **Fleet usage reports.** `/retro-fleet` in an agent, or `mm retro-fleet 7d` in a terminal, totals commits, active days, tokens and estimated API cost across every machine.
@@ -51,36 +51,34 @@ mm init
 
 Choose join (`j`). `mm init` asks for the storage path, the Syncthing device ID of one machine already in the fleet, a name for this machine and the sources to sync. It saves those answers (never the passphrase) and prints an approval command. Find a fleet machine's device ID under **Actions → Show ID** in its Syncthing GUI (`http://127.0.0.1:8384`).
 
-On that fleet machine, check that the 7-character short ID matches, then approve:
+On that fleet machine, check that the 7-character short ID matches. If `mm` manages its Syncthing, approve with the command below. Otherwise [approve in the Syncthing GUI](#configuring-syncthing-yourself).
 
 ```bash
 mm devices approve <short-id>
 ```
 
-The new machine waits up to 10 minutes. Once approved, it asks for the fleet passphrase and pulls. Run `mm push` on it when `mm init` finishes. Other machines pair with it on their next push or pull. If the wait runs out, run `mm init` again and resume with your saved answers.
+The new machine waits up to 10 minutes. Once approved, it asks for the fleet passphrase and pulls. Run `mm push` on it when `mm init` finishes. Other machines where `mm` manages Syncthing pair with it on their next push or pull. If the wait runs out, run `mm init` again and resume with your saved answers.
 
 ### Configuring Syncthing yourself
 
 `mm init` sets up Syncthing only when its configuration is still the default. If Syncthing already has paired devices, custom folders or a non-empty Default Folder, set it up by hand:
 
 1. In the Syncthing GUI, add one fleet machine with **Add Remote Device**. On the joining machine, mark that fleet machine as an **Introducer** so it learns about later machines.
-2. On the fleet machine, share the folder with ID `mind-meld` with the new machine. On the new machine, accept it at `~/Sync/mind-meld` (or your storage path).
-3. Wait for the `mm-crypto-init` file to arrive, then run `mm init`, choose join and enter the fleet passphrase.
-
-To approve a join from a fleet machine where you manage Syncthing, accept the new device in its GUI, then tick it on the `mind-meld` folder's **Edit → Sharing** tab.
+2. On the fleet machine, accept the new device in the Syncthing GUI, then tick it on the `mind-meld` folder's **Edit → Sharing** tab. If `mm` manages Syncthing there, `mm devices approve <short-id>` handles both steps when the request appears.
+3. On the new machine, accept the folder at `~/Sync/mind-meld` (or your storage path) and apply the settings below. Wait for `mm-crypto-init` to arrive, then run `mm init`, choose join and enter the fleet passphrase.
 
 <a id="syncthing-folder-options"></a>Folder settings, which `mm status` and `mm diag` check:
 
 - Folder type Send & Receive, file versioning off and pull order alphabetic.
 - **Ignore permissions** off, and **Maximum conflicts** `-1` or a positive number.
-- `(?d)tmp*.tmp` in the folder's `.stignore`.
+- Add `(?d)tmp*.tmp` to the folder's `.stignore` on each machine where you manage Syncthing. Syncthing keeps this file local.
 - If you also share the parent `~/Sync`, add `/mind-meld` to the parent's `.stignore`.
 
 ## Retire a machine
 
 <a id="retiring-a-dead-machine"></a>
 
-1. Run `mm pull` on a machine with the same home folder path. Check that the files you still need have arrived. Save any Codex memory copies you want to keep outside Mind Meld's managed copy directory. After retirement, the next pull with Codex sync enabled moves those copies into [30-day recovery](#recovering-a-deleted-file). Leave the retiring machine's manifests and blobs in the shared folder.
+1. Run `mm pull` on a machine with the same home folder path. Check that the files you still need have arrived. Save any Codex memory copies you want to keep from `~/.local/share/mind-meld/codex-memory/<device-id>/` to a separate folder. After retirement, the next pull with Codex sync enabled moves those copies into [30-day recovery](#recovering-a-deleted-file). Leave the retiring machine's manifests and blobs in the shared folder.
 2. Shut the old machine down, or stop its hooks and Syncthing. A later push from it registers it again.
 3. On an active machine, retire it by name, or by the 8-character ID that `mm devices` lists:
 
@@ -88,7 +86,7 @@ To approve a join from a fleet machine where you manage Syncthing, accept the ne
    mm devices retire <name|id>
    ```
 
-Machines where `mm` manages Syncthing drop the device once it disconnects. Where you manage Syncthing yourself, remove the device in the GUI, including on any introducer.
+Keep the Syncthing device if an active registration still uses its ID. Otherwise, machines where `mm` manages Syncthing drop it once it disconnects. Where you manage Syncthing yourself, remove it in the GUI, including on any introducer.
 
 ## Everyday commands
 
@@ -156,7 +154,7 @@ For Codex, add the same two steps to `~/.codex/AGENTS.md`.
    "Bash(qmd --index mind-meld get:*)"
    ```
 
-3. Codex in `workspace-write` mode needs the `qmd` cache to be writable. Add it to `~/.codex/config.toml`:
+3. Codex in `workspace-write` mode needs the `qmd` cache to be writable. In `~/.codex/config.toml`, append its absolute path to `sandbox_workspace_write.writable_roots`. The cache defaults to `~/.cache/qmd`, or `$XDG_CACHE_HOME/qmd` when set. Replace the example path with yours. If the table already exists, edit it in place.
 
    ```toml
    [sandbox_workspace_write]
@@ -188,7 +186,7 @@ auto_install = false   # still tell me about new releases
 auto_check = false     # never check
 ```
 
-To go back to an older release, run `UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@vX.Y.Z`. It stays pinned until you run `mm update`.
+To roll back to a release that supports your shared folder's format, run `UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@vX.Y.Z`. It stays pinned until you run `mm update`. If you use `/retro-fleet`, move `~/.local/share/mind-meld/agent-skills/retro-fleet` aside as a backup, then run `mm install-skills` to install the matching skill.
 
 ## Troubleshooting
 
@@ -203,11 +201,11 @@ mm status
 
 ### Another mm operation is running
 
-`mm` holds a lock at `~/.config/mind-meld/mind-meld.lock` while it syncs. Wait for the other command or hook to finish, then retry. Never delete a live lock file.
+`mm` holds a lock at `~/.config/mind-meld/mind-meld.lock` while it syncs. Leave the lock file in place. Wait for the other command or hook to finish, then retry.
 
 ### Auto commands skip: keyring locked or unavailable
 
-The hooks never open an unlock prompt. If they skip, run `mm status` for the cause. On Linux, unlock the login keyring in your desktop session. If Secret Service has no default collection, use its desktop prompt to create one and save the fleet passphrase:
+The hooks never open an unlock prompt. If they skip, run `mm status` for the cause. On Linux, unlock the login keyring in your desktop session. A login manager configured to unlock it at sign-in saves this step. If Secret Service has no default collection, use its desktop prompt to create one and save the fleet passphrase:
 
 ```bash
 secret-tool store --label=mind-meld service mind-meld username passphrase application 'Python keyring library'
@@ -218,6 +216,8 @@ On macOS, run `mm pull` in your desktop terminal and choose **Always Allow** in 
 ### Pull incomplete / could not pull a file
 
 `mm pull` applies every healthy file, prints one warning per failure and exits 1. Fix what the warning names and run `mm pull` again. If content is still on its way, wait for Syncthing to finish and pull again. For full detail, run `mm diag --json`.
+
+If `mm pull` skips an older peer edit you wanted, `mm pull --verbose` lists the held files. Compare the two versions, then run `touch <file>` and `mm push` on the machine whose copy you want to publish.
 
 ### Snapshot failures
 
@@ -238,7 +238,7 @@ cp -n "$copies/$source_name/$copy_path" "$source_dir/$origin_path"
 mm push
 ```
 
-If many files were deleted by mistake, pause pull hooks on unaffected machines. Restore and push on the origin, then wait for the new manifest to reach each peer's shared folder. Resume pulls and hooks once `mm pull --dry-run --verbose` on each peer shows that it would leave the restored files in place. Save recovery copies you still need before `mm gc` or a later pull clears copies older than 30 days.
+If many files were deleted by mistake, pause manual pulls and remove the `mm autopull` line from the other machines' agent instructions. Restore and push on the origin, then wait for the new manifest to reach each peer's shared folder. Resume pulls and hooks once `mm pull --dry-run --verbose` on each peer shows none of those deletions. Save recovery copies you still need before `mm gc` or a later pull clears copies older than 30 days.
 
 <a id="history-database"></a>
 ### History database (state.db)
@@ -252,6 +252,8 @@ If `mm` reports a newer format, leave the key header in place and run `mm update
 ### Key header copies differ
 
 `mm` removes only identical copies of the key header. A count of differing copies alone needs no action. If a fingerprint mismatch persists after Syncthing finishes, use a machine that previously synced successfully and back up every header outside the shared folder. Keep a usable header in place. Move extra copies aside one at a time and check `mm status` after each move. Stop when the mismatch clears. Undo a move immediately if the header goes missing, and restore all copies if none of the moves helps. If the canonical header itself is wrong, use the [restore steps above](#newer-or-damaged-storage-format) with a copy that matches the fleet's expected fingerprint. Stop if you can't verify a copy.
+
+Once the verified header stands alone, rejoin any machine that was registered against a different header. Run plain `mm init` on that machine and choose join. If every usable copy was lost, the old data cannot be decrypted. Keep the old folder and start a new fleet in an empty one.
 
 ### Dropped repositories and ignored git environment variables
 
@@ -290,6 +292,6 @@ command -v secret-tool >/dev/null && secret-tool clear service mind-meld usernam
 
 ## Development
 
-Run `./bin/check` for lint and the full test suite, or `./bin/check --affected` for the tests your change reaches. CI runs the same checks on macOS and Linux, plus a live Linux keyring test.
+Run `./bin/check` for lint and the full test suite, or `./bin/check --affected` for the tests your change reaches. CI runs the same checks on macOS and Linux, plus a live Linux keyring test. Those jobs run once the pull request is ready for review.
 
 [![CI](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml/badge.svg)](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml)

@@ -45,7 +45,7 @@ Admission gates: [docs/ROADMAP.md](docs/ROADMAP.md); rationale: [constraint hist
 - Investigate unwanted automatic behavior before adding its inverse; removal controls need demonstrated demand.
 - Name a reader for every persisted field or name the delivering Track. Trace normalization, retained cache fields, and migration gates when changing readers.
 - Prove inclusive/disjoint counter semantics before pricing, summing, or trending ([events/retro invariants](docs/invariants/events-retro.md)).
-- Read effective SIZE limits from installed gstack-extend (`bin/config get roadmap_max_files_per_track` / `roadmap_max_session_weight`) with machine-local overrides.
+- Read effective SIZE limits from installed gstack-extend (`bin/config get roadmap_max_files_per_track` / `roadmap_max_session_weight`) on the current machine, including environment overrides.
 
 ## Before editing code
 
@@ -74,7 +74,7 @@ Before editing anything under `src/`, read [docs/invariants/README.md](docs/inva
 ./bin/check tests/test_config.py    # scoped pytest; still lints the whole repo
 ```
 
-`--affected` selects by coverage since the merge base (default `origin/main`) and includes new or changed tests. It falls back to the suite for stale coverage or runner, config, conftest, non-Python, or module-scope changes. Use it without test paths, pytest args, or `--lint`. Use full checks and CI for release verification. `--tests` skips lint. `--lint` skips pytest. Ruff enforces E/F/W/I. Use `./bin/check --affected` or `./bin/check <scope>` in roadmap `verify:` fields, without a machine-specific Python path.
+`--affected` selects by coverage since the merge base (default `origin/main`) and includes new or changed tests. It falls back to the suite for stale coverage or runner, config, conftest, non-Python, or module-scope changes. Use it without test paths, pytest args, or `--lint`. Release verification requires full local checks and CI, even when `--affected` passes. `--tests` skips lint. `--lint` skips pytest. Ruff enforces E/F/W/I. Use `./bin/check --affected` or `./bin/check <scope>` in roadmap `verify:` fields, without a machine-specific Python path.
 
 Keep the `PYTEST_CURRENT_TEST` guard on `crypto.store_passphrase_in_keyring` ([init/device invariants](docs/invariants/init-devices.md)). `mm` reads `Path.home()` at import. Never run or import `tests/` outside `./bin/check` and give other probes a temporary `HOME`. On timeout bursts under load, rerun failing files with `./bin/check --tests --serial`, then the full run with `MM_PYTEST_WORKERS=6`. Avoid `KEY`, `PASSWORD`, `SECRET`, or `TOKEN` in identifiers. Only an owner-approved `.gstack/secret-dispositions.json` entry waives a finding.
 
