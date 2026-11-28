@@ -852,6 +852,7 @@ class _PublishedUsageBaseline:
     sessions_row: dict[str, Any] | None = None
     host_comparable: bool = True
     sessions_comparable: bool = True
+    blob_attempted: bool = False
     files: dict[str, tuple[int, bytes | None]] = field(default_factory=dict)
 
 
@@ -911,10 +912,18 @@ def _read_published_usage_baseline(
         now = datetime.now(timezone.utc)
         host_order = sessions_order = None
         newest_unread = None
-        tried_blob = False
 
         for delta in range(-1, events.CURSOR_SCAN_DAYS + 1):
             day = now.date() - timedelta(days=delta)
+            # A row cannot be written into a day earlier than its UTC
+            # timestamp. Older files cannot displace either confirmed winner.
+            if (
+                host_order is not None
+                and sessions_order is not None
+                and sessions_order[0] == 1
+                and day < host_order[0].astimezone(timezone.utc).date()
+            ):
+                break
             rel_default = f"events/{events.device_event_filename(device_id, day)}"
             stored = _stored_event_key(prior_files, rel_default)
             if stored is None:
@@ -932,8 +941,8 @@ def _read_published_usage_baseline(
                 base_path / stored, prior_sha, max_bytes=max_file_size, prefix_size=prefix_size
             )
             prior_bytes = None
-            if raw is None and not tried_blob:
-                tried_blob = True
+            if raw is None and not baseline.blob_attempted:
+                baseline.blob_attempted = True
                 raw = prior_bytes = _read_published_event_blob(
                     backend, device_id, prior_sha, passphrase, memory_kb, max_file_size
                 )
@@ -1019,6 +1028,7 @@ def _published_usage_changed(
     host_usage_published: bool,
     *,
     max_file_size: int,
+    read_prior_blob: Callable[[str], bytes | None] | None = None,
 ) -> bool:
     """Return True iff newly published own-device mm-events rows changed usage."""
     accepted_files = _mm_events_files(local_manifest)
@@ -1068,7 +1078,18 @@ def _published_usage_changed(
                 and hashlib.sha256(raw[:prior_size]).hexdigest() == prior_info["sha256"]
             ):
                 delta_bytes = raw[prior_size:]
-            elif prior_bytes is not None:
+            else:
+                # A rewritten older day can be outside the snapshot search.
+                # Spend the shared fallback here only if it is still available.
+                if (
+                    prior_bytes is None
+                    and read_prior_blob is not None
+                    and not baseline.blob_attempted
+                ):
+                    baseline.blob_attempted = True
+                    prior_bytes = read_prior_blob(prior_info["sha256"])
+                if prior_bytes is None:
+                    continue  # Unknown prior bytes cannot prove which rows are new.
                 prior_counts = Counter(prior_bytes.splitlines(keepends=True))
                 new_lines: list[bytes] = []
                 for line in raw.splitlines(keepends=True):
@@ -1077,8 +1098,6 @@ def _published_usage_changed(
                     else:
                         new_lines.append(line)
                 delta_bytes = b"".join(new_lines)
-            else:
-                continue  # Unknown prior bytes cannot prove which rows are new.
         for row in events.iter_jsonl_bytes(
             delta_bytes, {"host-usage-snapshot", "sessions-snapshot", "git-snapshot"}
         ):
@@ -3163,6 +3182,9 @@ def _push_core(
                 captured.appended if captured is not None else None,
                 result.host_usage_published,
                 max_file_size=max_file_size,
+                read_prior_blob=lambda digest: _read_published_event_blob(
+                    backend, device_id, digest, passphrase, memory_kb, max_file_size
+                ),
             )
         except Exception:
             pass

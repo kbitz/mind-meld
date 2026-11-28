@@ -65,6 +65,94 @@ def test_171a_only_new_rows_in_a_previously_accepted_day(tmp_path, unchanged_ali
     )
 
 
+def test_usage_baseline_stops_after_verified_winners(tmp_path, monkeypatch):
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz)
+
+    monkeypatch.setattr(cli, "datetime", FixedClock)
+    (tmp_path / "events").mkdir()
+    files = {}
+    for delta in (0, 1):
+        stamp = NOW - timedelta(days=delta)
+        rel = f"events/dev-a-{stamp.date().isoformat()}.jsonl"
+        rows = [
+            {**host_row(), "ts": stamp.isoformat()},
+            {"type": "sessions-snapshot", "ts": stamp.isoformat(), "projects": []},
+        ]
+        raw = b"".join((json.dumps(row) + "\n").encode() for row in rows)
+        (tmp_path / rel).write_bytes(raw)
+        files[rel] = {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
+
+    reads = []
+    read_verified = events.read_verified_event_bytes
+
+    def record_read(path, *args, **kwargs):
+        reads.append(path.name)
+        return read_verified(path, *args, **kwargs)
+
+    monkeypatch.setattr(events, "read_verified_event_bytes", record_read)
+    baseline = cli._read_published_usage_baseline(
+        cli.LocalBackend(tmp_path / "storage"),
+        "dev-a",
+        "",
+        8192,
+        [{"name": "mm-events", "path": str(tmp_path)}],
+        {"sources": {"mm-events": {"files": files}}},
+        max_file_size=100_000,
+    )
+    assert baseline.host_row is not None
+    assert baseline.sessions_row is not None
+    assert reads == [f"dev-a-{TODAY}.jsonl"]
+
+
+@pytest.mark.parametrize("queued", [False, True], ids=["old-rows", "new-catchup"])
+def test_usage_delta_reads_a_rewritten_older_day_on_demand(tmp_path, queued):
+    rel = f"events/dev-a-{OLD}.jsonl"
+    path = tmp_path / rel
+    path.parent.mkdir()
+    row = {"type": "git-snapshot", "origin": "catchup", "ts": f"{OLD}T00:00:00Z"}
+    previous = (json.dumps(row) + "\n").encode()
+    raw = b"\n" + previous
+    if queued:
+        raw += (json.dumps({**row, "ts": f"{OLD}T01:00:00Z"}) + "\n").encode()
+    path.write_bytes(raw)
+
+    def manifest(data):
+        return {
+            "sources": {
+                "mm-events": {
+                    "files": {rel: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}}
+                }
+            }
+        }
+
+    requested = []
+
+    def read_prior(digest):
+        requested.append(digest)
+        return previous
+
+    baseline = cli._PublishedUsageBaseline()
+    assert (
+        cli._published_usage_changed(
+            [{"name": "mm-events", "path": str(tmp_path)}],
+            "dev-a",
+            manifest(raw),
+            manifest(previous),
+            baseline,
+            None,
+            False,
+            max_file_size=1024,
+            read_prior_blob=read_prior,
+        )
+        is queued
+    )
+    assert requested == [hashlib.sha256(previous).hexdigest()]
+    assert baseline.blob_attempted
+
+
 @pytest.mark.parametrize(
     "hosts,usage_days,expected",
     [

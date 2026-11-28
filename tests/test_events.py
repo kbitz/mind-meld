@@ -5026,6 +5026,7 @@ def test_discover_git_roots_and_walk_session_metadata_emit_monotonic_progress_16
 def test_is_device_event_file_171a() -> None:
     assert events.is_device_event_file("events/dev-a-2026-11-27.jsonl", "dev-a") is True
     assert events.is_device_event_file("Events/dev-a-2026-11-27.jsonl", "dev-a") is True
+    assert events.is_device_event_file("Events/dev-a-2026-11-27.JSONL", "dev-a") is True
     assert events.is_device_event_file("events/dev-b-2026-11-27.jsonl", "dev-a") is False
     assert events.is_device_event_file("events/dev-a-2-2026-11-27.jsonl", "dev-a") is False
     assert events.is_device_event_file("other/dev-a-2026-11-27.jsonl", "dev-a") is False

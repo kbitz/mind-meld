@@ -107,11 +107,12 @@ unchanged `sessions-snapshot` (order-insensitive across project rotation),
 coverage/metadata-only changes, and reader dropouts without increased totals are
 ignored.
 
-Own-device files must match the daily filename exactly. The comparison uses a
-hash-verified local prefix or, for a missing or rewritten prior revision, one
-bounded encrypted-blob read. A case-only spelling change preserves the prior
-identity. An unread prior revision leaves its new rows unproven. If it could
-contain the latest host or session snapshot, that comparison is inconclusive.
+Own-device files must match the device ID and UTC date in the daily filename.
+The events directory and JSONL extension can vary in case. The snapshot search
+stops once older days cannot change either winner. Changed older days prove
+their delta from the accepted prefix or share the one bounded encrypted-blob
+read budget. If prior bytes are unreadable, changes that depend on those bytes
+remain inconclusive.
 
 Usage publication and deadline-stopped attended host readers
 (`PushResult.catching_up_readers`, in canonical `HOST_USAGE_TOKEN_SOURCES` order)

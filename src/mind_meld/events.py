@@ -4196,7 +4196,11 @@ def is_device_event_file(rel: str, device_id: str) -> bool:
     directory, _, name = rel.partition("/")
     prefix = f"{_safe_device_filename(device_id)}-"
     suffix = ".jsonl"
-    if directory.casefold() != "events" or not name.startswith(prefix) or not name.endswith(suffix):
+    if (
+        directory.casefold() != "events"
+        or not name.startswith(prefix)
+        or not name.lower().endswith(suffix)
+    ):
         return False
     day_text = name[len(prefix) : -len(suffix)]
     try:
