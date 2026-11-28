@@ -2200,7 +2200,7 @@ Successful previews always print pending setup and “Dry run complete. Nothing 
 
 ## Preview and inspection contract (Track 62A)
 
-The [README Previews table](../../README.md#previews) is the operator reference.
+The [README everyday commands](../../README.md#previews) introduce previews. The [command reference](../../SPEC.md#commands) lists their options.
 `push`, `pull`, `gc`, and `recapture` with `--dry-run` may create/flock only the
 local mm lock and its parent. `migrate-config --dry-run` and `diff` do not even
 take that lock. No config, keyring, history, upgrade cache, crypto repair,
@@ -2322,7 +2322,7 @@ safe bounded details, omissions, ordering uncertainty and errno name. Generated
 JSON <=16 KiB, <=8 details of <=384 chars. No raw exceptions, credentials,
 absolute user paths or host logs are retained. Missing custom mm-events paths
 normalize to their source label. Unknown/unsafe detail is omitted truthfully.
-See README's run-evidence table and events-retro.md for causes and counter units.
+See [Attended sync-run evidence and status projection](events-retro.md#attended-sync-run-evidence-and-status-projection-track-77a) for causes and counter units.
 `attemptlog` also owns private local `last-mesh.json` (`mesh_waits_path`,
 `write_mesh_waits`, `read_mesh_waits`), written at the end of `meshflow.run`
 from every `push`, `pull`, `autopush` and `autopull` only when

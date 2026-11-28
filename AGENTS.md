@@ -14,7 +14,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, secretstorage (Linux), 
 - **End-to-end encryption is mandatory.** All synced manifests, artifacts, and allowlisted context are AES-256-GCM encrypted client-side before touching storage.
 - **Scoped sync.** Built-in sources are allowlisted; session databases, credentials, and whole-file settings stay local.
 - **Truth-based manifests.** Complete snapshots propagate deletions automatically (with 30-day local recovery copies); SHA-256 diffing transfers only changed, gzip-compressed blobs (format 0x02).
-- **Fast-forward + conflict sidecars.** Unchanged local files fast-forward; `.jsonl` and `MEMORY.md` auto-merge; concurrent edits keep local canonical bytes and remote conflict sidecars until `mm resolve`. Pull writes `.mind-meld-log.md` per Claude project.
+- **Fast-forward + conflict sidecars.** Unchanged local files fast-forward. `.jsonl` and `MEMORY.md` auto-merge. Other concurrent edits keep local canonical bytes and remote conflict sidecars until `mm resolve`. Read the [conflict invariants](docs/invariants/conflicts.md) for older edits, legacy conflict direction and clock rules. Pull writes `.mind-meld-log.md` per Claude project.
 
 ## Product scope and releases
 

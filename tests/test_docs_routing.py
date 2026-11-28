@@ -897,11 +897,9 @@ def test_every_health_code_is_documented_in_skill_md() -> None:
 
 
 def test_pricing_provenance_and_attended_usage_contract_are_documented():
-    # Value: protects=the invariant and skill keep pricing provenance and the scheduled-rate rule,
-    # and the README keeps the attended-push usage promise;
-    # fails_when=the invariant loses the Anthropic date or xAI URL, or the skill's rule drifts;
-    # why_new=Track 172A moved vendor provenance out of the README (token_usage.py docstrings
-    # pair each date with its URL);
+    # Value: protects=vendor-specific provenance, the scheduled-rate rule and the usage promise;
+    # fails_when=a vendor's date or source is detached or a reader is told to apply a future rate;
+    # why_new=the pricing invariant now owns the provenance formerly in README;
     # seam=none;
     # no_claim=vendor rates or dates from source pages.
     from mind_meld import token_usage
@@ -909,8 +907,24 @@ def test_pricing_provenance_and_attended_usage_contract_are_documented():
     readme = (ROOT / "README.md").read_text()
     assert "docs.x.ai/developers/models/grok-4." not in readme
     invariant = (ROOT / "docs" / "invariants" / "events-retro.md").read_text()
-    assert token_usage.PRICING_LAST_UPDATED in invariant
-    assert "https://docs.x.ai/developers/pricing" in invariant
+    for vendor, date_attr, url in (
+        (
+            "Anthropic",
+            "PRICING_LAST_UPDATED",
+            "https://platform.claude.com/docs/en/about-claude/pricing",
+        ),
+        ("OpenAI", "PRICING_OPENAI_LAST_UPDATED", "https://developers.openai.com/api/docs/pricing"),
+        ("xAI", "PRICING_XAI_LAST_UPDATED", "https://docs.x.ai/developers/pricing"),
+        ("Google", "PRICING_GOOGLE_LAST_UPDATED", "https://ai.google.dev/gemini-api/docs/pricing"),
+        ("Muse", "PRICING_MUSE_LAST_UPDATED", token_usage.PRICING_MUSE_SOURCE_URL),
+    ):
+        row = next(line for line in invariant.splitlines() if line.startswith(f"- {vendor} `"))
+        assert all(part in row for part in (date_attr, getattr(token_usage, date_attr), url)), (
+            vendor
+        )
+    assert any(
+        "gemini-4-carbon" in line and "2026-12-01" in line for line in invariant.splitlines()
+    ), "Gemini Carbon's scheduled increase needs its effective date"
     assert "docs.x.ai/developers/models/grok-4." not in invariant
     skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text()
     scheduled = next(part for part in skill.split("\n\n") if "scheduled price change" in part)
@@ -1152,12 +1166,8 @@ def _collect_diag_state_keys() -> set[str]:
     raise AssertionError("_collect_diag_state return dict not found")
 
 
-def test_readme_diag_json_fields_match_emitted_keys() -> None:
-    """README's documented `mm diag --json` field list must match the code.
-
-    Nothing enforced this, so README.md's troubleshooting entry could name
-    fields `_collect_diag_state` no longer emits, or omit a new sibling key.
-    """
+def test_diag_json_reference_matches_emitted_keys() -> None:
+    """The command reference must list the emitted diagnostic fields."""
     emitted = _collect_diag_state_keys()
     assert emitted == set(_DIAG_JSON_TOP_LEVEL), (
         f"_collect_diag_state keys {sorted(emitted)} != documented {list(_DIAG_JSON_TOP_LEVEL)}"
@@ -1170,9 +1180,9 @@ def test_readme_diag_json_fields_match_emitted_keys() -> None:
     documented = {k.strip() for k in line.split("top-level keys:", 1)[1].split(",")}
     missing_top = [k for k in _DIAG_JSON_TOP_LEVEL if k not in documented]
     assert missing_top == [], f"SPEC.md does not name mm diag --json top-level keys {missing_top}"
-    rows = next(row for row in spec.splitlines() if "`skill_links` rows:" in row)
-    # SPEC.md's row list predates `key`; the code-side check above still pins it.
-    missing_rows = [k for k in _SKILL_LINKS_ROW_FIELDS if k != "key" and k not in rows]
+    row = next(line for line in spec.splitlines() if "`skill_links` rows:" in line)
+    fields = {field.strip() for field in row.split("rows:", 1)[1].split(",")}
+    missing_rows = [key for key in _SKILL_LINKS_ROW_FIELDS if key not in fields]
     assert missing_rows == [], f"SPEC.md does not name skill_links row fields {missing_rows}"
 
 
@@ -1367,7 +1377,7 @@ def test_preview_docs_describe_diff_as_snapshot_comparison62():
     assert not re.search(r"`mm diff`[^.;\n]*(?:predicts|pull predictor|Dry-run:)", readme)
     spec = (ROOT / "SPEC.md").read_text()
     assert "mm diff [--from DEVICE] [--source NAME]   # compare local files with this Mac" in spec
-    assert "mm pull --dry-run" in spec and "--conflict-mode fail" in spec
+    assert "mm pull --dry-run --conflict-mode fail" in spec
 
 
 def test_pre_1_1_notes_semantics_survive_as_health_entries():

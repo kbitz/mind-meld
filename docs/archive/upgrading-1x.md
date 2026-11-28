@@ -41,7 +41,7 @@ Peers on 1.12.76–1.12.79 with `codex-memory` enabled keep exchanging copies.
 **Automatic Syncthing pairing (Track 152A).** The first `mm push` after upgrading
 publishes this machine's encrypted Syncthing record when Syncthing is running.
 Run `mm update` and then `mm push` on each existing Syncthing fleet machine.
-See [Syncthing folder options](../../README.md#syncthing-folder-options) for the one-approval join steps.
+See [Add a machine](../../README.md#add-a-machine) for the one-approval join steps.
 
 **Plain `mm init` prompt order, approval wait, and saved join answers (Tracks 151A, 154A):**
 plain `mm init` asks `Start a new fleet or join an existing one? [n/j]`.
@@ -49,7 +49,7 @@ Answer `n`/`new` or `j`/`join`. Pressing Enter asks again, and
 `mm init --new-fleet` skips the question. Before waiting, a fresh join asks
 for the storage path, the fleet machine's Syncthing device ID if mm needs to
 pair, the device name, the sources and the applicable
-[memory-search setup questions](../../README.md#searching-agent-memory-qmd). Every yes/no
+[memory search setup](../../README.md#memory-search). Every yes/no
 question uses `[y/n] (Enter = y)` or `[y/n] (Enter = n)`, and every source
 defaults to yes when detected on disk. It saves those answers locally in
 `~/.config/mind-meld/join.toml` (never the passphrase). When a managed join
@@ -133,7 +133,7 @@ keeps the local file and writes a conflict copy; use `mm conflicts` and
 usage capture while leaving memory local, add `"memory-v2/*"` to the `grok`
 source's `exclude_patterns`; to stop
 Grok sync and usage capture, run `mm disable-source grok`. See
-[Grok Build](../../README.md#grok-build) for the scope, configuration and handoff walkthrough.
+[Grok Build sync and usage](../SPEC.md#what-mm-syncs-and-reports) for the current scope.
 
 **Git-root discovery finishes across attended pushes (Track 106A):** a cold Codex
 index used to need more pushes than discovery's 100 ms attended budget could
@@ -297,7 +297,7 @@ folder named for the checkout's absolute path, so the same repository at two pat
 on a Mac and a Linux box, was two projects. mm now publishes a project that has a
 network `origin` under that remote, and any other project under a home-relative name,
 and each machine maps the name back to the folder Claude uses for *its* checkout, wherever
-that checkout is. See [Project memory across machines](../../README.md#project-memory-across-machines).
+that checkout is. See [Project identity](../invariants/sync.md#project-identity-on-the-wire-track-90a).
 
 **Every machine must update before its own first push in the new form, and it takes part
 in the new form only from then.** Go one machine at a time, in any order; nothing waits for
@@ -446,7 +446,7 @@ listing ignores conflict copies and counts a `devices/` file only when its name
 matches the id in its body; valid manifest conflict copies remain recovery
 inputs. `mm diag`
 reports the number of ignored files as `ignored storage files`. See
-[waiting content](../../README.md#waiting-content-is-not-a-failure).
+[waiting content](../../README.md#pull-incomplete--could-not-pull-a-file).
 
 **Host usage snapshot compatibility:** an un-upgraded peer drops incoming `host-usage-snapshot` records carrying `"muse"` or `"agy"` until it updates. Content sync is unaffected; upgrade the peer with `mm update` or `pipx upgrade mind-meld` to include its usage in `retro-fleet`.
 
@@ -478,8 +478,8 @@ with `mm install-skills` or the next `mm push`, then restart the agent.
 its previous exit 0. Completed files remain applied. `mm autopull` keeps exit 0
 for contained failures and records the failed count; conflict-fail preflight
 keeps exit 3 before applying files. There is no data/config migration or new
-quiet flag. See [Sync outcomes](../../README.md#sync-outcomes), [Exit codes](../../README.md#exit-codes),
-[Status verdicts](../../README.md#status-verdicts) and [pull remedies](../../README.md#pull-incomplete--could-not-pull-a-file).
+quiet flag. See [Sync outcomes](../../README.md#sync-outcomes), [Exit codes](../../SPEC.md#error-handling),
+[Status verdicts](../invariants/sync.md#status-verdict-and-attended-sync-evidence-track-77a) and [pull remedies](../../README.md#pull-incomplete--could-not-pull-a-file).
 A foreground automatic update can delay the final line; successful version
 details appear only with `--verbose`. Standalone `mm update` is unchanged.
 

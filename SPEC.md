@@ -398,7 +398,7 @@ mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump;
                             # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, syncthing, project_index, sync_scope, fast_forward, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_usage, host_read_budgets, host_publication, discovery, git_capture, memory_index, capture_catchup, push_timings
                             # syncthing (read-only): reachability, folder state, needed files, pull errors, connected peer counts, folder-option and .stignore lint
                             # fast_forward (read-only): pull-ledger state, peer_base rows per peer, seen_version rows, scan-root anchor state and historical older-edit/anchor observations (possibly stale)
-                            # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
+                            # `skill_links` rows: key, agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
                             # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.
                             # maintain_links is enabled | disabled (...) | unknown (config invalid: ...) | unknown (policy not resolved)
@@ -445,7 +445,7 @@ mm recapture [WINDOW] [--dry-run]
                             # --dry-run discovers/walks and reports; changes nothing except the local lock file. Partial previews exit 0, stopped/no-repository previews exit 1.
 mm update                   # install the latest release through pipx (v1.3.0); needs no config or passphrase, so it works while sync is refusing
                             # exit 0: mm is on the latest release; exit 1: the update did not complete, or this install is not one mm can update (source-tree build, non-pipx, pipx pin, fork)
-                            # push/pull/autopull/autopush run the in-place pipx upgrade themselves unless [upgrade] auto_install = false; see README "Automatic updates"
+                            # push/pull/autopull/autopush run the in-place pipx upgrade themselves unless [upgrade] auto_install = false; see README "Upgrading"
 ```
 
 `mm diag --json` separates reader cache inventory (`host_usage`) from recorded
@@ -519,7 +519,7 @@ attended push's conditional activity tail and exit contract, read
 12. **Propagated deletions.** A local file absent from a remote manifest is never deleted just because it is absent. Only a peer's own, active, hash-carrying tombstone deletes it, and only when this machine's last-synced base for that peer equals the hash and the local bytes hash to it (and the guards in sync invariants hold). The file is moved into `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>` and kept at least 30 days; a record without a hash, or a file whose bytes differ, is never deleted. The deleting machine holds the only record; a machine that followed it mints none.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
 14. For a real pull, run the [Syncthing mesh pass](docs/invariants/init-devices.md#approving-and-retiring-fleet-machines-tracks-119a-152a-154a-load-bearing) before releasing the lockfile. It shares the fleet folder with eligible peers.
-15. Print one final outcome line per thing that happened, including applied, deleted, older-edit and waiting counts; omit skipped counts from these lines. On success, pending folder delivery adds its own line with `Run: mm pull` and leaves the exit at 0. On failure, the error reports pending delivery and keeps the repair command last. Verbose output retains written / merged / skipped / conflicted / failed / waiting detail; `mm status` and `mm diag` also retain skipped counts. For an attended, non-join pull on an mm-managed machine, report any pending join requests that lack a valid fleet record. When mm can read the fleet records and registry, the notice names other registered machines whose Syncthing-ID records are absent locally and suggests `mm update` and `mm push` there. See the [pending join notices](README.md#syncthing-folder-options) for fallback behavior.
+15. Print one final outcome line per thing that happened, including applied, deleted, older-edit and waiting counts; omit skipped counts from these lines. On success, pending folder delivery adds its own line with `Run: mm pull` and leaves the exit at 0. On failure, the error reports pending delivery and keeps the repair command last. Verbose output retains written / merged / skipped / conflicted / failed / waiting detail; `mm status` and `mm diag` also retain skipped counts. For an attended, non-join pull on an mm-managed machine, report any pending join requests that lack a valid fleet record. When mm can read the fleet records and registry, the notice names other registered machines whose Syncthing-ID records are absent locally and suggests `mm update` and `mm push` there. See the [pending join notices](docs/invariants/init-devices.md#approving-and-retiring-fleet-machines-tracks-119a-152a-154a-load-bearing) for fallback behavior.
 
 ### `mm gc`
 
@@ -547,7 +547,7 @@ The command body and own-device blob collection (`gc`, `_do_gc`) live in `gcflow
 4. Show local/own-manifest file counts and pending pushes by source. Summarize skipped nested repositories as an exact selected-source count; `mm diag` retains their paths.
 5. Show the selected latest auto or attended execution per push/pull verb. The `Last auto-pull` line shows recorded Syncthing delivery as a past observation. Strictly later valid completed success can resolve an earlier same-verb failure only with sufficient scope; skips, uncertain ordering and limited scope cannot prove recovery. Keep raw autorun and attended evidence plus their projection in `mm diag` and `mm diag --json`. A displayed `keyring-locked` or `keyring-no-collection` auto skip retains the existing keyring troubleshooting hint.
 6. Preserve current capture/publication evidence separately. Hide a capture-attempt row only when its existing supersession proof establishes that it is obsolete; retain it in diag. Missing attended-run history after upgrade is normal, not a successful run.
-7. Preserve autorun staleness meaning: a displayed auto breadcrumb older than 48h says `stale — no autorun in Nh`; an attended run's age is not hook liveness. Missing or unparseable timestamps retain the existing no-age-marker behavior; run-evidence uncertainty is reported separately. See [Status verdicts](README.md#status-verdicts) for evidence states, exit meaning and remedies.
+7. Preserve autorun staleness meaning: a displayed auto breadcrumb older than 48h says `stale — no autorun in Nh`; an attended run's age is not hook liveness. Missing or unparseable timestamps retain the existing no-age-marker behavior; run-evidence uncertainty is reported separately. See [Status verdict and attended sync evidence](docs/invariants/sync.md#status-verdict-and-attended-sync-evidence-track-77a) for evidence states and remedies.
 
 ### `mm sources`
 
@@ -748,8 +748,8 @@ gstack's per-machine artifacts (7-day TTL solo-vs-collaborative cache
 and deploy-config-hash markers, both recomputed locally per device).
 Without these, every pull conflict-copies them on every device every day
 (2026-04-24 first-pull regression). Those two globs are not the whole
-default. The current excludes, allowlist and `Local State` skip are in
-[Syncing gstack](README.md#syncing-gstack).
+default. See the [gstack allowlist and filter](docs/invariants/sync.md#include_patterns-allowlist--inverse-consumer-filter)
+and [generated file exclusions](docs/invariants/sync.md#generated-files-are-not-sync-data-load-bearing-v01251).
 
 **Consumer-boundary filter (load-bearing).** The exclude filter applies at
 TWO call sites — both **after** `_fetch_remote_manifest` returns:
