@@ -16,7 +16,7 @@ On macOS, install [Homebrew](https://brew.sh/) first.
    mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap) && sh -c "$mm_bootstrap"
    ```
 
-2. Open Claude Code once if you want to sync its project memory. On Arch, unlock your login keyring in the desktop session. Start a new fleet on your first machine, choose a fleet passphrase and enable at least one source when asked. `mm` sets up Syncthing and prints this machine's Syncthing device ID.
+2. Open Claude Code once if you want to sync its project memory. On Arch, unlock your login keyring in the desktop session. Start a new fleet on your first machine, choose a fleet passphrase and enable at least one source when asked. With Syncthing's default configuration, `mm` sets it up and prints this machine's Syncthing device ID. For an existing Syncthing setup, [create the fleet folder first](#configuring-syncthing-yourself).
 
    ```bash
    mm init --new-fleet
@@ -61,7 +61,9 @@ The new machine waits up to 10 minutes. Once approved, it asks for the fleet pas
 
 ### Configuring Syncthing yourself
 
-`mm init` sets up Syncthing only when its configuration is still the default. If Syncthing already has paired devices, custom folders or a non-empty Default Folder, set it up by hand:
+If Syncthing already has paired devices, custom folders or a non-empty Default Folder, set it up by hand. To start a fleet, create a separate empty folder in Syncthing with folder ID `mind-meld`. Apply the settings below and give `mm init --new-fleet` the same storage path.
+
+To join an existing fleet with an owner-managed Syncthing setup:
 
 1. In the Syncthing GUI, add one fleet machine with **Add Remote Device**. On the joining machine, mark that fleet machine as an **Introducer** so it learns about later machines.
 2. On the fleet machine, accept the new device in the Syncthing GUI, then tick it on the `mind-meld` folder's **Edit → Sharing** tab. If `mm` manages Syncthing there, `mm devices approve <short-id>` handles both steps when the request appears.
@@ -137,13 +139,13 @@ mm autopush
 If either command prints anything, surface it to the user. Skip these hooks when `mm` is not installed.
 ````
 
-For Codex, add the same two steps to `~/.codex/AGENTS.md`.
+For Codex, add the same two steps to `~/.codex/AGENTS.md`, or `$CODEX_HOME/AGENTS.md` when `CODEX_HOME` is set.
 
 ### Memory search
 
 `mm init` offers the index. To turn it on later, run `mm memory-index on` (it needs `qmd` 2.8.3+). Then:
 
-1. Add this line to each agent's global instructions (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`). If the file is a symlink, edit its target.
+1. Add this line to each agent's global instructions. Use `~/.claude/CLAUDE.md` for Claude Code and the Codex instruction file above. If the file is a symlink, edit its target.
 
    > If the owner mentions something they discussed with an agent before and you can't find it in your own memory, search every agent's memory with `qmd --index mind-meld search "<key words>" -n 10` (`qmd --index mind-meld get <docid>` reads a hit). If memories disagree, show the owner each one with its path and ask which is right.
 
@@ -154,7 +156,7 @@ For Codex, add the same two steps to `~/.codex/AGENTS.md`.
    "Bash(qmd --index mind-meld get:*)"
    ```
 
-3. Codex in `workspace-write` mode needs the `qmd` cache to be writable. In `~/.codex/config.toml`, append its absolute path to `sandbox_workspace_write.writable_roots`. The cache defaults to `~/.cache/qmd`, or `$XDG_CACHE_HOME/qmd` when set. Replace the example path with yours. If the table already exists, edit it in place.
+3. Codex in `workspace-write` mode needs the `qmd` cache to be writable. In `~/.codex/config.toml` (or `$CODEX_HOME/config.toml` with a custom home), append its absolute path to `sandbox_workspace_write.writable_roots`. The cache defaults to `~/.cache/qmd`, or `$XDG_CACHE_HOME/qmd` when set. Replace the example path with yours. If the table already exists, edit it in place.
 
    ```toml
    [sandbox_workspace_write]
