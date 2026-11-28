@@ -13,7 +13,7 @@
 set -eu
 
 MM_INSTALL_SPEC="git+https://github.com/kbitz/mind-meld.git@latest"
-MM_RELEASE="1.12.94"
+MM_RELEASE="1.12.95"
 SYNCTHING_PLISTS="sh.brew.syncthing.plist homebrew.mxcl.syncthing.plist"
 HOMEBREW_INSTALL_CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
@@ -417,7 +417,7 @@ main() {
       sudo_prefix="sudo "
     fi
     if ! command -v pacman >/dev/null 2>&1; then
-      die "pacman was not found on PATH" "${sudo_prefix}pacman -S --needed python python-pipx syncthing git"
+      die "pacman was not found on PATH" "${sudo_prefix}pacman -S --needed python python-pipx syncthing git gnome-keyring libsecret"
     fi
     if ! command -v python3 >/dev/null 2>&1; then
       missing="python"
@@ -430,6 +430,14 @@ main() {
     fi
     if ! command -v git >/dev/null 2>&1; then
       missing="${missing:+$missing }git"
+    fi
+    # mm keeps the fleet passphrase in the Secret Service; gnome-keyring
+    # provides it and libsecret ships secret-tool.
+    if ! command -v gnome-keyring-daemon >/dev/null 2>&1; then
+      missing="${missing:+$missing }gnome-keyring"
+    fi
+    if ! command -v secret-tool >/dev/null 2>&1; then
+      missing="${missing:+$missing }libsecret"
     fi
     if [ -n "$missing" ]; then
       install_cmd="${sudo_prefix}pacman -S --needed $missing"

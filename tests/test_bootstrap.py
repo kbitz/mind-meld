@@ -25,6 +25,8 @@ README_BOOTSTRAP_CMD = (
     ' && sh -c "$mm_bootstrap"'
 )
 README_BOOTSTRAP_URL = "https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap"
+# Everything bin/bootstrap installs with pacman on a bare Arch machine, in order.
+ARCH_PACKAGES = ["python", "python-pipx", "syncthing", "git", "gnome-keyring", "libsecret"]
 HOMEBREW_INSTALL_CMD = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
 SYNCTHING_CONFIG_PATHS = (
@@ -182,6 +184,11 @@ exit 2
 
     def install_git(self, directory: Path) -> None:
         _make_fake_script(directory / "git", "git", "exit 0\n")
+
+    def install_keyring(self, directory: Path) -> None:
+        """gnome-keyring's daemon and libsecret's secret-tool, the probes bootstrap uses."""
+        _make_fake_script(directory / "gnome-keyring-daemon", "gnome-keyring-daemon", "exit 0\n")
+        _make_fake_script(directory / "secret-tool", "secret-tool", "exit 0\n")
 
     def install_mm(self, directory: Path) -> None:
         _make_fake_script(directory / "mm", "mm", "exit 0\n")
@@ -416,6 +423,7 @@ exit 2
         self.install_pipx(stage)
         self.install_syncthing(stage, "2.1.7")
         self.install_git(stage)
+        self.install_keyring(stage)
         self.install_node(stage, "22.14.0")
         self.install_npm(stage)
         _make_fake_script(
@@ -447,6 +455,12 @@ if [ "${{1:-}}" = "-S" ]; then
         ;;
       git)
         copy_exec "{stage}/git" "{self.sysbin}/git"
+        ;;
+      gnome-keyring)
+        copy_exec "{stage}/gnome-keyring-daemon" "{self.sysbin}/gnome-keyring-daemon"
+        ;;
+      libsecret)
+        copy_exec "{stage}/secret-tool" "{self.sysbin}/secret-tool"
         ;;
       nodejs)
         if [ "${{MM_TEST_NODE_PKG_FAIL:-0}}" = "1" ]; then
@@ -622,8 +636,8 @@ class TestBootstrapContract:
 
     def test_readme_install_section_points_to_bootstrap_on_latest(self) -> None:
         text = README.read_text(encoding="utf-8")
-        match = re.search(r"^## Install\n(?P<body>.*?)(?=^## |\Z)", text, re.M | re.S)
-        assert match is not None, "## Install section missing from README.md"
+        match = re.search(r"^## Quick start\n(?P<body>.*?)(?=^## |\Z)", text, re.M | re.S)
+        assert match is not None, "## Quick start section missing from README.md"
         body = match.group("body")
         assert README_BOOTSTRAP_CMD in body
         url_match = re.search(
@@ -746,9 +760,7 @@ class TestBootstrapArch:
 
         calls = harness.calls()
         pacman_calls = [row for row in calls if row[0] == "pacman"]
-        assert pacman_calls == [
-            ["pacman", "-S", "--needed", "python", "python-pipx", "syncthing", "git"]
-        ]
+        assert pacman_calls == [["pacman", "-S", "--needed", *ARCH_PACKAGES]]
         pipx_install_calls = [row[1:] for row in calls if row[0] == "pipx" and row[1] == "install"]
         assert pipx_install_calls == [["install", upgrade.INSTALL_SPEC, "GIT_TERMINAL_PROMPT=0"]]
         assert "mm init" in _last_line(proc.stdout)
@@ -759,12 +771,59 @@ class TestBootstrapArch:
         harness.install_pacman()
         harness.install_python(harness.sysbin, "3.13.2")
         harness.install_git(harness.sysbin)
+        harness.install_keyring(harness.sysbin)
 
         proc = harness.run()
         assert proc.returncode == 0, proc.stdout
 
         pacman_calls = [row for row in harness.calls() if row[0] == "pacman"]
         assert pacman_calls == [["pacman", "-S", "--needed", "python-pipx", "syncthing"]]
+
+    @pytest.mark.parametrize(
+        "present,expected",
+        [
+            ("", ["gnome-keyring", "libsecret"]),
+            ("gnome-keyring-daemon", ["libsecret"]),
+            ("secret-tool", ["gnome-keyring"]),
+        ],
+    )
+    def test_arch_installs_missing_keyring_packages(
+        self, harness: BootstrapHarness, present: str, expected: list[str]
+    ) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_pacman()
+        harness.install_python(harness.sysbin, "3.13.2")
+        harness.install_pipx(harness.sysbin)
+        harness.install_syncthing(harness.sysbin, "2.1.7")
+        harness.install_git(harness.sysbin)
+        if present:
+            _make_fake_script(harness.sysbin / present, present, "exit 0\n")
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+
+        pacman_calls = [row for row in harness.calls() if row[0] == "pacman"]
+        assert pacman_calls == [["pacman", "-S", "--needed", *expected]]
+        assert (harness.sysbin / "gnome-keyring-daemon").exists()
+        assert (harness.sysbin / "secret-tool").exists()
+
+    def test_arch_failed_keyring_install_stops_with_fix(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_id(1000)
+        harness.install_pacman()
+        harness.install_python(harness.sysbin, "3.13.2")
+        harness.install_pipx(harness.sysbin)
+        harness.install_syncthing(harness.sysbin, "2.1.7")
+        harness.install_git(harness.sysbin)
+
+        proc = harness.run(extra_env={"MM_TEST_PKG_FAIL": "1"})
+        assert proc.returncode == 1
+        last = _last_line(proc.stdout)
+        assert "sudo pacman -S --needed gnome-keyring libsecret failed" in last
+        assert "Run: sudo pacman -S --needed gnome-keyring libsecret" in last
+        assert not [row for row in harness.calls() if row[0] == "pipx"]
 
     def test_arch_too_old_python_stops_with_pacman_syu(self, harness: BootstrapHarness) -> None:
         harness.install_uname("Linux")
@@ -791,9 +850,7 @@ class TestBootstrapArch:
 
         calls = harness.calls()
         sudo_calls = [row for row in calls if row[0] == "sudo"]
-        assert sudo_calls == [
-            ["sudo", "pacman", "-S", "--needed", "python", "python-pipx", "syncthing", "git"]
-        ]
+        assert sudo_calls == [["sudo", "pacman", "-S", "--needed", *ARCH_PACKAGES]]
 
     def test_arch_root_runs_pacman_without_sudo(self, harness: BootstrapHarness) -> None:
         harness.install_uname("Linux")
@@ -807,9 +864,7 @@ class TestBootstrapArch:
         calls = harness.calls()
         assert not [row for row in calls if row[0] == "sudo"]
         pacman_calls = [row for row in calls if row[0] == "pacman"]
-        assert pacman_calls == [
-            ["pacman", "-S", "--needed", "python", "python-pipx", "syncthing", "git"]
-        ]
+        assert pacman_calls == [["pacman", "-S", "--needed", *ARCH_PACKAGES]]
 
     @pytest.mark.parametrize("uid,expected_prefix", [(1000, "sudo "), (0, "")])
     def test_arch_failed_pacman_stops_with_fix(
@@ -822,9 +877,8 @@ class TestBootstrapArch:
 
         proc = harness.run(extra_env={"MM_TEST_PKG_FAIL": "1"})
         assert proc.returncode == 1
-        assert (
-            f"Run: {expected_prefix}pacman -S --needed python python-pipx syncthing git"
-            in _last_line(proc.stdout)
+        assert f"Run: {expected_prefix}pacman -S --needed {' '.join(ARCH_PACKAGES)}" in _last_line(
+            proc.stdout
         )
         assert not [row for row in harness.calls() if row[0] == "pipx"]
 
@@ -837,7 +891,7 @@ class TestBootstrapArch:
         assert proc.returncode == 1
         last = _last_line(proc.stdout)
         assert "pacman was not found on PATH" in last
-        assert "Run: sudo pacman -S --needed python python-pipx syncthing git" in last
+        assert f"Run: sudo pacman -S --needed {' '.join(ARCH_PACKAGES)}" in last
 
     def test_arch_rerun_changes_nothing(self, harness: BootstrapHarness) -> None:
         harness.install_uname("Linux")
@@ -1765,6 +1819,7 @@ class TestBootstrapQmd:
         harness.install_pipx(harness.sysbin)
         harness.install_syncthing(harness.sysbin, "2.1.7")
         harness.install_git(harness.sysbin)
+        harness.install_keyring(harness.sysbin)
         (harness.sysbin / "qmd").unlink()
 
     def _ready_macos(self, harness: BootstrapHarness) -> None:

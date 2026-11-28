@@ -1749,18 +1749,12 @@ def test_discovery_budget_docs_match_the_constants():
 
     recapture = f"{events.RECAPTURE_DISCOVERY_BUDGET_MS // 1000} s"
     attended = f"{events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS:,} ms"
-    readme_recapture = section(
-        "README.md", "### Dropped repositories and ignored git environment variables", "\n### "
-    )
+    # The README quotes no timing budgets (Track 172A); events-retro.md owns them.
     retro_recapture = section(
         "docs/invariants/events-retro.md", "## Cursor gate + recapture", "\n## "
     )
-    assert re.search(rf"discovery gets {recapture}\b", readme_recapture)
-    assert "keeps its 100 ms" not in readme_recapture
     assert re.search(rf"RECAPTURE_DISCOVERY_BUDGET_MS` \({recapture}\b", retro_recapture)
-    readme_upgrade = section("README.md", "## Upgrading", "\n## ")
     retro_budget = section(
         "docs/invariants/events-retro.md", "**Git-root discovery budget and reuse", "\n\n"
     )
-    for name, text in (("README.md", readme_upgrade), ("events-retro.md", retro_budget)):
-        assert attended in text, f"{name} omits {attended}"
+    assert attended in retro_budget, f"events-retro.md omits {attended}"

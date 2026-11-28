@@ -144,7 +144,7 @@ Track 7B wires `events.py` (Track 7A foundation, v0.10.2) into the push hot path
 
 1. **Single call site, gated on substantive change (Codex C4 + v0.12.2).** Pre-v0.12.2 the tail fired at the HEAD of `_push_core` unconditionally (the original Codex C4 fix replaced inline-before-each-early-return with a head-position single call to avoid branch fragility against the "must run on every push attempt" trust boundary). v0.12.2 relaxed the trust boundary to "must run on every push that uploads bytes" — empty pushes were writing a `mm-push` event row, mutating the mm-events file, and reporting "1 file uploaded" forever as the only "change" pushed (phantom-change-on-empty-push regression). The gate counts diffs across ALL sources (user + mm-events), so an un-flushed prior-push event row from a partial-upload failure still triggers a fresh push that drains it. Do NOT add additional call sites; do NOT move the tail back to HEAD.
 
-2. **`dry_run` no-op (preview contract, Track 56A).** `mm push --dry-run` changes nothing except the local lock file (including creation of its parent when absent). No blob, manifest, last_seen, event, config, history, skill, or mm-cache writes and no upgrade HTTP check. The events tail and device/skill hooks retain their dry-run gates. Push also skips migration prompts, the whole transition hook, fingerprint persistence, mm-events bootstrap, crypto-init repair, and the update-or-nudge tail. Strict scan and deletion-proof failures still refuse; a scan-time hold of a still-changing file (Track 75A) applies and its count is printed with exit 0. The trailer and pending setup lines belong to `push()`, after every successful `_push_core` return, including no-op/no-sources returns. No trailer on refusal. The preview omits host-usage capture, the activity row a real push appends, post-push GC, and upload re-reads; Track 62A extends the setup guarantee to all previews; see the [README Previews table](../../README.md#previews). Recapture preview writes no rows or config/upgrade state, reports non-benign walk skips separately from discovery errors/budget expiry, and retains exit 0 on partial scans. No repositories exits 1 with a preview-preserving remedy. Disabled and not-configured sources are distinct, with disabled taking precedence.
+2. **`dry_run` no-op (preview contract, Track 56A).** `mm push --dry-run` changes nothing except the local lock file (including creation of its parent when absent). No blob, manifest, last_seen, event, config, history, skill, or mm-cache writes and no upgrade HTTP check. The events tail and device/skill hooks retain their dry-run gates. Push also skips migration prompts, the whole transition hook, fingerprint persistence, mm-events bootstrap, crypto-init repair, and the update-or-nudge tail. Strict scan and deletion-proof failures still refuse; a scan-time hold of a still-changing file (Track 75A) applies and its count is printed with exit 0. The trailer and pending setup lines belong to `push()`, after every successful `_push_core` return, including no-op/no-sources returns. No trailer on refusal. The preview omits host-usage capture, the activity row a real push appends, post-push GC, and upload re-reads. Track 62A extends the setup guarantee to all previews in the [preview and inspection contract](sync.md#preview-and-inspection-contract-track-62a). Recapture preview writes no rows or config/upgrade state, reports non-benign walk skips separately from discovery errors/budget expiry, and retains exit 0 on partial scans. No repositories exits 1 with a preview-preserving remedy. Disabled and not-configured sources are distinct, with disabled taking precedence.
 
 3. **`mm-events`-resolved gate, NOT `disabled_sources` (Codex C1).** The gate is `next((s for s in sources if s.get("name") == "mm-events"), None) is not None`. This covers fresh / migrated / un-migrated configs uniformly: a config that pre-dates v0.10.1 simply has no `mm-events` entry and the tail no-ops, no migration prompt required. Gating only on `disabled_sources` would let pre-v0.10.1 configs accumulate local cruft forever (the `~/.local/share/mind-meld/events/` tree never created, never written). Real push explicitly bootstraps the default root before reaching the tail; a missing custom root is excluded from the tail entirely.
 
@@ -2816,7 +2816,7 @@ This walk is Claude-only. Codex rollouts and Grok session directories are
 not a metadata-only project ledger; their encoded cwd is a path and does
 not go on the wire. Do not extend `walk_session_metadata` to those trees
 to chase host parity. Usage interchangeability is Groups 18/21/22/23;
-see `docs/designs/host-parity.md`.
+see `docs/archive/host-parity.md`.
 
 `EVENTS_SCHEMA_VERSION` bumped 1 → 2 in Group 8. Pre-v0.11.0, `walk_session_metadata` filtered jsonls by `mtime >= since_ts` — each snapshot was a DELTA. Naive sum of v=1 snapshots double-counted any chat that was touched across pushes; latest-only-wins undercounted by losing prior windows. Codex outside-voice review caught the trap during `/plan-eng-review` for Group 8 (cross-model tension #1).
 
@@ -2982,8 +2982,8 @@ The one-time 0.12.42 policy-transition notice (`maybe_emit_policy_transition`,
 `policy_transition_acknowledged`, `acknowledge_policy_transition`,
 `_POLICY_TRANSITION_MARKER`, and the private `_join_display_names` that only it
 used) was **deleted in v0.12.44**. It explained one thing: mm no longer repairs
-a link whose row is unauthorized. `README.md`'s troubleshooting entry says that
-permanently and was deliberately KEPT when the code went — `docs/TODOS.md` said
+a link whose row is unauthorized. The [README upgrade instructions](../../README.md#upgrading)
+keep the remedy. The README guidance was deliberately KEPT when the code went — `docs/TODOS.md` said
 to delete it too, and that was overruled, because 2 of the 3 fleet machines
 (`mm devices`: 0.12.13 and 0.12.34.1) never ran a version that could emit the
 notice and will upgrade straight past it. A transient notice they cannot receive
@@ -3153,9 +3153,9 @@ symlinks untouched.
 
 **`0B` relays mm's own upgrade nudge; it does NOT compare versions.** `upgrade.update_or_nudge` already runs at the tail of interactive `mm push` and `mm pull`, checks GitHub `/tags`, and prints to stderr — which terminal collapse hides. Since v1.3.0 that tail may instead report that mm updated itself mid-run; 0B relays that too, because the session still holds the pre-update SKILL.md. That is the only network-authoritative staleness signal the skill can reach, and silence is NOT evidence of freshness (24h `DEFAULT_NUDGE_GAP`, `[upgrade] auto_check = false`, `--no-check-version`, dev-build sentinel, offline). A local `min_mm_version` / `skill_version` comparison was designed and **deliberately cut**: the field is written by the same binary whose freshness is in question (`_publish_skill_store`), it cannot know which SKILL.md the agent loaded (`live-checkout` is a supported status), and two matching stale numbers read as verification rather than as a stale pair. Do not reintroduce it; the negative assertions in the test exist to stop that.
 
-**Every remediation string ends with "restart the agent so it reloads SKILL.md."** Republishing the store does not change instructions already in the running agent's context, so `mm install-skills` alone never fixes the current run. The same clause was added to README's `mm install-skills` row, the store paragraph, and the troubleshooting entries.
+**Every remediation string ends with "restart the agent so it reloads SKILL.md."** Republishing the store does not change instructions already in the running agent's context, so `mm install-skills` alone never fixes the current run. The [README upgrade instructions](../../README.md#upgrading) also tell the owner to restart the agent.
 
-**Step 0 cannot reach the users it protects.** It ships through the store republish, which needs an `mm` at least as new as the store, so a user who never upgrades never receives it. Step 0 prevents future drift; it does not cure current drift. README's *"Retro output is missing a block, unexpectedly empty, or older than expected"* troubleshooting entry is the compensating control for that population and must not be deleted as redundant with Step 0.
+**Step 0 cannot reach the users it protects.** It ships through the store republish, which needs an `mm` at least as new as the store, so a user who never upgrades never receives it. Step 0 prevents future drift; it does not cure current drift. Keep the [README remedy for empty or outdated retro output](../../README.md#upgrading) for users who still load an older skill.
 
 Pinned by `tests/test_docs_routing.py::test_skill_md_step0_preflight_contract`: both headings exist and are ordered, `mm --version` present, two `STOP`s, `Do not run Steps 1-5`, no escape hatch in Step 0, Step 1's clause present and conditional, `upgrade.INSTALL_CMD` quoted verbatim (bound to the constant so the command cannot rot the way the removed `v0.12.37` floor literals did), and `min_mm_version` / `skill_version` / `sort -V` absent. Assertions run against whitespace-normalized text — the contract is the sentence, not where the line breaks fall. Slice with `str.index` on both boundaries, never `split(heading, 1)[-1]`: that returns the whole document when the heading is missing, and `command -v mm` appears in Step 1 historically, so the naive idiom passes for a MISSING Step 0.
 
@@ -3865,11 +3865,14 @@ Anthropic rate refresh landed in Track 58A, verified 2026-09-14; 57A's
 host delivery and model-scoped at-most contract remain in force, with the
 details carried by `cost_floor` in `MM_HEALTH`.
 
-Provenance is per vendor. Anthropic uses `PRICING_LAST_UPDATED`
-(2026-11-25), OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-11-25), xAI `PRICING_XAI_LAST_UPDATED`
-(2026-11-25, https://docs.x.ai/developers/pricing), Google `PRICING_GOOGLE_LAST_UPDATED` (2026-11-25), and Muse
-`PRICING_MUSE_LAST_UPDATED` (2026-11-25), with Muse's source in
-`PRICING_MUSE_SOURCE_URL` (https://dev.meta.ai/docs/pricing-rate-limits).
+Provenance is per vendor.
+
+- Anthropic `PRICING_LAST_UPDATED` (2026-11-25, [pricing](https://platform.claude.com/docs/en/about-claude/pricing)).
+- OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-11-25, [Standard pricing](https://developers.openai.com/api/docs/pricing)).
+- xAI `PRICING_XAI_LAST_UPDATED` (2026-11-25, [pricing](https://docs.x.ai/developers/pricing)).
+- Google `PRICING_GOOGLE_LAST_UPDATED` (2026-11-25, [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)).
+- Muse `PRICING_MUSE_LAST_UPDATED` (2026-11-25, [pricing](https://dev.meta.ai/docs/pricing-rate-limits), also `PRICING_MUSE_SOURCE_URL`).
+
 Each vendor's date and source URL ride in `MM_HEALTH.pricing`, including
 `xai_url` (`https://docs.x.ai/developers/pricing`), `muse_verified`, and `muse_url`.
 Literal four-field cards are ordered **input, cache read, cache create, output**,
@@ -3881,8 +3884,11 @@ in **USD per million tokens**: `gpt-6.2-astra` `(8.00, 0.40, 10.00, 40.00)`,
 `grok-4.7-fast` `(4.00, 1.00, 0.00, 12.00)` (long `(6.00, 1.50, 0.00, 18.00)`),
 Muse Wonder/Wonder Full `(4.00, 0.20, 0.00, 20.00)`, and Muse Spark 1.3
 `(1.25, 0.15, 0.00, 4.25)`. For models with a scheduled vendor price change,
-the shipped table carries the rate in effect on the date checked. When
-`/retro-fleet` checks official vendor docs before Pass 2, it uses the run's
+the shipped table carries the rate in effect on the date checked. At the check
+above, `gpt-5.6-sol` had promotional pricing through 2026-11-30,
+`gemini-4-carbon` and `gemini-4-argon` had increases scheduled for 2026-12-01,
+and `gemini-3.8-flash` had an increase scheduled for 2027-01-01.
+When `/retro-fleet` checks official vendor docs before Pass 2, it uses the run's
 UTC date to select the active rate and passes it via `--set-model-price`.
 The CLI fetches no rates.
 
@@ -4038,7 +4044,7 @@ Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates
 D1 = B: disclosure only. Local evidence, 2026-09-14: zero fast rows among
 22,042 carrying `speed`, 4,297 lacking it (absence is not chronology). No
 detector, cache field or wire flag is added; exposure elsewhere is unknown.
-Producer, renderer and decoder upgrades are separate, documented in README.
+Producer, renderer and decoder upgrades are separate. The [README upgrade instructions](../../README.md#upgrading) cover updating the local renderer and skill.
 Health issues retain the relevant caveat and remedy information. Codes are the
 skill interface: the AST test requires every literal `note(<code>, ...)` code
 in SKILL.md, and the skill reports an unfamiliar code verbatim rather than

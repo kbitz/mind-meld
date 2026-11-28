@@ -2180,4 +2180,4 @@ def test_memory_index_on_emits_agent_setup_link_and_preserves_symlinks(
     assert codex_target.read_text(encoding="utf-8") == "# Codex instructions\n"
 
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
-    assert "\n#### Agent setup\n" in readme
+    assert "\n## Agent setup\n" in readme

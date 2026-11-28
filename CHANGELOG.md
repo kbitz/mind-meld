@@ -2,6 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.95] - 2026-11-28
+
+Version 1.12.95 rewrites the Mind Meld guide as a walkthrough of setup, daily sync, and recovery, archives historical upgrades, and installs missing keyring packages when bootstrap runs on Arch.
+
+### Added
+
+- On Arch, bootstrap now installs missing gnome-keyring and libsecret packages.
+
+### Changed
+
+- The Mind Meld guide now walks through setup, daily sync, and recovery, with historical upgrades in a separate archive.
+
 ## [1.12.94] - 2026-11-27
 
 Version 1.12.94 reports `usage published` from an attended `mm push` only when this device publishes changed usage totals or queued catch-up data.

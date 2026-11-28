@@ -4434,12 +4434,8 @@ def test_recapture_budget_docs_match_the_constants():
         end = text.find(next_heading, start + len(heading))
         return " ".join(text[start : end if end != -1 else None].split())
 
+    # The README quotes no timing budgets (Track 172A); events-retro.md owns them.
     sections = {
-        "README.md": section(
-            "README.md",
-            "### Dropped repositories and ignored git environment variables",
-            "\n### ",
-        ),
         "docs/invariants/events-retro.md": section(
             "docs/invariants/events-retro.md", "## Cursor gate + recapture", "\n## "
         ),

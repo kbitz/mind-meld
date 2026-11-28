@@ -1,3 +1,8 @@
+> **Archived (superseded):** Historical host-parity rationale and live-check evidence.
+> [docs/SPEC.md](../SPEC.md) owns current host scope; runtime rules live in
+> [docs/invariants/sync.md](../invariants/sync.md) and
+> [docs/invariants/events-retro.md](../invariants/events-retro.md).
+
 # Host interchangeability (Claude / Codex / Grok)
 
 > Written 2026-08-17 after Track 21A review feedback. Supplements

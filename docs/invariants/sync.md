@@ -1162,7 +1162,7 @@ Before Track 73B this exceeded the shared 1 MB cap and evicted earlier
 history. The table now retains 20,000 excluded rows independently of conflicts;
 legacy backup copies stay readable with jq (not mm log).
 [Back up history and upgrade, migrate and push every active Mac before the next
-attended pull on any of them](../../README.md#v180-scope-trim).
+attended pull on any of them](../archive/upgrading-1x.md#v180-scope-trim).
 Auto-update installs per Mac. A default-config Mac publishes the trim on its
 next push or autopush; autopush stays silent on success (including those deletions).
 Those deletions count manifest entries, remove no local files and write no
@@ -1609,7 +1609,7 @@ is local metadata and never creates a missing root; the opt-out suppresses
 topic content and its deletion records, not this anchor maintenance.
 
 Grok workspace names are opaque: mm copies them unchanged and does not implement
-Grok's hash or add branch names. The 1.0.77 live checks recorded in host-parity.md
+Grok's hash or add branch names. The 1.0.77 live checks recorded in docs/archive/host-parity.md
 show matching origin-derived names for clones and linked worktrees. The owner
 accepted on 2026-11-06 that no-origin repositories (`device_local=1`) and
 non-repository scopes transfer as inert copies when the receiving Grok computes
@@ -2200,7 +2200,7 @@ Successful previews always print pending setup and “Dry run complete. Nothing 
 
 ## Preview and inspection contract (Track 62A)
 
-The [README Previews table](../../README.md#previews) is the operator reference.
+The [README everyday commands](../../README.md#previews) introduce previews. The [command reference](../../SPEC.md#commands) lists their options.
 `push`, `pull`, `gc`, and `recapture` with `--dry-run` may create/flock only the
 local mm lock and its parent. `migrate-config --dry-run` and `diff` do not even
 take that lock. No config, keyring, history, upgrade cache, crypto repair,
@@ -2322,7 +2322,7 @@ safe bounded details, omissions, ordering uncertainty and errno name. Generated
 JSON <=16 KiB, <=8 details of <=384 chars. No raw exceptions, credentials,
 absolute user paths or host logs are retained. Missing custom mm-events paths
 normalize to their source label. Unknown/unsafe detail is omitted truthfully.
-See README's run-evidence table and events-retro.md for causes and counter units.
+See [Attended sync-run evidence and status projection](events-retro.md#attended-sync-run-evidence-and-status-projection-track-77a) for causes and counter units.
 `attemptlog` also owns private local `last-mesh.json` (`mesh_waits_path`,
 `write_mesh_waits`, `read_mesh_waits`), written at the end of `meshflow.run`
 from every `push`, `pull`, `autopush` and `autopull` only when

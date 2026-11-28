@@ -1,3 +1,7 @@
+> **Archived (superseded):** Historical Track 68A plan and evidence.
+> Cross-model memory (O9) in [docs/designs/cross-model-memory.md](../designs/cross-model-memory.md)
+> and [docs/SPEC.md](../SPEC.md) supersede this design.
+
 # Memory continuity across machines and agents
 
 Status: formal implementation plan, 2026-09-30. Implementation has not started;
@@ -5,7 +9,7 @@ native adapter choices remain subject to the qualification gates below. Source i
 baseline: `c43b777`; local Codex version at inspection: 0.159.0. Work is filed in
 [Track 68A](../ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall)
 for qualification; the remaining work packages were preserved in Future with
-explicit promotion gates until [cross-model memory](cross-model-memory.md)
+explicit promotion gates until [cross-model memory](../designs/cross-model-memory.md)
 replaced them (2026-10-29, redesigned 2026-11-21).
 The [2026-09-30 inbox drain](../TODOS.md#roadmap-drain--2026-09-30) records their
 routing. Later work packages receive implementation Tracks after qualification.
@@ -17,7 +21,7 @@ routing. Later work packages receive implementation Tracks after qualification.
 > This file remains Track 68A evidence.
 
 > **Superseded design (2026-10-29):** the owner approved
-> [cross-model memory](cross-model-memory.md) as docs/SPEC.md O9, planned
+> [cross-model memory](../designs/cross-model-memory.md) as docs/SPEC.md O9, planned
 > after 2.0. It replaces this file's cross-agent design and work packages;
 > the Future anchors below now point at its implementation bullet.
 
@@ -193,9 +197,9 @@ package, not permission to deploy an incomplete sync protocol.
 | Work package | Depends on | Deliverable | Exit gate |
 |---|---|---|---|
 | [Qualify Codex memory portability and recall](../ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall) | None | Versioned adapter contract, sanitized live-source fixtures, isolated import/recall prototype | Native lifecycle measured; forgetting and ancestry capabilities established; unsafe integration candidates rejected |
-| [Deliver Codex memory sync across Macs](cross-model-memory.md) (superseded) | Qualification | Export, encrypted transfer, receiving consumer, retirement and provenance controls | Two-way Codex recall; deterministic forgetting, echo and hostile-content gates below pass; native regeneration preserves the qualified behavior |
+| [Deliver Codex memory sync across Macs](../designs/cross-model-memory.md) (superseded) | Qualification | Export, encrypted transfer, receiving consumer, retirement and provenance controls | Two-way Codex recall; deterministic forgetting, echo and hostile-content gates below pass; native regeneration preserves the qualified behavior |
 | [Qualify Claude and Codex memory parity across the fleet](../TODOS.md#roadmap-drain--2026-10-19) | Codex transport | Dated two-Mac CLI/Conductor qualification report and regression tests | Full parity matrix, including offline forgetting, same-agent re-export and the hostile-content checks on the live two-Mac and Conductor path, passes on supported versions |
-| [Share project memories between Claude and Codex](cross-model-memory.md) (superseded) | Fleet parity | Project identity, shared recall view, startup integration, required forget control | Fresh-session recall in both directions; live cross-agent forgetting and echo tests and the deterministic hostile-content tests pass; unsupported ancestry cannot auto-publish |
+| [Share project memories between Claude and Codex](../designs/cross-model-memory.md) (superseded) | Fleet parity | Project identity, shared recall view, startup integration, required forget control | Fresh-session recall in both directions; live cross-agent forgetting and echo tests and the deterministic hostile-content tests pass; unsupported ancestry cannot auto-publish |
 | Establish Cursor's memory capability and portability contract (killed 2026-11-07: [docs/SPEC.md](../SPEC.md) removes Cursor support) | Codex qualification for discovery; parity/bridge for integration | Measured capability matrix and qualified adapter or documented shared-view consumer | Same isolation, forgetting, echo and hostile-content gates; discovery alone does not claim Cursor implementation is complete |
 
 The retirement and ancestry schema is fixed during qualification, before
