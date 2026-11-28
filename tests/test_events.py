@@ -5314,3 +5314,17 @@ def test_read_verified_event_bytes_and_iter_jsonl_bytes_171a(
 
     monkeypatch.setattr(token_usage, "iter_bounded_lines", mutating_iter)
     assert events.read_verified_event_bytes(path, good_sha, max_bytes=len(payload) + 100) is None
+
+
+def test_verified_event_bytes_refuses_oversized_final_partial_line(tmp_path, monkeypatch):
+    import hashlib
+
+    from mind_meld import token_usage
+
+    path = tmp_path / "dev-a-2026-11-27.jsonl"
+    payload = b"{}\n" + b" " * 16
+    path.write_bytes(payload)
+    monkeypatch.setattr(token_usage, "MAX_JSONL_LINE_BYTES", 8)
+    assert events.read_verified_event_bytes(
+        path, hashlib.sha256(payload).hexdigest(), max_bytes=len(payload)
+    ) is None

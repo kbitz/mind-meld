@@ -4407,12 +4407,13 @@ def event_bytes_match(raw: bytes, expected_sha: str) -> bool:
     """Verify the digest and require a complete bounded-line read."""
     if hashlib.sha256(raw).hexdigest() != expected_sha:
         return False
-    return all(
-        line
+    scanned_bytes = sum(
+        len(line)
         for line, _ in token_usage.iter_bounded_lines(
             io.BytesIO(raw), "<event bytes>", 0, label="events verifier", yield_final_partial=True
         )
     )
+    return scanned_bytes == len(raw)
 
 
 def read_verified_event_bytes(
