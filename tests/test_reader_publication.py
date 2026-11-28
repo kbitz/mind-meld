@@ -32,6 +32,39 @@ def publication(row, readers=("codex", "agy")):
     return events.project_host_publication(scan, readers, None, now=NOW)
 
 
+@pytest.mark.parametrize("unchanged_alias", [True, False], ids=["case-alias", "unknown-prefix"])
+def test_171a_only_new_rows_in_a_previously_accepted_day(tmp_path, unchanged_alias):
+    """An old catch-up row must not count again when only the filename or receipt changes."""
+    rel = f"events/dev-a-{TODAY}.jsonl"
+    dayfile = tmp_path / rel
+    dayfile.parent.mkdir()
+    catchup = {"type": "git-snapshot", "origin": "catchup", "projects": []}
+    raw = (json.dumps(catchup) + "\n").encode()
+    dayfile.write_bytes(raw)
+    previous = raw if unchanged_alias else b"{}\n" + raw
+
+    def manifest(path, rows):
+        return {
+            "sources": {
+                "mm-events": {
+                    "files": {path: {"sha256": hashlib.sha256(rows).hexdigest(), "size": len(rows)}}
+                }
+            }
+        }
+
+    prior_rel = rel.replace("events/", "Events/") if unchanged_alias else rel
+    assert not cli._published_usage_changed(
+        [{"name": "mm-events", "path": str(tmp_path)}],
+        "dev-a",
+        manifest(rel, raw),
+        manifest(prior_rel, previous),
+        cli._PublishedUsageBaseline(),
+        None,
+        False,
+        max_file_size=1024,
+    )
+
+
 @pytest.mark.parametrize(
     "hosts,usage_days,expected",
     [

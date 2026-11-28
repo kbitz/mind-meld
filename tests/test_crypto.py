@@ -384,6 +384,13 @@ class TestEncryptDecrypt:
         blob = encrypt(b"", PASSPHRASE, memory_kb=MEMORY_KB)
         assert decrypt(blob, PASSPHRASE, memory_kb=MEMORY_KB) == b""
 
+    def test_decrypt_bounds_plaintext(self):
+        data = b"event rows\n" * 10
+        blob = encrypt(data, PASSPHRASE, memory_kb=MEMORY_KB)
+        assert decrypt(blob, PASSPHRASE, MEMORY_KB, max_plaintext_bytes=len(data)) == data
+        with pytest.raises(CryptoError, match="plaintext exceeds"):
+            decrypt(blob, PASSPHRASE, MEMORY_KB, max_plaintext_bytes=len(data) - 1)
+
     def test_round_trip_large(self):
         data = os.urandom(1_000_000)
         blob = encrypt(data, PASSPHRASE, memory_kb=MEMORY_KB)

@@ -18583,7 +18583,7 @@ def test_attended_push_same_day_queued_catchup_uses_prior_blob_baseline_171a(
     day = datetime.now(timezone.utc).date().isoformat()
     dayfile = capture61["dayfile"]
 
-    # Case A: Same-day queued origin="catchup" git-snapshot appended to already-published dayfile.
+    # An append preserves the published prefix and adds a same-day catch-up row.
     catchup_git = {
         "v": _mm_events.EVENTS_SCHEMA_VERSION,
         "type": "git-snapshot",
@@ -18598,7 +18598,9 @@ def test_attended_push_same_day_queued_catchup_uses_prior_blob_baseline_171a(
     assert r_git_cu.exit_code == 0, r_git_cu.output
     assert r_git_cu.stdout == "Push: no content changes; usage published.\n"
 
-    # Case B: Same-day queued host-usage growth appended before push; live read matches it.
+    # A rewrite removes the prefix proof, so compare the queued host totals with
+    # the stored blob. The live reader already sees the same growth as the queue.
+    dayfile.write_bytes(b"\n" + dayfile.read_bytes())
     grown_usage = {
         "codex": {day: {"input": 500, "cache_create": 0, "cache_read": 0, "output": 100}}
     }
@@ -18689,24 +18691,20 @@ def test_attended_push_reader_dropout_on_deadline_does_not_claim_usage_published
 
 def test_attended_push_ignores_peer_event_files_171a(capture61):
     day = datetime.now(timezone.utc).date().isoformat()
-    peer_file = capture61["dayfile"].with_name(f"dev-b-{day}.jsonl")
-    peer_file.write_text(
-        json.dumps(
-            {
-                "v": _mm_events.EVENTS_SCHEMA_VERSION,
-                "type": "host-usage-snapshot",
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "device": "dev-b",
-                "token_sources": ["codex"],
-                "hosts": {
-                    "codex": {day: {"input": 999, "cache_create": 0, "cache_read": 0, "output": 99}}
-                },
-                "counter_semantics": _mm_events.COUNTER_SEMANTICS_DISJOINT_V1,
-            }
-        )
-        + "\n",
-        encoding="utf-8",
+    # The peer shares our ID prefix, but its event day is still its own.
+    peer = "dev-a-2"
+    peer_file = capture61["dayfile"].with_name(f"{peer}-{day}.jsonl")
+    row = _mm_events.make_host_usage_snapshot(
+        device=peer,
+        ts=datetime.now(timezone.utc),
+        hosts={"codex": {day: {"input": 999, "cache_create": 0, "cache_read": 0, "output": 99}}},
+        token_sources=["codex"],
     )
+    data = (json.dumps(row) + "\n").encode()
+    _publish_peer62(capture61, peer, {("mm-events", f"events/{peer_file.name}"): (data, None)})
+    pulled = runner.invoke(app, ["pull"])
+    assert pulled.exit_code == 0, pulled.output
+    assert peer_file.read_bytes() == data
     res = runner.invoke(app, ["push"])
     assert res.exit_code == 0, res.output
     assert res.stdout == "Push: no content changes; no new usage.\n"

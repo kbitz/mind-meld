@@ -850,11 +850,38 @@ def _stored_event_key(files: dict, rel: str) -> str | None:
 class _PublishedUsageBaseline:
     host_row: dict[str, Any] | None = None
     sessions_row: dict[str, Any] | None = None
-    files: dict[str, tuple[str, int | None, bytes | None]] = field(default_factory=dict)
+    host_comparable: bool = True
+    sessions_comparable: bool = True
+    files: dict[str, tuple[int, bytes | None]] = field(default_factory=dict)
+
+
+# Allow for the encryption envelope and gzip overhead over the plaintext cap.
+_EVENT_BLOB_OVERHEAD_BYTES = 65_536
+
+
+def _read_published_event_blob(
+    backend: LocalBackend,
+    device_id: str,
+    digest: str,
+    passphrase: str,
+    memory_kb: int,
+    max_file_size: int,
+) -> bytes | None:
+    try:
+        enc = backend.get_bounded(
+            blob_key(device_id, digest),
+            max_bytes=max_file_size * 2 + _EVENT_BLOB_OVERHEAD_BYTES,
+        )
+        raw = crypto.decrypt(
+            enc, passphrase, memory_kb=memory_kb, max_plaintext_bytes=max_file_size
+        )
+        return raw if events.event_bytes_match(raw, digest) else None
+    except (OSError, MindMeldError, ValueError):
+        return None
 
 
 def _read_published_usage_baseline(
-    backend: Any,
+    backend: LocalBackend,
     device_id: str,
     passphrase: str,
     memory_kb: int,
@@ -865,11 +892,10 @@ def _read_published_usage_baseline(
 ) -> _PublishedUsageBaseline:
     """Capture this machine's last published usage baseline from ``prior_manifest``.
 
-    Uses verified local day files on the common fast path (zero backend
-    decryption), falling back to a bounded single-blob decrypt only when a
-    published day file is missing locally or already modified on disk before
-    capture (e.g. queued catch-up rows appended earlier today). Best-effort:
-    never fails a push.
+    Check the local accepted bytes first, including an unchanged prefix when
+    capture catch-up has appended to a published day. Allow one bounded blob
+    read for a missing or rewritten revision. An unread day that could contain
+    the latest snapshot leaves that comparison inconclusive.
     """
     baseline = _PublishedUsageBaseline()
     try:
@@ -883,65 +909,74 @@ def _read_published_usage_baseline(
 
         base_path = Path(mm_src["path"])
         now = datetime.now(timezone.utc)
-        safe_device = events._safe_device_filename(device_id)
-        host_winner: tuple[tuple, dict[str, Any]] | None = None
-        sessions_winner: tuple[tuple, dict[str, Any]] | None = None
-        decrypt_limit = max(max_file_size * 2, max_file_size + 65_536)
+        host_order = sessions_order = None
+        newest_unread = None
+        tried_blob = False
 
         for delta in range(-1, events.CURSOR_SCAN_DAYS + 1):
             day = now.date() - timedelta(days=delta)
-            rel_default = f"events/{safe_device}-{day.isoformat()}.jsonl"
+            rel_default = f"events/{events.device_event_filename(device_id, day)}"
             stored = _stored_event_key(prior_files, rel_default)
             if stored is None:
                 continue
-            info = prior_files.get(stored)
+            info = prior_files[stored]
             prior_sha = info.get("sha256") if isinstance(info, dict) else None
             if not is_content_hash(prior_sha):
+                if newest_unread is None:
+                    newest_unread = delta
                 continue
 
+            size = info.get("size")
+            prefix_size = size if type(size) is int else None
             raw = events.read_verified_event_bytes(
-                base_path / stored, prior_sha, max_bytes=max_file_size
+                base_path / stored, prior_sha, max_bytes=max_file_size, prefix_size=prefix_size
             )
-            if raw is not None:
-                baseline.files[stored] = (prior_sha, len(raw), None)
-                scan_bytes = raw
-            else:
-                try:
-                    blob_ref = blob_key(device_id, prior_sha)
-                    enc = (
-                        backend.get_bounded(blob_ref, max_bytes=decrypt_limit)
-                        if hasattr(backend, "get_bounded")
-                        else backend.get(blob_ref)
-                    )
-                    prior_bytes = crypto.decrypt(enc, passphrase, memory_kb=memory_kb)
-                except (OSError, MindMeldError, ValueError):
-                    continue
-                baseline.files[stored] = (prior_sha, len(prior_bytes), prior_bytes)
-                scan_bytes = prior_bytes
+            prior_bytes = None
+            if raw is None and not tried_blob:
+                tried_blob = True
+                raw = prior_bytes = _read_published_event_blob(
+                    backend, device_id, prior_sha, passphrase, memory_kb, max_file_size
+                )
+            if raw is None:
+                if newest_unread is None:
+                    newest_unread = delta
+                continue
+            baseline.files[stored] = (len(raw), prior_bytes)
 
             for index, row in enumerate(
-                events.iter_jsonl_bytes(scan_bytes, {"host-usage-snapshot", "sessions-snapshot"})
+                events.iter_jsonl_bytes(raw, {"host-usage-snapshot", "sessions-snapshot"})
             ):
                 kind = row["type"]
                 if kind == "host-usage-snapshot":
                     cand = aggregator.local_host_capture_candidate(row, until=now)
                     if cand is not None:
                         order_rank = cand[0]
-                        if host_winner is None or order_rank > host_winner[0]:
-                            host_winner = (order_rank, row)
+                        if host_order is None or order_rank > host_order:
+                            host_order = order_rank
+                            baseline.host_row = row
                 elif kind == "sessions-snapshot":
                     row_ts = events.parse_aware_ts(row.get("ts"))
                     valid = int(row_ts is not None and row_ts <= now)
                     if delta < 0 and not valid:
                         continue
                     order_rank = (valid, -delta, index)
-                    if sessions_winner is None or order_rank > sessions_winner[0]:
-                        sessions_winner = (order_rank, row)
+                    if sessions_order is None or order_rank > sessions_order:
+                        sessions_order = order_rank
+                        baseline.sessions_row = row
 
-        baseline.host_row = host_winner[1] if host_winner is not None else None
-        baseline.sessions_row = sessions_winner[1] if sessions_winner is not None else None
+        if newest_unread is not None:
+            missing_day = now.date() - timedelta(days=newest_unread)
+            baseline.host_comparable = (
+                host_order is not None
+                and missing_day < host_order[0].astimezone(timezone.utc).date()
+            )
+            baseline.sessions_comparable = (
+                sessions_order is not None
+                and sessions_order[0] == 1
+                and newest_unread > -sessions_order[1]
+            )
     except Exception:
-        return baseline
+        baseline.host_comparable = baseline.sessions_comparable = False
     return baseline
 
 
@@ -950,24 +985,27 @@ def _changed_own_event_files(
     prior: dict,
     device_id: str,
     unverified_host_path: str | None,
-) -> list[tuple[str, dict]]:
+) -> list[tuple[str, dict, str | None]]:
     """Return accepted own-device mm-events files whose bytes changed vs prior."""
-    changed: list[tuple[str, dict]] = []
+    changed: list[tuple[str, dict, str | None]] = []
+    prior_folded = {rel.casefold() for rel in prior if isinstance(rel, str)}
     for rel, info in files.items():
         if not isinstance(rel, str) or not isinstance(info, dict):
             continue
-        if rel == unverified_host_path:
+        if unverified_host_path is not None and rel.casefold() == unverified_host_path.casefold():
             continue
         if not events.is_device_event_file(rel, device_id):
             continue
-        if rel not in prior:
-            changed.append((rel, info))
+        prior_rel = _stored_event_key(prior, rel)
+        if prior_rel is None:
+            if rel.casefold() not in prior_folded:
+                changed.append((rel, info, None))
             continue
-        previous = prior[rel]
+        previous = prior[prior_rel]
         digest = previous.get("sha256") if isinstance(previous, dict) else None
         # Missing recovery evidence cannot prove that an accepted file changed.
         if is_content_hash(digest) and digest != info.get("sha256"):
-            changed.append((rel, info))
+            changed.append((rel, info, prior_rel))
     return changed
 
 
@@ -986,7 +1024,7 @@ def _published_usage_changed(
     accepted_files = _mm_events_files(local_manifest)
     prior_files = _mm_events_files(remote_manifest)
     unverified_host_path = (
-        _stored_event_key(accepted_files, f"events/{captured_appended[0].name}")
+        f"events/{captured_appended[0].name}"
         if captured_appended is not None and not host_usage_published
         else None
     )
@@ -998,6 +1036,7 @@ def _published_usage_changed(
     if (
         captured_appended is not None
         and host_usage_published
+        and baseline.host_comparable
         and events.host_usage_changed(captured_appended[1], baseline.host_row)
     ):
         return True
@@ -1009,7 +1048,7 @@ def _published_usage_changed(
 
     base_path = Path(mm_src["path"])
     now = datetime.now(timezone.utc)
-    for rel, info in changed_files:
+    for rel, info, prior_rel in changed_files:
         expected_sha = info.get("sha256")
         if not is_content_hash(expected_sha):
             continue
@@ -1018,44 +1057,43 @@ def _published_usage_changed(
         )
         if raw is None:
             continue
-        if rel not in prior_files:
+        if prior_rel is None:
             delta_bytes = raw
         else:
-            prior_entry = baseline.files.get(rel)
-            if prior_entry is None:
-                delta_bytes = raw
+            prior_info = prior_files[prior_rel]
+            prior_size, prior_bytes = baseline.files.get(prior_rel, (prior_info.get("size"), None))
+            if (
+                type(prior_size) is int
+                and 0 <= prior_size <= len(raw)
+                and hashlib.sha256(raw[:prior_size]).hexdigest() == prior_info["sha256"]
+            ):
+                delta_bytes = raw[prior_size:]
+            elif prior_bytes is not None:
+                prior_counts = Counter(prior_bytes.splitlines(keepends=True))
+                new_lines: list[bytes] = []
+                for line in raw.splitlines(keepends=True):
+                    if prior_counts[line] > 0:
+                        prior_counts[line] -= 1
+                    else:
+                        new_lines.append(line)
+                delta_bytes = b"".join(new_lines)
             else:
-                prior_sha, prior_size, prior_bytes = prior_entry
-                if prior_bytes is not None and raw.startswith(prior_bytes):
-                    delta_bytes = raw[len(prior_bytes) :]
-                elif (
-                    prior_size is not None
-                    and prior_size <= len(raw)
-                    and hashlib.sha256(raw[:prior_size]).hexdigest() == prior_sha
-                ):
-                    delta_bytes = raw[prior_size:]
-                elif prior_bytes is not None:
-                    prior_counts = Counter(prior_bytes.splitlines(keepends=True))
-                    new_lines: list[bytes] = []
-                    for line in raw.splitlines(keepends=True):
-                        if prior_counts[line] > 0:
-                            prior_counts[line] -= 1
-                        else:
-                            new_lines.append(line)
-                    delta_bytes = b"".join(new_lines)
-                else:
-                    delta_bytes = raw
+                continue  # Unknown prior bytes cannot prove which rows are new.
         for row in events.iter_jsonl_bytes(
             delta_bytes, {"host-usage-snapshot", "sessions-snapshot", "git-snapshot"}
         ):
             kind = row["type"]
             if kind == "host-usage-snapshot":
-                if aggregator.local_host_capture_candidate(
-                    row, until=now
-                ) is not None and events.host_usage_changed(row, baseline.host_row):
+                if (
+                    baseline.host_comparable
+                    and aggregator.local_host_capture_candidate(row, until=now) is not None
+                    and events.host_usage_changed(row, baseline.host_row)
+                ):
                     return True
             elif kind == "sessions-snapshot":
-                if events.sessions_usage_changed(row, baseline.sessions_row):
+                if baseline.sessions_comparable and events.sessions_usage_changed(
+                    row, baseline.sessions_row
+                ):
                     return True
             elif kind == "git-snapshot":
                 if events.git_snapshot_counts_as_usage(row):
@@ -2730,7 +2768,9 @@ def _push_core(
                     attempt=attempt,
                 )
                 result.usage_published = bool(
-                    result.host_usage_published
+                    result_observer is not None
+                    and result.host_usage_published
+                    and usage_baseline.host_comparable
                     and events.host_usage_changed(captured.appended[1], usage_baseline.host_row)
                 )
             except Exception as e:

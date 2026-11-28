@@ -51,6 +51,7 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -63,8 +64,8 @@ from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
 )
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from pathlib import Path, PurePosixPath
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence, TypedDict
 
 from mind_meld import config as mm_config
@@ -4155,8 +4156,7 @@ def write_push_event(
                 today = max(today, ts.astimezone(timezone.utc).date())
             except OverflowError:
                 pass  # Invalid UTC timestamps are rejected by consumers.
-    safe_device = _safe_device_filename(device_id)
-    path = events_dir / f"{safe_device}-{today.isoformat()}.jsonl"
+    path = events_dir / device_event_filename(device_id, today)
     lines = [json.dumps(wire_row(e), sort_keys=True).encode("utf-8") for e in events]
     try:
         fsutil.flock_append_jsonl(path, lines, mode=0o600, strict=strict, max_bytes=max_file_size)
@@ -4184,13 +4184,26 @@ def _safe_device_filename(device_id: str) -> str:
     return out or "unknown"
 
 
+def device_event_filename(device_id: str, day: date) -> str:
+    """Use the same daily filename for writes and published-baseline lookups."""
+    return f"{_safe_device_filename(device_id)}-{day.isoformat()}.jsonl"
+
+
 def is_device_event_file(rel: str, device_id: str) -> bool:
     """Return True iff ``rel`` is a daily JSONL file owned by ``device_id``."""
     if not isinstance(rel, str) or not rel:
         return False
-    name = PurePosixPath(rel).name
+    directory, _, name = rel.partition("/")
     prefix = f"{_safe_device_filename(device_id)}-"
-    return name.startswith(prefix) and name.endswith(".jsonl")
+    suffix = ".jsonl"
+    if directory.casefold() != "events" or not name.startswith(prefix) or not name.endswith(suffix):
+        return False
+    day_text = name[len(prefix) : -len(suffix)]
+    try:
+        day = date.fromisoformat(day_text)
+    except ValueError:
+        return False
+    return day.isoformat() == day_text
 
 
 def _usage_bucket_grew(cur: Mapping[str, Any], prior: Mapping[str, Any]) -> bool:
@@ -4250,6 +4263,20 @@ def _host_usage_grew(
     return False
 
 
+def _host_days(row: Mapping[str, Any]) -> dict:
+    hosts = row.get("hosts")
+    if not isinstance(hosts, Mapping):
+        return {}
+    return {family: days for family, days in hosts.items() if isinstance(days, Mapping) and days}
+
+
+def _reader_names(row: Mapping[str, Any], field: str) -> set[str]:
+    names = row.get(field)
+    if not isinstance(names, (list, tuple, set, frozenset)):
+        return set()
+    return {name for name in names if isinstance(name, str)}
+
+
 def host_usage_changed(
     current: Mapping[str, Any],
     prior: Mapping[str, Any] | None,
@@ -4257,22 +4284,14 @@ def host_usage_changed(
     """Return True iff published host usage totals changed vs ``prior``.
 
     Ignores timestamp, device_name, and coverage/degradation metadata changes
-    when totals are unchanged. When a previously contributing reader drops out
-    (e.g. hits deadline), requires a strict bucket or counter increase so a
-    reader dropout on an idle machine does not report false usage publication.
+    when totals are unchanged. With partial reader coverage, require a strict
+    bucket or counter increase so a deadline alone does not report new usage.
     """
-    cur_hosts = current.get("hosts") if isinstance(current.get("hosts"), Mapping) else {}
-    cur_non_empty = any(isinstance(days, Mapping) and bool(days) for days in cur_hosts.values())
+    cur_hosts = _host_days(current)
     if prior is None:
-        return cur_non_empty
+        return bool(cur_hosts)
     cur_by_day = (
         current.get("tokens_by_day") if isinstance(current.get("tokens_by_day"), Mapping) else {}
-    )
-    raw_cur_sources = current.get("token_sources")
-    cur_sources = (
-        {s for s in raw_cur_sources if isinstance(s, str)}
-        if isinstance(raw_cur_sources, (list, tuple, set, frozenset))
-        else set()
     )
     cur_sem = (
         current.get("counter_semantics")
@@ -4280,30 +4299,24 @@ def host_usage_changed(
         else None
     )
 
-    prior_hosts = prior.get("hosts") if isinstance(prior.get("hosts"), Mapping) else {}
+    prior_hosts = _host_days(prior)
     prior_by_day = (
         prior.get("tokens_by_day") if isinstance(prior.get("tokens_by_day"), Mapping) else {}
-    )
-    raw_prior_sources = prior.get("token_sources")
-    prior_sources = (
-        {s for s in raw_prior_sources if isinstance(s, str)}
-        if isinstance(raw_prior_sources, (list, tuple, set, frozenset))
-        else set()
     )
     prior_sem = (
         prior.get("counter_semantics") if isinstance(prior.get("counter_semantics"), str) else None
     )
 
-    lost_reader = bool(prior_sources - cur_sources)
-    if lost_reader:
-        if cur_sem != prior_sem and cur_non_empty:
-            return True
-        return _host_usage_grew(cur_hosts, prior_hosts, cur_by_day, prior_by_day)
-    return (
-        cur_hosts != prior_hosts
-        or cur_by_day != prior_by_day
-        or (cur_sem != prior_sem and cur_non_empty)
+    if cur_sem != prior_sem and cur_hosts:
+        return True
+    with_partial_coverage = (
+        _reader_names(prior, "token_sources") - _reader_names(current, "token_sources")
+        or _reader_names(current, "partial_sources")
+        or _reader_names(current, "degraded_sources")
     )
+    if with_partial_coverage:
+        return _host_usage_grew(cur_hosts, prior_hosts, cur_by_day, prior_by_day)
+    return cur_hosts != prior_hosts or cur_by_day != prior_by_day
 
 
 def _canonical_sessions_map(
@@ -4390,39 +4403,41 @@ def iter_jsonl_bytes(raw: bytes, row_types: set[str]) -> Iterator[dict]:
                 yield obj
 
 
+def event_bytes_match(raw: bytes, expected_sha: str) -> bool:
+    """Verify the digest and require a complete bounded-line read."""
+    if hashlib.sha256(raw).hexdigest() != expected_sha:
+        return False
+    return all(
+        line
+        for line, _ in token_usage.iter_bounded_lines(
+            io.BytesIO(raw), "<event bytes>", 0, label="events verifier", yield_final_partial=True
+        )
+    )
+
+
 def read_verified_event_bytes(
     path: Path,
     expected_sha: str,
     *,
     max_bytes: int,
+    prefix_size: int | None = None,
 ) -> bytes | None:
-    """Read an event day file in one open and verify identity, bounds, and SHA-256."""
-    if max_bytes < 0:
-        return None
+    """Verify a regular event file, or the prefix named by a prior manifest."""
     try:
-        with open(path, "rb") as f:
+        if not path.is_file():
+            return None
+        # A path can change file type between the lookup and the open.
+        with open(path, "rb", opener=lambda p, flags: os.open(p, flags | os.O_NONBLOCK)) as f:
             before = os.fstat(f.fileno())
-            if before.st_size > max_bytes:
+            size = before.st_size if prefix_size is None else prefix_size
+            if not stat.S_ISREG(before.st_mode) or not 0 <= size <= min(max_bytes, before.st_size):
                 return None
-            digest = hashlib.sha256()
-            buf = bytearray()
-            for raw, _end in token_usage.iter_bounded_lines(
-                f, str(path), 0, label="events verifier", yield_final_partial=True
-            ):
-                if len(buf) + len(raw) > max_bytes:
-                    return None
-                digest.update(raw)
-                buf.extend(raw)
-            after = path.stat()
-            if (
-                _event_file_identity(before) != _event_file_identity(after)
-                or len(buf) != before.st_size
-                or before.st_size != after.st_size
-            ):
+            raw = f.read(size)
+            if len(raw) != size or not event_bytes_match(raw, expected_sha):
                 return None
-            if digest.hexdigest() != expected_sha:
+            if _event_file_identity(before) != _event_file_identity(path.stat()):
                 return None
-            return bytes(buf)
+            return raw
     except OSError:
         return None
 

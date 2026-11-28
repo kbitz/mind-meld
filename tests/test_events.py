@@ -5027,6 +5027,8 @@ def test_is_device_event_file_171a() -> None:
     assert events.is_device_event_file("events/dev-a-2026-11-27.jsonl", "dev-a") is True
     assert events.is_device_event_file("Events/dev-a-2026-11-27.jsonl", "dev-a") is True
     assert events.is_device_event_file("events/dev-b-2026-11-27.jsonl", "dev-a") is False
+    assert events.is_device_event_file("events/dev-a-2-2026-11-27.jsonl", "dev-a") is False
+    assert events.is_device_event_file("other/dev-a-2026-11-27.jsonl", "dev-a") is False
     assert events.is_device_event_file("events/dev-a-2026-11-27.txt", "dev-a") is False
     assert events.is_device_event_file("", "dev-a") is False
     assert events.is_device_event_file("events/dev_a_1-2026-11-27.jsonl", "dev/a:1") is True
@@ -5079,6 +5081,9 @@ def test_host_usage_changed_171a() -> None:
         "partial_sources": ["codex"],
     }
     assert events.host_usage_changed(refreshed, base_row) is False
+    assert not events.host_usage_changed(
+        {**base_row, "hosts": {**base_row["hosts"], "grok": {}}}, base_row
+    )
 
     # Real growth, new day, new by_model entry, and counter_semantics upgrade on non-empty hosts.
     grown = {
@@ -5145,6 +5150,16 @@ def test_host_usage_changed_171a() -> None:
     }
     # Grok drops out, Codex unchanged -> False.
     assert events.host_usage_changed(base_row, two_readers) is False
+    # A deadline can leave a reader contributing a smaller, partial total.
+    partial = {
+        **two_readers,
+        "partial_sources": ["grok"],
+        "hosts": {
+            **two_readers["hosts"],
+            "grok": {day: {"input": 20, "cache_create": 0, "cache_read": 0, "output": 10}},
+        },
+    }
+    assert not events.host_usage_changed(partial, two_readers)
     # Grok drops out, Codex grew -> True.
     assert events.host_usage_changed(grown, two_readers) is True
     # Later Grok recovers its totals -> True.

@@ -107,6 +107,12 @@ unchanged `sessions-snapshot` (order-insensitive across project rotation),
 coverage/metadata-only changes, and reader dropouts without increased totals are
 ignored.
 
+Own-device files must match the daily filename exactly. The comparison uses a
+hash-verified local prefix or, for a missing or rewritten prior revision, one
+bounded encrypted-blob read. A case-only spelling change preserves the prior
+identity. An unread prior revision leaves its new rows unproven. If it could
+contain the latest host or session snapshot, that comparison is inconclusive.
+
 Usage publication and deadline-stopped attended host readers
 (`PushResult.catching_up_readers`, in canonical `HOST_USAGE_TOKEN_SOURCES` order)
 render on the lead `Push:`

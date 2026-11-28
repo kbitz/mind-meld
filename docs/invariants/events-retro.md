@@ -2178,6 +2178,10 @@ preserving `as_of` freshness, `attemptlog`, `--verbose`
 receipts even when totals are unchanged; separately, `PushResult.usage_published`
 gates `; usage published` on changed published usage totals or queued catch-up
 data compared against the prior accepted manifest baseline (Track 171A).
+For an already published day, only rows beyond a verified prefix or absent from
+its verified prior bytes count. A rewrite can use one bounded decrypt of the
+prior blob. If the prior bytes are unavailable, publication freshness is still
+reported separately from whether usage changed.
 The capture-specific former `on_manifest_accepted` callback is gone; 78A
 uses a facts-only result observer at this boundary.
 
