@@ -80,7 +80,7 @@ To approve a join from a fleet machine where you manage Syncthing, accept the ne
 
 <a id="retiring-a-dead-machine"></a>
 
-1. Run `mm pull` on a machine with the same home folder path, so the retiring machine's last project memory lands on disk. Keep its manifests and blobs in the shared folder for any work still to pull.
+1. Run `mm pull` on a machine with the same home folder path. Check that the retiring machine's last project memory and any other files you still need have arrived before retiring it. Leave its manifests and blobs in the shared folder.
 2. Shut the old machine down, or stop its hooks and Syncthing. A later push from it registers it again.
 3. On an active machine, retire it by name, or by the 8-character ID that `mm devices` lists:
 
@@ -238,7 +238,7 @@ cp -n "$copies/$source_name/$copy_path" "$source_dir/$origin_path"
 mm push
 ```
 
-If many files were deleted by mistake, pause pull hooks on unaffected machines. Preview with `mm pull --dry-run` before pulling there. Restore and push on the origin first, then resume pulls and hooks. Save recovery copies you still need before `mm gc` or a later pull clears copies older than 30 days.
+If many files were deleted by mistake, pause pull hooks on unaffected machines. Restore and push on the origin, then wait for Syncthing to deliver the new manifest. Resume pulls and hooks once `mm pull --dry-run --verbose` on each peer shows that it would leave the restored files in place. Save recovery copies you still need before `mm gc` or a later pull clears copies older than 30 days.
 
 <a id="history-database"></a>
 ### History database (state.db)
@@ -247,11 +247,11 @@ If many files were deleted by mistake, pause pull hooks on unaffected machines. 
 
 ### Newer or damaged storage format
 
-If `mm` reports a newer format, leave the key header in place and run `mm update`. If the latest release still reports damage, run `mm diag` and wait for Syncthing to finish. For a missing or unreadable `mm-crypto-init`, back up every header outside the shared folder. Move any damaged canonical file aside and copy a verified header from this same fleet into `mm-crypto-init` without overwriting another file. Keep any usable conflict copy in place until the canonical header is restored. Verify with `mm pull`. Never initialize a new fleet or re-key this folder to repair it.
+If `mm` reports a newer format, leave the key header in place and run `mm update`. If the latest release still reports damage, run `mm diag` and wait for Syncthing to finish. If `mm-crypto-init` is missing, unreadable or confirmed to be from the wrong fleet, restore only from a verified copy of this fleet's header. Back up every header outside the shared folder before moving a damaged or wrong canonical file aside. Copy the verified header into `mm-crypto-init` without overwriting another file. Keep any usable conflict copy in place until the canonical header is restored. Verify with `mm pull`. Never initialize a new fleet or re-key this folder to repair it.
 
 ### Key header copies differ
 
-`mm` removes only identical copies of the key header. A count of differing copies alone needs no action. If a fingerprint mismatch persists after Syncthing finishes, use a machine that previously synced successfully and back up every header outside the shared folder. Keep a usable header in place. Move extra copies aside one at a time and check `mm status` after each move. Stop when the mismatch clears. Undo a move immediately if the header goes missing, and restore all copies if none of the moves helps. If the canonical header is missing or unreadable, use the [restore steps above](#newer-or-damaged-storage-format).
+`mm` removes only identical copies of the key header. A count of differing copies alone needs no action. If a fingerprint mismatch persists after Syncthing finishes, use a machine that previously synced successfully and back up every header outside the shared folder. Keep a usable header in place. Move extra copies aside one at a time and check `mm status` after each move. Stop when the mismatch clears. Undo a move immediately if the header goes missing, and restore all copies if none of the moves helps. If the canonical header itself is wrong, use the [restore steps above](#newer-or-damaged-storage-format) with a copy that matches the fleet's expected fingerprint. Stop if you can't verify a copy.
 
 ### Dropped repositories and ignored git environment variables
 
