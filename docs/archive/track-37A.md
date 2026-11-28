@@ -7,7 +7,7 @@ ROADMAP.md holds the card. This file holds the review residue so the card
 stays lean.
 
 Full review (1,280 lines, 2026-09-01):
-`~/.gstack/projects/kbitz-mind-meld/kbitz-fresh-workspace-verify-autoplan-plan-20260901.md`
+`~/.gstack/projects/<project>/fresh-workspace-verify-autoplan-plan-20260901.md`
 
 ## Approach E
 

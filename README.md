@@ -2,17 +2,17 @@
 
 [![CI](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml/badge.svg)](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml)
 
-Mind Meld (`mm`) keeps your AI coding-agent context identical across macOS and Arch-based Linux machines through one shared Syncthing folder — end-to-end encrypted, with no server. It syncs **Claude Code**, **Codex**, **Grok Build**, **Muse**, **Antigravity**, **gstack**, and **gstack-extend**, reports fleet-wide usage with **`/retro-fleet`**, and maintains a local cross-model memory search index with **`qmd`**.
+Mind Meld (`mm`) syncs your AI coding-agent context across macOS and Arch Linux. It encrypts your data before writing it to your shared Syncthing folder. Sync sources include **Claude Code**, **Codex**, **Grok Build**, **Muse**, **Antigravity**, **gstack**, and **gstack-extend**. Use **`/retro-fleet`** for usage across machines and **`qmd`** to search their memories locally.
 
 ## Install
 
-On macOS or Arch-based Linux, run the bootstrap script from the `latest` release branch:
+On macOS, install [Homebrew](https://brew.sh/) first. On macOS or Arch Linux, run the bootstrap script from the `latest` release branch:
 
 ```bash
 mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap) && sh -c "$mm_bootstrap"
 ```
 
-The script installs missing prerequisites (Homebrew on macOS, `pacman` on Arch: Python 3.11+, `pipx`, Syncthing 2.1+, `git`, and `qmd` 2.8.3+ via Bun or npm), installs or upgrades `mm` from `@latest` through `pipx`, and enables Syncthing at login when Syncthing still has its default configuration. On a pre-existing Syncthing configuration it changes nothing and points you to [Configuring Syncthing yourself](#configuring-syncthing-yourself). Rerunning on an up-to-date machine is a no-op.
+The script uses Homebrew on macOS or `pacman` on Arch to install missing Python 3.11+, `pipx`, and Syncthing 2.1+. It installs missing Git on Arch, installs or updates `mm` via `pipx`, and tries to install `qmd` via Bun or npm. With default Syncthing settings it enables Syncthing at login. If you already configure Syncthing yourself, follow the [manual setup](#configuring-syncthing-yourself).
 
 For a manual install when you already have Python 3.11+, `pipx`, and Syncthing 2.1+:
 
@@ -24,7 +24,7 @@ The `@latest` branch tracks each tagged release, so `mm update` and `pipx upgrad
 
 ## Quick Start
 
-The shared store lives at the root of one Syncthing folder (`~/Sync/mind-meld` by default).
+The shared store lives at the root of one Syncthing folder (`~/Sync/mind-meld` by default). On Arch Linux, install `gnome-keyring` and `libsecret` and unlock your login keyring in the desktop session. If you sync Claude Code project memory, open Claude Code once before `mm init` so `~/.claude` exists.
 
 ```bash
 # First machine of a new fleet (empty folder):
@@ -34,8 +34,8 @@ mm push
 
 # Joining machine:
 mm init                  # asks start/join, saves answers, pairs with one fleet machine, waits for approval
-# On the fleet machine whose ID you pasted:
-mm devices approve <short-id>
+# On the fleet machine whose ID you pasted, run the approval command printed by init.
+# Use its Syncthing GUI if you manage Syncthing there yourself (see below).
 # Back on the joining machine once init finishes pulling:
 mm push
 
@@ -64,28 +64,28 @@ Pull: 1 content change from mac-a.
 
 ## Setting up another machine
 
-On a machine whose Syncthing still has its default configuration (no paired devices, and only an unshared, empty Default Folder), `mm init` handles Syncthing setup automatically:
+On a machine whose Syncthing still has its default configuration (no paired devices or custom folders, and any stock Default Folder is empty and unshared), `mm init` handles Syncthing setup automatically:
 
 1. Run `mm init` and choose join (`j`). It asks for the storage path, one existing fleet machine's Syncthing device ID, this machine's name, sync sources, and optional `qmd` memory-index settings, then saves those answers (never the passphrase) in `~/.config/mind-meld/join.toml`.
-2. `mm init` pairs with that fleet machine and prints this machine's Syncthing ID along with copyable `mm devices approve <short-id>` and `mm devices approve <device-id>` commands, then waits up to ~10 minutes for approval and the fleet key header.
-3. On the fleet machine, run `mm devices approve <short-id>` (or `mm devices approve` with no argument on a terminal to pick interactively). Compare the 7-character short ID before approving.
+2. `mm init` pairs with that fleet machine and prints this machine's Syncthing ID and copyable approval commands. The approval wait lasts about 10 minutes.
+3. On the fleet machine, run the printed `mm devices approve <short-id>` or `mm devices approve <device-id>` command if `mm` manages Syncthing there. Compare the 7-character short ID before approving. For an owner-managed fleet machine, [approve through Syncthing](#configuring-syncthing-yourself).
 4. Once approved, the joining machine accepts the folder, prompts for the fleet passphrase, verifies it, registers itself, publishes its encrypted `syncthing/<id>.enc` record, and pulls.
 
 If the wait times out or you press Ctrl-C, `mm init` exits with `Run: mm init`. Rerunning offers to resume with your saved answers so you don't retype them.
 
 **One approval connects the whole managed mesh.** Each machine publishes its own Syncthing device ID in encrypted `syncthing/<id>.enc`. On every other machine where `mm` manages Syncthing, the next `mm push`, `mm pull`, `mm autopush`, or `mm autopull` pairs knocking fleet peers vouched by those records, clears stale introducer flags, keeps device names aligned, and removes disconnected retired devices — no introducers required.
 
-**Linux keyring note:** On Arch Linux, `mm` stores the fleet passphrase in Secret Service (`gnome-keyring` / `libsecret`). Unlock your login keyring in the desktop session before running `mm` or agent hooks.
-
-**Retiring a machine:** Run `mm devices retire <name|id>` on any active machine (interactive runs confirm with `[y/n] (Enter = n)`; `--yes` and non-terminal runs require the exact 8-character Mind Meld device ID from `mm devices`). It writes an encrypted `retired/<id>.enc` record and removes `syncthing/<id>.enc` and `devices/<id>.json`, so managed peers drop the retired device automatically on their next sync.
+**Retiring a machine:** [Save its unpulled work and disconnect it first](#retiring-a-dead-machine), then run `mm devices retire <name|id>` on an active machine. It writes an encrypted `retired/<id>.enc` record and removes `syncthing/<id>.enc` and `devices/<id>.json`. Managed peers remove eligible disconnected devices on a later sync.
 
 ### Configuring Syncthing yourself
 
 If a machine already has its own Syncthing configuration (paired devices, custom folders, or a non-empty Default Folder), `mm init` leaves Syncthing untouched. Configure Syncthing yourself:
 
-1. Pair this machine with one existing fleet machine. On this owner-managed machine, mark that one fleet machine as an **Introducer** (one-way: `mm`-managed peers do not mark introducers back, so this lets your owner-managed machine learn of new peers without mutual-introducer warnings).
-2. Share the fleet folder (`mind-meld`, path `~/Sync/mind-meld` by default) with the options below.
-3. Wait for `mm-crypto-init` to arrive in the folder, then run `mm init` to enter the passphrase and pull.
+1. [Pair](#pairing-machines-in-syncthing) with one fleet machine. On the **joining owner-managed machine**, mark that fleet machine as an **Introducer** so the joiner learns later peers. Leave the introducer setting off for the joiner on the fleet side.
+2. On the fleet machine, share the folder with ID `mind-meld` with the joiner. On the owner-managed joiner, accept the share at `~/Sync/mind-meld` (or your chosen storage path) and apply the [folder options](#syncthing-folder-options).
+3. Wait for `mm-crypto-init` to arrive, then run `mm init`, choose join, and enter the fleet passphrase when prompted.
+
+If you're approving a join from an owner-managed **fleet machine**, accept the joining device in that machine's Syncthing GUI. Open the `mind-meld` folder's **Edit → Sharing** tab, select the joining device, and save. The waiting managed joiner then accepts the offer.
 
 ### Pairing machines in Syncthing
 
@@ -93,15 +93,24 @@ In the Syncthing GUI (`http://127.0.0.1:8384`), find a machine's ID under **Acti
 
 ### Syncthing folder options
 
-`mm` relies on these folder settings (`mm status` and `mm diag` check them):
+Share the storage root as its own folder. If you also share its parent `~/Sync`, exclude `/mind-meld` in the parent's `.stignore` on each machine that shares it. `mm status` and `mm diag` check the fleet folder settings:
 
 - **Folder type:** Send & Receive
-- **Ignore permissions (`ignorePerms`):** enabled (prevents macOS/Linux mode churn)
+- **Ignore permissions (`ignorePerms`):** off, so mode `0600` survives
 - **File versioning:** none (`mm` keeps its own 30-day deletion recovery copies)
-- **`.stignore`:** present at the folder root (created by `mm init --new-fleet` to ignore `.DS_Store`, temporary lock/swap files)
+- **Maximum conflicts (`maxConflicts`):** `-1` or any positive number so Syncthing keeps conflict copies
+- **Pull order (`order`):** alphabetic, so blobs arrive before the manifests that reference them
+- **`.stignore`:** add `(?d)tmp*.tmp` at the fleet folder root on every owner-managed machine. Managed setup writes the rule locally.
 
 <a id="syncthing-mesh-causes"></a>
-During an attended pull on an `mm`-managed machine, `mm` reports unvouched pending join requests:
+Check mesh problems with `mm status` and `mm diag`:
+
+- **`unreachable`, `timeout`:** make sure local Syncthing is running. The next push or pull retries.
+- **`unauthorized`, `config-unreadable`, `address-unsupported`, `path-unreadable`, `bad-response`:** run `mm diag` to check the local Syncthing configuration and API response.
+- **`no-folder`, `not-mm-folder`:** check the `mind-meld` folder ID, storage path, and options above.
+- **Unreadable or newer-format peer record:** run `mm diag` for an unreadable record, or `mm update` for a newer format.
+
+An attended pull also explains pending join requests:
 
 - **Knocking fleet machine without `syncthing/<id>.enc`:** another registered machine hasn't published its encrypted Syncthing record yet → run `mm update` and `mm push` on that machine.
 - **Superseded old registration:** a re-initialized machine left an old entry → run `mm devices retire <old-id>`.
@@ -111,11 +120,12 @@ During an attended pull on an `mm`-managed machine, `mm` reports unvouched pendi
 
 There is no automated migration tool. Move each Mac on its own schedule — Macs still on iCloud Drive keep syncing until you move them:
 
-1. Run `mm push` on the Mac to flush any final iCloud changes if needed, then uninstall `mm` (`pipx uninstall mind-meld`) and remove `~/.config/mind-meld` (copy anything you want out of `~/.config/mind-meld/deleted/` first).
-2. Reinstall with the [bootstrap script](#install).
-3. Run `mm init --new-fleet` (if this is the first machine on Syncthing) or `mm init` to join an existing Syncthing fleet.
+1. Close agent sessions so hooks stay idle. Optionally run one last `mm push` to iCloud. Back up `~/.config/mind-meld/config.toml` and any custom-excluded files outside your sync sources. A join pulls before you can reapply your exclusions.
+2. Run `pipx uninstall mind-meld`. Keep `~/.config/mind-meld` for the pull ledger and recovery copies. Move `~/.local/share/mind-meld/events` outside the source, for example to `~/mind-meld-icloud-events`, to keep old event history out of the new fleet.
+3. Reinstall with the [bootstrap script](#install). Run `mm init --new-fleet` for the first Syncthing machine or [join](#setting-up-another-machine) with `mm init`. Use the Syncthing path, confirm replacing the config, and decline previously disabled sources.
+4. Reapply your settings and exclusions, restore excluded files from backup, and run `mm push`. If interrupted after init starts, resume at step 3 and retain the original backups.
 
-Your local agent files stay in place and merge through normal pull rules: nothing local is overwritten without a proven base, and differing files keep both copies until `mm resolve`.
+Your agent files merge under the normal [pull conflict rules](#handling-conflicts). iCloud and Syncthing remain separate stores. Save the iCloud folder until every Mac has moved.
 
 ## Commands and output
 
@@ -144,7 +154,7 @@ Your local agent files stay in place and merge through normal pull rules: nothin
 | `mm reconfigure-sources` | Re-run the interactive source selection prompts |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively resolve conflict files with a unified diff (requires a terminal) |
-| `mm recover <source> <path>` | Recover a file from a peer's published manifest into your local tree |
+| `mm recover --abandon-manifest` | Last resort when push reports a corrupt manifest and no recovery source. Quarantines this machine's corrupt manifest and discards its unpublished deletion records. For a deleted file, use [the file recovery recipe](#recovering-a-deleted-file) |
 | `mm gc` | Delete this device's orphaned blobs and run local retention cleanup (including 30-day deleted-file copies); `--dry-run` previews, `--conflicts` also reaps redundant conflict copies older than 30 days |
 | `mm log` | Query local `~/.config/mind-meld/state.db` history. Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed\|deleted}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
 | `mm memory-index [on\|off]` | Inspect or toggle the dedicated `mind-meld` qmd memory index (bare form is read-only) |
@@ -154,6 +164,7 @@ Your local agent files stay in place and merge through normal pull rules: nothin
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`; `--no-author-filter`, `--dump-host-usage`, `--set-model-price`, `--mark-pricing-verified`) |
 | `mm install-skills` | Install or repair `retro-fleet` skill links for authorized agents (`--agent KEY` grants link maintenance for one agent without enabling sync) |
 | `mm update` | Update `mm` to the latest release via `pipx` (needs no config or passphrase) |
+| `mm autopull` / `mm autopush` | Run pull or push from agent hooks without prompts |
 
 ### Sync outcomes
 
@@ -213,9 +224,7 @@ For a write-free CI gate, run `mm pull --dry-run --conflict-mode fail` (0 = no c
 | 3 | `pull --conflict-mode fail` predicted a conflict or local failure (including with `--dry-run`) |
 | 4 | `mm recapture` completed only partially |
 
-## Sources, agents, and cross-model memory
-
-### Project memory across machines
+## Project memory across machines
 
 Claude Code project memory (`~/.claude/projects/<encoded>/memory/` and `todos/`) is mapped across machines by each repository's canonical git `origin` remote — so a repo at `/Users/user/code/app` on macOS and `/home/user/src/app` on Linux shares one project memory automatically. A project without a network `origin` falls back to its home-relative path when it lives under `$HOME`; projects outside `$HOME` with no `origin` stay machine-specific.
 
@@ -225,29 +234,29 @@ Claude Code project memory (`~/.claude/projects/<encoded>/memory/` and `todos/`)
 
 Add this to your global `~/.claude/CLAUDE.md`:
 
-```markdown
+````markdown
 # Mind Meld
 
 At the **start of each conversation**, run:
 
-\`\`\`bash
+```bash
 mm autopull
-\`\`\`
+```
 
 - **No output:** Synced (or already in sync). Continue silently.
 - **Any output:** Surface conflicts, deletions, warnings and their suggested fixes.
 
 At the **end of each conversation** (when wrapping up or completing the requested task), run:
 
-\`\`\`bash
+```bash
 mm autopush
-\`\`\`
+```
 
 - **No output:** Nothing was printed. Continue normally.
 - **Any output:** Surface skips, warnings and their suggested fixes.
 
-If `mm` is not installed, both commands fail silently — no action needed.
-```
+Skip these hooks when `mm` is not installed.
+````
 
 ### How it works
 
@@ -309,11 +318,15 @@ Mind Meld can maintain one local [qmd](https://github.com/tobi/qmd) search index
    codex mcp add mind-meld -- qmd --index mind-meld mcp
    ```
 
+## Other sources
+
 ### Grok Build
 
 `mm enable-source grok` syncs `~/.grok` `skills/`, `commands/`, `rules/`, and `memory-v2/` topic Markdown (`memory-v2/global/topics/**/*.md` and `memory-v2/workspaces/*/topics/**/*.md`), and consents to reading completed turn totals from `~/.grok/sessions/*/*/usage.json` (including Paseo ACP runs). Sessions, SQLite indexes, `MEMORY.md`, `archive/`, `observations/`, `config.toml`, `auth.json`, `plugins/`, and `hooks/` stay local. Grok Build reads `~/.claude/skills`, so `mm` keeps no separate Grok skill link.
 
 #### Grok memory across machines
+
+Add `[memory]` with `enabled = true` to `~/.grok/config.toml` on each machine that should use Grok memory.
 
 - **Topics only:** pending `observations/` (including `_inbox/`) stay local because Grok 1.0.77 does not consolidate transferred captures ([live check](docs/archive/host-parity.md#track-111a-review-follow-up-grok-1077-2026-11-06)). Before switching machines, run `/flush` then `/dream` in Grok, then `mm push`; run `mm pull` on the receiving machine before starting Grok.
 - **Repository scopes:** global topics and repos with a network `origin` remote match across machines; no-origin repos and plain directories transfer as inert copies.
@@ -348,7 +361,7 @@ Walkers skip any directory strictly below a source root that contains a `.git` f
 
 ### Garbage collection
 
-Attended content-changing pushes automatically delete this machine's orphaned blobs. Run `mm gc` anytime to clean up orphaned blobs and local retention files (including 30-day deleted-file copies), or `mm gc --conflicts` to also reap redundant `.sync-conflict-*` copies older than 30 days (live conflicts are never reaped).
+Attended content-changing pushes clean up this machine's orphaned blobs. If you use only hooks, run `mm gc` periodically to clean up orphaned blobs and expired local recovery copies. Use `mm gc --conflicts` to also reap redundant conflict copies older than 30 days.
 
 ## Disabling sources per machine
 
@@ -356,11 +369,11 @@ Run `mm disable-source <name>` to stop syncing a source on one machine without d
 
 ## Managing agent skill links per machine
 
-`mm` maintains a `/retro-fleet` skill link in `~/.local/share/mind-meld/agent-skills/retro-fleet/` for each authorized agent that does not discover `~/.claude/skills` (Claude Code, Codex, and Antigravity). Enabling an agent's sync source authorizes its link; to manage links without enabling sync, run `mm install-skills --agent <key>` or set `agents = ["claude", "codex"]` under `[skills]` in `config.toml`.
+`mm` links `/retro-fleet` from the skill directories of authorized Claude Code, Codex, and Antigravity installs to the shared local copy at `~/.local/share/mind-meld/agent-skills/retro-fleet/`. Enabling a source authorizes its link. To authorize one without enabling sync, run `mm install-skills --agent <key>` or set `agents = ["claude", "codex"]` under `[skills]` in `config.toml`.
 
 ### Removing a skill link
 
-To remove `/retro-fleet` from one agent while keeping `mm`, remove its symlink (e.g., `rm ~/.codex/skills/retro-fleet`) — `mm` records an absent link as intentional (`removed-by-user`) and will not recreate it unless you run `mm install-skills --agent <key>`.
+To remove `/retro-fleet` from one agent while keeping `mm`, remove its symlink (for example `rm ~/.codex/skills/retro-fleet`). Routine pushes respect `removed-by-user`. Run `mm install-skills` to restore authorized links, or add `--agent <key>` to grant maintenance for that agent first.
 
 ## Fleet retro (`/retro-fleet`)
 
@@ -379,9 +392,9 @@ Run `/retro-fleet` in an agent or `mm retro-fleet 7d` (or `30d`, etc.) in a term
 
 ## Handling conflicts
 
-- **Fast-forward:** a peer's edit to a file you have not changed since your last sync applies directly.
-- **Auto-merge:** `.jsonl` files (set-union sorted by string `ts`) and `MEMORY.md` (3-way line merge) merge automatically.
-- **Keep-both (default):** when two machines edit the same non-mergeable file, `mm pull` preserves your local canonical bytes and writes the peer's version to `<file>.sync-conflict-<timestamp>-<device>`.
+- **Fast-forward:** a peer's edit to a file you have not changed since your last sync can apply directly, without a recovery copy.
+- **Auto-merge:** concurrent edits to `.jsonl` and `MEMORY.md` combine lines. In `.jsonl`, records with string `ts` sort by that value before the other lines.
+- **Keep-both (default):** when two machines edit the same non-mergeable file, `mm pull` keeps the local version at its current path and saves the peer's version as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>`.
 - **Resolve:** inspect with `mm conflicts`, resolve interactively with `mm resolve` (keep local, keep remote, merge, or promote an orphan sidecar), then `mm push`. Use `mm gc --conflicts` to clean up redundant conflict copies older than 30 days.
 
 ## Upgrading
@@ -406,7 +419,7 @@ auto_install = false   # keep check + notice, never run pipx
 auto_check = false     # disable checks and updates completely
 ```
 
-Pass `--no-check-version` to skip for one command. To roll back to a specific tag, force-reinstall that tag (`UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@vX.Y.Z`); tag-pinned installs are never auto-updated until you run `mm update`.
+Run `mm --no-check-version <command>` to skip the check and update once. Before rolling back, check the [upgrade notes](docs/archive/upgrading-1x.md) and storage-format requirements for the target tag. On the Syncthing fleet, use a release that supports its shared folder layout and registrations. Force-reinstall the tag with `UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@vX.Y.Z`. If you need the older bundled skill, move the local skill store aside before running `mm install-skills`. A pin holds until you run `mm update`.
 
 ## Versioning and compatibility
 
@@ -417,7 +430,9 @@ Mind Meld has one user and makes no compatibility promise beyond storage-format 
 <a id="history-database"></a>
 ### History database (state.db)
 
-`~/.config/mind-meld/state.db` stores pull/push/self-upgrade history (`mm log`), the pull ledger (`peer_base`, `seen_version`), and peer cursors. It is local and never synced. If `state.db` is unreadable or corrupt, `mm diag` reports the SQLite error; move the damaged file aside and `mm` recreates a fresh database on the next sync (existing files on disk are preserved; the next pull conservatively keeps both copies if two machines differ without a recorded base).
+`~/.config/mind-meld/state.db` holds local history (`mm log`), the pull ledger, and peer cursors. Run `mm diag` to tell an interrupted write from damage. If the database is busy, wait for the other command. For a newer schema, run `mm update`. After an interrupted write, let the next attended `mm push` or `mm pull` recover its journal.
+
+If the database is damaged, stop sync commands and hooks. Move `state.db` and its `state.db-*` companions **together** to a backup directory. The next sync builds a fresh database. Keep the backup if you need the previous history.
 
 ### Recovering a deleted file
 
@@ -436,6 +451,8 @@ cp -n "$copies/$source_name/$copy_path" "$source_dir/$origin_path"
 mm push
 ```
 
+**Many files were deleted by mistake:** Pause the `mm autopull` hook on machines that have yet to pull. Use `mm pull --dry-run` to see which files are queued for deletion. Gather recovery copies from machines that already pulled, restore them on the origin as above, and push there. Resume hooks and attended pulls once that push has been delivered.
+
 ### Syncthing stalled or needs a restart
 
 If Syncthing stops delivering files or appears stuck, restart it cleanly from the CLI and recheck fleet state:
@@ -448,7 +465,7 @@ mm diag
 
 ### Another mm operation is running
 
-`mm` holds an exclusive lock at `~/.config/mind-meld/mm.lock` while syncing. Wait for the other command or hook to finish and retry. Never delete a live lockfile.
+`mm` holds an exclusive lock at `~/.config/mind-meld/mind-meld.lock` while syncing. Wait for the other command or hook to finish and retry. Never delete a live lockfile.
 
 ### Auto commands skip: keyring locked or unavailable
 
@@ -456,15 +473,21 @@ On Linux, `autopull` and `autopush` never trigger a desktop keyring unlock promp
 
 ### Retiring a dead machine
 
-Run `mm devices retire <name|id>` on an active machine (use the 8-character ID from `mm devices` for `--yes` or non-interactive runs). On owner-managed Syncthing machines, also remove the dead device in the Syncthing GUI.
+1. Pull on a machine with the same home folder as the one you're retiring to bring its available project memory onto disk. Keep that device's manifests and blobs for any work still to pull.
+2. Shut down the retired machine or stop its `mm` hooks and Syncthing. A later push from that machine can register it again.
+3. Run `mm devices retire <name|id>` on an active machine. Interactive runs confirm with Enter defaulting to no. For `--yes` or non-interactive runs, use the exact 8-character ID from `mm devices`.
+
+Managed peers wait for the device to disconnect. On owner-managed peers, remove it in the Syncthing GUI, including at the introducer if it can reintroduce the retired device.
 
 ### Newer or damaged storage format
 
-An older `mm` refuses envelopes or manifests written with a newer format version rather than corrupting them. Run `mm update` on this machine, verify `mm --version`, and retry.
+If `mm` reports a newer format, leave the key headers in place and run `mm update`. Verify with `mm --version` and retry. If the latest release still reports damage, wait for Syncthing to finish and get a known-good `mm-crypto-init` from a working machine or backup. Back up every header outside the shared folder, then move the damaged canonical file aside and restore the known-good header to `mm-crypto-init` without overwriting an existing file. Verify with `mm pull`. Keep the backups. If no valid header is available, stop before changing the store.
 
 ### Key header copies differ
 
-If Syncthing created a conflict copy of `mm-crypto-init`, `mm` refuses to sync until you inspect the copies and keep the single authoritative key header for the fleet (remove the stale conflict copy from the shared folder).
+`mm` removes only byte-identical copies after verifying the passphrase. It preserves differing copies, which may contain the only usable header. A pending-copy count in `mm status` or `mm diag` does not by itself need repair.
+
+If a fingerprint mismatch persists after Syncthing finishes, use a machine that previously synced successfully. Back up **every** header outside the shared folder, then move extra copies to the backup one at a time, keeping a usable header in place. Run `mm status` after each move. Stop when the mismatch clears. If a move causes a missing-header error, undo it immediately. If no move helps, restore all copies. When the canonical file is missing or unreadable, use the [restore procedure above](#newer-or-damaged-storage-format). Never reinitialize or re-key existing storage.
 
 ### Waiting content is not a failure
 
@@ -540,7 +563,7 @@ Host usage last recorded capture: unknown (~/.local/share/mind-meld/events/local
 
 ### Snapshot failures
 
-If a file changes, vanishes, or grows while `mm push` scans or uploads it, `mm` holds that file (keeping its previously published version) and continues publishing the rest of the snapshot. Unreadable files, missing source roots, or files exceeding `sync.max_file_size` refuse the push so a broken scan never publishes false deletions.
+If a file changes, vanishes, or grows while `mm push` scans or uploads it, `mm` can hold that file at its last published version and publish the rest. A failed or incomplete scan of an enabled user source refuses the push rather than guessing which files were deleted. The default local event history has its own [deletion rules](#uninstalling).
 
 ### Shell completion
 
@@ -552,7 +575,9 @@ mm --install-completion
 
 Only want `/retro-fleet` removed from one agent? See [Removing a skill link](#removing-a-skill-link).
 
-`pipx uninstall mind-meld` removes only the `mm` binary. To remove links, local data, config, and keyring entries as well (your shared Syncthing storage folder is untouched unless you delete it separately):
+`pipx uninstall mind-meld` removes the command. Leave the local data and config in place if you plan to reinstall. Removing only `~/.local/share/mind-meld` while keeping your config can make the next push publish missing default event files as deletions.
+
+For a full cleanup, first save any authored skills from the local skill store and any recovery copies you still need from `~/.config/mind-meld/deleted/`. These commands leave the shared Syncthing folder in place for the rest of your fleet.
 
 ```bash
 pipx uninstall mind-meld

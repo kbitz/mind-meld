@@ -60,7 +60,7 @@ no native FAIL or PASS. Evidence class is separately `preflight`, `protocol` or
 |---|---|---|
 | CLI | `codex-cli 0.159.2`; executable SHA-256 `16593cc2f422d5f398a8e40f550ebbaf1245392528957be342c295920a300704` | Exact build only |
 | Actual Conductor app-server | Running process ancestry reaches Conductor; executable resolves to the same 0.159.2 binary; isolated `initialize` reports 0.159.2 | Direct app-server probe is not an isolated Conductor integration |
-| Conductor | 0.89.2, local macOS; device short ID `889e42c0`; UTC date 2026-10-01 | No second-Mac evidence |
+| Conductor | 0.89.2, local macOS; device short ID `aaaa1111`; UTC date 2026-10-01 | No second-Mac evidence |
 | Other daemon | A separate 0.159.3 app-server daemon exists | Excluded from this cohort; never substitute its schema |
 | Memory feature | Observed `memories stable true`; external-agent memory import under development and disabled | Feature labels are candidates, not import qualification |
 | Capture/use | Isolated `config/read` accepts `generate_memories=false`, `use_memories=false` independently; production feature read true, overrides absent | On/on, off/on, on/off behavioral effects unproven; production settings unchanged |
@@ -127,7 +127,7 @@ disabled-source paths, changed roots and bad modes refuse.
 mm's own self-update is a drift event for this receipt. Since 1.3.0,
 `[upgrade] auto_install` (default on) lets push, pull and the hooks replace the
 installed package in place. On 2026-10-02 the installed mm on device
-`889e42c0` was 1.3.0, and the provenance SHA above no longer matched it. Set
+`aaaa1111` was 1.3.0, and the provenance SHA above no longer matched it. Set
 `auto_install = false` for a campaign, or treat any update as a changed
 inventory. Provenance records the installed package version, the installed
 `config.py` and the user's `config.toml`; the checker re-reads all three on
@@ -546,7 +546,7 @@ This table assigns work, without claiming a prototype settled a native gate.
 | Q18 | Raw Claude file sync can resurrect/echo outside controlled view; narrow/disable or establish replica evidence and test actual path before bridge | parity / bridge |
 
 Transport, two-Mac parity and cross-agent sharing are superseded by
-[cross-model memory](cross-model-memory.md); Cursor discovery was killed on
+[cross-model memory](../designs/cross-model-memory.md); Cursor discovery was killed on
 2026-11-07.
 Production host-store/sync code, shared settings and release bookkeeping are
 unchanged. A no-route result is evidence for those owners, not a feature gate waiver.
@@ -555,7 +555,7 @@ unchanged. A no-route result is evidence for those owners, not a feature gate wa
 ## Verification
 
 Working directory: the repository checkout root (a Conductor workspace on
-device `889e42c0`). Python 3.13.15, ruff 0.15.12, pytest 9.1.1. Default tests
+device `aaaa1111`). Python 3.13.15, ruff 0.15.12, pytest 9.1.1. Default tests
 exercise owned synthetic stores and retain existing Keychain/cache protections.
 
 Implementation stage, 2026-10-01. These receipts cover an earlier code snapshot

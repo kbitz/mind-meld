@@ -11,7 +11,7 @@ instead of qmd's default index. After upgrading, run `mm memory-index on` or
 let an enabled sync refresh succeed on each machine that uses the index.
 This builds the dedicated index. On machines with a legacy refresh record,
 it also removes the old `mm-` collections from the default index. Then use
-[Agent setup](#agent-setup) to replace the old pointer line. Complete the
+[Agent setup](../../README.md#agent-setup) to replace the old pointer line. Complete the
 refreshes before editing shared instruction files. Turning the index off
 before migration can clear the record and leave legacy collections in the
 default index.
@@ -41,7 +41,7 @@ Peers on 1.12.76–1.12.79 with `codex-memory` enabled keep exchanging copies.
 **Automatic Syncthing pairing (Track 152A).** The first `mm push` after upgrading
 publishes this machine's encrypted Syncthing record when Syncthing is running.
 Run `mm update` and then `mm push` on each existing Syncthing fleet machine.
-See [Syncthing folder options](#syncthing-folder-options) for the one-approval join steps.
+See [Syncthing folder options](../../README.md#syncthing-folder-options) for the one-approval join steps.
 
 **Plain `mm init` prompt order, approval wait, and saved join answers (Tracks 151A, 154A):**
 plain `mm init` asks `Start a new fleet or join an existing one? [n/j]`.
@@ -49,7 +49,7 @@ Answer `n`/`new` or `j`/`join`. Pressing Enter asks again, and
 `mm init --new-fleet` skips the question. Before waiting, a fresh join asks
 for the storage path, the fleet machine's Syncthing device ID if mm needs to
 pair, the device name, the sources and the applicable
-[memory-search setup questions](#searching-agent-memory-qmd). Every yes/no
+[memory-search setup questions](../../README.md#searching-agent-memory-qmd). Every yes/no
 question uses `[y/n] (Enter = y)` or `[y/n] (Enter = n)`, and every source
 defaults to yes when detected on disk. It saves those answers locally in
 `~/.config/mind-meld/join.toml` (never the passphrase). When a managed join
@@ -66,7 +66,7 @@ Syncthing ID printed by the joining machine. Init offers Grok Build and Muse and
 defaults to yes when it detects their supported files or directories. On each
 managed machine, a push or pull restores the Mind Meld name in Syncthing for this
 machine and configured peers that a fleet record vouches for.
-Update managed peers so they apply new [retirements](#retiring-a-dead-machine).
+Update managed peers so they apply new [retirements](../../README.md#retiring-a-dead-machine).
 
 **`mm retro-fleet --no-save` removed (Track 145A):** `mm retro-fleet --no-save` is
 removed and now exits 2 as an unknown option (`mm: error: No such option: --no-save`).
@@ -133,7 +133,7 @@ keeps the local file and writes a conflict copy; use `mm conflicts` and
 usage capture while leaving memory local, add `"memory-v2/*"` to the `grok`
 source's `exclude_patterns`; to stop
 Grok sync and usage capture, run `mm disable-source grok`. See
-[Grok Build](#grok-build) for the scope, configuration and handoff walkthrough.
+[Grok Build](../../README.md#grok-build) for the scope, configuration and handoff walkthrough.
 
 **Git-root discovery finishes across attended pushes (Track 106A):** a cold Codex
 index used to need more pushes than discovery's 100 ms attended budget could
@@ -207,7 +207,7 @@ time, in any order.
   same-named file with other bytes, or anything else stays. The deleted file is moved to
   `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>` and kept at least 30
   days. The pull's last line names the folder. See [Recovering a deleted
-  file](#recovering-a-deleted-file).
+  file](../../README.md#recovering-a-deleted-file).
 - **A fast-forward has no recovery copy.** It replaces your unchanged file with the peer's
   bytes, so a bad edit on one machine spreads to the others. When both machines changed a
   file, `.jsonl` and `MEMORY.md` are still unioned (a line deleted on one side returns when
@@ -297,7 +297,7 @@ folder named for the checkout's absolute path, so the same repository at two pat
 on a Mac and a Linux box, was two projects. mm now publishes a project that has a
 network `origin` under that remote, and any other project under a home-relative name,
 and each machine maps the name back to the folder Claude uses for *its* checkout, wherever
-that checkout is. See [Project memory across machines](#project-memory-across-machines).
+that checkout is. See [Project memory across machines](../../README.md#project-memory-across-machines).
 
 **Every machine must update before its own first push in the new form, and it takes part
 in the new form only from then.** Go one machine at a time, in any order; nothing waits for
@@ -363,7 +363,7 @@ machines now use the Syncthing setup described in Quick Start; `mm init` require
 Syncthing to be running. mm no longer rewrites the key header or
 moves a differing copy: repair now only removes `mm-crypto-init` conflict
 copies that are byte-identical to the main file. Differing copies stay
-where they are (see [Key header copies differ](#key-header-copies-differ)),
+where they are (see [Key header copies differ](../../README.md#key-header-copies-differ)),
 and `mm diag` reports `pending_repair` as `delete` and `preserve` counts only
 (no `replace_canonical`). The iCloud auto-pin step is removed.
 
@@ -425,7 +425,7 @@ through Syncthing's local read-only API, including on owner-managed folders.
 The initial probe has a 2 s REST budget. If delivery is pending, a terminal
 pull waits up to `[sync] pull_syncthing_wait_ms` (default 15,000 ms) after the
 probe. The transient progress phase is `Waiting for Syncthing to deliver N files`.
-See [Sync outcomes](#sync-outcomes) for when the spinner appears.
+See [Sync outcomes](../../README.md#sync-outcomes) for when the spinner appears.
 A non-terminal pull or a pull with the setting at `0` proceeds after one probe.
 If delivery still appears pending, pull applies what has arrived and adds
 `Pull: Syncthing is still delivering N files. Run: mm pull.` Pending delivery
@@ -446,7 +446,7 @@ listing ignores conflict copies and counts a `devices/` file only when its name
 matches the id in its body; valid manifest conflict copies remain recovery
 inputs. `mm diag`
 reports the number of ignored files as `ignored storage files`. See
-[waiting content](#waiting-content-is-not-a-failure).
+[waiting content](../../README.md#waiting-content-is-not-a-failure).
 
 **Host usage snapshot compatibility:** an un-upgraded peer drops incoming `host-usage-snapshot` records carrying `"muse"` or `"agy"` until it updates. Content sync is unaffected; upgrade the peer with `mm update` or `pipx upgrade mind-meld` to include its usage in `retro-fleet`.
 
@@ -478,8 +478,8 @@ with `mm install-skills` or the next `mm push`, then restart the agent.
 its previous exit 0. Completed files remain applied. `mm autopull` keeps exit 0
 for contained failures and records the failed count; conflict-fail preflight
 keeps exit 3 before applying files. There is no data/config migration or new
-quiet flag. See [Sync outcomes](#sync-outcomes), [Exit codes](#exit-codes),
-[Status verdicts](#status-verdicts) and [pull remedies](#pull-incomplete--could-not-pull-a-file).
+quiet flag. See [Sync outcomes](../../README.md#sync-outcomes), [Exit codes](../../README.md#exit-codes),
+[Status verdicts](../../README.md#status-verdicts) and [pull remedies](../../README.md#pull-incomplete--could-not-pull-a-file).
 A foreground automatic update can delay the final line; successful version
 details appear only with `--verbose`. Standalone `mm update` is unchanged.
 
@@ -554,7 +554,7 @@ imports `~/.config/mind-meld/pull-history.jsonl` and `.1` once into local
 `state.db`. Before that first write, `mm log` still reads JSONL. New rows go only
 to the database; the legacy files remain untouched. The table keeps 20,000 rows
 per (verb, action) class, including per-file uploaded rows. The [history
-remedies](#history-database-statedb) cover interrupted writes and import notices.
+remedies](../../README.md#history-database-statedb) cover interrupted writes and import notices.
 
 Downgrading to an older mm shows only its JSONL history; it cannot see database
 rows. After re-upgrading, rows the older binary appended to either legacy file
@@ -613,17 +613,17 @@ needs an attended content-changing `mm push` or `mm gc`.
 
 Rollback: an install tracking `@latest` can reinstall the latest release on a
 later sync command unless `[upgrade] auto_install = false`; a tag-pinned
-rollback follows the exception under [Automatic updates](#automatic-updates).
+rollback follows the exception under [Automatic updates](../../README.md#automatic-updates).
 A migrated explicit config keeps these globs until removed by hand, which
 brings back the migration warning and attended prompt.
 
 **v1.0.0:** no action needed beyond upgrading. Mixed 0.14.x/1.0.0 fleets
 interoperate with no wire or storage migration. Newer-format storage refuses with
-an upgrade remedy ([Storage-format gates](docs/invariants/auto-upgrade.md#storage-format-gates)).
+an upgrade remedy ([Storage-format gates](../invariants/auto-upgrade.md#storage-format-gates)).
 `b` / `both` still leave both conflict files on disk. Once v1.0.0 is tagged, a regression
 ships as 1.0.1: the upgrade nudge never downgrades.
 
 **v0.14.9:** the old identity cache becomes stale and refreshes on the next identity read that completes repository discovery; incomplete attempts retry.
-The first push needing that refresh shows `mm: notice: refreshing identity cache (one-off)` with `--verbose`. [Future capture is corrected; previously published rows stay unchanged.](#dropped-repositories-and-ignored-git-environment-variables)
+The first push needing that refresh shows `mm: notice: refreshing identity cache (one-off)` with `--verbose`. [Future capture is corrected; previously published rows stay unchanged.](../../README.md#dropped-repositories-and-ignored-git-environment-variables)
 
-For `mm: error: Pull incomplete [result-degraded]:` or a per-file warning after upgrading, see [pull failures and remedies](#pull-incomplete--could-not-pull-a-file). No data migration is needed for apply exception containment.
+For `mm: error: Pull incomplete [result-degraded]:` or a per-file warning after upgrading, see [pull failures and remedies](../../README.md#pull-incomplete--could-not-pull-a-file). No data migration is needed for apply exception containment.
