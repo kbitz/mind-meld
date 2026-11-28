@@ -209,7 +209,7 @@ Previews never mutate sync data, prompt for migration, check for updates, or rep
 |---|---|---|---|
 | `mm push --dry-run` | Local lock only | Host scanning/warming/capture, activity row, post-push GC, upload re-reads (scan-time holds are shown) | 0 completed, including held files; 1 stopped |
 | `mm pull --dry-run` | Local lock only | Conflict renames, pull history, sync logs, blob download/decrypt failures, waiting blobs, pull ledger writes, recovery copies | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
-| `mm gc --dry-run` | Local lock only | Deletion of orphan blobs or local retention items (`--conflicts` needed for conflict copies) | 0 completed; 1 stopped |
+| `mm gc --dry-run` | Local lock only | Actual cleanup. Previews orphan blobs and retention candidates, including conflict copies (`--conflicts` required to delete those) | 0 completed; 1 stopped |
 | `mm recapture --dry-run [WINDOW]` | Local lock only | Writing git-snapshot rows and pushing | 0 completed, including partial scans; 1 stopped or no repositories |
 | `mm migrate-config --dry-run` | Nothing, including no lock | Applying the displayed config changes | 0 completed; 1 config error |
 | `mm diff [--from DEVICE]` | Nothing, including no lock | Snapshot comparison, not a forecast of all incoming peers; use `mm pull --dry-run` for that | 0 completed; 1 stopped |
@@ -232,7 +232,7 @@ Claude Code project memory (`~/.claude/projects/<encoded>/memory/` and `todos/`)
 
 ## Claude Code Integration
 
-`mm autopull` and `mm autopush` are designed for agent hooks: they never prompt, stay silent on the happy path, and degrade gracefully on errors. On Linux with Secret Service, a locked or missing keyring skips quietly with a breadcrumb rather than popping up an unlock dialog. Load-bearing warnings (corrupt manifests, missing sources, fsync or per-file apply failures) still print to stderr.
+`mm autopull` and `mm autopush` are designed for agent hooks: they never prompt, stay silent on the happy path, and degrade gracefully on errors. If a locked or missing Linux Secret Service collection leaves a hook without a passphrase, it prints a one-line remedy to stderr and records the skip for `mm status`. Load-bearing warnings (corrupt manifests, missing sources, fsync or per-file apply failures) still print to stderr.
 
 Add this to your global `~/.claude/CLAUDE.md`:
 
@@ -245,7 +245,7 @@ At the **start of each conversation**, run:
 mm autopull
 ```
 
-- **No output:** Synced (or already in sync). Continue silently.
+- **No output.** Continue silently. Check `mm status` when you need to confirm the outcome.
 - **Any output:** Surface conflicts, deletions, warnings and their suggested fixes.
 
 At the **end of each conversation** (when wrapping up or completing the requested task), run:
@@ -483,7 +483,7 @@ Managed peers wait for the device to disconnect. On owner-managed peers, remove 
 
 ### Newer or damaged storage format
 
-If `mm` reports a newer format, leave the key headers in place and run `mm update`. Verify with `mm --version` and retry. If the latest release still reports damage, run `mm diag` to identify the affected object. For a damaged manifest, investigate on its publishing machine and let `mm push` try its normal recovery.
+If `mm` reports a newer format, leave the key headers in place and run `mm update`. Verify with `mm --version` and retry. If the latest release still reports damage, use `mm diag` to inspect key-header state. For a damaged peer manifest, use the publishing machine named in the `mm pull` warning and let `mm push` try its normal recovery there.
 
 If diagnostics identify a missing or unreadable key header, wait for Syncthing to finish. Get a known-good `mm-crypto-init` from a machine that can still sync **this same fleet folder** or from a verified backup of that fleet. Back up every header outside the shared folder. Move any damaged canonical file aside, then restore the verified copy to `mm-crypto-init` without overwriting another file. Check with `mm pull` and keep the backups. If you cannot verify a copy belongs to this fleet, stop before changing its storage.
 
@@ -499,7 +499,7 @@ If a peer's manifest arrived before some of its encrypted blobs finished syncing
 
 ### Pull incomplete / could not pull a file
 
-When one or more files fail to apply (permissions, disk full, corrupt peer manifest), `mm pull` applies all healthy files, prints one `mm: warning:` line per failure, and exits 1. Fix the local filesystem or peer issue and re-run `mm pull`.
+When a file fails to apply, `mm pull` applies the remaining healthy files, prints one `mm: warning:` line per failure, and exits 1. Fix the reported problem and rerun `mm pull`. A corrupt peer manifest produces a warning and skips that peer while pulls from other peers continue.
 
 For full machine-readable triage (no passphrase or valid config required), run `mm diag --json`. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`, `fast_forward`, `syncthing`, `memory_index`, `capture_catchup`, `push_timings`. Each `skill_links` row includes `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`.
 
