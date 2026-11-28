@@ -271,8 +271,9 @@ time, in any order.
   Add any other synced source folder that `mm sources` lists.
 
 <a id="track-91a-deletion-recipe"></a>
-A two-machine recipe that exercises all of it (Mac A and Mac B; it uses a throwaway file under
-the default `gstack` source, so check `mm sources` shows `gstack` enabled on both):
+A two-machine recipe that exercises all of it uses a throwaway file under the default
+`gstack` source. Check that `mm sources` shows `gstack` enabled on both Macs. The
+push examples assume usage is unchanged and all readers finish.
 
 ```bash
 # On Mac A, then Mac B (once each, in order)
@@ -281,7 +282,7 @@ mm pull                        # Pull: no changes.           (or N content chang
 
 # On Mac A: create a file and share it
 mkdir -p ~/.gstack/analytics && echo "recipe v1" > ~/.gstack/analytics/mm-recipe.md
-mm push                        # Push: 1 content change published; usage published.
+mm push                        # Push: 1 content change published.
 
 # On Mac B: receive it
 mm pull --verbose              # Includes "flushed N files in X.XXs", then Pull: 1 content change from Mac A.
@@ -290,7 +291,7 @@ cat ~/.gstack/analytics/mm-recipe.md   # recipe v1
 # On Mac A: delete it, preview, publish
 rm ~/.gstack/analytics/mm-recipe.md
 mm push --dry-run              # ... - 1 deleted ... Dry run complete. Nothing was changed except the local lock file.
-mm push                        # Push: 1 content change published; usage published.
+mm push                        # Push: 1 content change published.
 
 # On Mac B: preview, then follow the deletion
 mm pull --dry-run              # delete  analytics/mm-recipe.md   ...   1 would be deleted
@@ -302,7 +303,7 @@ ls ~/.gstack/analytics/mm-recipe.md    # No such file or directory
 scp ~/.config/mind-meld/deleted/<stamp>/gstack/analytics/mm-recipe.md macA:/tmp/mm-recipe.md
 # On Mac A: put it back without overwriting anything newer, then publish
 cp -n /tmp/mm-recipe.md ~/.gstack/analytics/mm-recipe.md
-mm push                        # Push: 1 content change published; usage published.
+mm push                        # Push: 1 content change published.
 
 # On Mac B: the file comes back
 mm pull                        # Pull: 1 content change from Mac A.
@@ -477,12 +478,12 @@ only when published usage totals or queued catch-up data changed since this
 machine's last published snapshot (`Push: 10 content changes published; usage published.`,
 `Push: no content changes; usage published.`, or
 `Push: no content changes; usage published (Grok catching up).` when a host reader
-hit its deadline). When usage totals did not change, idle pushes print
-`Push: no content changes; no new usage.` (or
-`Push: no content changes; no new usage (Grok catching up).`), and non-empty
-content, metadata, selection, or repair pushes omit the usage clause. Routine
-capture, cache, budget, nested-repository, scan, and pull `skipped` details live
-under `--verbose` (and in `mm status` / `mm diag`);
+hit its deadline). With no verified new usage, idle pushes print
+`Push: no content changes; no new usage.`. Content, metadata, selection,
+or repair leads omit the usage clause when no readers are catching up. A reader
+that stops at its deadline can add `; no new usage (Grok catching up)` to those
+leads. Routine capture, cache, budget, nested-repository, scan, and pull
+`skipped` details live under `--verbose` (and in `mm status` / `mm diag`);
 a pull that only skips newer local files ends with `Pull: no changes.`. Capture
 failure does not make content sync fail. Actionable and data-at-risk warnings
 still print before the outcome. Successful automatic commands stay silent,
@@ -1261,11 +1262,11 @@ machine's last published snapshot, the lead `Push:` line appends `; usage publis
 (for example, `Push: 10 content changes published; usage published.` or
 `Push: no content changes; usage published.`). The receipt uses the accepted
 manifest after file holds and requires publication proof for the captured host
-day file. When usage totals did not change, a `no content changes` lead prints
-`Push: no content changes; no new usage.` and non-empty content, metadata,
-selection, or repair leads omit the usage clause.
+day file. With no verified new usage, a `no content changes` lead prints
+`Push: no content changes; no new usage.`. Content, metadata, selection, or
+repair leads omit the usage clause when no readers are catching up.
 If any attended host usage reader stopped at its deadline, the usage clause names
-the readers still catching up in parentheses (for example,
+the readers still catching up in parentheses, including beside content changes (for example,
 `Push: no content changes; usage published (Grok catching up).` or
 `Push: no content changes; no new usage (Grok catching up).`). `mm push --verbose`
 keeps `Host usage published (manifest accepted).`, and `mm status` / `mm diag`
@@ -2508,11 +2509,11 @@ line counts no user content change and reports `; usage published` only when
 published usage totals or queued catch-up data changed since this machine's last
 published snapshot (`Push: no content changes; usage published.`, or
 `Push: no content changes; usage published (Grok catching up).` when a host
-reader hit its deadline); when totals are unchanged it prints
-`Push: no content changes; no new usage.` (or omits the usage clause beside
-content, metadata, selection, or repair updates). Verified publication still
-appears with `--verbose` as `Host usage published (manifest accepted).`, and in
-`mm status` / `mm diag`.
+reader hit its deadline). An idle push with no verified new usage prints
+`Push: no content changes; no new usage.` and still names any readers catching up.
+Verified publication appears with `--verbose` as
+`Host usage published (manifest accepted).`. `mm status` and `mm diag` also show
+publication details.
 A content-changing push records activity once and runs auto-GC. Usage-only
 publication skips this device's blob GC; obsolete blobs wait for the next
 content-changing push or an explicit `mm gc`.
