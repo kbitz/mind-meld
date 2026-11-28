@@ -1,3 +1,7 @@
+> **Archived (superseded):** Historical multi-source sync design.
+> Current sync scope and rules live in [docs/SPEC.md](../SPEC.md) and
+> [docs/invariants/sync.md](../invariants/sync.md).
+
 # Multi-Source Sync: gstack context across machines
 
 > Generated from CEO plan review on 2026-04-08.

@@ -2816,7 +2816,7 @@ This walk is Claude-only. Codex rollouts and Grok session directories are
 not a metadata-only project ledger; their encoded cwd is a path and does
 not go on the wire. Do not extend `walk_session_metadata` to those trees
 to chase host parity. Usage interchangeability is Groups 18/21/22/23;
-see `docs/designs/host-parity.md`.
+see `docs/archive/host-parity.md`.
 
 `EVENTS_SCHEMA_VERSION` bumped 1 → 2 in Group 8. Pre-v0.11.0, `walk_session_metadata` filtered jsonls by `mtime >= since_ts` — each snapshot was a DELTA. Naive sum of v=1 snapshots double-counted any chat that was touched across pushes; latest-only-wins undercounted by losing prior windows. Codex outside-voice review caught the trap during `/plan-eng-review` for Group 8 (cross-model tension #1).
 

@@ -1,3 +1,7 @@
+> **Archived (superseded):** This Track 68A qualification contract is historical.
+> Cross-model memory (O9) in [docs/designs/cross-model-memory.md](../designs/cross-model-memory.md)
+> and [docs/SPEC.md](../SPEC.md) supersede it.
+
 # Codex memory source contract
 
 Contract version 1 · Track 68A · measured 2026-10-01 · **NO QUALIFIED ROUTE**.

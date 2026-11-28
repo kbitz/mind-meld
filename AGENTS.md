@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-Mind Meld (mm) — CLI that keeps one person's AI coding-agent context (Claude Code memory, Codex skills, Muse memory, gstack state) identical across their machines, end-to-end encrypted, and reports agent usage across the fleet with `retro-fleet` (Claude Code, Codex, Muse, Antigravity). 1.x syncs over iCloud Drive on macOS; 2.0 carries the same store to a Syncthing folder so Arch-based Linux machines join. [docs/SPEC.md](docs/SPEC.md) is the product authority, including what each host gets.
+Mind Meld (`mm`) — CLI that keeps one person's AI coding-agent context (Claude Code, Codex, Grok Build, Muse, Antigravity, gstack, gstack-extend) identical across macOS and Arch-based Linux machines over one shared Syncthing folder, end-to-end encrypted, reports fleet-wide usage with `retro-fleet`, and maintains a local cross-model memory index (`qmd`). [docs/SPEC.md](docs/SPEC.md) is the product authority, including what each host gets.
 
 <!-- roadmap:parallelism_cap=8 -->
 Up to eight Tracks can run across separate workspaces; the host owns branch and worktree lifecycle.
@@ -10,14 +10,11 @@ Up to eight Tracks can run across separate workspaces; the host owns branch and 
 Python 3.11+, typer, cryptography, argon2-cffi, keyring, secretstorage (Linux), rich, packaging.
 
 ## Key Principles
-- No API server. The CLI reads and writes a shared folder through the local filesystem.
-- Single local-folder storage backend: the root of a shared Syncthing folder (`~/Sync/mind-meld` by default). mm never moves a configured path; a Mac not yet moved keeps its iCloud Drive path.
-- **End-to-end encryption is mandatory.** All synced manifests, artifacts, and allowlisted context are encrypted client-side with AES-256-GCM before touching storage. No plaintext sync data may reach storage.
-- **Scoped sync.** Built-in sources are allowlisted. Session databases, credentials, and whole-file settings that may contain credentials stay local.
-- **Truth-based manifests.** Complete snapshots of local state propagate deletions automatically; there is no separate prune step.
-- **Conflicts preserve local canonical bytes and remote sidecars.** Newer local files are skipped; legacy direction and clock rules live in the conflict invariants.
-- After pull, `.mind-meld-log.md` records changes from other machines per project.
-- SHA-256 manifest diffing transfers only changes; blobs are content-addressed and gzip-compressed before encryption (format 0x02).
+- No API server; single local-folder backend (`~/Sync/mind-meld` by default; Macs not yet moved keep their iCloud Drive path).
+- **End-to-end encryption is mandatory.** All synced manifests, artifacts, and allowlisted context are AES-256-GCM encrypted client-side before touching storage.
+- **Scoped sync.** Built-in sources are allowlisted; session databases, credentials, and whole-file settings stay local.
+- **Truth-based manifests.** Complete snapshots propagate deletions automatically (with 30-day local recovery copies); SHA-256 diffing transfers only changed, gzip-compressed blobs (format 0x02).
+- **Fast-forward + conflict sidecars.** Unchanged local files fast-forward; `.jsonl` and `MEMORY.md` auto-merge; concurrent edits keep local canonical bytes and remote conflict sidecars until `mm resolve`. Pull writes `.mind-meld-log.md` per Claude project.
 
 ## Product scope and releases
 
@@ -43,72 +40,69 @@ never use it to reintroduce scope or override the current spec.
 
 Admission gates: [docs/ROADMAP.md](docs/ROADMAP.md); rationale: [constraint history](docs/roadmap-shipped.md#planning-constraint-history).
 
-- Verify premises against current HEAD and cited artifacts this turn. Discharge delivered goals; kill disproved or obsolete work orders.
-- Establish demand before pricing repairs. One Mac's cold artifact proves only that Mac's inactivity; repair or retirement must follow supported product scope.
+- Verify premises against current HEAD and cited artifacts this turn; discharge delivered goals and kill disproved work orders.
+- Establish demand before pricing repairs; follow supported product scope.
 - Investigate unwanted automatic behavior before adding its inverse; removal controls need demonstrated demand.
-- Name a reader for every persisted field, or the delivering Track and its title.
-- Trace normalization, retained cache fields, and migration gates when changing readers.
-- Prove inclusive/disjoint counter semantics for every reader before pricing, summing, or trending; see [events/retro invariants](docs/invariants/events-retro.md).
-- Read the roadmap audit's effective SIZE limits. Machine-local caps come from installed gstack-extend's `bin/config get roadmap_max_files_per_track` and `bin/config get roadmap_max_session_weight`, with environment overrides. Historical values from another Mac are not project limits.
+- Name a reader for every persisted field (or delivering Track), and trace normalization, retained cache fields, and migration gates when changing readers.
+- Prove inclusive/disjoint counter semantics before pricing, summing, or trending ([events/retro invariants](docs/invariants/events-retro.md)).
+- Read effective SIZE limits from installed gstack-extend (`bin/config get roadmap_max_files_per_track` / `roadmap_max_session_weight`), not historical values.
 
 ## Before editing code
 
-Before editing anything under `src/`, read [docs/invariants/README.md](docs/invariants/README.md), find the file or function you're touching, and read every invariant doc it names. This is the authoritative module map and routing table. Shortcut: `rg -n '<symbol>' docs/invariants/`, then read every doc named by matching README rows and every doc whose header lists it.
+Before editing anything under `src/`, read [docs/invariants/README.md](docs/invariants/README.md), find the file or function you're touching, and read every invariant doc it names. Shortcut: `rg -n '<symbol>' docs/invariants/`.
 
 ## Cross-cutting rules
 
-- Imports flow from `cli` to extracted modules, never back; leaves import nothing from the CLI layer. Call moved symbols module-qualified (`resolveflow.foo(...)`), not via from-import, so owner patches reach callers. See the routing README for the exact module list; `tests/test_module_boundaries.py` enforces it.
+- Imports flow from `cli` to extracted modules, never back; leaves import nothing from the CLI layer. Call moved symbols module-qualified (`resolveflow.foo(...)`), not via from-import, so owner patches reach callers (`tests/test_module_boundaries.py`).
 - `aggregator.py` reaches the CLI only as a subprocess, never an import.
-- Build storage keys only through validated helpers in `storage/keys.py`, never raw f-strings.
-- Use `lockedjson` for flock-guarded JSON caches; extend it instead of adding ad-hoc fcntl. The multi-file `devices-write.lock` is the exception.
-- Code, tests, fixtures and docs use placeholders (`/Users/user`, `mac-a`, `user@example.com`), never a real username, hostname, email or person's name.
-- Sanitize peer-controlled display strings through `safety`; use `safe_terminal_str` for single-line plain stderr. Display text is not a filesystem identity or shell argument.
-- Output follows docs/SPEC.md O8: one line per outcome in the shared style; on failure, what broke and its fix command last. Never quiet-gate data-at-risk warnings. Record other degradations (every events-tail degradation in `PushResult.events_degradations`) for `mm status` and `mm diag`, and print them only when the owner must act. Normalize config failures at `load_config`.
-- Do not reintroduce the conflict collector or its cancelled auto-resolver; see [conflict invariants](docs/invariants/conflicts.md#collector-removal-and-auto-resolver-cancellation).
-- Release PRs include the `docs/PROGRESS.md` row with the `pyproject.toml`, `VERSION` and `CHANGELOG.md` bump. Never restore workflow pushes to protected main. Row format and release rules: [auto-upgrade invariants](docs/invariants/auto-upgrade.md#release-discipline-enforced-by-mm-auto-upgrade).
-- Every `_get_config` and `_maybe_prompt_migration` call requires `read_only=`. Update integration tests' `COMMAND_INTENTS62` for every new command; previews and inspection must preserve their write boundaries.
+- Build storage keys only through `storage/keys.py`, never raw f-strings.
+- Use `lockedjson` for flock-guarded JSON caches (except multi-file `devices-write.lock`).
+- Use placeholders (`/Users/user`, `/home/user`, `mac-a`, `linux-a`, `user@example.com`), never real usernames, hostnames, emails, or personal names.
+- Sanitize peer-controlled display strings through `safety` (`safe_terminal_str` for single-line plain stderr).
+- Output follows `docs/SPEC.md` O8: one line per outcome in the shared style; on failure, what broke and its fix command last. Never quiet-gate data-at-risk warnings. Record events-tail degradations in `PushResult.events_degradations` for `mm status` / `mm diag`. Normalize config failures at `load_config`.
+- Do not reintroduce the conflict collector or its cancelled auto-resolver ([conflict invariants](docs/invariants/conflicts.md#collector-removal-and-auto-resolver-cancellation)).
+- Release PRs include the `docs/PROGRESS.md` row with the `pyproject.toml`, `VERSION`, and `CHANGELOG.md` bump ([auto-upgrade invariants](docs/invariants/auto-upgrade.md#release-discipline-enforced-by-mm-auto-upgrade)).
+- Every `_get_config` and `_maybe_prompt_migration` call requires `read_only=`. Update `COMMAND_INTENTS62` for every new command; previews must preserve write boundaries.
 
 ## Testing
 
-`./bin/check` is the verification entry point: bootstraps `.venv` if needed, then runs `ruff check .`, `ruff format --check .`, and pytest (default scope `tests/`). Use `tmp_path` for local backends.
+`./bin/check` bootstraps `.venv` if needed, then runs `ruff check .`, `ruff format --check .`, and pytest (default `tests/`). Use `tmp_path` for local backends.
 
 ```
-./bin/check --affected              # while working and reviewing: tests the change reaches
-./bin/check                         # full portable checks; CI runs this before merge
+./bin/check --affected              # coverage-selected tests for the change
+./bin/check                         # full portable checks (CI runs this)
 ./bin/check tests/test_config.py    # scoped pytest; still lints the whole repo
 ```
 
-`--affected` runs the tests whose recorded coverage reaches the files changed since the merge base (default `origin/main`, or `--base REF`), plus new or changed test files, and prints "ran N of M collected tests". The first run, a stale record (new interpreter, packages, config or merge base) or `--refresh` runs the whole suite once to record coverage under the ignored `.mm-test-selection/`. It runs everything and says why for runner, config, conftest, non-Python and module-scope changes, so a green `--affected` never replaces the full `./bin/check` or CI. It rejects test paths, pytest arguments and `--lint`. `bin/check` runs pytest in its own process group and ends that group on exit, error, SIGINT, SIGTERM or SIGHUP.
+`--affected` runs tests whose recorded coverage reaches changed files since `origin/main` (plus new/changed test files), falling back to the full suite for runner, config, conftest, non-Python, or module-scope changes. `--tests` skips lint; `--lint` skips pytest. Ruff enforces E/F/W/I. Roadmap cards' `verify:` fields must use `./bin/check --affected` (or `./bin/check <scope>`).
 
-`--tests` skips lint; `--lint` skips pytest. Ruff is pinned in dev dependencies and enforces E/F/W/I. Every roadmap card's `verify:` field must use `./bin/check --affected` (or `./bin/check <scope>` when it needs a named scope); cards must not encode where Python lives. The `PYTEST_CURRENT_TEST` guard on `crypto.store_passphrase_in_keyring` is load-bearing; see [init/device invariants](docs/invariants/init-devices.md).
-
-mm reads `Path.home()` at import: never run or import `tests/` outside `./bin/check`, and give any other `mm` or Python probe a temporary `HOME`. A red run of timeouts under load: rerun those files with `./bin/check --tests --serial`, then the full run with `MM_PYTEST_WORKERS=6`. Name identifiers without KEY, PASSWORD, SECRET or TOKEN: gstack's secret scan flags the name, and only an owner-approved `.gstack/secret-dispositions.json` entry waives it.
+The `PYTEST_CURRENT_TEST` guard on `crypto.store_passphrase_in_keyring` is load-bearing ([init/device invariants](docs/invariants/init-devices.md)). `mm` reads `Path.home()` at import: never run or import `tests/` outside `./bin/check`, and give any probe a temporary `HOME`. On timeout bursts under load, rerun failing files with `./bin/check --tests --serial`, then full run with `MM_PYTEST_WORKERS=6`. Avoid `KEY`, `PASSWORD`, `SECRET`, or `TOKEN` in identifier names (gstack secret scan).
 
 ## CI
 
-`.github/workflows/ci.yml` has three jobs: `ci` (portable checks plus real Keychain and isolated wheel smokes on macOS/Python 3.13), `portable-linux` (portable checks plus wheel smoke on Ubuntu/Python 3.14), and `secret-service-live` (the live gnome-keyring test in an Arch container); see [README Development](README.md#development). Local portable checks do not qualify those CI-only checks. Release automation and compatibility rules live in [auto-upgrade invariants](docs/invariants/auto-upgrade.md). Version source: `pyproject.toml`, mirrored by the root `VERSION` file (same `x.y.z`; bump both).
+`.github/workflows/ci.yml` runs `ci` (macOS/3.13: portable checks, real Keychain, wheel smoke), `portable-linux` (Ubuntu/3.14: portable checks, wheel smoke), and `secret-service-live` (Arch container live `gnome-keyring`); see [README Development](README.md#development). Release automation and compatibility rules: [auto-upgrade invariants](docs/invariants/auto-upgrade.md). Version source: `pyproject.toml`, mirrored by `VERSION` (bump both).
 
 ## Commands
 
-mm --version | init | push | pull | status | diag | devices | devices approve | devices retire | diff | gc | sources | conflicts | resolve | recover | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | memory-index | refresh-identity | install-skills | retro-fleet | recapture | update
+`mm --version | init | push | pull | status | diag | devices | devices approve | devices retire | diff | gc | sources | conflicts | resolve | recover | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | memory-index | refresh-identity | install-skills | retro-fleet | recapture | update`
 
-Attended `mm push` refreshes consented host usage under the lock. Exit 0 means content sync succeeded regardless of capture outcome; verify recorded capture/publication with `mm status`. Autopush stays change-gated and never warms; previews never capture. Flags and exit codes: README and SPEC.
+Attended `mm push` refreshes consented host usage under the lock. Exit 0 means content sync succeeded regardless of capture outcome; verify recorded capture/publication with `mm status`. Autopush stays change-gated and never warms; previews never capture.
 
 ## Auto Commands
 
-- `autopull` / `autopush` never prompt, are quiet on the happy path, and exit silently when uninitialized or unchanged.
-- Malformed config emits a one-line stderr error; data-at-risk warnings remain visible in quiet mode. Unexpected errors degrade gracefully.
-- `push`/`pull`/`autopull`/`autopush` upgrade a pipx `@latest` install at their tail (`auto_install`, default on; previews skip it); failures never change the exit code.
-- `autopull` reports per-file apply failures and counts. `autopush` records `no-sources` and `degraded` breadcrumbs so `mm status` can expose failures.
-- Detailed contracts: [sync](docs/invariants/sync.md), [events/retro](docs/invariants/events-retro.md) and [auto-upgrade](docs/invariants/auto-upgrade.md) invariants. Integration snippets: README.
+- `autopull` / `autopush` never prompt, stay silent on the happy path, and exit silently when uninitialized or unchanged.
+- Malformed config emits a one-line stderr error; data-at-risk warnings stay visible. Unexpected errors degrade gracefully.
+- `push`/`pull`/`autopull`/`autopush` upgrade a pipx `@latest` install at their tail (`auto_install`, default on; previews skip it); failures never change exit code.
+- `autopull` reports per-file apply failures; `autopush` records `no-sources` and `degraded` breadcrumbs for `mm status`.
+- Contracts: [sync](docs/invariants/sync.md), [events/retro](docs/invariants/events-retro.md), and [auto-upgrade](docs/invariants/auto-upgrade.md) invariants.
 
 ## Where detail lives
 
 AGENTS.md stays under 12 KiB (`tests/test_docs_routing.py`).
 
-- [Module map and invariant routing](docs/invariants/README.md): authoritative current source layout and mandatory per-topic rules.
+- [Module map and invariant routing](docs/invariants/README.md): authoritative source layout and per-topic rules.
 - [README](README.md): commands, configuration, previews, integration, and development.
-- [Project spec](docs/SPEC.md): purpose, audience, selected target, acceptance and release policy.
-- [SPEC](SPEC.md): architecture, data model and CLI reference; Project Structure, Implementation Order, and original push algorithm are historical. 2.0 carries this store onto Syncthing ([docs/SPEC.md](docs/SPEC.md)).
-- Design decisions: [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md); archived: [Grok reader](docs/archive/grok-build-usage-reader.md), [v1 review](docs/archive/mind-meld-v1.md).
-- [ROADMAP](docs/ROADMAP.md): execution plan (edited only by /roadmap, except a `/ship` review fix to one card when roadmap-audit passes with `GROUP_DEPS` unchanged); [TODOS](docs/TODOS.md): deferred work; [PROGRESS](docs/PROGRESS.md): release rows. Superseded designs live in `docs/archive/`.
+- [Project spec](docs/SPEC.md): product scope, audience, selected target, acceptance, and release policy.
+- [SPEC](SPEC.md): architecture, data model, and CLI reference (2.0 carries this store onto Syncthing).
+- Active design: [cross-model memory](docs/designs/cross-model-memory.md). Historical designs live in `docs/archive/`.
+- [ROADMAP](docs/ROADMAP.md), [TODOS](docs/TODOS.md), [PROGRESS](docs/PROGRESS.md).

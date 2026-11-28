@@ -10,8 +10,8 @@ follow their roadmap dependency order. This design replaces the 2026-10-29
 design ([archived](../archive/cross-model-memory-2026-10-29.md)), which
 carried only Codex memory and pointed agents at grep. The developer rejected
 it: "o9 - why just codex? current design seems like we should throw out and
-start over". [Memory continuity](memory-continuity.md) and the
-[Codex memory contract](codex-memory-contract.md) remain Track 68A evidence.
+start over". [Memory continuity](../archive/memory-continuity.md) and the
+[Codex memory contract](../archive/codex-memory-contract.md) remain Track 68A evidence.
 
 ## Goal
 

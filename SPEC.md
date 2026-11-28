@@ -700,7 +700,7 @@ SYNCED_SUBDIRS = ["memory", "todos"]
 
 **Retired sources.** Standalone Grok Build and OpenCode sources are ignored on push and pull without creating deletion tombstones. `mm migrate-config` removes their obsolete config entries; it does not remove local files. The `grok` source type is no longer supported.
 
-**`muse` type** — Claude-shaped walker for `~/.local/share/muse`. Hardcodes `memory/` at the source root; Muse's `.muse-memory.lock` is excluded on push and pull. Sessions, the session index and bundled skills are never entered, and `~/.config/muse` is not a source. See [host parity](docs/designs/host-parity.md#muse-1x-minor-2026-10-14).
+**`muse` type** — Claude-shaped walker for `~/.local/share/muse`. Hardcodes `memory/` at the source root; Muse's `.muse-memory.lock` is excluded on push and pull. Sessions, the session index and bundled skills are never entered, and `~/.config/muse` is not a source. See [host parity](docs/archive/host-parity.md#muse-1x-minor-2026-10-14).
 
 **`codex-memory` type** — Internal Claude-shaped walker derived automatically by `config.resolve_sources` from the selected `codex` source (using the `codex` source's path, `~/.codex` by default). Hardcodes the active memory folder (`memories_v2/` when present as a real directory, else `memories/`) and copy set (`memory_summary.md`, `MEMORY.md`, and direct `.md` children of `rollout_summaries/`), accepting only singly-linked regular files and never entering `.git`, `.codex-baseline`, `extensions/`, or SQLite stores. Local push paths use `<memdir>/<sub>` and are encoded at `core.encode_manifest` to wire form `<device id>/<sub>` (decoded back to local form only for this machine's own manifest at `load_manifest`).
 

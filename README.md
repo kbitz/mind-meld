@@ -2,920 +2,228 @@
 
 [![CI](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml/badge.svg)](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml)
 
-Sync AI coding-agent context, skills, and gstack activity across your machines through one shared Syncthing folder. End-to-end encrypted. Supports Claude Code, Codex, Muse, and Antigravity. `mm` maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills` (Claude Code, Codex, and Antigravity). Muse discovers that directory, so it needs no link.
+Mind Meld (`mm`) keeps your AI coding-agent context identical across macOS and Arch-based Linux machines through one shared Syncthing folder — end-to-end encrypted, with no server. It syncs **Claude Code**, **Codex**, **Grok Build**, **Muse**, **Antigravity**, **gstack**, and **gstack-extend**, reports fleet-wide usage with **`/retro-fleet`**, and maintains a local cross-model memory search index with **`qmd`**.
 
 ## Install
 
-On a Mac or Arch-based Linux machine, fetch and run the bootstrap script from the `latest` release branch:
+On macOS or Arch-based Linux, run the bootstrap script from the `latest` release branch:
 
 ```bash
 mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap) && sh -c "$mm_bootstrap"
 ```
 
-It installs missing prerequisites (`python`, `pipx`, and `syncthing` with Homebrew on macOS, where a `python3` older than 3.11 counts as missing; `python`, `python-pipx`, `syncthing`, and `git` with `pacman -S --needed` on Arch-based Linux), checks that Python is 3.11 or newer and Syncthing is 2.1 or newer, installs `mm` through `pipx` from `@latest` or upgrades an installed `mm` older than the script's release first (in place with `pipx upgrade mind-meld` for an `@latest` install, or the forced `@latest` reinstall for one pinned to a tag), and verifies that `mm` on `PATH` is pipx's copy. On a default or missing Syncthing configuration the script reports that Syncthing already starts at login, enables it without starting a second instance when it is already running (`systemctl --user enable syncthing.service` on Arch-based Linux, or registering Homebrew's login item at `~/Library/LaunchAgents/sh.brew.syncthing.plist` on macOS, with the older `homebrew.mxcl.syncthing.plist` name also supported), or starts it at login (`brew services start syncthing` on macOS, `systemctl --user enable --now syncthing.service` on Arch-based Linux); on a pre-existing configuration, or when the check fails, it changes nothing and reports whether Syncthing already starts at login, or prints the command to make it do so; it never changes Syncthing's configuration. After Syncthing, it installs [qmd](https://github.com/tobi/qmd) for local agent-memory search if `qmd --version` does not run: with `bun install -g @tobilu/qmd` when Bun is on `PATH`, otherwise with `npm install -g --prefix "$HOME/.local" @tobilu/qmd` (installing Node first with `brew install node` on macOS or `pacman -S --needed nodejs npm` on Arch when neither Bun nor Node 22+ is available). It leaves an existing working `qmd` alone, never downloads qmd's models, and never uses `sudo` for qmd itself; if installing qmd fails, it prints the manual install command and the rest of the install still finishes. If a working copy is outside `PATH`, bootstrap names its directory so you can add it. `mm init` sets Syncthing up on a default configuration, while a machine with its own Syncthing configuration follows [Configuring Syncthing yourself](#configuring-syncthing-yourself); see [Quick Start](#quick-start) for the next steps. The script stops with the fixing command when Homebrew is missing or off `PATH` on macOS, on an unsupported system, when an installed Python or Syncthing is too old, when installing or upgrading `mm` fails, when starting or enabling Syncthing fails, or when `mm` is missing from `PATH`, shadowed by another install, or not pipx's copy. A rerun on a current machine changes nothing.
+The script installs missing prerequisites (Homebrew on macOS, `pacman` on Arch: Python 3.11+, `pipx`, Syncthing 2.1+, `git`, and `qmd` 2.8.3+ via Bun or npm), installs or upgrades `mm` from `@latest` through `pipx`, and enables Syncthing at login when Syncthing still has its default configuration. On a pre-existing Syncthing configuration it changes nothing and points you to [Configuring Syncthing yourself](#configuring-syncthing-yourself). Rerunning on an up-to-date machine is a no-op.
 
-To install manually when you already have the prerequisites (Python 3.11+, pipx, and Syncthing 2.1 or newer sharing one folder between your machines):
+For a manual install when you already have Python 3.11+, `pipx`, and Syncthing 2.1+:
 
 ```bash
 pipx install git+https://github.com/kbitz/mind-meld.git@latest
 ```
 
-Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the release workflow force-advances to each tagged release, so you always get the newest *released* version (never untagged work-in-progress off `main`) **and** plain `pipx upgrade` keeps working (see below).
+The `@latest` branch tracks each tagged release, so `mm update` and `pipx upgrade mind-meld` always move to the newest release rather than untagged commits on `main`.
 
-## Upgrading
+## Quick Start
 
-**Dedicated `mind-meld` qmd index (Track 163A).** Mind Meld now keeps its
-`mm-` collections in a dedicated `mind-meld` qmd index (`--index mind-meld`)
-instead of qmd's default index. After upgrading, run `mm memory-index on` or
-let an enabled sync refresh succeed on each machine that uses the index.
-This builds the dedicated index. On machines with a legacy refresh record,
-it also removes the old `mm-` collections from the default index. Then use
-[Agent setup](#agent-setup) to replace the old pointer line. Complete the
-refreshes before editing shared instruction files. Turning the index off
-before migration can clear the record and leave legacy collections in the
-default index.
-
-**Codex memory folded into `codex` (Track 161A).** Codex memory copies now
-sync with the `codex` source. Run `mm migrate-config` on each machine with
-an old `codex-memory` source entry or name in `disabled_sources` to remove it.
-The `codex` source controls selection as soon as you upgrade. If you had
-disabled only `codex-memory`, the machine resumes publishing memory while
-`codex` is enabled. If you had selected only `codex-memory`, run
-`mm enable-source codex` to resume exchanging copies. This also enables Codex
-customization sync and usage capture.
-
-`mm enable-source codex-memory` and `mm disable-source codex-memory` print
-a notice with `mm enable-source codex` or `mm disable-source codex`,
-respectively, and leave your configuration intact.
-
-Memory now uses the `codex` source's path. If the resolved root changes,
-peers keep their copies of files found only at the previous root. A push
-from the new root records it in the manifest even when the files are identical.
-Legacy memory file exclusions apply immediately after upgrade.
-`mm migrate-config` and `mm reconfigure-sources` preserve them in
-`sync.codex_memory_exclude_patterns`, a list of globs relative to the Codex
-source path.
-Peers on 1.12.76–1.12.79 with `codex-memory` enabled keep exchanging copies.
-
-**Automatic Syncthing pairing (Track 152A).** The first `mm push` after upgrading
-publishes this machine's encrypted Syncthing record when Syncthing is running.
-Run `mm update` and then `mm push` on each existing Syncthing fleet machine.
-See [Syncthing folder options](#syncthing-folder-options) for the one-approval join steps.
-
-**Plain `mm init` prompt order, approval wait, and saved join answers (Tracks 151A, 154A):**
-plain `mm init` asks `Start a new fleet or join an existing one? [n/j]`.
-Answer `n`/`new` or `j`/`join`. Pressing Enter asks again, and
-`mm init --new-fleet` skips the question. Before waiting, a fresh join asks
-for the storage path, the fleet machine's Syncthing device ID if mm needs to
-pair, the device name, the sources and the applicable
-[memory-search setup questions](#searching-agent-memory-qmd). Every yes/no
-question uses `[y/n] (Enter = y)` or `[y/n] (Enter = n)`, and every source
-defaults to yes when detected on disk. It saves those answers locally in
-`~/.config/mind-meld/join.toml` (never the passphrase). When a managed join
-needs approval, the same run prints both the short-ID and full-ID `mm devices approve` commands and waits for up to about 10 minutes plus local
-Syncthing request time. A stopped join offers to resume from the saved answers
-with `Continue joining? [y/n] (Enter = y)`.
-Scripts and tests that supply input for a fresh join must send `j` or `join`
-before the storage path, then supply the device name, source answers and any
-memory-search setup answers before the passphrase.
-
-**Fleet approval and retirement (Track 154A).** Update the approving machine to use
-a name or short ID at a terminal. For an older release or a script, use the full
-Syncthing ID printed by the joining machine. Init offers Grok Build and Muse and
-defaults to yes when it detects their supported files or directories. On each
-managed machine, a push or pull restores the Mind Meld name in Syncthing for this
-machine and configured peers that a fleet record vouches for.
-Update managed peers so they apply new [retirements](#retiring-a-dead-machine).
-
-**`mm retro-fleet --no-save` removed (Track 145A):** `mm retro-fleet --no-save` is
-removed and now exits 2 as an unknown option (`mm: error: No such option: --no-save`).
-Remove `--no-save` from any scripts or aliases calling `mm retro-fleet`. If an agent
-session still holds a stale `retro-fleet` skill copy that passes `--no-save`, run
-`mm install-skills` and then restart the agent so it reloads `SKILL.md`.
-
-**Migration, gc and source warning output (Track 137A):** migration, backfill,
-init-cleanup and forced unknown-source warnings now use the shared stderr
-forms, with fix commands last when present. The malformed-blob summary from
-`mm gc` and attended content-changing pushes moves from stdout to stderr;
-verbose/dry-run per-key listings stay on stdout. Source outcomes name the
-verb once (`Disable: source 'gstack' disabled on this device.`).
-Update scripts matching the old wording or stream. No migration is needed;
-exit codes, prompts and stored data are unchanged.
-
-**Cursor support removed (Tracks 114A–116A):** `mm cursor-agent`,
-`mm capture-cursor-usage`, the `cursor` source alias for `mm enable-source` /
-`mm disable-source`, the Cursor usage reader, the Cursor git-root discovery prober, and
-Cursor pricing provenance are removed. Scripts and aliases that ran `mm cursor-agent ...`
-must call `cursor-agent ...` directly; the old command now exits 2 without starting
-Cursor. On any machine where `mm enable-source cursor` was run earlier, delete the `stop`
-hook entry whose command is `mm capture-cursor-usage` from `~/.cursor/hooks.json` and keep
-your other hooks; until you do, Cursor runs that missing command after every turn.
-Leftover private files under `~/.config/mind-meld/` (`cursor-host-tokens.json`,
-`cursor-host-tokens.json.lock`, `cursor-standalone-spool.jsonl`,
-`cursor-standalone-spool.jsonl.merging`) and any `[retro] cursor_host_usage` key in
-`~/.config/mind-meld/config.toml` are ignored and can be deleted; git-root discovery drops
-any cached `cursor` prober state on its next complete pass. Repositories that only
-Cursor's records named leave discovery from the first push after upgrading and are no
-longer captured: on the Mac that works in them, pin any you still use in
-`[retro] repo_roots`, then run `mm recapture 90d` there once to collect the commits it
-missed (`retro-fleet` counts each commit once, so the full window is safe). Older
-published `host-usage-snapshot` rows that name `cursor` remain unchanged, with no
-migration: `mm retro-fleet` labels a failed or incomplete Cursor read on those rows
-`unknown/retired reader`, and counts retained `grok-4.7-fast` or effort-suffixed tokens in
-the Grok row as unpriced while `grok-4.7` and `grok-4.7-build` stay priced from xAI's
-rates. A machine with another consented host reader replaces its earlier snapshot on the
-next push that captures host usage, while a machine with no consented host readers skips
-pre-push attended host capture on a converged `mm push` and replaces its earlier snapshot
-with an empty `host-usage-snapshot` (`token_sources: []`) on its next push with
-content/identity changes or `mm autopush` (or until its earlier row ages past the 90-day
-retention window). A last attended-attempt record written by mm 1.12.21 or older that
-names Cursor shows `record corrupt — the next attended mm push rewrites it` until that
-push.
-
-**Grok Build `memory-v2/` sync (Track 111A):** on machines where the `grok` source is
-already enabled, the first `mm push` after upgrading publishes existing topic
-Markdown under `~/.grok/memory-v2/global/topics/**/*.md` and
-`~/.grok/memory-v2/workspaces/*/topics/**/*.md`, without another prompt. Run
-`mm update`, then `mm push` to publish them now. `skills/`, `commands/` and
-`rules/` continue syncing. All `observations/` files, including `_inbox/`, remain
-local, as do `MEMORY.md`, SQLite databases and their `-shm`/`-wal` files,
-`archive/` and `.retired-stores/`. Before switching machines, run `/flush` then
-`/dream` in Grok, then `mm push` in your shell; only the resulting topics travel.
-
-No config migration is required. The first publishing push records the
-`memory-v2/.mind-meld-anchor` without minting topic deletions from a pre-upgrade
-manifest. Older mm versions may receive topic files and valid deletions, but do
-not publish topics. Use `mm devices` to find older machines and run `mm update`
-there. If populated stores have different bytes at the same topic path, pull
-keeps the local file and writes a conflict copy; use `mm conflicts` and
-`mm resolve` before starting the next Grok session. To keep customizations and
-usage capture while leaving memory local, add `"memory-v2/*"` to the `grok`
-source's `exclude_patterns`; to stop
-Grok sync and usage capture, run `mm disable-source grok`. See
-[Grok Build](#grok-build) for the scope, configuration and handoff walkthrough.
-
-**Git-root discovery finishes across attended pushes (Track 106A):** a cold Codex
-index used to need more pushes than discovery's 100 ms attended budget could
-give, so the retro cursor stayed held. An attended `mm push` now gives discovery
-1,500 ms plus the attended scan-cap extension, clamped to the shared tail deadline; autopush keeps 50 ms and init
-keeps 100 ms. Progress persists between pushes and a finished provider is never
-re-read, so discovery reaches `complete` within three attended pushes on a cold
-index and costs about 0.1 s once it is warm. `mm recapture 30d` finishes discovery
-in one run (it gets a 30 s discovery budget). While the last push recorded discovery
-`partial`, `mm status` names `mm push` until it advises recovery (for example after
-three incomplete captures), then names `mm recapture` as the way to finish discovery.
-`mm refresh-identity` also runs a complete discovery first,
-so it reads the repository-local email of every repository discovery holds. Held
-history comes back on the first push after discovery completes, for commits since
-the held cursor; only commits older than that cursor, in repositories discovery
-finds for the first time, need `mm recapture <window>`.
-
-**Git-root discovery reads more records (Track 102A):** besides Claude Code's project
-logs, discovery now finds repositories from the working directories recorded by Codex
-(rollouts),
-Muse and Antigravity when those providers are enabled, and from Paseo's project list and
-the mmm factory's items when they are installed. `mm diag` names the source of each root.
-After updating, run `mm push` until `mm diag` shows discovery `complete` (see the
-entry above for how long that takes), then run
-`mm recapture 30d` once to collect commits from repositories discovery has just found.
-Pins in `[retro] repo_roots` for repositories these sources now name can be removed.
-
-**Attended usage reads get 3,000 ms, and autopush gives each provider 1,000 ms concurrently (Tracks 101A / 149A / 165B):** the attended
-host-usage default (`host_usage_interactive_budget_ms`) is 3,000 ms,
-host reads (sweep plus inline warm) get up to three fifths of the attended scan cap
-(`capture_budget_ms` before Track 124A; half before Track 101A), and sequential
-attended warm retries keep a reserve of up to 300 ms per later retry. Track
-165B gives each enabled reader its own cooperative deadline on autopush.
-The default is **1,000 ms** per reader, and an explicit
-`host_usage_autopush_budget_ms` now applies to each reader. Readers run
-concurrently. Attended push progress shows phase counts and elapsed time,
-`mm push --verbose` prints phase timings before the `Push:` outcome lines,
-and `mm diag` exposes `push_timings` (including `attended`, `autopush`, and `catchup` runs) and `capture_catchup`. If you pinned `host_usage_interactive_budget_ms`
-in `~/.config/mind-meld/config.toml` as a workaround, remove that line and run
-`mm push`; the measured reader timings fit the new default. Live verification
-across up to three attended pushes follows release installation. Codex also
-settles archived rollouts by the date in their name, so rollouts that have not changed
-are no longer re-read on later pushes.
-
-**Fast-forward peer edits and propagated deletions (Track 91A):** a peer's edit to a file
-you have not changed since you last synced it now simply applies (no union, no conflict
-copy), and a file deleted on one machine is now deleted on the others, each keeping a
-30-day recovery copy. Before this release a deletion only stopped a missing file from
-coming back, and every peer edit to a file both machines held was a conflict.
-
-**Update every machine, then run `mm push` and then `mm pull` on each, before anyone
-deletes a file you care about.** Deletions are provable only after a push on this release
-has published each folder's marker, and a pull on this release has recorded what each
-peer holds; a deletion made before that does not propagate (the first push after updating
-mints no deletion records, and a record from an older release carries no content hash, so
-it keeps its old effect of stopping a re-download and never deletes). Go one machine at a
-time, in any order.
-
-- **Update pinned Codex exclusions before syncing.** If your config has an explicit
-  `[[sync.sources]]` entry for `codex`, run `mm migrate-config --dry-run`, then
-  `mm migrate-config` on each machine. This appends `plugins/cache/*` and
-  `plugins/.remote-plugin-install-staging/*` to its exclusions, preserving your custom
-  exclusions. Codex manages these installed plugin files itself. Then run `mm push` on
-  each machine; removing them from sync leaves the local files in place and publishes
-  no deletion records. Configs using the default sources get these exclusions automatically.
-- **What a deletion removes.** A deletion record carries the sha256 of the version that was
-  deleted: the newest version this machine held for which it knows the full hash. If the
-  full hash is unknown, no record is published. A machine deletes its copy only when that
-  file's bytes equal that hash and it
-  last synced exactly that version from the machine that deleted it; a file you changed, a
-  same-named file with other bytes, or anything else stays. The deleted file is moved to
-  `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>` and kept at least 30
-  days. The pull's last line names the folder. See [Recovering a deleted
-  file](#recovering-a-deleted-file).
-- **A fast-forward has no recovery copy.** It replaces your unchanged file with the peer's
-  bytes, so a bad edit on one machine spreads to the others. When both machines changed a
-  file, `.jsonl` and `MEMORY.md` are still unioned (a line deleted on one side returns when
-  both sides changed the file, except a `MEMORY.md` pointer to a missing file that is not
-  waiting or failed, or a duplicate pointer for the same file) and any other file still gets
-  a conflict copy.
-- **A pull no longer restores a file this machine held and removed by hand.** Deleting a
-  synced file is a deletion your next push publishes, so an accidental removal spreads at
-  the next push; copy it back from a recovery folder (see above) and push from the machine
-  that deleted it.
-- **Conflict copies that exist today do not clear by themselves.** `mm pull` stops
-  reporting a copy it already holds, but `mm conflicts` keeps listing it until you run
-  `mm resolve` on each one (it needs a terminal).
-- **Pull line-merges older peer edits to `.jsonl` files and `MEMORY.md`.** For other
-  files, pull holds a peer edit built on your version with an older mtime. It says
-  `N older peer edits not applied`. Per-source pull summaries now use
-  `<peer>/<source>` labels. `mm pull --verbose` counts holds by that label and
-  lists the held paths.
-  `mm diag` shows the last pull's observations, including both mtimes, labeled as
-  possibly stale.
-  Compare both versions, then run `touch <file>` and `mm push` on the machine whose version
-  should win.
-- **`.mind-meld-anchor`.** mm keeps this small file (a random token) in each folder it
-  scans: for example `~/.claude/projects`, `~/.codex/skills`, `~/.codex/plugins` and
-  `~/.gstack/projects`, and the source folder itself (`~/.codex`, `~/.gstack`) for
-  sources that sync individual files there. It is never synced; leave it. It is how a push tells "a file was removed" from "the whole
-  folder was removed, recreated or restored from a backup". In the second case the push
-  mints no deletions and says `N files left out because <folder> is new; run mm pull to
-  restore them`. An anchor that cannot be written (a read-only folder) means deletions under
-  it will not propagate; the push says so. If a restore tool repeatedly rewrites the token,
-  push reports the repeated mismatch and `mm diag` records it; check that tool's restore
-  rules rather than repeatedly pushing.
-- **Rollback.** The previous release ignores the new `state.db` tables and the new manifest
-  fields; files already deleted stay deleted, with their copies. An older release's walker
-  publishes `.mind-meld-anchor` from a scan root as an ordinary file that differs on every
-  machine, so remove those files before going back, on each machine:
-
-  ```bash
-  find ~/.claude ~/.codex ~/.gstack -name .mind-meld-anchor -type f -print -delete
-  ```
-
-  Add any other synced source folder that `mm sources` lists.
-
-<a id="track-91a-deletion-recipe"></a>
-A two-machine recipe that exercises all of it uses a throwaway file under the default
-`gstack` source. Check that `mm sources` shows `gstack` enabled on both Macs. The
-push examples assume usage is unchanged and all readers finish.
+The shared store lives at the root of one Syncthing folder (`~/Sync/mind-meld` by default).
 
 ```bash
-# On Mac A, then Mac B (once each, in order)
-mm update && mm push           # Push: metadata updated.     (the new .mind-meld-anchor tokens; or N content changes published)
-mm pull                        # Pull: no changes.           (or N content changes from Mac A)
-
-# On Mac A: create a file and share it
-mkdir -p ~/.gstack/analytics && echo "recipe v1" > ~/.gstack/analytics/mm-recipe.md
-mm push                        # Push: 1 content change published.
-
-# On Mac B: receive it
-mm pull --verbose              # Includes "flushed N files in X.XXs", then Pull: 1 content change from Mac A.
-cat ~/.gstack/analytics/mm-recipe.md   # recipe v1
-
-# On Mac A: delete it, preview, publish
-rm ~/.gstack/analytics/mm-recipe.md
-mm push --dry-run              # ... - 1 deleted ... Dry run complete. Nothing was changed except the local lock file.
-mm push                        # Push: 1 content change published.
-
-# On Mac B: preview, then follow the deletion
-mm pull --dry-run              # delete  analytics/mm-recipe.md   ...   1 would be deleted
-mm pull                        # Pull: 1 file deleted because Mac A deleted it; copies in ~/.config/mind-meld/deleted/<stamp> for 30 days; see ...#recovering-a-deleted-file.
-ls ~/.gstack/analytics/mm-recipe.md    # No such file or directory
-
-# Recover it onto Mac A, the machine that deleted it (a copy put back only on Mac B stays there)
-# On Mac B: send the copy to Mac A by any means (scp shown; <stamp> is the folder the pull line named)
-scp ~/.config/mind-meld/deleted/<stamp>/gstack/analytics/mm-recipe.md macA:/tmp/mm-recipe.md
-# On Mac A: put it back without overwriting anything newer, then publish
-cp -n /tmp/mm-recipe.md ~/.gstack/analytics/mm-recipe.md
-mm push                        # Push: 1 content change published.
-
-# On Mac B: the file comes back
-mm pull                        # Pull: 1 content change from Mac A.
-```
-
-Repeat the recipe with the Macs' roles reversed, and note the verbose flush time on each receiving Mac.
-
-**Shared Claude project memory (Track 90A):** Claude keeps a project's memory under a
-folder named for the checkout's absolute path, so the same repository at two paths, or
-on a Mac and a Linux box, was two projects. mm now publishes a project that has a
-network `origin` under that remote, and any other project under a home-relative name,
-and each machine maps the name back to the folder Claude uses for *its* checkout, wherever
-that checkout is. See [Project memory across machines](#project-memory-across-machines).
-
-**Every machine must update before its own first push in the new form, and it takes part
-in the new form only from then.** Go one machine at a time, in any order; nothing waits for
-the whole fleet. On each machine run the update command, then `mm push`. The first push
-after updating that can list `~/.claude/projects` (attended or from a hook) republishes the manifest with shared names;
-it uploads no content, deletes nothing and runs no GC. An attended push prints
-`Push: project memory published under shared names.`; `mm autopush` stays silent and records
-`published under shared names` in its breadcrumb. A push that cannot list the folder holds the switch: `mm status` and an
-attended push say project memory is not published, `project_index.reason` is `projects_unlisted`, and the next
-push that can list it switches and republishes that machine's project memory as content. A
-machine where Claude has not created the folder yet stays on the old form until it does.
-Confirm with `mm diag --json`: `project_index.state` is `shared`,
-and `project_index.machines` shows which other machines have switched.
-
-- Updated machines sync with each other at once. Older machines keep syncing with each
-  other in the old form. An updated machine reads an old-form peer's manifest too: files
-  under the same home folder keep applying, and another home's files wait, shown as
-  `312 files from Mac B wait until it publishes shared names`, until that peer updates.
-- An older machine skips an updated peer's **whole** manifest, every source and not only
-  Claude memory, so it receives nothing from that peer until it updates. Through 1.7.1, once
-  any peer has updated: `mm gc` refuses at exit 1; an attended `mm push` with a content
-  change publishes that content, prints `Push complete.`, then fails with `cannot GC
-  safely` at exit 1, every time until that machine updates; blob collection does not run
-  there, so orphaned blobs use disk until then; pull, autopull and autopush stay at exit 0.
-  Nothing is lost by that, and there is nothing to clean up: update the machine.
-- **Through 0.14.18**, run the update command *before* that machine's next attended
-  `mm push` or `mm gc`, or leave it off: beside a conflict copy of an updated machine's
-  manifest (for example `manifest.json 2.enc`), its GC can read the older copy as that
-  machine's whole manifest and delete blobs only the newer manifest references.
-- A file deleted on an updated machine keeps flowing among older machines until they update.
-- Rollback past the switch is unsupported: an older mm refuses its own new-form manifest, and
-  a regression ships as a new release.
-- Below v1.3.0 there is no `mm update`, and `pipx upgrade` leaves a tag-pinned install frozen,
-  so use `UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest`.
-
-A two-machine recipe (Mac A updates first, then Linux B):
-
-```bash
-# On Mac A
-mm update                      # then: mm --version
-mm push                        # Push: project memory published under shared names.
-mm status                      # nothing about names unless a peer still waits
-mm diag --json | jq .project_index.state   # "shared"
-
-# On Linux B, which keeps a different checkout path
-mm update && mm push
-git clone git@github.com:acme/widgets.git ~/code/widgets && cd ~/code/widgets
-mm pull                        # places the Mac's memory into the folder Claude uses here
-ls ~/.claude/projects/*widgets*/memory
-```
-
-**`mm init --new-fleet` and the new default storage path (Track 89A).** Starting
-a fleet creates its key header (`mm-crypto-init`) in an empty folder. Use
-`mm init --new-fleet` or answer `new` at the prompt on the first machine.
-A joining machine requires the existing header before it registers the device
-or writes to the Mind Meld store. Managed Syncthing setup and its local record
-may already be saved while waiting. On a join, `mm init` also runs the first
-`mm pull` with the passphrase you just typed. The typed `BRICK` override is
-gone. The default storage path is now
-`~/Sync/mind-meld`. It does not move an existing store or change a configured
-`storage.path`, and configured Macs still on iCloud Drive keep syncing. New or restored
-machines now use the Syncthing setup described in Quick Start; `mm init` requires
-Syncthing to be running. mm no longer rewrites the key header or
-moves a differing copy: repair now only removes `mm-crypto-init` conflict
-copies that are byte-identical to the main file. Differing copies stay
-where they are (see [Key header copies differ](#key-header-copies-differ)),
-and `mm diag` reports `pending_repair` as `delete` and `preserve` counts only
-(no `replace_canonical`). The iCloud auto-pin step is removed.
-
-**Machine-local gstack files and browser profiles (Track 94A):** any directory
-holding a regular, non-symlink `Local State` file, the marker Chromium and Electron write at the
-root of a browser user-data directory, is now skipped in every generic source.
-No folder name is hard-coded: `chrome-profile`, `signed-profile` and
-`.dev/user-data` all qualify. The default gstack `include_patterns` also
-narrowed. `manager-*.json`, `*-evidence.jsonl` and the live `driver-handoff.md`
-no longer sync (the timestamped `driver-handoff-*.md` archives still do),
-`pair-review/` admits only `deploy.md`, `report.md` and `parked-bugs.md`, and
-the ten artifact directories admit document file types only. On a Mac whose
-config pins the previous default list, `mm migrate-config` offers the
-narrowed list, showing only the entries that change; then run `mm push`.
-
-The generic rule replaces a local `projects/*/chrome-profile/*` stopgap
-exclude for profiles that still have their marker. Keep the stopgap while
-unmarked copies remain (see below); after cleanup you can delete it from
-`config.toml`. It is not a recommended glob, so deleting it brings back no
-prompt. Narrowing deletes nothing on any
-Mac: no tombstones are written, every Mac keeps its copies, and own store
-space is reclaimed by an attended push's GC or `mm gc`. To remove profile
-copies that already synced:
-
-1. Wait until every Mac runs this release and has pushed once.
-2. On each Mac, list marked profiles with
-   `find ~/.gstack/projects -name 'Local State' -type f`. Also inspect the
-   known profile paths from the originating tools on every Mac: under the new
-   artifact allowlist, incoming document files can arrive without `Local State`
-   and keep syncing even after every Mac upgrades. Names such as `chrome-profile`,
-   `signed-profile` and `user-data` are useful clues, not a complete detector.
-3. For each confirmed synced copy, add its exact source-relative directory plus
-   `/*` to that source's local `exclude_patterns` on every Mac, including
-   Macs without a copy (for example `projects/myapp/designs/t/user-data/*`).
-   Then run `mm push` on every Mac and recheck for late arrivals before deleting
-   anything, so their manifests drop those files
-   without tombstones. Keep these exclusions through cleanup: deleting a marked
-   directory also removes its marker, so the marker alone cannot protect the
-   next push or prevent stale peer copies from returning.
-4. Delete only confirmed copies that no tool still uses, on every Mac. Wait for
-   dormant Macs to complete steps 1–3 too. Leave the explicit exclusions in
-   place to prevent stale copies returning. Deleting a
-   still-published unmarked copy without step 3 can propagate a deletion: a Mac that
-   holds identical bytes deletes its copy (with a 30-day recovery copy) once this
-   release has run on it.
-
-**Undelivered content is waiting, not failed (Track 87A):** on a Syncthing
-folder a manifest can arrive before its blobs, or a file can be replaced while
-mm reads it. A blob that has not been delivered yet used to count as a failed
-file (attended `mm pull` exit 1, autopull `degraded`). It is now **waiting**:
-`mm pull` says `Pull: ... waiting for 2 files from Mac B.` and exits 0, and
-`mm autopull` records `success` with the same detail (`mm status` shows it).
-Waiting files are not applied; other available files still apply. The next pull
-picks up the waiting files once they sync. A failed file still means a real
-error (decrypt, write, permission).
-
-Before reading peer manifests, `mm pull` checks delivery for the whole folder
-through Syncthing's local read-only API, including on owner-managed folders.
-The initial probe has a 2 s REST budget. If delivery is pending, a terminal
-pull waits up to `[sync] pull_syncthing_wait_ms` (default 15,000 ms) after the
-probe. The transient progress phase is `Waiting for Syncthing to deliver N files`.
-See [Sync outcomes](#sync-outcomes) for when the spinner appears.
-A non-terminal pull or a pull with the setting at `0` proceeds after one probe.
-If delivery still appears pending, pull applies what has arrived and adds
-`Pull: Syncthing is still delivering N files. Run: mm pull.` Pending delivery
-alone keeps exit 0. If a file fails to apply, the error also includes the
-pending delivery observation and ends with the repair command.
-
-`mm autopull` makes one probe with a 500 ms REST budget and records pending
-delivery in a successful run without printing anything for it. `mm status`
-clears the live pending verdict when the folder catches up. The `Last auto-pull`
-line shows recorded delivery as a past observation. `mm pull --dry-run` and
-the `mm init` join pull skip the delivery check. If the initial check finds
-the API unreachable, unauthorized or unconfigured, or finds no Syncthing folder
-matching the storage path (for example, iCloud Drive), pull adds no delivery output.
-
-`mm pull` and `mm status` ignore Syncthing's temporary files and `.stversions`
-folder and retry observed canonical files that disappear during a read. Device
-listing ignores conflict copies and counts a `devices/` file only when its name
-matches the id in its body; valid manifest conflict copies remain recovery
-inputs. `mm diag`
-reports the number of ignored files as `ignored storage files`. See
-[waiting content](#waiting-content-is-not-a-failure).
-
-**Host usage snapshot compatibility:** an un-upgraded peer drops incoming `host-usage-snapshot` records carrying `"muse"` or `"agy"` until it updates. Content sync is unaffected; upgrade the peer with `mm update` or `pipx upgrade mind-meld` to include its usage in `retro-fleet`.
-
-**Push and pull output (Tracks 78A / 129B / 167A / 171A):** attended `mm push` and `mm pull` end
-with one `<Verb>: <what happened>.` outcome line per thing that happened, and
-errors print `mm: error: <what broke>` on stderr followed by `Run: <command>` on
-its own last line (including CLI usage errors, which exit 2 with
-`Run: <command path> --help`). Attended `mm push` appends `; usage published`
-only when published usage totals or queued catch-up data changed since this
-machine's last published snapshot (`Push: 10 content changes published; usage published.`,
-`Push: no content changes; usage published.`, or
-`Push: no content changes; usage published (Grok catching up).` when a host reader
-hit its deadline). With no verified new usage, idle pushes print
-`Push: no content changes; no new usage.`. Content, metadata, selection,
-or repair leads omit the usage clause when no readers are catching up. A reader
-that stops at its deadline can add `; no new usage (Grok catching up)` to those
-leads. Routine capture, cache, budget, nested-repository, scan, and pull
-`skipped` details live under `--verbose` (and in `mm status` / `mm diag`);
-a pull that only skips newer local files ends with `Pull: no changes.`. Capture
-failure does not make content sync fail. Actionable and data-at-risk warnings
-still print before the outcome. Successful automatic commands stay silent,
-including when they move files.
-
-Update scripts that match the exact `Push: no content changes.` line to
-accept the usage clause. After upgrading, refresh the `/retro-fleet` skill
-with `mm install-skills` or the next `mm push`, then restart the agent.
-
-**Exit change:** an attended pull with any failed file now exits **1**, replacing
-its previous exit 0. Completed files remain applied. `mm autopull` keeps exit 0
-for contained failures and records the failed count; conflict-fail preflight
-keeps exit 3 before applying files. There is no data/config migration or new
-quiet flag. See [Sync outcomes](#sync-outcomes), [Exit codes](#exit-codes),
-[Status verdicts](#status-verdicts) and [pull remedies](#pull-incomplete--could-not-pull-a-file).
-A foreground automatic update can delay the final line; successful version
-details appear only with `--verbose`. Standalone `mm update` is unchanged.
-
-**Setup and resolution output (Tracks 130B, 154A):** `mm init`, `mm devices approve`, `mm devices retire`,
-source enable/disable/reconfigure and per-conflict resolution now use the same
-`<Verb>: <what happened>.` outcomes. Pull and resolution errors, warnings and
-notices use the shared stderr forms, including fail-mode preflight warnings.
-Human-readable text and streams change; commands, flags, exit codes, consent
-and `mm devices --format=json` are unchanged. No migration is needed.
-
-**Status, gc, diff, log, recapture and update-notice output (Track 133A):** `mm gc`
-and `mm recapture` now end with one `Gc: ... .` or `Recapture: ... .` outcome line
-instead of bold-green "complete" banners. `mm gc -v` shows the per-reaper retention
-summaries, and the new `mm recapture --verbose` / `-v` shows the window, repository,
-record and size breakdown and the commit-date note. The `mm diff` corrupt-manifest
-warning, the incomplete-retention warning, the newer-history-database error, status
-advice, and the update nudge and failure notices use the shared `mm: error:` /
-`mm: warning:` / `mm: notice:` forms with the fix as `Run: <command>`. Recapture's
-errors (including a partial recovery's `mm: error:` headline and its single `Run:`
-fix) and its host-usage notice now print on stderr; partial-recovery cause lines
-stay on stdout.
-Human-readable text and streams change; commands, flags (apart from the new recapture
-`-v`), exit codes, stored data and `mm log --format jsonl` records are unchanged. No
-migration is needed.
-
-**Empty conflict results (Track 134A):** when they find no conflict files,
-`mm conflicts` and `mm resolve` now print `Conflicts: no conflict files.` and
-`Resolve: no conflict files.` instead of a green `No conflict files.`, and both
-still exit 0. `mm resolve ""` (an empty PATH, such as a script's unset quoted
-variable) now fails like any PATH that matches no conflict file
-(`mm: error: No conflict file matching: <path>` on stderr, exit 1) instead of
-being treated as no PATH, which walks every conflict. No migration is needed.
-
-**Conflict gc and conflict-command lines (Track 136A):** `mm gc --conflicts` no
-longer warns about conflict copies it keeps on purpose (unresolved, pre-v0.9.2
-or with an unreadable age), and per-reaper summaries show them as `kept=`.
-`mm gc` always prints its `Gc:` line, and a real retention failure adds the
-warning after it, whose fix after `--conflicts` is `Run: mm gc --conflicts -v`.
-An unmatched `mm resolve PATH` ends with `Run: mm conflicts`. `mm conflicts`
-ends with `Run: mm resolve`, plus a `mm: notice:` line when it lists pre-v0.9.2
-copies. When `mm resolve` cannot read a same-file conflict copy, it names the
-move repair only if the original's symlink chain reaches the copy. An uncertain
-symlink chain gets advice to inspect both names instead of deleting the copy.
-Exit codes and stored data are unchanged, and no migration is needed.
-
-
-**Status verdict and local run evidence (Track 77A):** `mm status` now opens
-its report after authentication with a verdict about this device's last push.
-Nested checkout paths are summarized as a count; use `mm diag` for paths.
-The optional, private `last-attended-runs.json` needs no migration. Missing
-history after upgrade is normal: a readable own manifest and complete local
-inspection can establish a healthy comparison without seeding both verbs.
-Older binaries ignore this sidecar. Existing auto-update and rollback rules
-below still apply; plaintext status is not a stable scripting interface.
-
-
-**Before the first attended `mm push` or `mm gc` on any Mac, including a dormant
-one, check every `mm` it can run.** Older releases' GC can delete other Macs'
-blobs during a push or `mm gc`. Run `which -a mm`, then `<path> gc --help` for
-each path listed: an mm with own-device GC says "this device's". Update the pipx
-install with `mm update` (it updates only pipx installs; an mm older than v1.3.0
-has no `mm update`, so use `pipx upgrade mind-meld` as described below). For any
-other copy, fix `PATH` so the pipx `mm` comes first and never run that copy
-against real storage.
-Hooks (`mm autopush`, `mm autopull`) do not run GC, but do not
-rely on their background update to bring a Mac current. Updating one Mac protects
-peer namespaces only from that Mac's GC; other arrival-order limitations of the
-1.x store remain.
-
-**Local history database (Track 73B):** the first history write after upgrading
-imports `~/.config/mind-meld/pull-history.jsonl` and `.1` once into local
-`state.db`. Before that first write, `mm log` still reads JSONL. New rows go only
-to the database; the legacy files remain untouched. The table keeps 20,000 rows
-per (verb, action) class, including per-file uploaded rows. The [history
-remedies](#history-database-statedb) cover interrupted writes and import notices.
-
-Downgrading to an older mm shows only its JSONL history; it cannot see database
-rows. After re-upgrading, rows the older binary appended to either legacy file
-are **not** imported again. `mm log` notices changes to either file: this shows
-past divergence, not proof that an old binary still runs. Check `which -a mm`
-and fix PATH on that Mac. To inspect and keep those rows before moving both
-legacy files aside (with no mm running):
-
-```bash
-jq -c . ~/.config/mind-meld/pull-history.jsonl.1 ~/.config/mind-meld/pull-history.jsonl
-mkdir -p ~/mm-history-backup
-for name in pull-history.jsonl pull-history.jsonl.1; do
-  if [ -f "$HOME/.config/mind-meld/$name" ]; then
-    mv "$HOME/.config/mind-meld/$name" "$HOME/mm-history-backup/$name.$(date +%Y%m%d-%H%M%S)"
-  fi
-done
-```
-
-These copies remain readable with `jq -c . ~/mm-history-backup/pull-history*`;
-neither the importer nor `mm log` reads backup directories. Keep state.db too
-if you need the history recorded by the newer version. Moving only one legacy
-file may leave a stale-binary notice for the other.
-
-<a id="v180-scope-trim"></a>
-
-**v1.8.0:** gstack defaults exclude generated output. Complete this checklist
-on every active Mac before the next attended `mm pull` on any of them:
-
-1. Before the release lands on each Mac, copy its pull-history files aside.
-   Before Track 73B, about 8,000 excluded peer rows per attended pull could
-   rotate the shared 1 MB history and evict earlier records. The database now
-   keeps 20,000 excluded rows independently of conflict history. Keep existing
-   `~/mm-history-backup/` copies: inspect them with `jq -c .
-   ~/mm-history-backup/pull-history*`; neither import nor `mm log` reads them.
-2. Update each Mac and check `mm --version` (1.8.0 or newer).
-3. Run `mm migrate-config`, then `mm push`. A Mac without explicit
-   `[[sync.sources]]` reports nothing to migrate; it already uses the new defaults.
-4. Run `mm status` on each Mac: no migration warning and no pending gstack deletions.
-
-```bash
-# Before v1.8.0 lands on each Mac:
-mkdir -p ~/mm-history-backup && cp ~/.config/mind-meld/pull-history.jsonl* ~/mm-history-backup/
-# On every active Mac before the next attended pull on any of them:
-mm update && mm --version
-mm migrate-config
+# First machine of a new fleet (empty folder):
+mm init --new-fleet      # sets up default Syncthing, writes key header + .stignore, prints Syncthing ID
+mm push --dry-run        # preview: changes nothing except the lock file
 mm push
+
+# Joining machine:
+mm init                  # asks start/join, saves answers, pairs with one fleet machine, waits for approval
+# On the fleet machine whose ID you pasted:
+mm devices approve <short-id>
+# Back on the joining machine once init finishes pulling:
+mm push
+
+# Everyday workflow:
+mm pull --dry-run   # preview: changes nothing except the lock file
+mm pull
 mm status
+mm diag
 ```
 
-The first push after migrating includes the removed entries in its content-change count;
-`--verbose` shows upload/scan detail. This counts entries removed from this Mac's manifest: expected, no
-tombstones, and every Mac keeps its copies. A default-config Mac's autopush
-may already have printed `mm: pushed N files (N deleted)` for that trim;
-autopush removes no local files and never runs GC. Own storage reclamation
-needs an attended content-changing `mm push` or `mm gc`.
+Typical 1.12.9x output — one line per outcome, nothing for what didn't happen:
 
-Rollback: an install tracking `@latest` can reinstall the latest release on a
-later sync command unless `[upgrade] auto_install = false`; a tag-pinned
-rollback follows the exception under [Automatic updates](#automatic-updates).
-A migrated explicit config keeps these globs until removed by hand, which
-brings back the migration warning and attended prompt.
+```text
+$ mm push
+Push: 1 content change published.
 
-**v1.0.0:** no action needed beyond upgrading. Mixed 0.14.x/1.0.0 fleets
-interoperate with no wire or storage migration. Newer-format storage refuses with
-an upgrade remedy ([Storage-format gates](docs/invariants/auto-upgrade.md#storage-format-gates)).
-`b` / `both` still leave both conflict files on disk. Once v1.0.0 is tagged, a regression
-ships as 1.0.1: the upgrade nudge never downgrades.
+$ mm push
+Push: 10 content changes published; usage published.
 
-**v0.14.9:** the old identity cache becomes stale and refreshes on the next identity read that completes repository discovery; incomplete attempts retry.
-The first push needing that refresh shows `mm: notice: refreshing identity cache (one-off)` with `--verbose`. [Future capture is corrected; previously published rows stay unchanged.](#dropped-repositories-and-ignored-git-environment-variables)
+$ mm push
+Push: no content changes; no new usage.
 
-For `mm: error: Pull incomplete [result-degraded]:` or a per-file warning after upgrading, see [pull failures and remedies](#pull-incomplete--could-not-pull-a-file). No data migration is needed for apply exception containment.
-
-```bash
-mm update
+$ mm pull
+Pull: 1 content change from mac-a.
 ```
 
-That's it, and from v1.3.0 you rarely need it: `mm pull` and `mm push` (and the `autopull` / `autopush` hooks) install a newer release on their own once they notice one. See [Automatic updates](#automatic-updates). `mm update` needs no config and no passphrase, so it also works on a Mac whose sync is refusing.
+## Setting up another machine
 
-In a terminal, `mm update` shows a transient spinner (`Updating mm <old> → <new>`, then phase labels and counters) that keeps animating during silent steps and clears before the one-line outcome (`Update: mm <old> → <new>.`, or `Update: mm <version> is up to date.` / `Update: mm <version> is already the latest release pipx can see.`). Phase names and measured progress change only when installer output reports them. It shows download bytes or package installation counts when pip reports them. pip reports those only for larger uncached downloads and multi-package installs, so an update that changes only mm usually shows phase labels alone. A pipx venv created with the uv backend shows fewer labels. Percentages describe that phase; build phases show their label without an estimated percentage. Raw output stays hidden during the update, and mm verifies the installed release before reporting success. A pinned install's reinstall shows only a `Reinstalling` label: pipx removes the install if a forced reinstall cannot finish, so that command is never tied to the terminal. Display exceptions do not stop the installer, and closing the terminal mid-update lets pipx finish. A paused terminal can still stall the update until resumed. Redirected or piped output, including output that `FORCE_COLOR` marks as a terminal, prints no spinner and the same outcome line.
+On a machine whose Syncthing still has its default configuration (no paired devices, and only an unshared, empty Default Folder), `mm init` handles Syncthing setup automatically:
 
-`mm update` and the automatic path both ship in v1.3.0, so an mm older than that (1.2.0 and below) has neither: update it once by hand with `pipx upgrade mind-meld`, or the `@latest` reinstall below if that leaves you on the same version. The first release an installed mm can fetch for you is the one after v1.3.0.
+1. Run `mm init` and choose join (`j`). It asks for the storage path, one existing fleet machine's Syncthing device ID, this machine's name, sync sources, and optional `qmd` memory-index settings, then saves those answers (never the passphrase) in `~/.config/mind-meld/join.toml`.
+2. `mm init` pairs with that fleet machine and prints this machine's Syncthing ID along with copyable `mm devices approve <short-id>` and `mm devices approve <device-id>` commands, then waits up to ~10 minutes for approval and the fleet key header.
+3. On the fleet machine, run `mm devices approve <short-id>` (or `mm devices approve` with no argument on a terminal to pick interactively). Compare the 7-character short ID before approving.
+4. Once approved, the joining machine accepts the folder, prompts for the fleet passphrase, verifies it, registers itself, publishes its encrypted `syncthing/<id>.enc` record, and pulls.
 
-Under the hood it runs `pipx upgrade mind-meld`. Because the install tracks the moving `latest` branch (not a frozen tag), pipx re-resolves it to the newest release and lands it. Running that pipx command yourself is equivalent.
+If the wait times out or you press Ctrl-C, `mm init` exits with `Run: mm init`. Rerunning offers to resume with your saved answers so you don't retype them.
 
-**Stuck on an old version?** If you ever installed or upgraded with the old `--force …@vX.Y.Z` form, your install is pinned to that exact tag — pipx re-resolves the frozen ref on every `pipx upgrade` and reports your current version as "latest" forever. A git tag never moves; a branch does. `mm update` detects the pin and, when a newer release exists, reinstalls onto the `latest` branch for you. On an mm older than v1.3.0, run this once instead:
+**One approval connects the whole managed mesh.** Each machine publishes its own Syncthing device ID in encrypted `syncthing/<id>.enc`. On every other machine where `mm` manages Syncthing, the next `mm push`, `mm pull`, `mm autopush`, or `mm autopull` pairs knocking fleet peers vouched by those records, clears stale introducer flags, keeps device names aligned, and removes disconnected retired devices — no introducers required.
 
-```bash
-UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
-```
+**Linux keyring note:** On Arch Linux, `mm` stores the fleet passphrase in Secret Service (`gnome-keyring` / `libsecret`). Unlock your login keyring in the desktop session before running `mm` or agent hooks.
 
-(This is exactly the command mm's upgrade nudge prints.)
+**Retiring a machine:** Run `mm devices retire <name|id>` on any active machine (interactive runs confirm with `[y/n] (Enter = n)`; `--yes` and non-terminal runs require the exact 8-character Mind Meld device ID from `mm devices`). It writes an encrypted `retired/<id>.enc` record and removes `syncthing/<id>.enc` and `devices/<id>.json`, so managed peers drop the retired device automatically on their next sync.
 
-### Automatic updates
+### Configuring Syncthing yourself
 
-Once per 24h, `mm pull`, `mm push`, `mm autopull` and `mm autopush` check GitHub for a newer release tag after the sync has finished. If there is one, mm updates itself:
+If a machine already has its own Syncthing configuration (paired devices, custom folders, or a non-empty Default Folder), `mm init` leaves Syncthing untouched. Configure Syncthing yourself:
 
-- **`mm pull` / `mm push`** run `pipx upgrade mind-meld` in the foreground before their final outcome line. On a terminal without `--verbose`, they show the update step in the spinner and print `Updated mm <old> → <new>.` after the sync's outcome line (or `mm: notice: automatic update to <new> did not complete (<reason>). Run: mm update` on `stderr` after a successful sync, or before the sync's error and final fix command when both fail, without changing the sync's exit code); with output piped, a successful update stays silent and a failure prints the `mm: notice:`; with `--verbose`, they print `mm: notice: updating mm <old> → <new> (pipx upgrade mind-meld)…`, then `mm: notice: updated mm <old> → <new>; the next mm command runs it` as before. Cancellation keeps its existing `automatic update cancelled` notice and reinstall remedy; nudges for installs mm cannot update keep their existing ordering. Expect a short one-off wait per release while pipx clones and builds.
-- **`mm autopull` / `mm autopush`** start the same command in the background and return immediately, printing nothing. The output goes to `~/.config/mind-meld/auto-update.log`.
+1. Pair this machine with one existing fleet machine. On this owner-managed machine, mark that one fleet machine as an **Introducer** (one-way: `mm`-managed peers do not mark introducers back, so this lets your owner-managed machine learn of new peers without mutual-introducer warnings).
+2. Share the fleet folder (`mind-meld`, path `~/Sync/mind-meld` by default) with the options below.
+3. Wait for `mm-crypto-init` to arrive in the folder, then run `mm init` to enter the passphrase and pull.
 
-The new version takes effect on the next `mm` command. A failed update never fails the sync or changes its exit code: it prints a `mm: notice:`, `mm status` shows `Automatic update did not complete`, and mm retries once a day. Run `mm update` to see the error.
+### Pairing machines in Syncthing
 
-The automatic path only ever runs the in-place `pipx upgrade`, and only when mm was installed from `@latest` by pipx. Anything else — a tag-pinned install (including the rollback below), a `pipx pin`, a fork, a local checkout, a non-pipx install — is left alone and gets the printed upgrade notice instead. An explicit `mm update` reinstalls a tag-pinned install onto `@latest`; rerunning the bootstrap also does so when the install is older than the script's release.
+In the Syncthing GUI (`http://127.0.0.1:8384`), find a machine's ID under **Actions → Show ID**. Add the peer with **Add Remote Device**, share the `mind-meld` folder on its **Sharing** tab, and accept the incoming device and folder prompts on the other machine.
 
-To turn it off:
+### Syncthing folder options
 
-```toml
-# ~/.config/mind-meld/config.toml
-[upgrade]
-auto_install = false   # keep the check and the notice; never run pipx
-auto_check = false     # no check at all: no notice and no automatic update
-```
+`mm` relies on these folder settings (`mm status` and `mm diag` check them):
 
-`mm --no-check-version <command>` skips both for one invocation. `mm update` ignores all three settings.
+- **Folder type:** Send & Receive
+- **Ignore permissions (`ignorePerms`):** enabled (prevents macOS/Linux mode churn)
+- **File versioning:** none (`mm` keeps its own 30-day deletion recovery copies)
+- **`.stignore`:** present at the folder root (created by `mm init --new-fleet` to ignore `.DS_Store`, temporary lock/swap files)
 
-**Need to roll back?** Pin the last 0.x release, then replace the skill store
-with the running package's copy. If the store exists, move it aside first:
-`mm install-skills` never overwrites a newer stored skill with an older one.
+<a id="syncthing-mesh-causes"></a>
+During an attended pull on an `mm`-managed machine, `mm` reports unvouched pending join requests:
 
-```bash
-UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.14.18
-mv "$HOME/.local/share/mind-meld/agent-skills/retro-fleet" "$HOME/.local/share/mind-meld/agent-skills/retro-fleet.pre-rollback-$(date +%Y%m%d-%H%M%S)"
-mm install-skills
-```
+- **Knocking fleet machine without `syncthing/<id>.enc`:** another registered machine hasn't published its encrypted Syncthing record yet → run `mm update` and `mm push` on that machine.
+- **Superseded old registration:** a re-initialized machine left an old entry → run `mm devices retire <old-id>`.
+- **New joining machine:** run `mm devices approve`.
 
-1.0.0 and 0.14.18 use the same storage and wire formats. Rollback within 1.x
-is a reinstall unless an intervening MINOR's Upgrade notes say otherwise.
-Keep the moved store as a backup. A pinned install is never updated
-automatically, so the rollback holds until you run `mm update` (or the
-`@latest` reinstall above) to resume upgrades; neither the nudge nor the
-automatic update downgrades an install for you.
+## Moving a machine from iCloud Drive to Syncthing
 
-## Versioning and compatibility
+There is no automated migration tool. Move each Mac on its own schedule — Macs still on iCloud Drive keep syncing until you move them:
 
-Mind Meld has one user and makes no compatibility promise beyond its storage formats: an older mm refuses storage written in a format it cannot read and tells you to upgrade. Commands, flags, config keys and output can change in any release; the [Upgrading](#upgrading) notes say what to do. The release policy is in [docs/SPEC.md](docs/SPEC.md#release-policy).
+1. Run `mm push` on the Mac to flush any final iCloud changes if needed, then uninstall `mm` (`pipx uninstall mind-meld`) and remove `~/.config/mind-meld` (copy anything you want out of `~/.config/mind-meld/deleted/` first).
+2. Reinstall with the [bootstrap script](#install).
+3. Run `mm init --new-fleet` (if this is the first machine on Syncthing) or `mm init` to join an existing Syncthing fleet.
+
+Your local agent files stay in place and merge through normal pull rules: nothing local is overwritten without a proven base, and differing files keep both copies until `mm resolve`.
+
+## Commands and output
+
+### Manual commands
+
+| Command | Description |
+|---------|-------------|
+| `mm --version` | Print the installed version and exit |
+| `mm init` | Start a new fleet or join an existing one; sets up default Syncthing, saves join answers, waits for approval, verifies passphrase, pulls |
+| `mm init --new-fleet` | First machine of a new fleet: configures default Syncthing, writes key header (`mm-crypto-init`) and `.stignore`, prints Syncthing device ID |
+| `mm push` | Sync all enabled sources and refresh consented host usage; publishes `syncthing/<id>.enc` and runs the managed mesh pass. Exit 0 means content sync succeeded regardless of capture outcome |
+| `mm push --dry-run` | Preview publication and deletions without uploading; changes nothing except the local lock file |
+| `mm pull` | Pull peer changes, apply fast-forwards, merge `.jsonl` and `MEMORY.md`, keep conflict sidecars, propagate deletions with 30-day recovery copies, and run the managed mesh pass |
+| `mm pull --dry-run` | Preview writes, merges, conflicts, deletions, and older edits (`--verbose` explains kept files); changes nothing except the local lock file |
+| `mm pull --conflict-mode prompt` | Choose a winner interactively per conflict during pull |
+| `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted; add `--dry-run` for a write-free CI gate |
+| `mm status` | Show a one-line verdict, Syncthing state, each peer's last push and applied state, latest auto/attended runs, and actionable diagnostics |
+| `mm diag` | Print non-secret crypto, sync, Syncthing, keyring, skill-link, host-usage, discovery, `git_capture`, `memory_index`, `capture_catchup`, and `push_timings` state (`--json` for machine-readable output). Runs without a passphrase or valid config |
+| `mm diff` | Compare local files with this Mac's last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
+| `mm devices` | List registered fleet machines and their last-seen versions (`--format=json` for scripting) |
+| `mm devices approve [name\|short-id\|device-id]` | Approve a joining machine on an `mm`-managed fleet machine (bare form lists pending devices interactively on a terminal) |
+| `mm devices retire <name\|id> [--yes]` | Retire a fleet machine, writing `retired/<id>.enc` and removing its device and Syncthing records |
+| `mm sources` | List configured sync sources, enabled state, and file counts |
+| `mm enable-source <name>` | Enable a sync source (and its host-usage consent / skill link where applicable) |
+| `mm disable-source <name>` | Disable a sync source on this machine without deleting local files or writing tombstones |
+| `mm reconfigure-sources` | Re-run the interactive source selection prompts |
+| `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
+| `mm resolve [PATH]` | Interactively resolve conflict files with a unified diff (requires a terminal) |
+| `mm recover <source> <path>` | Recover a file from a peer's published manifest into your local tree |
+| `mm gc` | Delete this device's orphaned blobs and run local retention cleanup (including 30-day deleted-file copies); `--dry-run` previews, `--conflicts` also reaps redundant conflict copies older than 30 days |
+| `mm log` | Query local `~/.config/mind-meld/state.db` history. Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed\|deleted}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
+| `mm memory-index [on\|off]` | Inspect or toggle the dedicated `mind-meld` qmd memory index (bare form is read-only) |
+| `mm migrate-config` | Update legacy config entries and append missing recommended `exclude_patterns` / `include_patterns` (`--dry-run`, `--yes`) |
+| `mm refresh-identity` | Force-refresh the cached git author-email set used by `retro-fleet` (`--json` prints the resolved set) |
+| `mm recapture [WINDOW]` | Re-capture this machine's git commits for `WINDOW` (default `30d`) and push (`--dry-run`, `--verbose`; partial recovery exits 4) |
+| `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`; `--no-author-filter`, `--dump-host-usage`, `--set-model-price`, `--mark-pricing-verified`) |
+| `mm install-skills` | Install or repair `retro-fleet` skill links for authorized agents (`--agent KEY` grants link maintenance for one agent without enabling sync) |
+| `mm update` | Update `mm` to the latest release via `pipx` (needs no config or passphrase) |
+
+### Sync outcomes
+
+Every hand-run command uses one shared plain-text style:
+
+- **Outcome (stdout):** `<Verb>: <what happened>.` — one line per thing that happened, nothing for what didn't (`Push: 10 content changes published; usage published.`, `Push: 1 file held.`, `Pull: 1 content change from mac-a, 2 content changes from mac-b (1 conflict copy).`).
+- **Error (stderr):** `mm: error: <what broke>`, with `Run: <command>` on its own last line when a fix applies.
+- **Warning (stderr):** `mm: warning: <what is wrong>` (data-at-risk warnings are never quiet-gated).
+- **Notice (stderr):** `mm: notice: <what changed or was skipped>`.
+- **Fix command:** `Run: <command>` on its own last line (CLI usage errors exit 2 with `Run: <command path> --help`).
+
+On an interactive terminal (without `--verbose` or `--dry-run`), `mm push`, `mm pull`, and `mm update` show a transient spinner after 3 seconds with live phase labels, counts, and elapsed time, clearing before the final outcome lines.
+
+**`Push:` usage clause (1.12.9x):**
+- When an attended push publishes changed usage totals (host usage, Claude sessions, or Git commits) or queued catch-up data, the lead line appends `; usage published` (`Push: 10 content changes published; usage published.` or `Push: no content changes; usage published.`).
+- When a content-changing push has no new usage, the usage clause is omitted (`Push: 1 content change published.`).
+- When an idle push has no new usage, it prints `Push: no content changes; no new usage.`.
+- If a host reader hit its deadline, the lead line appends the reader status (`(Grok catching up)`).
+- A file still changing during scan/upload keeps its previously published version and adds `Push: N files held.`.
+- `mm pull` reports applied changes per peer (`<n> content change(s) from <device>`), deletions with recovery folder, and any blobs still waiting on Syncthing delivery.
+
+### Status verdicts
+
+`mm status` opens with a one-line verdict (in sync, changes waiting, or the action needed), followed by Syncthing state, each peer's last push and whether this machine applied it (anything overdue > 24 h warns in every mode), the latest auto/attended run per verb, and current diagnostics. Any autorun breadcrumb older than 48 h is flagged `stale — no autorun in Nh`.
+
+#### Run evidence diagnostics
+
+| Code | Meaning and action |
+|------|--------------------|
+| <a id="run-evidence-write-unavailable"></a>`run-evidence-write-unavailable` | Sync succeeded, but recording local history failed. Restore local access/storage and run `mm diag`. |
+| <a id="run-evidence-contended"></a>`run-evidence-contended` | History read was busy. Retry `mm status`; if it persists, run `mm diag`. Never delete a live lock. |
+| <a id="run-evidence-corrupt"></a><a id="run-evidence-oversized"></a><a id="run-evidence-unreadable"></a>`run-evidence-corrupt`, `run-evidence-oversized`, `run-evidence-unreadable` | History state is unknown. Inspect with `mm diag`; do not delete or blindly retry. |
+| <a id="run-evidence-ambiguous"></a><a id="run-evidence-limited-coverage"></a>`run-evidence-ambiguous`, `run-evidence-limited-coverage` | Ordering or scope cannot prove recovery. Inspect with `mm diag`. |
+
+### Previews
+
+Previews never mutate sync data, prompt for migration, check for updates, or repair crypto-init state.
+
+| Command | May touch | Not previewed | Exit codes |
+|---|---|---|---|
+| `mm push --dry-run` | Local lock only | Host scanning/warming/capture, activity row, post-push GC, upload re-reads (scan-time holds are shown) | 0 completed, including held files; 1 stopped |
+| `mm pull --dry-run` | Local lock only | Conflict renames, pull history, sync logs, blob download/decrypt failures, waiting blobs, pull ledger writes, recovery copies | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
+| `mm gc --dry-run` | Local lock only | Deletion of orphan blobs or local retention items (`--conflicts` needed for conflict copies) | 0 completed; 1 stopped |
+| `mm recapture --dry-run [WINDOW]` | Local lock only | Writing git-snapshot rows and pushing | 0 completed, including partial scans; 1 stopped or no repositories |
+| `mm migrate-config --dry-run` | Nothing, including no lock | Applying the displayed config changes | 0 completed; 1 config error |
+| `mm diff [--from DEVICE]` | Nothing, including no lock | Snapshot comparison, not a forecast of all incoming peers; use `mm pull --dry-run` for that | 0 completed; 1 stopped |
+
+For a write-free CI gate, run `mm pull --dry-run --conflict-mode fail` (0 = no conflicts/failures predicted, 1 = stopped, 3 = conflicts or local failures predicted).
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | Completed successfully. Valid `autopull`/`autopush` invocations also exit 0 on refusal or degradation; inspect stderr and `mm status`. Attended pull with failed files exits 1. |
-| 1 | Stopped, interrupted, or incomplete: includes attended pull with failed files, EOF/Ctrl-C at a prompt, config/crypto/lock failures, required maintenance failure, and argument values rejected after parsing (`mm log --since bad`, `mm log --format xml`, `mm recapture 999d`). A push may already have published before required GC stops. |
-| 2 | Usage error from Typer/Click or retro-fleet's argparse, including unknown options on autorun commands. |
-| 3 | `pull --conflict-mode fail` preflight predicts a conflict or local failure, including with `--dry-run`; no files applied. |
-| 4 | `recapture` completed only partially (`RECAPTURE_EXIT_PARTIAL`). |
+| 0 | Completed successfully (`autopull`/`autopush` also exit 0 on graceful degradation; check stderr and `mm status`) |
+| 1 | Stopped, interrupted, or incomplete (including attended pull with failed files, config/crypto/lock errors, invalid flag values) |
+| 2 | CLI usage error (Typer/Click or `retro-fleet` argparse) |
+| 3 | `pull --conflict-mode fail` predicted a conflict or local failure (including with `--dry-run`) |
+| 4 | `mm recapture` completed only partially |
 
-Behavioral exit tests live in
-[`tests/test_integration.py`](tests/test_integration.py); the [Previews](#previews)
-table lists the applicable codes per command. Exit 0 from content sync does
-not prove host usage was captured or published.
+## Sources, agents, and cross-model memory
 
-## Quick Start
+### Project memory across machines
 
-The storage path is the root of a Syncthing folder shared by every machine (`~/Sync/mind-meld` by default). On a machine where Syncthing has its default configuration, `mm init` sets Syncthing up for you; on a machine that already has its own Syncthing configuration, `mm init` leaves Syncthing alone and points you to [Configuring Syncthing yourself](#configuring-syncthing-yourself). A Mac still on iCloud Drive moves to Syncthing with [Moving a machine from iCloud Drive to Syncthing](#moving-a-machine-from-icloud-drive-to-syncthing); iCloud Drive is not supported once the last Mac has moved ([docs/SPEC.md](docs/SPEC.md)). One block per role:
-
-```bash
-# First machine of a new fleet (empty folder):
-mm init --new-fleet   # sets up the Syncthing folder on default config, creates key header and .stignore, prints this machine's Syncthing device ID
-mm push --dry-run   # preview: changes nothing except the lock file
-mm push    # upload configured agent context
-```
-
-```bash
-# Every other machine:
-mm init    # choose join, enter the requested details, then follow the approval and passphrase prompts below
-mm push    # publishes this machine's own files
-```
-
-After setup, pull whenever you want changes from another machine:
-
-```bash
-mm pull --dry-run   # preview: changes nothing except the lock file
-mm pull    # download from another device, any time
-```
-
-Plain `mm init` asks whether to start a new fleet or join an existing one (`mm init --new-fleet` skips that question). Joining requires the fleet's existing key header. It asks for the storage path, a fleet machine's Syncthing device ID if mm needs to pair, the device name (on macOS, the Mac's local hostname when available, otherwise the machine's hostname), and the sources. When `qmd` 2.8.3+ runs, it asks whether to index agent memories (`Enter = y`) and, if you enable indexing, whether to download qmd's 334 MB embedding model for semantic search (`Enter = n`). It offers to add the recommended [memory-search pointer line](#agent-setup) (`Enter = n`) even when qmd is unavailable. It saves those answers in `~/.config/mind-meld/join.toml` and asks for the passphrase only after the header arrives. After registration and the initial pull, a yes to the index refreshes the `mind-meld` index and starts `qmd --index mind-meld embed` in the background if chosen. A yes to the pointer line updates regular instruction files once. If Codex's synced instructions could still be in transit, init prints the line for you to add after the files arrive. During mm-managed Syncthing setup for a new fleet or a join that needs pairing, `mm init` sets the local Syncthing device name to the name you enter. On a join, this happens before adding the fleet machine so it first sees that name.
-
-When managed Syncthing needs pairing, `mm init` prints this machine's Syncthing device ID (with its 7-character short ID) and the `mm devices approve <short-id>` (plus full-ID `mm devices approve <device-id>`) command to run on the fleet machine and waits about 10 minutes for approval, plus time for local Syncthing requests. After accepting the folder offer, or when the folder already shares with a peer, it waits about two minutes if the key header is still missing. It then verifies the passphrase and joins once the header is present.
-
-Ctrl-C during either wait and an approval timeout print a waiting outcome ending `Run: mm init`. A header timeout prints the same outcome if the folder is empty or holds only Syncthing bookkeeping or in-flight files. If the folder holds other files or is unreadable, `mm init` gives a folder-specific remedy. These stops exit non-zero and keep your answers without writing a device entry, `config.toml` or key header. Syncthing continues syncing any accepted share. Rerun `mm init` and answer `y` at `Continue joining? [y/n] (Enter = y)` to resume. Answer `n` to forget the answers and start over with the existing pairing.
-
-Config lives at `~/.config/mind-meld/config.toml` — not tied to your current directory. Install `mm` anywhere, run from anywhere; it always syncs the sources configured in your global config.
-
-See [Status verdicts](#status-verdicts) to interpret `mm status` after your first push.
-
-## Setting up another machine
-
-To add another Mac or an Arch-based Linux machine to a Syncthing fleet (for a Mac moving off iCloud Drive, see [Moving a machine from iCloud Drive to Syncthing](#moving-a-machine-from-icloud-drive-to-syncthing)):
-
-1. Run the bootstrap script from [Install](#install) on the new machine. It upgrades an outdated `mm` and leaves Syncthing starting at login on a default configuration (`brew services start syncthing` on macOS, or `systemctl --user enable --now syncthing.service` on Arch-based Linux), or prints the command that starts it at login.
-2. On Linux, install `libsecret` and `gnome-keyring` and unlock the login keyring in your desktop session before hooks run (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)).
-3. Run Claude Code once so `~/.claude` exists.
-4. Run `mm init` on the new machine:
-   - **Default Syncthing configuration (managed by `mm`).** Answer `j` or `join`, choose an empty storage folder (normally `~/Sync/mind-meld`), paste the Syncthing device ID of a machine already in the fleet (printed when the first machine starts the fleet, or shown in Syncthing's **Actions > Show ID**), enter the device name (on macOS, the Mac's local hostname when available, otherwise the machine's hostname) and sources, and answer the [memory-search setup questions](#searching-agent-memory-qmd). `mm init` saves those answers locally (never the passphrase), sets this machine's Syncthing device name to the device name entered (before adding the fleet machine, so the fleet first sees that name; `--new-fleet` sets the first machine's Syncthing device name the same way), adds that fleet machine, prints this machine's Syncthing device ID (and 7-character short ID) with copyable `mm devices approve <short-id>` and `mm devices approve <device-id>` commands, and removes the unshared empty stock Default Folder at `~/Sync` when the target is inside it. While it waits, run `mm devices approve <short-id>` (or `mm devices approve` / `mm devices approve <name>` / `mm devices approve <device-id>`) on the fleet machine whose ID you pasted if `mm` manages Syncthing there. On an owner-managed fleet machine, approve by hand as described in [Configuring Syncthing yourself](#configuring-syncthing-yourself). The waiting `mm init` accepts the folder offer with mm's options, waits for Syncthing to deliver the key header (`mm-crypto-init`), verifies the **same passphrase**, writes `(?d)tmp*.tmp` to `.stignore`, registers the new device, and tries to publish this machine's encrypted Syncthing record (`syncthing/<id>.enc`). It tries to remove the saved join answers and warns if that fails, then pulls. After the pull attempt, it runs the first memory-index refresh if enabled and applies the approved pointer line. It prints the line and resolved path for symlinks or when it could not confirm delivery of the synced Codex instructions. If a wait stops before the join finishes, rerun `mm init` and confirm `Continue joining? [y/n] (Enter = y)`.
-   - **Pre-existing Syncthing configuration (owner-managed):** `mm init` reports what makes the configuration non-default and points to [Configuring Syncthing yourself](#configuring-syncthing-yourself). Answer `j` or `join`, the storage path, the device name, the sources, and the memory-search and pointer-line questions (`mm init` saves those answers locally so a rerun can confirm `Continue joining? [y/n] (Enter = y)` without asking them again). Pair the machines, share the `mind-meld` folder at `~/Sync/mind-meld` with the [Syncthing folder options](#syncthing-folder-options), add `(?d)tmp*.tmp` to `~/Sync/mind-meld/.stignore`, wait for Syncthing to deliver `mm-crypto-init`, and run `mm init` to verify the passphrase, register the device, publish its encrypted Syncthing record (`syncthing/<id>.enc`) when its Syncthing ID is known, apply any chosen memory-index and pointer-line setup, and finish joining.
-5. If the folder is still syncing blobs after `mm init` finishes, run `mm pull` again when delivery finishes.
-6. `mm push` — publishes anything this machine has that the others don't; push is what shares this machine's own files.
-7. Add the `# Mind Meld` hook block to your global agent instructions ([Claude Code Integration](#claude-code-integration)).
-
-A project's Claude memory lands only where mm can place it: in a Claude project folder that already exists on this machine for the checkout, or in the checkout you run `mm pull` from. Either way `~/.claude` must exist: on a new machine, run Claude once first, or mm skips the `claude` source and places nothing. A project you have not opened here is listed as `Not placed here` (see [Project memory across machines](#project-memory-across-machines)); clone it and run `mm pull` inside it.
-
-Push and pull on each machine to exchange changes according to each file's sync rules:
-
-- **Eligible `.jsonl` and `MEMORY.md` files** merge by deduplicating and combining lines when both sides changed, when a peer edit built on your version has an older mtime, or when the no-base fallback applies. Fast-forward takes the peer's bytes directly. In `.jsonl`, records with a string `ts` sort first by that string, then by the full line. Every other line follows in lexical order. `MEMORY.md` sorts by line and ignores `ts`. Entries from all machines accumulate through these merges, keeping telemetry, learnings, and timeline files coherent across devices. [Handling conflicts](#handling-conflicts) describes the rule for per-device Codex memory copies.
-- **Other files** follow what each Mac last synced. If only the peer changed a file, pull fast-forwards to the peer's bytes without a recovery copy. It holds the edit if the peer's mtime is older. If you changed it and the peer did not, pull leaves yours. If both changed it, with the default `keep-both` mode your local file stays at the canonical path and the remote version is saved as `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` sitting next to it (Syncthing convention). If this machine has no base for the peer and the peer publishes no ancestry, pull uses the older rule, where a local file newer than the remote is left alone. See [Handling conflicts](#handling-conflicts) below.
-- **Deletions** propagate. A tombstone in the manifest carries the sha256 of the version that was deleted: it stops a missing file from being restored from an older peer snapshot, and a receiving Mac whose copy has exactly those bytes, last synced from the deleting Mac, moves it into `~/.config/mind-meld/deleted/` for at least 30 days instead of keeping it. A file you changed, or a record from a release before 91A (no hash), is never deleted. See [Recovering a deleted file](#recovering-a-deleted-file).
-
-After the first successful `mm push` on Machine A, open Machine B and `mm pull`, then confirm one selected file you edited on A is present on B.
-
-First-run-from-divergent-state is explicitly supported: if each machine already has its own memory/todos/analytics before you first run `mm init`, the three-way sync will merge the JSONLs, download missing files, and flag any true content conflicts as `.sync-conflict-*` for you to triage with `mm resolve`.
-
-### Configuring Syncthing yourself
-
-When Syncthing on a machine already has its own configuration (extra devices, non-default folders, or a shared/non-empty Default Folder), `mm init` leaves Syncthing untouched, and `bin/bootstrap` changes nothing in it but prints the command that starts it at login (`brew services start syncthing` on macOS, or `systemctl --user enable --now syncthing.service` on Arch-based Linux) when it does not already. Configure Syncthing by hand on that machine, or when approving a joining machine without `mm devices approve`:
-
-- **Pairing machines:** follow [Pairing machines in Syncthing](#pairing-machines-in-syncthing) so both machines show **Connected**.
-- **Sharing the folder:** share the storage folder root (default `~/Sync/mind-meld`) with Syncthing folder ID `mind-meld` (label `Mind Meld`). A joining machine where `mm` manages Syncthing looks for the folder offer with ID `mind-meld`.
-- **Five folder options and `.stignore`:** set the five [Syncthing folder options](#syncthing-folder-options) (`type = sendreceive`, `versioning = none`, `maxConflicts != 0`, `ignorePerms = false`, `order = alphabetic`) and add `(?d)tmp*.tmp` to `.stignore` in the storage folder on every owner-managed machine (`mm init` writes `.stignore` automatically on machines where `mm` manages Syncthing).
-- **Approving a new machine by hand on a fleet machine:** in the fleet machine's Syncthing GUI, accept the incoming device connection request (or click **Add Remote Device** and paste the joining machine's Syncthing device ID), open the `mind-meld` folder's **Edit > Sharing** tab, check the new device so Syncthing offers `mind-meld` to it, optionally mark the device as **Introducer** so it learns the rest of the fleet automatically, and save. On an owner-managed machine, mark at least one usually-on fleet machine as introducer (**Remote Devices > the machine > Edit > Advanced > Introducer > Save**) so Syncthing introduces new fleet peers to it automatically.
-
-### Pairing machines in Syncthing
-
-1. Open Syncthing's web GUI on each machine at the address `mm diag` reports as `gui_address` (default `http://127.0.0.1:8384`).
-2. Exchange device IDs: in the GUI, open **Actions > Show ID** to copy each machine's Device ID.
-3. Click **Add Remote Device**, paste the other machine's Device ID, and save; accept the connection prompt on the other machine (or add each side on both machines) so both show **Connected**.
-4. On the machine that already has `~/Sync/mind-meld` configured in Syncthing, confirm the folder ID is `mind-meld`, open the folder's **Edit** dialog, check the remote device under the **Sharing** tab, and save.
-5. On the joining machine, accept the incoming folder share prompt with path `~/Sync/mind-meld`, apply the [Syncthing folder options](#syncthing-folder-options) below, and add `(?d)tmp*.tmp` to `~/Sync/mind-meld/.stignore`.
-
-### Syncthing folder options
-
-Share the storage folder's root (by default `~/Sync/mind-meld`), not a parent or child directory. Set the Syncthing folder on every machine to the folder options from `store-v2` §10:
-
-- **`type = sendreceive`** — every machine both sends and receives fleet files.
-- **`versioning = none`** — mm keeps its own conflict and deleted-file copies; Syncthing's `.stversions` duplicates encrypted blobs without context.
-- **`maxConflicts != 0`** (keep Syncthing's default `-1` or any positive count, never `0`) — `0` deletes losing conflict copies silently, which can discard a manifest or device update before mm can read it.
-- **`ignorePerms = false`** — mode `0600` on synced files must survive.
-- **`order = alphabetic`** — blobs under `data/` arrive before the `manifests/` that name them.
-- **`.stignore` contains `(?d)tmp*.tmp`** — `mm init --new-fleet` and a managed `mm init` join write `.stignore` automatically; add `(?d)tmp*.tmp` to `.stignore` by hand in the synced folder on any machine where you configure Syncthing yourself, because Syncthing does not sync `.stignore` itself.
-
-Syncthing's first start can create a **Default Folder** at `~/Sync`, which is the parent directory of `~/Sync/mind-meld`. Share `~/Sync/mind-meld` as its own Syncthing folder — never share only the parent `~/Sync`. On a default Syncthing configuration, `mm init` removes the unshared empty **Default Folder** automatically when your storage path sits inside `~/Sync`. If you configure Syncthing yourself and do not use the **Default Folder** at `~/Sync`, remove it in the Syncthing GUI (**Edit > Remove**, which removes the Syncthing folder entry without deleting files on disk); if you keep `~/Sync` shared for other files, keep the store out of it by adding `/mind-meld` (or `mind-meld`) to `~/Sync/.stignore` on every machine that shares `~/Sync`.
-
-mm discovers Syncthing's local `config.xml` and talks to its local REST API with the API key from that file using short timeouts. `mm init` tries to publish `syncthing/<id>.enc` encrypted under the fleet key when this machine's Syncthing ID is known. If the record is missing or stale, `mm push` and `mm autopush` refresh it from the running Syncthing instance. A matching local certificate can confirm the record is current without a REST call.
-
-On a machine where mm found Syncthing's default configuration when it set Syncthing up (recorded as `syncthing.managed_device_id` in `~/.config/mind-meld/syncthing.toml`), `mm init` creates or accepts mm's folder (`mind-meld`), adds the pasted fleet device, and may remove the unshared empty Default Folder. It sets the local Syncthing device name to the name you enter only when setting up a new fleet or pairing to join one. Use `mm devices approve <device-id>` on one fleet machine to add the new device and share `mind-meld` with it.
-
-On each mm-managed machine where `mind-meld` matches `storage.path` and has the options above, the next `mm push`, `mm pull`, `mm autopush` or `mm autopull` can add a device asking to connect and share the folder with it once its valid encrypted record and registry entry have arrived. The sync command also finishes interrupted adds for vouched devices that still match mm's settings, and clears any Syncthing introducer flag an earlier `mm` set on a fleet peer that shares only `mind-meld`. To opt a device out of automatic pairing, choose **Ignore device** in Syncthing's pending banner or pause the configured device. On the managed joiner's first pull after approval and passphrase verification, mm also adds existing peers whose encrypted fleet records have arrived, so the joiner can connect to them directly. Existing fleet members accept those connections through the normal mesh pass. If an encrypted record is still arriving or Syncthing is briefly unavailable, later syncs retry the existing peer registrations the joiner saw during init.
-
-`mm status` and `mm diag` send only `GET` requests, `--dry-run` previews never touch Syncthing, and mm never changes an owner-managed Syncthing configuration. `mm status` shows the Syncthing connection and folder state. On a managed machine, `mm status` and attended `mm pull` exclude pending devices vouched for by the fleet when its records are readable. They show a count-only notice ending in `Run: mm devices approve` for the remaining join requests, and list all pending requests by count if fleet records are unavailable. When they recognize a knocking fleet machine whose Syncthing record is missing, they name it and advise running `mm update` and `mm push` there. The pending-join notices also flag superseded registrations with `Run: mm devices retire <old-id>`. `mm diag` checks each folder option above and `.stignore`. Inspection prefers a folder matching the storage root. For an existing parent-folder share, it reports the deepest containing folder and checks its `.stignore` and folder options.
-
-To add a machine with one approval, follow these steps on the indicated machines. For the approval step on an owner-managed machine, [use the Syncthing GUI](#configuring-syncthing-yourself).
-
-```bash
-# 1. On each existing fleet machine (publishes its encrypted syncthing/<id>.enc record):
-mm update
-mm push
-
-# 2. On the new machine:
-mm init
-
-# 3. While init waits, on the mm-managed fleet machine whose ID you pasted:
-# Run the exact command printed by mm init, with the joining machine's ID.
-mm devices approve '<joining-syncthing-device-id>'
-
-# 4. On any mm-managed fleet machine still showing a knock (or wait for its next push/pull/hook):
-mm pull
-mm status
-```
-
-<a id="syncthing-mesh-causes"></a>
-Syncthing mesh diagnostics appear in `mm status` and `mm diag`. `mm status`
-shows removal waits from the latest push, pull, or hook that evaluated removals.
-A later evaluation with no waits clears those lines. `mm diag --json` reports
-that evaluation under `syncthing.last_mesh`. An attended run prints a line
-when it shares the folder and a notice when you need to act. Hooks record
-their outcomes silently.
-
-- **`unreachable`** — local Syncthing did not answer. The next push or pull retries.
-- **`timeout`** — local Syncthing exceeded the per-request or pass deadline. The next push or pull retries.
-- **`unauthorized`** — local Syncthing rejected the API key from `config.xml` (`Run: mm diag`).
-- **`config-unreadable`** — mm could not read Syncthing's GUI settings from `config.xml` (`Run: mm diag`).
-- **`address-unsupported`** — mm cannot use the configured Syncthing GUI address (`Run: mm diag`).
-- **`path-unreadable`** — mm could not resolve the Syncthing folder path (`Run: mm diag`).
-- **`bad-response`** — local Syncthing returned malformed JSON or an unexpected REST response (`Run: mm diag`).
-- **`no-folder`** — the `mind-meld` folder is absent from local Syncthing's configuration (`Run: mm diag`).
-- **`not-mm-folder`** — the `mind-meld` folder's path does not match `storage.path` or its five required folder options are not valid (`Run: mm diag`).
-- **`the Syncthing record of device <id> is from a newer mm`** — the encrypted record uses a newer format (`Run: mm update`).
-- **`the Syncthing record of device <id> is unreadable`** — mm could not read the encrypted record, or it exceeded the size limit, failed authentication or failed validation (`Run: mm diag`).
-
-Status reports Syncthing's folder state and needed-file count independently: queued files do not mean it is actively syncing. It says `up to date` only when the folder is idle and both needed files and pull errors are known to be zero. Positive pull-error counts direct you to `mm diag`, which also displays the count; `mm diag --json` retains an unknown count as `syncthing.pull_errors: null`.
-
-## Moving a machine from iCloud Drive to Syncthing
-
-Each Mac moves on its own schedule, with no migration tool ([docs/SPEC.md](docs/SPEC.md)). The first machine on Syncthing — whether a moving Mac or a Linux machine — starts the fleet with `mm init --new-fleet`; every later machine joins with `mm init` and the pairing and approval steps in [Setting up another machine](#setting-up-another-machine). Linux machines were never on iCloud Drive and simply join.
-
-On a moving Mac, close all agent sessions and keep them closed through the final push below (the `# Mind Meld` hooks call `mm`):
-
-1. Copy `~/.config/mind-meld/config.toml` first, for example `cp -n ~/.config/mind-meld/config.toml ~/.config/mind-meld/config.icloud.toml`. Keep that original copy when resuming a move. `mm init` writes a new `~/.config/mind-meld/config.toml` from scratch, so settings changed by hand (such as `[upgrade] auto_install`, exclusions or disabled sources) and the old iCloud `storage.path` survive only in that copy. If you use custom exclusions, also back up the excluded local files outside every sync source: init pulls before you can restore those settings, so it can change those files.
-2. Run `pipx uninstall mind-meld`.
-3. Move this machine's iCloud-era usage log (`~/.local/share/mind-meld/events`) out of the `mm-events` source before `mm init`, for example `mv ~/.local/share/mind-meld/events ~/mind-meld-icloud-events`, so the Syncthing fleet never receives the iCloud store's usage records (the iCloud folder still holds them).
-4. Run the bootstrap script from [Install](#install).
-5. Run `mm init --new-fleet` if this Mac is the first machine in the Syncthing fleet, or `mm init` if it is joining an existing one. In both cases, approve overwriting the existing config and decline any sources disabled in the old config. For a join, choose `join`, follow [Setting up another machine](#setting-up-another-machine) from step 4, and confirm when asked to create a new device entry. The old entry stays in the iCloud store.
-6. Re-apply any hand-set settings from the copied config, restore any excluded local files from their backup after restoring the exclusions, then run `mm push`.
-
-If init stops while waiting for the share or after saving the new config, resume at step 5, then step 6. Do not repeat steps 1–3: keep the original iCloud config and event-log backup, and leave any newly captured Syncthing events in place.
-
-What stays in the home: the agent files (Claude memory, Codex skills, gstack state and the other enabled sources) and `mm`'s local state in `~/.config/mind-meld` (the pull ledger and the 30-day recovery copies). On the join they merge by the pull rules: identical files match; a file this machine has not changed since its last iCloud sync takes the fleet's version only when that version was built on it; a fleet version this machine already moved past is skipped without a copy; `MEMORY.md` and `.jsonl` files merge; any other file that differs keeps this machine's bytes, and the fleet's version is saved beside it as a `.sync-conflict-*` copy for `mm resolve` (or, when it is older and carries no sync history, stays on the machine that has it); the join deletes nothing. See [Handling conflicts](#handling-conflicts).
-
-A Mac not yet moved keeps syncing over iCloud Drive with any other Macs still there. The two stores exchange nothing until a machine moves: a change made on a moved machine reaches a Mac still on iCloud Drive only when that Mac moves, and the reverse. `retro-fleet` on Syncthing does not import the iCloud store's usage history; init can still capture recent activity again from this machine's local git and agent records.
-
-Once the last Mac has moved, delete the old iCloud folder (its path is `storage.path` in the copied config) on one Mac only: iCloud Drive removes it across your Macs. You can then delete the copied config and the moved event log too.
-
-## Project memory across machines
-
-Clone a project anywhere. mm finds your checkout from the folder names Claude created
-under `~/.claude/projects` (each decodes to a directory on *this* machine) and from the
-directory you run `mm pull` in, and shares that project's memory under its `origin` URL.
-
-- The `origin` must match: `git remote set-url origin <canonical>` for a fork or an SSH
-  alias (`mm pull --dry-run --verbose` confirms what this directory resolves to). A fork,
-  an SSH alias host, a renamed repository, a different path case, or the same repository
-  over `ssh://host:2222` and `https://host` is a **different project**.
-- **Not placed here** means a peer published memory for a project with no checkout on this
-  machine. Nothing is written, nothing is lost, the bytes stay encrypted in the store.
-  `mm status` prints `Not placed here: N files in M projects with no known checkout`;
-  `mm pull --dry-run --verbose` lists them. Clone the project and run `mm pull` inside it.
-- Memory placed by `mm autopull` at session start may reach only the next session.
-- A second clone of one repository on one machine does not share memory: the first (the one
-  with `memory/`, then the smallest folder name) owns the project; the other keeps its own
-  files. A linked worktree uses the main checkout's folder, as Claude does.
-- A project with no `origin`, a local-path remote, a submodule or a bare layout is shared
-  by its home-relative path. The same `origin` on different projects (a template left as
-  `origin`) merges their memory. `mm pull` or `mm autopull` inside any directory whose
-  `.git/config` claims that origin places the project's memory there, and what Claude writes
-  there later publishes back under that project.
-- The default `claude` source is required. `mm devices` shows the mm version at each
-  machine's last push (`—` if it never pushed).
+Claude Code project memory (`~/.claude/projects/<encoded>/memory/` and `todos/`) is mapped across machines by each repository's canonical git `origin` remote — so a repo at `/Users/user/code/app` on macOS and `/home/user/src/app` on Linux shares one project memory automatically. A project without a network `origin` falls back to its home-relative path when it lives under `$HOME`; projects outside `$HOME` with no `origin` stay machine-specific.
 
 ## Claude Code Integration
 
-Mind Meld includes `autopull` and `autopush` commands designed for Claude Code — they never prompt for input and stay silent on successful changes and no-ops. On Linux with the Secret Service keyring backend they also never open a desktop unlock prompt: a locked or missing collection skips the run with a `keyring-locked` / `keyring-no-collection` breadcrumb instead (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)). Other backends (KWallet, KeePassXC, keyring's libsecret backend), macOS Keychain access dialogs, and a stalled D-Bus session can still block. A failed apply prints one `mm: warning:` line per failed file plus a per-source summary and a total count.
+`mm autopull` and `mm autopush` are designed for agent hooks: they never prompt, stay silent on the happy path, and degrade gracefully on errors. On Linux with Secret Service, a locked or missing keyring skips quietly with a breadcrumb rather than popping up an unlock dialog. Load-bearing warnings (corrupt manifests, missing sources, fsync or per-file apply failures) still print to stderr.
 
-Add the following to your **global** `~/.claude/CLAUDE.md` to have Claude automatically sync at the start and end of each conversation:
+Add this to your global `~/.claude/CLAUDE.md`:
 
 ```markdown
 # Mind Meld
@@ -929,216 +237,31 @@ mm autopull
 - **No output:** Synced (or already in sync). Continue silently.
 - **Any output:** Surface conflicts, deletions, warnings and their suggested fixes.
 
-At the **end of each conversation** (when the user is wrapping up, says goodbye,
-or you've completed the requested task), run:
+At the **end of each conversation** (when wrapping up or completing the requested task), run:
 
 \`\`\`bash
 mm autopush
 \`\`\`
 
-- **No output:** Nothing was printed. Say goodbye normally. A held file stays quiet; `mm status` names it as not yet synced.
+- **No output:** Nothing was printed. Continue normally.
 - **Any output:** Surface skips, warnings and their suggested fixes.
 
-If `mm` is not installed, both commands will fail silently — no action needed.
+If `mm` is not installed, both commands fail silently — no action needed.
 ```
 
 ### How it works
 
-- `mm autopull` checks all other registered devices for changes and applies them locally. It writes a `.mind-meld-log.md` breadcrumb to each affected project so Claude Code knows what changed. On a machine where `mm` manages Syncthing, it also adds knocking fleet devices vouched by a registered peer's encrypted `syncthing/<id>.enc` record and finishes half-finished adds.
-- `mm autopush` builds a manifest of the configured sync sources, diffs against the last push, and uploads only what changed. A file that is still changing is held: its previous version, if any, stays published and autopush prints nothing. It also publishes this machine's `syncthing/<id>.enc` record when missing or stale. On a machine where `mm` manages Syncthing, it adds knocking fleet devices vouched by a peer's encrypted record and finishes half-finished adds.
-- Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error, so they do not block Claude Code (except for the keyring residuals noted [above](#claude-code-integration): other Linux keyring backends, macOS Keychain access dialogs, a stalled D-Bus session).
-- "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest (including this Mac's own manifest vanishing mid-pull), unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. Autopush also records `degraded` when it holds a file that changed, vanished or grew while being read: the previous version, if any, stays published, and the detail says the file is not yet synced ([Snapshot failures](#snapshot-failures)). A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
-- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery keeps a private local project index, and per-repository cursors resume unfinished Git walks on later attended `mm push` runs, including pushes with no user-file edits. Unchanged projects avoid rescanning their session logs. Autopush keeps its own small budgets. An attended push uses one `[retro] capture_budget_ms` (default 5,000 ms) for host capture and activity capture together, and can spend up to `[retro] attended_capture_cap_ms` (default 30,000 ms, range `capture_budget_ms`–60,000) to finish remaining host warm retries, repository discovery, Git walks and session scans before stopping. On a terminal, an attended push that runs longer than 3 seconds shows a transient progress line with the step and count that clears before the single outcome line. A host reader or Git walk stopped by its deadline or budget with items left reports `catching up (N left)` on the attended push and in `mm status`, with `N` matching `mm diag`'s `host_usage.codex.pending` (or `files_on_disk - files_cached`) and `git_capture.fresh.pending_repos`. Persistent failures (three incomplete captures), empty discovery, Git errors, or gaps beyond the 90-day retained event window advise explicit `mm recapture`. Historical degradation breadcrumbs retain their original diagnostic text. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does not mean fleet retro received a new activity event.
-- **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available. Run: UV_VENV_CLEAR=1 pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
-
+- `mm autopull` pulls peer changes, writes `.mind-meld-log.md` into affected Claude projects, runs the managed Syncthing mesh pass, and starts a detached `qmd` memory-index refresh when enabled.
+- `mm autopush` diffs enabled sources against the last push, uploads only changed blobs (holding files still being written), publishes `syncthing/<id>.enc` if needed, runs the managed mesh pass, and starts a detached memory-index refresh.
+- Both run under the local lock, keep small capture budgets so hooks never stall a session, record `degraded` / `no-sources` breadcrumbs for `mm status` when something degrades, and run the once-a-day background self-update at their tail.
 
 ## Codex Integration
 
-Mind Meld treats Codex as a first-class peer of Claude Code. Grok Build, Muse and Antigravity are also usage-reader hosts (see [Grok Build](#grok-build), [Muse](#muse) and [Antigravity](#antigravity-agy)).
+Enabling `codex` (`mm enable-source codex`) syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/` (excluding Codex's own `plugins/cache/*` and `plugins/.remote-plugin-install-staging/*`), enables Codex rollout usage capture (including archived sessions), maintains Codex's `/retro-fleet` skill link, and publishes this machine's Codex memory summaries (`memory_summary.md`, `MEMORY.md`, and direct `rollout_summaries/*.md` from `~/.codex/memories_v2/`, falling back to `~/.codex/memories/`).
 
-- `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`, except Codex's own installed plugin versions (`plugins/cache/*` and `plugins/.remote-plugin-install-staging/*`): Codex installs and removes those itself, and a removal there would otherwise delete the same files on your other Macs.
-- With `codex` enabled, `mm push` publishes `memory_summary.md`, `MEMORY.md`, and direct `rollout_summaries/*.md` files from `~/.codex/memories_v2/`, with `~/.codex/memories/` as the fallback. The native memory folders, Git metadata, and SQLite stores stay untouched by memory sync. Each publisher's copies land in `~/.local/share/mind-meld/codex-memory/<peer device id>/` on machines with `codex` enabled, including machines without their own Codex memory folder. Treat the copies as read-only. To correct a memory, fix it on the machine that wrote it, then push from that machine and pull on its peers.
-- Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
-- Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source agy` is the corresponding verb: it adds a scoped Antigravity source (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`) and opts this Mac into reading step token totals from local conversation databases. Session databases, settings, and chat history stay on the Mac.
-- The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`.
+Peers receive each publisher's Codex memory as read-only per-machine copies under `~/.local/share/mind-meld/codex-memory/<peer-device-id>/` — `mm` never writes into Codex's own memory folder. Credentials, session databases, and whole-file `config.toml` stay local. Symlinks inside any sync source are skipped on push and left untouched on pull.
 
-Symlinks inside any sync source are local routing, not portable content: Mind Meld does not upload them and leaves existing local links untouched on pull, including dangling links and linked directories. A source root itself may be a symlink.
-
-During `mm init`, the `codex` choice covers both customization and memory sync. That choice also decides whether mm maintains a `retro-fleet` skill link in that agent's skills directory. Enable a source on an existing installation with the corresponding command.
-
-```bash
-mm enable-source codex
-mm enable-source grok
-mm enable-source agy
-mm enable-source muse
-```
-
-To verify Codex usage capture on an initialized Mac with Codex logs and the
-`mm-events` source enabled, first upgrade to v0.14.17+ and verify with `mm --version`:
-
-1. `mm enable-source codex`
-2. Run `mm push`, including on a Mac with no synced changes.
-3. Run `mm status`: expect a recent host capture, Codex contributed, and
-   `Publication: published`. `mm diag` separately describes the cache:
-
-   ```text
-   codex cache inventory:   ready
-   codex usage read blocker: none
-   ```
-
-`ready` describes cached rollout inventory; `none` means no known standing
-read blocker. Neither proves a snapshot was published. The device-wide capture
-and publication lines in `mm status` provide that evidence. For a blocker, see
-[Host usage capture](#host-usage-capture).
-
-### Searching agent memory (qmd)
-
-Mind Meld can maintain one local [qmd](https://github.com/tobi/qmd) search index on this machine over every enabled provider's memory so any agent here can search memory from projects present on this machine plus each agent's machine-wide memory across machines (Codex memories, Grok global topics, Muse personal memory); Claude project memory from a project with no checkout on this machine stays off it and is not searchable here:
-
-- **What is indexed:** only enabled sources whose memory folder exists — `mm-claude` (`<claude>/projects`, `*/memory/**/*.md`), `mm-grok` (`<grok>/memory-v2`, `**/topics/**/*.md`), `mm-muse` (`<muse>/memory`, `**/*.md`), `mm-codex-<this-machine>` (`<codex>/memories_v2` or `memories`, `{MEMORY.md,memory_summary.md,rollout_summaries/*.md}`), and one `mm-codex-<peer>` per peer copies folder under `~/.local/share/mind-meld/codex-memory/`.
-- **Local and derived:** the index and its `[memory_index]` config live on this machine only and never sync. The markdown files stay the source of truth.
-- **Setup (bootstrap and `mm init`):** `bin/bootstrap` installs qmd automatically when missing (via Bun if present, otherwise npm into `~/.local`, installing Node first if needed), leaving an existing working qmd alone and continuing past failures with the manual command. During `mm init`, when qmd 2.8.3+ runs, init offers to enable the index (`Enter = y`) and optionally download qmd's 334 MB embedding model (`Enter = n`); on existing machines, run `mm memory-index on` after installing qmd.
-- **Pointer line:** `mm init` shows the recommended agent-instruction search line and asks whether to add it (`Enter = n`) to `~/.claude/CLAUDE.md` and `CODEX_HOME/AGENTS.md`. On yes, regular files inside your home folder have the line appended once (reruns add no duplicate). For a symlinked file or containing folder, or a path that resolves outside your home folder, init prints the line and resolved path for you to add by hand. The line is never removed automatically.
-- **Commands:**
-  - `mm memory-index` — show whether the index and embeddings are enabled, the qmd version, the `mm-` collections verified from the last refresh record, and the last refresh result (read-only).
-  - `mm memory-index on` — verify qmd 2.8.3+ before enabling `[memory_index]` in `~/.config/mind-meld/config.toml`. Reconcile collections, refresh the index, and print the [Agent setup](#agent-setup) link on success. A failed version check exits with code 1 and prints the install command.
-  - `mm memory-index off` — disable refresh and remove the `mm-` collections from the dedicated `mind-meld` index.
-- **Automatic refresh:** attended `mm push` and `mm pull` reconcile `mm-` collections in `--index mind-meld` and run `qmd --index mind-meld update` after releasing the sync lock (printing nothing on success). `mm autopush` and `mm autopull` run the same refresh detached in the background and never wait or print. Previews (`--dry-run`) never refresh.
-- **Dedicated `mind-meld` index:** Routine operations that open an index select `--index mind-meld` (by default, `~/.cache/qmd/mind-meld.sqlite` and `~/.config/qmd/mind-meld.yml`). If a valid refresh record identifies a legacy installation, cleanup follows the first successful refresh of the dedicated index. It removes the legacy `mm-` collections from the default index. Each enabled refresh retries any incomplete cleanup.
-- **Other qmd collections:** Mind Meld adds and removes only collections with the `mm-` prefix through qmd's CLI. Update and embed apply to every collection in the dedicated index. Keep your own collections in the default or a project index to leave them outside those operations.
-- **Embeddings (optional):** keyword search (`qmd --index mind-meld search`) is the baseline and downloads no models. Answer yes to the embeddings question during `mm init` (or set `embeddings = true` under `[memory_index]` in `~/.config/mind-meld/config.toml`) to run `qmd --index mind-meld embed` in the background after each successful refresh (downloads qmd's ~334 MB embedding model on first run).
-- **Failures and diagnostics:** a missing qmd or a failed/timed-out refresh never changes a sync's outcome or exit code. `mm status` shows one line with its fix when the index is enabled and unhealthy; `mm diag` shows the qmd version, `mm-` collections, and last refresh result.
-
-#### Agent setup
-
-1. **Add the pointer line** to your global agent instruction files (`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, or `AGENTS.md` in your custom `CODEX_HOME`). Edit the target by hand for symlinked files. After the per-machine refresh in [Upgrading](#upgrading), replace any old `--index index` pointer with this line:
-
-   > If the owner mentions something they discussed with an agent before and you can't find it in your own memory, search every agent's memory with `qmd --index mind-meld search "<key words>" -n 10` (`qmd --index mind-meld get <docid>` reads a hit). If memories disagree, show the owner each one with its path and ask which is right.
-
-2. **Claude Code allow rules:** add these two rules to `~/.claude/settings.json` under `permissions.allow` so Claude Code can search and read Mind Meld's index without prompting:
-
-   ```json
-   "Bash(qmd --index mind-meld search:*)",
-   "Bash(qmd --index mind-meld get:*)"
-   ```
-
-3. **Codex sandbox writable root.** qmd 2.8.3 opens `mind-meld.sqlite` in WAL mode for `search` and `get`. With `workspace-write`, add the absolute path of the folder that contains this database to `sandbox_workspace_write.writable_roots` in your Codex `config.toml`. The folder is `~/.cache/qmd` by default, or `$XDG_CACHE_HOME/qmd` when that variable is set for qmd. Append the directory to the existing list if you have one.
-
-   ```toml
-   [sandbox_workspace_write]
-   writable_roots = ["/home/user/.cache/qmd"]
-   ```
-
-4. **Optional MCP setup (manual):** Mind Meld never edits agent MCP configs. If you want Claude Code or Codex to query Mind Meld's index over MCP instead of (or alongside) the CLI, run these yourself:
-
-   ```bash
-   claude mcp add mind-meld -- qmd --index mind-meld mcp
-   codex mcp add mind-meld -- qmd --index mind-meld mcp
-   ```
-
-### Grok Build
-
-`mm enable-source grok` syncs `~/.grok` `skills/`, `commands/`, `rules/`, and `memory-v2/` topic Markdown files (`memory-v2/global/topics/**/*.md` and `memory-v2/workspaces/*/topics/**/*.md`), and records consent for Grok usage capture (`grok_usage_consented`). Sessions, SQLite indexes (`index.sqlite`, `memory_state.sqlite` and `-shm`/`-wal`), `MEMORY.md`, `archive/`, all `observations/` files (including `_inbox/`), `.retired-stores/`, `config.toml`, `auth.json`, `trusted_folders.toml`, `plugins/`, `hooks/`, and logs stay local and are never synced. Grok is never enabled in the background without an explicit `[[sync.sources]]` entry; `mm init` defaults to yes (`[y/n] (Enter = y)`) when `~/.grok/skills/`, `commands/`, or `rules/` exists and no (`[y/n] (Enter = n)`) otherwise, and `mm reconfigure-sources` defaults to the current setting (or to detected on a legacy config without explicit sources). `mm enable-source grok` clears `"grok"` from `disabled_sources` on machines that ran `mm migrate-config` after v1.11.8. Grok Build reads `~/.claude/skills`, so mm keeps no separate Grok skill link. Run `mm disable-source grok` to turn it off.
-
-Consent also lets `mm push` read completed turn token totals from `~/.grok/sessions/*/*/usage.json` and nothing else: it never opens `updates.jsonl`, `chat_history.jsonl` or any other session file, so usage capture does not publish prompts or responses. The same consent is the config verdict `[retro] grok_host_usage = true`; `mm disable-source grok` stops the reading, and an unconsented `~/.grok` is never opened. Runs that Paseo makes through Grok Build (ACP) are counted. A session without a `usage.json` (Paseo leaves some with only a one- or two-line `updates.jsonl`) counts as zero and costs one `lstat`. Usage capture publishes only the existing encrypted aggregate: family, model, UTC day and token counters, never cost ticks, paths or session ids. Separately, memory sync transfers topic Markdown, which can contain facts extracted from conversations and provenance retained in the topic; these files are encrypted before reaching shared storage. Pending observations stay local. In the fleet retro, Grok Build tokens join the `Grok` row and are priced from the Grok 4.7 rates. Grok Build does not document `usage.json` as a stable contract, so a format change makes this reader alone fail closed: `mm status` and `mm diag` name the broken record format with the fix (`mm update`, or `mm disable-source grok` to stop retrying; when the cached release check says this mm is the newest known, they say instead that no newer mm can read the format yet, and give that stop step and `mm diag`), `mm push` still exits 0, and the other readers keep publishing. Unknown extra fields in `usage.json` are ignored.
-
-#### Grok memory across machines
-
-Grok Build's memory system (`~/.grok/memory-v2/`) is opt-in in Grok Build itself. Because `~/.grok/config.toml` is never synced, enable memory in `~/.grok/config.toml` on **each** machine that should read and write Grok memory:
-
-```toml
-# ~/.grok/config.toml (on each machine)
-[memory]
-enabled = true
-```
-
-Enable the `grok` source on both machines from your shell:
-
-```bash
-mm enable-source grok
-```
-
-The output names memory topics as synced and observations as local. In a normal
-repository checkout on Machine A (not under `/tmp`, where Grok disables memory),
-ask Grok to remember a distinctive project fact. Before leaving that machine,
-run these commands **inside the same Grok session**:
-
-```text
-/flush
-/dream
-```
-
-`/flush` finishes capture; `/dream` consolidates pending observations into
-`topics/`. Grok also Dreams automatically once enough observations accumulate.
-For an immediate handoff, wait for the explicit Dream to finish and confirm the
-fact appears in a topic, then run this in Machine A's **shell**:
-
-```bash
-mm push
-```
-
-After the shared folder delivers that push, run this in Machine B's **shell**
-before starting its next Grok session:
-
-```bash
-mm pull
-mm status
-scope="mind-meld-ac6e5bf3"  # replace with your matching workspace folder
-ls "$HOME/.grok/memory-v2/workspaces/$scope/topics/"
-```
-
-Set `scope` to the matching workspace folder name; for global memory,
-inspect `~/.grok/memory-v2/global/topics/` instead. The topic should be present
-and `mm status` should report the latest push applied. Start Grok in the same
-repository and ask for the fact. Allow roughly 2–5 minutes for this walkthrough
-and folder delivery (an estimate, not a measured guarantee). Observations
-captured after the sender's Dream remain on that machine until a later Dream
-turns them into topics and another push publishes them.
-
-How Grok memory sync works:
-
-- **Workspace scope names.** Grok Build 1.0.77 gives clones and linked worktrees with the same network `origin` an opaque scope name, such as `mind-meld-ac6e5bf3`; mm preserves that name. Global memory and these matching repository scopes reach the corresponding Grok memory on other machines. Repositories without `origin` (`device_local=1`) and non-repository folders use path-dependent names. Their files transfer as inert copies where Grok computes a different name; mm does not map them into the receiving machine's active scope. This is an owner-accepted limitation, not cross-machine parity for those folders.
-- **Topics only.** All `observations/` files, including pending `_inbox/` captures, stay local: mm neither publishes them nor applies peer files or deletion records for them. Grok 1.0.77 did not consolidate a transferred session capture in an initialized receiving store, so observations must become topics on the sending machine before handoff. The [live check](docs/designs/host-parity.md#track-111a-review-follow-up-grok-1077-2026-11-06) records that limitation.
-- **Topic changes and deletions.** Changes to `topics/**/*.md` sync through the existing encrypted file pipeline. Removing a previously published topic propagates a hashed deletion record; a peer with the same last-synced bytes keeps a plaintext recovery copy for at least 30 days in a `0700` folder under `~/.config/mind-meld/deleted/`. See [Recovering a deleted file](#recovering-a-deleted-file). Topics become model context on every receiving machine, with the same trust implications as synced skills.
-- **Topic conflicts.** A first-sync collision or concurrent edits at the same `memory-v2/.../topics/<name>.md` path can leave your local file alongside a `.sync-conflict-*` copy of the peer's version. The conflict copy is still Markdown inside `topics/`, so Grok may treat both unresolved versions as context. Run `mm conflicts` and `mm resolve` to review and resolve them before starting the next Grok session.
-- **Opting out of memory sync only.** To keep syncing Grok `skills/`, `commands/`, `rules/` and usage capture while keeping `memory-v2/` local on a machine, edit the **existing** `grok` `[[sync.sources]]` entry in `~/.config/mind-meld/config.toml`. Append `"memory-v2/*"` to its `exclude_patterns` array, preserving every current exclusion. Do not add a second source block or replace the array with only the memory pattern.
-
-### Muse
-
-`mm enable-source muse` does two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this machine into reading completed model-step token totals from local Muse session logs. Prompts never leave this machine. Muse is never enabled in the background without an explicit `[[sync.sources]]` entry; because Muse creates an empty `~/.local/share/muse/memory/` directory on first run, `mm init` detects Muse and defaults to yes (`[y/n] (Enter = y)`) only when `memory/` is a real directory containing at least one non-excluded regular file, and defaults to no (`[y/n] (Enter = n)`) otherwise (`mm reconfigure-sources` defaults to the current setting, or to detected on a legacy config without explicit sources). Muse's own `.muse-memory.lock` file never syncs. `~/.config/muse` (credentials, settings, trust) is never a sync source. Muse 1.4.14 usage accepts additive model-step metadata, four required usage counters with optional cache-read/write counters, and validated zero-token steps without a model; a nonzero step still requires a model. In the fleet retro, Muse models appear under the `Muse` row. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
-
-### Antigravity (agy)
-
-`mm enable-source agy` does three things: it syncs `~/.gemini/config` (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`; session DBs, settings, hooks, and `agents/` stay local), maintains a `retro-fleet` skill link under `~/.gemini/config/skills/`, and opts this machine into reading completed step token totals from `~/.gemini/antigravity-cli/conversations/<cid>.db`. Prompts never leave this machine. The fleet retro gains an `Antigravity` row alongside Claude, Codex, and Muse.
-
-Upgrade and enable the source on each machine. First run
-`mm update` to install the release with Antigravity support, verify with
-`mm --version`, then:
-
-1. `mm enable-source agy`
-2. Run **`mm push`**. It needs enabled, resolved `mm-events` and host consent, but no Git roots or content changes. With `--verbose`, each cold reader may print scanning progress; scanning is cooperative, not a hard ceiling. Autopush never warms.
-3. Verify on the **producing machine** with `mm status`: a recent recorded capture, Antigravity contributed (or explicitly partial), and `Publication: published`. A prior successful scan or `agy usage read blocker: none` describes only the cache.
-4. Optionally verify end to end from a **second machine** after the shared folder delivers the files. Run `mm devices --format=json` to find the producing machine's ID and substitute it for `<id>`:
-
-```sh
-mm pull
-mm devices --format=json
-mm retro-fleet 7d --dump-host-usage | jq '.by_device["<id>"] | {as_of, consulted, partial, degraded}'
-mm retro-fleet 7d --dump-host-usage | jq '[.by_device["<id>"].tokens_by_day[]?.by_model | keys[]] | unique'
-mm retro-fleet 7d
-```
-
-Expected: a new `as_of`, the enabled readers in `consulted`, and their actual workload's models in the model list when usage exists. A completed empty scan is valid; no fixed model id or nonzero counter is required. Readers in `partial` contributed usable but incomplete totals; readers in `degraded` contributed nothing. For example:
-
-```json
-{"as_of": "2026-10-22T12:00:00+00:00", "consulted": ["codex", "agy"], "partial": [], "degraded": []}
-```
-
-After the next real capture, repeat the second-Mac check: `as_of` must advance with Antigravity still consulted. Upgrade the **producing Mac** for delivery and the **rendering Mac** for tables and wording. Run `mm install-skills` and restart the **agent** so it loads the updated decoder.
-
-If Antigravity writes a record this version cannot read, that Mac drops Antigravity (declared on `mm status` / `mm diag` / `mm push --verbose` stderr) and keeps publishing Codex. The advice is to run `mm update`, or `mm disable-source agy` to stop retrying. Status, plain-text diag, the `mm push --verbose` usage-capture warning, the automatic-push breadcrumb, and the `mm recapture` and `mm init` notices use that advice unless the cached release check says this mm is the newest known; then they say no newer mm can read the format yet, and give that stop step and `mm diag`. See [Host usage capture](#host-usage-capture) for all blockers.
-
-Then give each agent the same lifecycle contract. For Codex, add this to `~/.codex/AGENTS.md` (or merge it into your existing global guidance):
+Add the same lifecycle hook to `~/.codex/AGENTS.md`:
 
 ```markdown
 # Mind Meld
@@ -1149,856 +272,158 @@ At the end of each completed task or conversation, run `mm autopush`.
 If either command has output, summarize it for the user. If it is silent, continue silently.
 ```
 
-This makes every agent feed the same gstack and `mm-events` history used by `retro-fleet`; Claude-only session and token breakdowns remain explicitly labeled as Claude-only.
+### Searching agent memory (qmd)
 
-### Manual commands
+Mind Meld can maintain one local [qmd](https://github.com/tobi/qmd) search index (`--index mind-meld`) over every enabled provider's memory so any agent on this machine can search what any other agent learned across your fleet:
 
-| Command | Description |
-|---------|-------------|
-| `mm --version` | Print the installed version and exit |
-| `mm update` | Update mm to the latest release through pipx. Needs no config or passphrase. Exit 0 means mm is on the latest release; exit 1 means the update did not complete, or `mm update` leaves this install alone (a source-tree build, a non-pipx install, a `pipx pin` or a fork; the message names the fix). `pull` and `push` do this on their own — see [Automatic updates](#automatic-updates) |
-| `mm init` | Check Syncthing and offer to resume a saved join or ask whether to start or join a fleet. When joining, save the storage path, device name (on macOS, the local hostname when available), sources, optional memory-index / embeddings / pointer-line answers, and fleet device ID if pairing is needed in `~/.config/mind-meld/join.toml`. When managed Syncthing needs pairing, set the local Syncthing device name to the name you enter, add the fleet machine, print `mm devices approve <short-id>` and `mm devices approve <id>`, wait for approval, and accept the folder offer. When `mm-crypto-init` arrives, verify the passphrase, register this device, save config, publish its encrypted Syncthing record (`syncthing/<id>.enc`) when its ID is known, pull, then run the initial memory-index refresh and pointer-line update if chosen. See [Quick Start](#quick-start) for wait times and recovery |
-| `mm init --new-fleet` | First machine of a new fleet only: set up default Syncthing using the entered device name for the local Syncthing device, create the key header (`mm-crypto-init`) and `.stignore` in an empty folder, and try to publish this machine's encrypted Syncthing record (`syncthing/<id>.enc`) when its ID is known. On a managed machine, prints this machine's Syncthing device ID. Refuses a managed folder already shared with peers |
-| `mm push` | Sync content and refresh consented host usage; publish this machine's encrypted Syncthing record (`syncthing/<id>.enc`) when missing or different and, on a machine where `mm` manages Syncthing, add knocking fleet devices vouched by a peer's encrypted record (and finish half-finished adds), remove disconnected retired fleet devices (`retired/<id>.enc`), and keep Syncthing device names current. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture) |
-| `mm push --dry-run` | Preview publication and deletions (files a recreated scan folder hides are not counted as deletions); changes nothing except the local lock file |
-| `mm pull --dry-run` | Preview what a pull would write, merge, conflict, delete or hold back as `older` (add `--verbose` for why a file with a deletion record is kept: `keep (<reason>)`); changes nothing except the local lock file |
-| `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`) and end with one `Recapture: ... .` outcome line (`--verbose` / `-v` adds the window, repository, record-count and size breakdown, plus the inner push's own progress and detail). When the oldest recovered commit falls outside a 7-day retro window, an `mm: notice:` line names the `mm retro-fleet <N>d` window that covers it. Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Any other held file adds a `Push: N files held.` line (paths with `-v`) and goes with a later push. Retros window by the COMMIT's date, not by when mm captured it |
-| `mm pull` | Pull context; one final line per outcome, reporting applied content changes per peer device (`<n> content change(s) from <device>`). Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)). On a machine where `mm` manages Syncthing, adds knocking fleet devices vouched by a peer's encrypted `syncthing/<id>.enc` record (and finishes half-finished adds), removes disconnected retired devices (`retired/<id>.enc`), keeps Syncthing device names current, and reports any [unvouched pending join requests](#syncthing-folder-options) during an attended pull. Knocking devices whose sanitized name matches an unpublished registered fleet machine report `Run: mm update` (and `mm push` on that machine); superseded old registrations appear alongside join requests with `Run: mm devices retire <old-id>`; other pending join requests end with `Run: mm devices approve` |
-| `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
-| `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
-| `mm status` | Open with a scoped verdict comparing local context with this device's last push, then show Syncthing state (including knocking unpublished fleet machines with `Run: mm update`, superseded old registrations alongside join requests with `Run: mm devices retire <old-id>`, and a count-only `Run: mm devices approve` line for other pending join requests on a machine where `mm` manages Syncthing), each peer's last push and applied state, the latest auto or attended run per verb, and current diagnostics. Peer pushes overdue by more than 24 h warn in every mode. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
-| `mm diag` | Dump non-secret crypto, sync, Syncthing, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`, with `grok` beside `codex`, `muse` and `agy`), git-root `discovery`, recorded-vs-fresh `git_capture`, local `memory_index` state, background `capture_catchup` state, and recorded per-phase `push_timings` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`, `memory_index`, `capture_catchup`, `push_timings`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
-| `mm devices` | List registered devices |
-| `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
-| `mm devices approve [name\|short-id\|device-id]` | On a fleet machine where mm manages Syncthing, approve a newly joining machine by **Syncthing** device ID, short Syncthing ID (at least 4 base32 chars, terminal required), device name (terminal required), or with no argument to list pending devices and choose interactively on a terminal. Explains and filters out pending devices already vouched by `syncthing/<id>.enc`, labels knocking fleet machines that have not yet published their Syncthing ID, flags retired Syncthing IDs (`(retired)`, requiring the full Syncthing ID to re-approve), and finishes a half-finished approval by full Syncthing device ID |
-| `mm devices retire <name\|id> [--yes]` | Retire a fleet machine by **Mind Meld** device name (interactive terminal only) or exact 8-character Mind Meld device ID from `mm devices`. Writes an encrypted retirement record (`retired/<id>.enc`), removes `syncthing/<id>.enc` and `devices/<id>.json` under the mm lock, and lets each mm-managed peer remove the disconnected Syncthing device on its next push or pull. Interactive runs confirm with `[y/n] (Enter = n)`; `--yes` and non-terminal runs require an exact Mind Meld device ID |
-| `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
-| `mm gc` | Delete this device's orphaned blobs using its raw manifest and run local retention cleanup (including recovery copies of deleted files older than 30 days), always printing one `Gc: ... .` outcome line (`--verbose` / `-v` shows per-reaper retention summaries). When a retention reaper reports a failed or skipped item, one `mm: warning: Retention cleanup was incomplete ...` line follows as the last line, with `Run: mm gc --conflicts -v` after `--conflicts`, otherwise `Run: mm gc -v` (and a missing-manifest `Gc:` line drops `; local retention complete`); a conflict copy kept on purpose is reported as `kept=` under `-v` and never warns; a missing own manifest skips blob collection with a warning |
-| `mm gc --dry-run` | Preview this device's orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
-| `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or is the same file as the sidecar (a symlink or hard link between them), or cannot be hashed, is preserved |
-| `mm sources` | List configured sync sources |
-| `mm memory-index [on\|off]` | Show or toggle the dedicated `mind-meld` qmd index. `on` verifies qmd 2.8.3+, enables `[memory_index]` in local `config.toml`, and refreshes. `off` disables refresh and removes the dedicated index's `mm-` collections. The bare form is read-only. |
-| `mm log` | Query local `~/.config/mind-meld/state.db` history (legacy JSONL before import). Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed\|deleted}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
-| `mm migrate-config` | Clean up [legacy Codex memory settings](#upgrading), append any missing recommended `exclude_patterns`, and set `include_patterns` to the current default when that key is absent or still a previous default list. That update also adds `analytics/stage-runs` to an old-default `gstack-extend` entry's `include_dirs` ([details](#syncing-gstack-extend)). An edited list, even an empty one, stays. Idempotent; `--dry-run` to preview, `--yes` to skip the prompt |
-| `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Runs repository discovery to completion first (30 s budget), so it reads every discovered repository's local email. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |
-| `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
-| `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff); needs a terminal. Run it on each conflict copy that exists when you upgrade; they do not clear by themselves. A conflict copy that is the same file as its original (a symlink or hard link between them) is refused before the prompt, with the manual repair named; nothing is deleted. Exits 1 if any per-conflict read, rename, link, unlink or merged write fails, or a promote or same-file pair is refused, so CI / scripts can detect partial failure (the walk still continues through every conflict); a conflict copy that cannot be removed after a successful merge only warns. |
-| `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). Superseded unregistered device IDs whose recorded name uniquely matches a registered machine fold into that machine per `(agent family, day)` (disclosed in `MM_HEALTH` under `folded_registrations`; unmatched or ambiguous IDs stay unfolded under `unregistered_devices`). `--no-author-filter` renders every fleet commit instead of just yours (automated `checkpointer@noreply` / `checkpoint:` commits are never counted). `--dump-host-usage` prints forensic JSON of accepted host inventory (family totals, per-model `tokens_by_day`, a detail status per device, coverage fields `degraded` / `partial` with the reason a coverage field was dropped, plus `folded_registrations`, `superseded_by_device`, and `unregistered_devices`) and skips the markdown retro. `--set-model-price` / `--mark-pricing-verified` record local pricing overrides; see [Pricing refresh and local overrides](#fleet-retro-retro-fleet). |
-| `mm install-skills` | Force-check the `retro-fleet` skill link for every *authorized* agent and report every agent's outcome, including skipped (declined) rows. Creates missing links, repairs dangling ones, and re-points links left over from an old install onto the store at `~/.local/share/mind-meld/agent-skills/retro-fleet/`. A file of your own, or a link to somewhere Mind Meld does not recognize, is never overwritten — it is reported with the cause and the fix. `--agent KEY` (repeatable) grants and persists skill-link maintenance for that agent without enabling sync or usage reading, then installs every authorized agent. Bare invocation with no config is fresh-machine setup (install all available); with a config it honors `[skills]`. Restart the agent afterwards so it reloads SKILL.md. |
+- **Scope:** covers memory from projects present on this machine plus each agent's machine-wide memory (`mm-claude`, `mm-grok`, `mm-muse`, `mm-codex-<this-machine>`, and `mm-codex-<peer>` copies). Claude project memory for a project with no checkout on this machine stays off it and is not searchable here.
+- **Local and derived:** markdown files stay the source of truth; the index lives locally (`~/.cache/qmd/mind-meld.sqlite`) and never syncs.
+- **Refresh:** attended `mm push` and `mm pull` reconcile `mm-` collections and run `qmd --index mind-meld update` after releasing the sync lock; `autopush` and `autopull` refresh detached in the background. Previews never refresh. Failures never change a sync's exit code and surface in `mm status` / `mm diag`.
+- **Embeddings (optional):** keyword search (`qmd --index mind-meld search`) downloads no models. Opt in during `mm init` (or set `embeddings = true` under `[memory_index]` in `config.toml`) to run `qmd --index mind-meld embed` in the background (~334 MB model on first run).
+- **Commands:** `mm memory-index` (read-only status), `mm memory-index on` (requires `qmd` 2.8.3+), `mm memory-index off` (disables refresh and removes `mm-` collections).
 
+#### Agent setup
 
-### Sync outcomes
+1. **Add the pointer line** to your global instruction files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, or `AGENTS.md` in your `CODEX_HOME`). For symlinked files, edit the target by hand:
 
-The shared output style has five plain-text forms (Tracks 129B / 130B / 133A / 134A).
-Push/pull, setup, device approval, source toggles, resolution, empty conflict
-listings, status, gc, diff, log, recapture, update notices and the shared error
-helpers use them:
+   > If the owner mentions something they discussed with an agent before and you can't find it in your own memory, search every agent's memory with `qmd --index mind-meld search "<key words>" -n 10` (`qmd --index mind-meld get <docid>` reads a hit). If memories disagree, show the owner each one with its path and ask which is right.
 
-- **Outcome:** `<Verb>: <what happened>.` on stdout, one line per thing that happened (`Push: 10 content changes published; usage published.`, `Push: 1 file held.`, `Pull: 1 content change from mac-a, 2 content changes from mac-b (1 conflict copy).`, `Gc: 2 orphaned blobs deleted.`, `Recapture: 14 commit records captured and published across 3 repositories (2026-10-14 → 2026-11-13).`).
-- **Error:** `mm: error: <what broke>` on stderr, followed by `Run: <command>` on its own last line when a fix command is supplied.
-- **Warning:** `mm: warning: <what is wrong>` on stderr (one line; data-at-risk warnings are never quiet-gated).
-- **Notice:** `mm: notice: <what changed or was skipped>` on stderr (one line).
-- **Fix command:** `Run: <command>` on its own last line after an error, or ending a one-line warning, notice, or status verdict; CLI usage errors exit **2** with `Run: <command path> --help` instead of a Rich panel.
+2. **Claude Code allow rules:** add these to `~/.claude/settings.json` under `permissions.allow`:
 
-In an interactive terminal without `--verbose` or `--dry-run`, `mm push` and
-`mm pull` show a transient spinner after three seconds of sync work, with live
-phase labels, progress counters, and per-phase elapsed time (`· <elapsed>s`).
-During a scan, `mm push` names the source and, when available, the project or
-scope (`Scanning sources claude projects/-Users-user-myapp · 0.3s`), then
-shows per-phase counts and elapsed
-time (`Reading Codex usage 41/159 · 2.1s`, `Discovering repositories 3/6 ·
-0.4s`, `Uploading files 50.0% 1/2 files · 0.2s`), while `mm pull` shows
-manifest and file counters with elapsed time (`Reading peer manifests 50.0%
-1/2 manifests · 0.2s`, `Applying files 50.0% 1/2 files · 0.4s` per source
-batch). Pull keeps the spinner active through finishing and Syncthing fleet
-checks. Both commands keep it active through any memory-index refresh and the
-release check. The spinner pauses for mid-run warnings or conflict prompts and
-clears before the final outcome lines. If the check finds a newer release, it
-clears before any installer spinner or upgrade notice. A successful
-`mm push --verbose` prints a `Phase timings:` block before the `Push:`
-outcome lines. Each recorded phase shows elapsed milliseconds and, when
-applicable, its allowance. `mm update` and an
-automatic update during an attended terminal `mm push` or `mm pull` share the
-same transient spinner (`Updating mm <old> → <new>`, then installer phases and
-counters). Redirected output (even with `FORCE_COLOR`), `--dry-run`, `autopush`,
-and `autopull` omit the spinner. Ordinary sync progress also skips dumb
-terminals. A verbose terminal pull shows a standalone spinner during a
-Syncthing delivery wait.
+   ```json
+   "Bash(qmd --index mind-meld search:*)",
+   "Bash(qmd --index mind-meld get:*)"
+   ```
 
-Default and verbose commands end with the same final outcome lines; a narrow
-terminal may wrap a line visually. Success is on stdout, failure on stderr.
-These examples describe possible results, not commands that guarantee them:
+3. **Codex sandbox writable root:** `qmd` opens `mind-meld.sqlite` in WAL mode. Under `workspace-write`, add your qmd cache folder (`~/.cache/qmd`, or `$XDG_CACHE_HOME/qmd`) to `sandbox_workspace_write.writable_roots` in Codex's `config.toml`:
 
-```text
-$ mm push
-Push: 10 content changes published; usage published.
-Push: 1 file held.
-$ mm push --verbose
-Building manifest...
-...scan, capture and upload details...
-Push: 10 content changes published; usage published.
-Push: 1 file held.
-$ mm pull
-mm: warning: ... — 1 conflicts: ...
-mm: 1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner
-Pull: 1 content change from mac-a, 2 content changes from mac-b (1 conflict copy).
-```
+   ```toml
+   [sandbox_workspace_write]
+   writable_roots = ["/home/user/.cache/qmd"]
+   ```
 
-Push counts accepted user-file changes, excluding captured usage rows and held
-files. Metadata-only, source-selection-only and repair-only publications say
-`Push: metadata updated.`, `Push: source selection updated.` and
-`Push: manifest repaired.` respectively. For Claude project memory, the first
-publish under shared names says `Push: project memory published under shared names.`,
-a later project rename says `Push: project names updated.`, and a first switch held
-because `~/.claude/projects` cannot be listed says
-`Push: project memory not published until Claude's projects folder can be listed.`
-(see [Project memory across machines](#project-memory-across-machines)).
-A held file keeps its previous
-published version, if any, and adds its own outcome line (`Push: 1 file held.` /
-`Push: N files held.`); its paths/reasons appear with `--verbose`.
-When an attended push publishes changed usage totals (host usage, Claude
-session totals, or Git commits) or queued catch-up data compared against this
-machine's last published snapshot, the lead `Push:` line appends `; usage published`
-(for example, `Push: 10 content changes published; usage published.` or
-`Push: no content changes; usage published.`). The receipt uses the accepted
-manifest after file holds and requires publication proof for the captured host
-day file. With no verified new usage, a `no content changes` lead prints
-`Push: no content changes; no new usage.`. Content, metadata, selection, or
-repair leads omit the usage clause when no readers are catching up.
-If any attended host usage reader stopped at its deadline, the usage clause names
-the readers still catching up in parentheses, including beside content changes (for example,
-`Push: no content changes; usage published (Grok catching up).` or
-`Push: no content changes; no new usage (Grok catching up).`). `mm push --verbose`
-keeps `Host usage published (manifest accepted).`, and `mm status` / `mm diag`
-show full publication details. Existing clauses (held files, metadata, source
-selection, manifest repair, failures and `Run:` fix lines) and quiet `mm autopush`
-keep their behavior. Other explicit outcomes include `Push: no enabled sources.`,
-`Pull: no changes.`, `Pull: no peer devices.` and `Pull: no enabled sources.`
+4. **Optional MCP setup (manual):** Mind Meld never edits agent MCP configs. Run these yourself if you prefer MCP access alongside or instead of the CLI:
 
-When a successful `mm push` records a capture problem that needs your action,
-the default output shows the first remedy as an `mm: notice:` line on stderr
-before `Push:`. Automatically continuing Git catch-up stays quiet.
+   ```bash
+   claude mcp add mind-meld -- qmd --index mind-meld mcp
+   codex mcp add mind-meld -- qmd --index mind-meld mcp
+   ```
 
-Pull counts applications across selected peers/sources, not guaranteed unique
-paths. On a successful pull, the lead clause lists applied content changes per
-peer device (`<n> content change(s) from <device>`, sorted by display name,
-omitting peers with zero applied files, with any `(N conflict copy/copies)`
-suffix kept on the same line); `Pull incomplete [...]` failure lines keep their
-combined `N files applied, M failed` counts. Skipped newer local files are omitted from the default `mm pull` outcome
-line (a pull that only skips newer local files prints `Pull: no changes.`);
-`mm pull --verbose` (`N skipped (local newer)`), `mm status`, and `mm diag`
-show the skipped count. A deletion a peer made prints its own outcome line
-`Pull: 3 files deleted because Mac B deleted them;
-copies in ~/.config/mind-meld/deleted/<stamp> for 30 days; see ...#recovering-a-deleted-file.`
-(`peers` replaces the name when several machines deleted); `mm pull --verbose`
-lists the paths. A peer edit held back as `older` prints `Pull: 1 older peer edit not applied (mm pull --verbose).`
-Verbose pull summaries use `<peer>/<source>` labels with counts such as
-`<peer>/<source>: 1 older peer edit held` and list the held paths. If the source
-has held edits and no other changes, verbose output also shows
-`Up to date with <peer>/<source>.`
-A push whose scan folder was recreated prints `Push: metadata updated.` followed by
-`Push: 12 files left out because /home/user/.claude/projects is new; run mm pull to restore them.`
-Conflict copies are already included in applied files; skipped and failed
-outcomes are separate. A scoped pull makes no claim about other sources or peers.
-Content a sync tool has not delivered yet is **waiting**, not failed: pull prints
-`Pull: waiting for 2 files from Mac B.` (or `Mac B's manifest`, or `cccccccc's
-device entry`), the exit stays 0, and the next pull retries. When a pull also
-failed, the waiting clause stays in the `mm: error:` line before `Run:`. `--verbose` lists the waiting
-paths. Attended run summaries in `last-attended-runs.json` do not record a waiting
-count; full pulls record each peer's count in `state.db` for `mm status`, and
-`mm autopull` also records it in the `success` breadcrumb detail.
-Another home's files from a peer still on path
-names print `Pull: 312 files from Mac B wait until it publishes shared names (mm status).`:
-the exit stays 0, and they wait on that machine updating, not on delivery.
+### Grok Build
 
-```text
-$ mm pull
-mm: warning: ...named failed file and its remedy...
-mm: error: Pull incomplete [result-degraded]: 12 files applied, 2 failed; completed changes remain; repair the reported failures before one retry.
-Run: mm diag
-$ mm push
-Push: no content changes; no new usage.
-$ mm status
-...capture degradation and its action, when capture failed independently...
-$ mm push --verbose
-...Usage capture (no-row): ...
-Push: no content changes; no new usage.
-```
+`mm enable-source grok` syncs `~/.grok` `skills/`, `commands/`, `rules/`, and `memory-v2/` topic Markdown (`memory-v2/global/topics/**/*.md` and `memory-v2/workspaces/*/topics/**/*.md`), and consents to reading completed turn totals from `~/.grok/sessions/*/*/usage.json` (including Paseo ACP runs). Sessions, SQLite indexes, `MEMORY.md`, `archive/`, `observations/`, `config.toml`, `auth.json`, `plugins/`, and `hooks/` stay local. Grok Build reads `~/.claude/skills`, so `mm` keeps no separate Grok skill link.
 
-The partial pull exits 1. The degraded-capture push exits 0: consult
-[Status verdicts](#status-verdicts) or `mm diag` for the existing capture receipt
-and reader state. No repeated-push escalation counter is implied.
+#### Grok memory across machines
 
-Failures print `mm: error: <Verb> <state> [<cause>]: <reason and known effects>`
-followed by `Run: <command>` on its own last line. Those cause labels are explanatory, not a stable error-code API.
-Known completed changes remain; nothing rolls back. Correct the named problem
-before one retry; when effects are unconfirmed, reconcile with read-only
-`mm diag` first. Repeated or unresolved failures need the owner's judgment.
-No-terminal authentication failures name `MINDMELD_PASSPHRASE`: the owner must
-supply the passphrase securely before retrying, without exposing it in output.
-Unexpected traces are verbose-only and contain trusted frame identifiers and
-safe errno, with no exception messages, locals, source text or user paths.
+- **Topics only:** pending `observations/` (including `_inbox/`) stay local because Grok 1.0.77 does not consolidate transferred captures ([live check](docs/archive/host-parity.md#track-111a-review-follow-up-grok-1077-2026-11-06)). Before switching machines, run `/flush` then `/dream` in Grok, then `mm push`; run `mm pull` on the receiving machine before starting Grok.
+- **Repository scopes:** global topics and repos with a network `origin` remote match across machines; no-origin repos and plain directories transfer as inert copies.
 
-Capture receipt, lock release, eligible update, history notice and run-evidence
-notice finish before the final outcome lines. Data-at-risk and actionable warnings stay
-visible: apply/fsync failures, kept conflict copies, corrupt/unsafe peer skips,
-recovery issues, large sync growth, config migration, missing custom mm-events
-folders, unavailable history/run evidence, and update failure/nudges. Successful `autopush` and
-`autopull` emit nothing, except that an `autopull` which deleted files prints the
-deletion line above as one `mm:` line on stderr (deleted files are data at risk) and
-records the folder in its breadcrumb; failures/warnings and their existing status
-breadcrumbs remain available. Previews retain their read-only scope and completion trailer.
+### Muse
 
+`mm enable-source muse` syncs `~/.local/share/muse/memory/` (excluding `.muse-memory.lock`) and consents to reading completed `model_completed` step totals from local Muse session logs. Sessions, bundled skills, and `~/.config/muse` stay local. Muse discovers `~/.claude/skills`, so `mm` maintains no separate Muse skill link.
 
-### Status verdicts
+### Antigravity (agy)
 
-Required passphrase prompts keep working. After authentication, the report's
-first line is one plain stdout line, including when redirected or on a narrow
-terminal (the terminal itself may soft-wrap). Preparatory notices follow it.
-Fatal inspection errors use stderr and preserve a nonzero exit and their
-notices. Exit 0 means inspection completed, **not** proof that everything synced.
-
-Representative first lines:
-
-```text
-In sync with this device's last push.
-Syncthing is still delivering 2 files. Run: mm pull
-Waiting more than 24 h for Mac B's push of 2026-06-14. Run: mm pull
-2 new, 1 modified and 3 deleted waiting to push. Run: mm push
-Project memory ready to publish under shared names. Run: mm push
-Metadata-only changes waiting to push. Run: mm push
-Project memory not published until Claude's projects folder can be listed.
-This device has not pushed yet. Run: mm push
-This device's manifest is still arriving from sync. Run: mm status
-Source 'claude' — 1 new, 0 modified and 0 deleted waiting to push. Run: mm push
-Sync run evidence unknown [run-evidence-ambiguous] (pull). Run: mm diag
-```
-
-`mm status` also reports the local Syncthing connection and folder state (`Syncthing: ...`, plus a nudge to `mm diag` when folder settings need attention and, on a machine where `mm` manages Syncthing, knocking unpublished fleet machines with `Run: mm update`, superseded old registrations alongside join requests with `Run: mm devices retire <old-id>`, and a count-only `Run: mm devices approve` line for other devices waiting to join) and, under `Other devices`, each peer's last push and whether it is applied here (`applied here`, `not pulled here yet`, `N file(s) waiting for sync`, `its manifest has not arrived`, `never pushed`, `manifest unreadable here (mm pull shows why)`, or `applied state unknown`). When a peer's unpulled push, waiting files, or missing manifest has waited more than 24 h (strictly `> 24 h`), the opening verdict warns in every mode (`Waiting more than 24 h for <peer>'s push of YYYY-MM-DD. Run: mm pull` or `mm diag`) whenever no higher-priority local or run verdict applies; otherwise the warning follows that verdict. Unplaced project-memory files and old-form peer files are not pending and never trigger the 24 h warning. Counts cover the selected `--source` set. Metadata means
-equal hashes with a strictly newer local mtime, using the same forward-only
-gate as push; a source selection change also needs publication. Holds and
-failed files stay pending or degraded; pushing does not force a green verdict.
-Missing published roots, unavailable requested sources, incomplete scans,
-conflicts and corrupt/newer own metadata cannot report healthy. Inspection
-uses a strict source scan; this disables cached diagnostic hashes and can
-reread event-file bytes, while retaining one event parsing pass. The I/O cost
-is unmeasured.
-
-`applied here` requires the current manifest content to match a recorded applied
-identity as well as its timestamp. A late conflict copy with additional content
-therefore needs another pull even if the push timestamp has not changed. Older
-timestamp-only cursor records cannot prove applied content until a full pull
-refreshes them.
-
-Status selects one execution summary per verb from the latest available auto
-and attended records. Strictly later valid completed success can resolve an
-available earlier same-verb failure, in either auto/attended order. Push never clears pull. Equal, invalid, naive, future or otherwise
-ambiguous timestamps cannot establish recovery. A filtered pull carries its
-source/device scope and explicitly says limited coverage; it cannot clear an
-unscoped failure. Lock skips establish neither failure nor recovery: a routine
-skip alone need not displace a healthy current comparison, but a known
-unresolved failure in those records stays actionable. Later runs overwrite
-their own per-verb record; overwritten failures are not retained. Discovery
-finding no repositories is advisory detail, not lost work. No additional history or consecutive-hold
-escalation is inferred.
-
-`mm diag --json` reports `last_autorun`, `last_attended_runs` (`state`, `runs`),
-and `sync_run_projection`. Each projected verb has `kind`,
-`selected`, `superseded`, `unknown_reason`, `unresolved`, and `limited_coverage`.
-Plain diag prints these too. When a valid mesh record exists, both forms
-filter older removal-wait clauses from `last_autorun`. The on-disk hook
-breadcrumb and the raw attended records retain their original detail. Autorun
-age describes when hooks ran. Supersession hides obsolete status rows without
-deleting the underlying latest records. Capture/publication
-evidence stays separate; only its existing `latest_attempt_superseded` proof hides an obsolete capture
-attempt from status, and diag retains it.
-
-The local mode-0600 sync record has schema `version: 1` and at most one `push`
-and one `pull` entry. Entries contain UTC `completed_at`, `outcome`, `cause`,
-finite integer `counts`, `content_accepted` (true/false/unknown), optional
-`scope`, bounded safe `degradations`, `omitted_details`, `ordering_unknown`,
-and an errno name. Outcomes are success, degraded, failed and skipped;
-interruption is failed/interrupted. Counts retain named push new/modified/deleted,
-content-file/held/event-degradation/maintenance counts, and pull written,
-merged, skipped, conflicted, failed, unknown-source pair, corrupt-peer and
-parent-fsync counts; bytes transferred are separate from file counts. An
-unknown partial interruption invents no counts. Content acceptance survives
-later maintenance failure and says nothing about usage publication or delivery.
-
-Records are recoverable forensic evidence, capped at 16 KiB generated JSON;
-at most eight detail phrases are retained. Omitted detail is **not retained**,
-including unsafe unknown phrases, rather than promised in diag. Reads/writes
-never wait on a busy evidence lock. A delayed older completion cannot replace
-a newer one; conflicting writes with equal or older timestamps make ordering
-unknown, covering both delayed writers and clock rollback. The shared
-truncate/write primitive does not guarantee old bytes survive a write error,
-or certify power-loss durability. Ordinary oversized files are rejected before
-parsing; a size race retains the shared helper's 64 MiB ceiling. Status/diag
-never repair records; a later real attended invocation may repair recoverable
-history. Previews write no sync record or extra lock (the existing local mm
-lock/parent exemption remains). Parsing before a callback and SIGKILL cannot
-be recorded.
-
-#### Run evidence diagnostics
-
-| Code / cause | Meaning and safe next step |
-|---|---|
-| <a id="run-evidence-write-unavailable"></a>`run-evidence-write-unavailable` | Sync's primary result is unchanged. The stderr notice names push/pull, known content side effects and a bounded errno/code. Do not repeat sync solely to record history; restore local access/storage if needed, then run `mm diag`. |
-| <a id="run-evidence-contended"></a>`run-evidence-contended` | Read was busy and changed nothing. Retry read-only `mm status` once; if still busy, use `mm diag` and inspect local access. Never delete a live lock. |
-| <a id="run-evidence-corrupt"></a><a id="run-evidence-oversized"></a><a id="run-evidence-unreadable"></a>`run-evidence-corrupt`, `run-evidence-oversized`, `run-evidence-unreadable` | History is unknown. Use `mm diag`; no deletion or blind sync retry is prescribed. Missing history needs no repair. |
-| <a id="run-evidence-ambiguous"></a><a id="run-evidence-limited-coverage"></a>`run-evidence-ambiguous`, `run-evidence-limited-coverage` | Ordering or scope cannot prove recovery. Inspect run evidence and the selected scope with `mm diag`. |
-| `ok`, `no-changes` | Completed content execution; capture and publication remain independent. |
-| `setup-error`, `authentication-error`, `crypto-error`, `storage-error`, `snapshot-refused`, `command-refused`, `unexpected-error` | The callback stopped; use current diagnostics and the original fixing instruction. A bare command refusal has unknown side effects. |
-| `lock-held`, `interrupted`, `result-degraded` | No execution, interruption, or typed partial/degraded result. Inspect `mm diag` and its counts before choosing a sync retry. |
-
-Track 78A since made attended partial pulls exit 1 and moved the push/pull
-outcome after these finalizers (see [Sync outcomes](#sync-outcomes)); this
-verdict alone does not complete O8's quiet-output checkpoint. Deadline-stopped
-host reads and budget-stopped Git walks with items left report `catching up (N left)`
-on attended push, in `mm status`, and in `mm retro-fleet`'s `MM_HEALTH`. Automatic
-pushes repeat the last attended count for up to seven days without recounting;
-completion, a non-deadline failure, or no longer selecting a reader clears its
-figure. Nothing more is needed than the next attended `mm push` on that machine.
-Other reader failures and peers without the new field keep the old wording;
-older renderers ignore the field. Capture errors and quiet breadcrumbs keep
-their existing remedies.
-
-### Garbage collection
-
-GC reads only this device's raw manifest and lists only its blob directory.
-If that manifest is missing, it warns that blob collection was skipped and no
-blobs were deleted: wait for sync, inspect with `mm diag`, then retry `mm gc`.
-Local retention still runs. A valid empty own manifest can collect own orphans.
-If this device's manifest is unreadable, or only conflict copies of it (iCloud,
-Dropbox or Syncthing) load, GC refuses and says what to do. When only conflict copies load, `mm push`
-on this device rewrites the manifest even with no content change; then retry
-`mm gc`. Hooks (`mm autopush`, `mm autopull`) never run GC, and each Mac cleans
-only its own blobs, so run `mm gc` now and then on a Mac that syncs mostly
-through hooks; otherwise its superseded blobs accumulate in the storage folder. Abandoned
-peers' blobs remain after [device retirement](#retiring-a-dead-machine), too.
-A lagging peer reading this device's prior manifest can still miss a blob this
-device has already collected; this repair does not solve every arrival order.
-
-### Nested git repositories
-
-Source walkers that traverse directory trees skip nested directories containing a `.git` directory with `HEAD`
-or a gitlink `.git` file by default; an empty `.git` directory is not a
-checkout and its folder syncs normally. A folder that an earlier release froze
-only because of an empty `.git` directory resumes syncing on the next `mm push`. The rule covers explicit includes
-that point inside a checkout. The source root's own `.git` keeps its existing
-behavior. Ordinary directories still sync; there is no opt-out setting.
-
-[Codex memory sync](#codex-integration) reads a fixed file set from Codex's Git-tracked memory directory. Its Git metadata stays local.
-
-Attended `mm push --verbose` and the `--dry-run` preview report each skipped root once:
-`skipped: nested git repository <source>:<relative-root>`. `mm status` shows
-the exact selected-source count plus `mm diag` for details; diag lists paths. `mm autopush` and `mm recapture` stay silent about them.
-`mm diag --json` adds `sync_scope`, whose `skipped_nested_repositories` maps
-source names to relative roots (empty lists mean none found; null means config
-unavailable). Inspection is best-effort and never reads checkout contents.
-
-A checkout's contents never publish. If `.git` appears in a directory that was
-already published, this Mac keeps advertising those last-published entries
-unchanged: nothing is uploaded or deleted, and peer copies stay in place. Edits
-and new files inside the checkout stay local. Deleting the checkout later
-deletes those entries like any other deletion, so peers converge instead of
-sending the files back. To stop advertising them without deleting anything,
-add an `exclude_patterns` glob such as `<folder>/*` instead. The freeze also
-ends, with the same effect, when this Mac's previous manifest no longer lists
-those entries: after disabling and re-enabling the source, `mm recover
---abandon-manifest`, or recovery from a peer or a manifest whose blobs are gone.
-Pull never writes peer files into a local checkout, nor deletes below one (a deletion
-record under a checkout is skipped like its files), and `mm diff` previews the same view. Both check
-only the local folders above incoming paths. An attended `mm pull` (not
-`--dry-run` or `autopull`) records one `excluded` log entry per checkout root
-and peer, whether that peer advertised files or only deletion records there.
-(Conflict-copy discovery for `mm conflicts`
-still scans inside checkouts.) Pull also ignores peer paths with a `.git` segment in
-any letter case, or with `.` or empty segments. Older writers may still publish
-checkout files; upgrade those Macs to apply the same default.
-
-A push adding more than 1,000 new files in a subtree prints a nonblocking growth
-warning naming up to three subtrees and their observed counts. Groups use the
-first two directory components under each source; modified files do not count.
-The first push without an accepted manifest of this Mac's own (a new Mac, or
-recovery from a corrupt one) skips the warning. It is printed to stderr only,
-including by autopush, whose hook output you may never see; `mm status` does
-not record it.
+`mm enable-source agy` syncs `~/.gemini/config` (`skills/`, `rules/`, `AGENTS.md`, `GEMINI.md`), maintains a `retro-fleet` skill link under `~/.gemini/config/skills/`, and consents to reading completed step token totals from `~/.gemini/antigravity-cli/conversations/<cid>.db`. Session databases, settings, hooks, and `agents/` stay local.
 
 ### Syncing gstack
 
-If `~/.gstack` is detected during `mm init`, it is automatically added as a sync source. gstack uses a **whitelist walker** — unlike the Claude source (which has hardcoded subdirs), the gstack source only syncs the directories and files you explicitly list. Inside them, `include_patterns` is a second allowlist: only context with a cross-machine reader (context-save checkpoints, plans, learnings/decisions/timeline ledgers, handoffs) syncs, while per-run output (review-prep trees, loop state, gate diffs) stays on the Mac that produced it. New skill output stays local until it is added to the list.
+When `~/.gstack` exists, `mm init` adds it as a whitelist-based `generic` source. Only cross-machine context syncs; per-run output and browser profiles (any directory containing a regular `Local State` file) stay local.
 
-**Defaults out of the box:**
+- **`include_dirs`:** `projects/`, `analytics/`, `retros/`
+- **`include_files`:** `retro-context.md`, `greptile-history.md`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`
+- **`include_patterns`:** everything under `analytics/` and `retros/`, the `include_files` above, and inside `projects/<slug>/` only cross-machine documents and ledgers (checkpoints, plans, designs, specs, briefs, cards, handoffs, deploy reports, pair-review reports, `learnings.jsonl`, `decisions*.jsonl`, `timeline.jsonl`, review logs). Full allowlist: [sync invariants](docs/invariants/sync.md#include_patterns-allowlist--inverse-consumer-filter).
+- **`exclude_patterns` (machine-local state):** `config.yaml`, `projects/*/repo-mode.json`, `projects/*/land-deploy-confirmed`, `analytics/.last-sync-*`, `projects/*/decisions.active.json`, `projects/*/brain-cache/*`, `projects/*/pair-review/session.yaml`.
+- **`exclude_patterns` (generated output):** `projects/*/venv/*`, `projects/*/.venv/*`, `projects/*/*.app/*`, `projects/*/.qa-evidence/*`, `*.zip`, `*.tar`, `*.tgz`, `*.tar.gz`, `*.tar.xz`, `*.tar.bz2`, `*.tar.zst`, `*.whl`, `*.so`, `*.dylib`, `*.pak`, `*.dmg`.
 
-- `include_dirs`: `projects/`, `analytics/`, `retros/`
-- `include_files`: `retro-context.md`, `greptile-history.md`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`
-- `include_patterns` (segment-aware: `*` stays within one directory segment, `**` crosses): everything under `analytics/` and `retros/`, the `include_files` above, and inside each `projects/<slug>/` the document files (md, txt, html, css, json, jsonl, png, jpg, jpeg, gif, svg, webp, pdf, patch, diff) of the `checkpoints/`, `checkpoint-pointers/`, `ceo-plans/`, `plans/`, `designs/`, `specs/`, `briefs/`, `cards/`, `handoffs/` and `deploy-reports/` directories, the three `pair-review/` files `deploy.md`, `report.md` and `parked-bugs.md`, and the loose ledgers (`learnings.jsonl`, `decisions*.jsonl`, `timeline.jsonl`, `question-*.json*`, `*-reviews.jsonl`, `*-autoplan-*.md`, `*-test-plan-*.md`, `*-card.md`, the timestamped `driver-handoff-*.md` archives, plus a few history files). `manager-*.json`, `*-evidence.jsonl`, the live `driver-handoff.md`, `session.from-*` resume copies and scripts or logs inside the artifact directories stay on the Mac that wrote them. The full list with per-entry readers and the measurement behind it lives in [the sync invariants](docs/invariants/sync.md#include_patterns-allowlist--inverse-consumer-filter). Excludes below still win over an allowlist match. Existing installs opt in with `mm migrate-config`, which also offers the narrowed list to a config that still pins the previous default list (any other present list, even empty, is respected; deleting the key brings the prompt back). The original allowlist took `projects/` on the measured Mac from about 43,000 synced files / 1.5 GB to about 3,400 files / 40 MB; the narrowed list has not been re-measured; de-scoped files stay on every Mac's disk, no tombstones are written, and own store space is reclaimed by the next attended push's GC or `mm gc`. Until every active Mac has migrated and pushed, an attended pull on a migrated Mac logs one excluded row per de-scoped file an unmigrated peer still lists (same behavior as the v1.8.0 trim, larger counts) — migrate and push every active Mac before the next attended pull on any of them.
-- `exclude_patterns`, per-machine caches and state: `config.yaml`,
-  `projects/*/repo-mode.json`, `projects/*/land-deploy-confirmed`,
-  `analytics/.last-sync-*`, `projects/*/decisions.active.json`,
-  `projects/*/brain-cache/*`, `projects/*/pair-review/session.yaml`.
-  These are version-check state, deploy markers, analytics cursors, derived
-  decisions, gbrain caches and the live pair-review state machine. The source
-  `decisions.jsonl` and pair-review prose reports stay in scope.
-- `exclude_patterns`, generated output: `projects/*/venv/*`,
-  `projects/*/.venv/*`, `projects/*/*.app/*`, `projects/*/.qa-evidence/*`,
-  `*.zip`, `*.tar`, `*.tgz`, `*.tar.gz`, `*.tar.xz`, `*.tar.bz2`, `*.tar.zst`,
-  `*.whl`, `*.so`, `*.dylib`, `*.pak`, `*.dmg`.
-
-The generated-output trim saves about 30% of the gstack set's sealed bytes on
-the measured Mac. In 1.x it means about
-23% fewer gstack manifest entries plus own storage reclaimed by an attended
-content-changing push's GC. [Measurement and matching caveats](docs/invariants/sync.md#bulk-generator-output).
-Those directory names are skipped at any depth inside a project; removing a
-default glob brings back the migration prompt. [Existing installs: v1.8.0 steps](#v180-scope-trim).
-
-This covers the common cross-machine cases. In particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** additions on pull. Pull deduplicates lines and sorts by string `ts` first, then by full line. The union includes edits from an older-mtime peer that built on your version. Append-only telemetry from 3 machines converges into one timeline. [Handling conflicts](#handling-conflicts).
-
-**Browser profiles are skipped:** a directory holding a regular, non-symlink Chromium or Electron `Local State` file (a `chrome-profile`, a signed-in test profile, an Electron `user-data` directory) is never synced. That includes an include that starts inside the profile, and a file selected when the source has no `include_dirs`. See [Upgrading](#upgrading) for removing copies that synced before.
-
-**Not synced by default** (machine-local by design): `sessions/`, `sidebar-sessions/`, `slug-cache/`, `worktrees/`, `builder-profile.jsonl`, `developer-profile.json`. If you want any of these on every Mac, add them to your config (see below).
-
-**Adding files or dirs:** edit `~/.config/mind-meld/config.toml` and extend the gstack source. For example, to sync the writing-style prompt marker and a custom notes file:
-
-```toml
-[[sync.sources]]
-name = "gstack"
-path = "~/.gstack"
-type = "generic"
-include_dirs = ["projects", "analytics", "retros"]
-include_files = [
-    "retro-context.md",
-    "greptile-history.md",
-    ".completeness-intro-seen",
-    ".telemetry-prompted",
-    ".proactive-prompted",
-    ".welcome-seen",
-    ".codex-desc-healed",
-    ".writing-style-prompted",   # added (your custom extra)
-]
-exclude_patterns = [
-    "config.yaml",
-    "projects/*/repo-mode.json",
-    "projects/*/land-deploy-confirmed",
-]
-```
-
-Supplying `sync.sources` replaces the defaults wholesale — copy the full list,
-don't just add your extras, then run `mm migrate-config` to append the
-recommended globs. A custom file under `projects/<slug>/` also needs a
-matching `include_patterns` entry or the allowlist leaves it local; run
-`mm sources` to confirm the resolved source list and counts.
-
-**Useful flags:**
-
-- `mm sources` — show the configured source list with their `Enabled` state and file counts.
-- `mm pull --source gstack` — pull only the gstack source (skip Claude).
+JSONL ledgers (`analytics/skill-usage.jsonl`, `projects/<slug>/timeline.jsonl`, etc.) set-union merge on pull. To customize `[[sync.sources]]` in `~/.config/mind-meld/config.toml`, copy the full default entry (supplying `sync.sources` replaces defaults), then run `mm migrate-config` to keep recommended excludes.
 
 ### Syncing gstack-extend
 
-If `~/.gstack-extend/` is detected during `mm init`, it is automatically added as a sync source. A directory holding a regular, non-symlink `Local State` file is still skipped. Files that gstack-extend skills (pair-review, test-plan, full-review) persist under `~/.gstack-extend/projects/<slug>/` and per-host run history under `~/.gstack-extend/analytics/stage-runs/*.jsonl` sync through this source, so cross-machine resume and fleet stage-run history work across machines.
+When `~/.gstack-extend/` exists, `mm init` adds it with `include_dirs = ["projects", "analytics/stage-runs"]` and `include_patterns = ["projects/**", "analytics/stage-runs/*.jsonl"]` so pair-review state, plans, and fleet stage-run history roam across machines.
 
-**Defaults out of the box:**
+### Nested git repositories
 
-- `include_dirs`: `projects/`, `analytics/stage-runs/`
-- `include_patterns`: `projects/**`, `analytics/stage-runs/*.jsonl` (regular `.jsonl` files directly in `stage-runs/`, including `<host>.legacy.jsonl` from gstack-extend's no-clobber move of the historical file)
-- Stays local: root bookkeeping (`config`, `just-upgraded-from`, `update-snoozed`, `projects.json`, `telemetry/`) and the rest of `analytics/` — including the historical single-file `analytics/stage-runs.jsonl`, which every machine wrote under the same filename before gstack-extend v0.71.0 and which gstack-extend's reader already joins locally with `stage-runs/*.jsonl`, plus `skill-usage.jsonl` and `workflow-metrics/`. Details: [the sync invariants](docs/invariants/sync.md#gstack-extend-run-history-track-113a).
+Walkers skip any directory strictly below a source root that contains a `.git` file or a `.git` directory with `HEAD` (except `codex-memory`, which reads only its hardcoded copy set inside Codex's Git-tracked memory dir). A folder published before it became a git checkout is frozen rather than deleted.
 
-Existing installs whose explicit `gstack-extend` `[[sync.sources]]` entry still has `include_dirs = ["projects"]` and no `include_patterns` key pick up the new `analytics/stage-runs` directory and allowlist with `mm migrate-config`, then `mm push`. Preview first with `mm migrate-config --dry-run`.
+### Garbage collection
 
-Customized `include_dirs` lists are kept. If `include_patterns` is absent, accepting migration adds the default allowlist: other configured paths outside it stop syncing, while local files are kept. To retain custom paths or publish run history from a customized entry, ensure both its `include_dirs`/`include_files` and its `include_patterns` cover the files you want. A present `gstack-extend` `include_patterns` list, even `[]`, is left unchanged and does not trigger the directory addition.
-
-Installs where `gstack-extend` is not yet configured see a `New source available: gstack-extend` hint on next `mm status`: opt in with `mm enable-source gstack-extend` or dismiss with `mm disable-source gstack-extend`.
+Attended content-changing pushes automatically delete this machine's orphaned blobs. Run `mm gc` anytime to clean up orphaned blobs and local retention files (including 30-day deleted-file copies), or `mm gc --conflicts` to also reap redundant `.sync-conflict-*` copies older than 30 days (live conflicts are never reaped).
 
 ## Disabling sources per machine
 
-`config.toml` lives at `~/.config/mind-meld/` and is never synced — making it the natural home for per-device preferences. To turn off a source on one machine without affecting the others:
-
-```bash
-mm disable-source gstack       # this machine only; other machines untouched
-mm enable-source gstack        # turn it back on
-```
-
-The on/off state lives in `[sync].disabled_sources = ["gstack"]`. Disabling does NOT delete your `[[sync.sources]]` entry — re-enabling preserves any customizations like `include_dirs` or `exclude_patterns`. For a supported agent, disabling its source removes the **derived** skill-link grant. It does not override an explicit `[skills] agents` list; edit that list to revoke maintenance. `gstack` has no agent skill-link row.
-
-`mm sources` shows the toggle state as an `Enabled` column. `mm status` calls out disabled sources in a one-line breadcrumb so future-you doesn't forget gstack is off and re-debug "why isn't this syncing". Neither `mm sources` nor `mm status` shows a `[skills] agents` override — `mm diag` is the authoritative resolved view of skill-link policy.
-
-**Forward-compat for not-yet-shipped sources.** When `mm` adds a new source to its defaults, upgraders don't get auto-enrolled — `mm status` surfaces a one-shot enable hint. To pre-disable a name before it ships:
-
-```bash
-mm disable-source future-agent --force   # accepts unknown names for forward-compat
-```
-
-`mm reconfigure-sources` re-runs the picker against your current config + new defaults, in case you want to revisit every choice at once. Changing which sources are enabled also changes derived skill-link consent on this machine.
+Run `mm disable-source <name>` to stop syncing a source on one machine without deleting local files or writing tombstones, or `mm enable-source <name>` to turn it back on. Use `mm reconfigure-sources` to revisit all source choices interactively.
 
 ## Managing agent skill links per machine
 
-Skill-link maintenance is per-machine and never synced (`config.toml` lives at `~/.config/mind-meld/`). By default mm maintains a `retro-fleet` link for each agent whose sync source is enabled, using the same source bit as host-usage reads.
-
-```toml
-[skills]
-maintain_links = true          # false disables every row
-# agents = ["claude", "codex"] # when present, an exhaustive allowlist
-```
-
-1. `maintain_links = false` disables every row.
-2. Omitting `agents` derives consent from enabled sources.
-3. Providing `agents` creates an exhaustive allowlist and suppresses source derivation, the same way an explicit `[[sync.sources]]` suppresses `DEFAULT_SOURCES` auto-detect.
-4. `agents = []` is invalid; use `maintain_links = false` to turn maintenance off. Two encodings of one result is a bug farm.
-5. `mm install-skills --agent KEY` turns `maintain_links` back on and preserves prior derived grants (`agents =` the set you already had, plus KEY), then installs every authorized agent — not only KEY. It does not enable source sync or usage reading.
-6. Declining does not remove an existing link. **Unmaintained is not dead:** a declined agent's link keeps resolving and that agent keeps offering `/retro-fleet`, because store publish is not consent-gated (rule 7). What you give up is repair — clobber that link or leave it dangling after a future store change, and `mm` will not rebuild it; the agent loses the skill silently. **To actually remove a link, delete it** — since v0.12.44 `mm` leaves a deleted link deleted (see [Removing a skill link](#removing-a-skill-link)), so you do not need to touch this config at all. With source-derived policy, `mm disable-source KEY` also removes the grant and drops sync and usage reading.
-7. The mm-owned store at `~/.local/share/mind-meld/agent-skills/` keeps refreshing while any link still points at it, maintained or not. That is deliberate: a surviving link must never resolve to a stale `SKILL.md` just because its row was declined. `mm` will not, however, *create* a store on an all-declined machine that has none.
-8. The config is per-machine and never synced.
-9. An explicit `agents` list will not automatically include future agents.
-
-`mm diag` is the authoritative resolved view. `mm sources` structurally cannot show a `[skills] agents` override.
-
-Muse is not a skill-link row because Muse discovers `~/.claude/skills` directly. Codex and Antigravity do not discover that directory, so Mind Meld maintains a `retro-fleet` skill link for both hosts when enabled. Exit criterion: **mm maintains a skill link only for hosts that do not discover `~/.claude/skills`.**
+`mm` maintains a `/retro-fleet` skill link in `~/.local/share/mind-meld/agent-skills/retro-fleet/` for each authorized agent that does not discover `~/.claude/skills` (Claude Code, Codex, and Antigravity). Enabling an agent's sync source authorizes its link; to manage links without enabling sync, run `mm install-skills --agent <key>` or set `agents = ["claude", "codex"]` under `[skills]` in `config.toml`.
 
 ### Removing a skill link
 
-Delete it. Since v0.12.44 `mm` leaves a deleted link deleted.
-
-```bash
-rm ~/.codex/skills/retro-fleet
-```
-
-Restart the agent so it drops `/retro-fleet` from the session it already loaded.
-
-That is the whole procedure — there is no `mm uninstall-skills`, and you do not
-need to edit `config.toml`. Earlier versions treated a missing link as damage
-and rebuilt it on the next interactive `mm push`, which is why removing one used
-to require a config edit as well.
-
-`mm` still repairs a link that is *present and wrong* — dangling after a store
-move, or pointing at an old package path. Only an absent link counts as your
-decision, and only for an agent `mm` has installed for before. Confirm with
-`mm diag`: the row reads `status: removed-by-user`, distinct from `absent`
-(that agent never had one).
-
-Changed your mind:
-
-```bash
-mm install-skills          # rebuilds every authorized agent's link
-```
-
-`mm init` rebuilds them too — both are explicit acts, and only an unattended
-`mm push` respects the deletion.
-
-This is per-machine. `config.toml` is never synced, and deleting a link on one
-Mac does not touch the others.
-
-**One trade-off worth knowing:** if an agent app wipes its own skills directory,
-`mm` no longer silently rebuilds the link — run `mm install-skills`. Making
-deletion stick and healing an agent's self-inflicted wipe are the same
-filesystem state, and deletion is the one you do on purpose.
+To remove `/retro-fleet` from one agent while keeping `mm`, remove its symlink (e.g., `rm ~/.codex/skills/retro-fleet`) — `mm` records an absent link as intentional (`removed-by-user`) and will not recreate it unless you run `mm install-skills --agent <key>`.
 
 ## Fleet retro (`/retro-fleet`)
 
-Mind Meld v0.11.0 ships a Claude Code skill that stitches engineering activity from every Mac in your fleet into one accurate retrospective. Every substantive `mm push` writes a per-device daily JSONL row (commit metadata, sessions count, sync activity) to the synced `mm-events` source, so any machine can read the union and produce a fleet-wide picture. `mm recapture` writes extra git-snapshot rows (not an mm-push) to recover omitted intervals, then runs an ordinary push. For skipped repositories and environment overrides, see [Git capture troubleshooting](#dropped-repositories-and-ignored-git-environment-variables).
+Run `/retro-fleet` in an agent or `mm retro-fleet 7d` (or `30d`, etc.) in a terminal to aggregate commits, active days, tokens, and estimated API list-rate cost across every machine in the fleet into one `## Agents` table (Claude, Codex, Grok, Muse, Antigravity).
 
-Inside Claude Code:
-
-```text
-/retro-fleet 7d     # last week, default if you omit the window
-/retro-fleet 30d    # last month
-/retro-fleet 90d    # last quarter (the retention ceiling)
-```
-
-The skill renders a paste-ready markdown retro — drop it into iMessage, Slack, or email. Commits are deduped across machines via `(canonical remote URL, sha)` so the same PR landed once but pushed from two laptops counts as one.
-
-Requires **mm v1.1.0+** on the rendering Mac (below that the aggregator emits
-the pre-1.1 sections and no `MM_HEALTH` block). Peers only need v0.14.17+ to
-publish a usable capture.
-
-**v1.1 output shape.** A pixel-aligned ASCII card sits at the top, then a short markdown body: `## Code shipped` (volume, top repos, peak hours, ship-of-the-window, weekly buckets when window ≥14d), `## Agents`, `## Skills used`, `## Fleet`. The card carries volume, LOC, an `AGENTS` block, then NOTEWORTHY and up to three TOP WORK bullets the skill synthesizes.
-
-**Every agent is reported identically** — fleet-summed tokens, active days, contributing machines, estimated cost, top model:
-
-```text
-| Agent  | Tokens | Days | Machines | Est. cost | Top model          |
-|--------|-------:|-----:|---------:|----------:|--------------------|
-| Claude |   8.0B |   29 |        2 |   ~$5,590 | Opus 5 (4.8B)      |
-| Codex  |   3.3B |   28 |        2 |   ~$2,239 | gpt-5.6-terra (2.0B) |
-| Grok   |   1.0B |   11 |        1 |     ≥$546 | grok-4.6-build (830.8M) |
-```
-
-Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `grok` / `agy` / `muse`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
-
-Days are a set union across machines and can only understate. When a machine re-registers under a new device ID while keeping the same device name, `retro-fleet` folds the superseded unregistered ID into the currently registered machine per `(agent family, day)` — counting only the registered device on overlapping days while keeping non-overlapping earlier days attributed to it — and discloses each fold in `MM_HEALTH` under `folded_registrations` (for example `mac-a: folded earlier registrations dev-old-1, dev-old-2 into dev-cur`) and in `--dump-host-usage`. Unregistered IDs whose name is missing, matches no registered device, or matches more than one registered device are never folded and are named under `unregistered_devices`; nothing folds while `mm devices` reports a dropped registration, and `fleet_changed` names that cause too. When stored names cannot be read, that note and `fleet_changed` say so and name the owner's fix: unlock the keyring in their own desktop session or run `mm retro-fleet` from a terminal there. When the available passphrase does not unlock the fleet, the owner checks it (`mm diag` shows the keyring backend and item). No remedy advises exporting `MINDMELD_PASSPHRASE` for the retro. Token sums can still double-count a migrated home directory carrying two distinct device IDs with overlapping ledger history. mm flags identical post-fold day counters as possible overlap through health code `duplicate_ledger` across both host ledgers and Claude Code session snapshots; matching totals alone are not proof, so inspect the machines before retiring one. Before v1.1 this hazard was handled by refusing to sum host tokens at all, while summing Claude's under the identical risk.
-
-The card is generated via a two-pass flow: the first invocation emits an `MM_THEMES_PROMPT` JSON sidecar, the skill synthesizes themes + noteworthy, then re-invokes `mm retro-fleet <window> --theme … --noteworthy … --name …` to render the final card. `## Trends vs prior <N>d` is a two-column table computed from the synced events corpus (the immediately preceding equal-length window), identical in both passes, and fleet-deterministic — it does not depend on when you last typed the command. Direct CLI users (no skill) get the body without the card. The window argument is `Nd` — `7d`, not `7`.
-
-Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the same CLI surface is available directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`) or terminal use, just without the LLM judgment layer the skill adds (natural-language window parsing, error translation). The earlier `python -m mind_meld.skills.retro_fleet.aggregator` form is a development-checkout fallback only; pipx-installed mm lives in an isolated venv that bare `python` / `python3` can't import from, so the skill's documented invocation routes through the `mm` console-script (always on PATH wherever mm is installed).
-
-**Token usage and cost (v0.11.14, hosts in v0.12.52, unified in v1.1).** The `## Agents` table answers: how much did each agent consume this window, on which model, and what would that have cost at API list rates. Claude's numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...` at init and with `mm push --verbose`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
-
-Cost is not subscription spend: historical tokens are repriced at the bundled rates plus any active local pricing overrides, verified on the dates below. Grok always contributes a base-tier floor because its usage records cannot recover each request's context tier. All four token fields (input, cache write, cache read, output) contribute to the Tokens column.
-
-Partial, catching-up, or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Unusable coverage metadata (a reason with an empty source list) does the same, even when that machine recorded no in-window usage. A peer's latest row with valid progress produces a note such as ``codex on `mac-a` is catching up (3 left)`` or ``Git capture is catching up on `mac-a` (2 left)``, with the next attended `mm push` on that machine as its remedy. Counts are per reader and per machine, never summed or added to token totals. Other failures retain their existing remedies. Grok's context-tier caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
-
-Legend:
-
-- `~` is an estimate; it may use a family-extrapolated rate, named in `MM_HEALTH`.
-- `≥` is a floor of the priced subtotal under bundled rate assumptions,
-  never a guaranteed billing minimum. A floor never uses a family-extrapolated
-  rate; such a model is left out of the floor and named in `MM_HEALTH`. Causes
-  include unpriced models,
-  incomplete coverage, readers still catching up, dropped readers, unattributed tokens and an unknown
-  long-context tier, and are named per agent in `MM_HEALTH`.
-- `—` is unavailable, not zero.
-
-An agent with no priceable model shows `—`, never a confident `$0`. A priced model stored at zero tokens is not a priced basis, so it cannot turn that row into `$0` either. A snapshot predating the window contributes nothing at all. A Mac on mm older than v0.12.52 reported inclusive counters that would read up to ~2x high, so any agent it contributes to shows `—` until it upgrades and republishes — the one caveat that points the wrong way, and so the one that stays a rendered marker. Grok's cost causes may include an at-most figure for **this model's recorded tokens, in token charges; server-side tool fees excluded**. Any partial/degraded reader, nonzero model cache writes, or active local override that changes the bundled base rates suppresses that figure. Overrides keep the long-context floor and its cause; an override equal to the bundled base rates keeps the figure when the other conditions allow it.
-
-`--dump-host-usage` carries the per-machine inputs (`tokens_by_day` and coverage); bundled rates and any local pricing overrides are not in the dump.
+**Cost legend:**
+- `~` — estimate (may include a family-extrapolated rate named in `MM_HEALTH`).
+- `≥` — floor of the priced subtotal (unpriced models, incomplete/catching-up/dropped readers, or Grok's unknown context tier; causes named in `MM_HEALTH`).
+- `—` — unavailable, not zero.
 
 **Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-11-25 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-11-25 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-11-25 ([pricing](https://docs.x.ai/developers/pricing), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-11-25 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-11-25 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The shipped table uses the rate in effect on the date checked; scheduled vendor price changes (`gemini-4-carbon` and `gemini-4-argon` increase from `$2.00/$0.10/$0/$10.00` to `$4.00/$0.20/$0/$20.00` on 2026-12-01; `gemini-3.8-flash` increases from `$0.75/$0.075/$0/$3.75` to `$1.50/$0.15/$0/$7.50` on 2027-01-01; `gpt-5.6-sol` promotional pricing runs through 2026-11-30) take effect on the documented dates. When `/retro-fleet` checks vendor pricing before its second pass, it uses the rate active on the run's UTC date via `--set-model-price`.
 
-**Haiku 5.5 limitation.** The bundled card uses the rates for prompts up to 100,000 tokens. Anthropic charges five times those rates for each request above that threshold, counting all input tokens, including cache reads and writes. The retro does not apply that tier, so its Haiku 5.5 estimate understates such usage. Tier-aware pricing is deferred to R6.
+**Pricing refresh and local overrides:** `mm retro-fleet` accepts `--set-model-price '<model>=<in>,<cache_read>,<cache_write>,<out>'` (USD per million tokens) and `--mark-pricing-verified`, storing local overrides in `~/.config/mind-meld/pricing-cache.json` (never synced; delete the file to reset to bundled rates).
 
-**Pricing refresh and local overrides.** `MM_HEALTH.pricing.refresh_due` asks the skill to check prices when verification is more than seven days behind the report's UTC end date, or an active in-window model is unverified (including a priced family extrapolation). `effective_verified_date` is the newer of the oldest of all five bundled vendor dates and the cache's top-level `verified_date`. `unpriced_model_ids` and `unverified_model_ids` identify the models needing attention; `cached_model_ids` lists active overrides. Zero-volume and cost-excluded models do not trigger a model refresh.
-
-After checking official vendor docs, supply repeatable overrides in **USD per million tokens**, ordered **input, cache read, cache create, output**:
-
-```bash
-mm retro-fleet 7d --set-model-price 'gpt-6.1-sol=2.00,0.10,2.50,10.00'
-```
-
-Each successful pricing-cache update writes one confirmation line to `stderr` (`default location` or `set by MM_PRICING_CACHE_PATH`), leaving `stdout` unchanged so `mm retro-fleet 7d > retro.md` keeps the retro alone:
-
-```text
-Pricing: saved gpt-6.1-sol to this machine's pricing cache (default location).
-Pricing: marked verified 2026-11-11 in this machine's pricing cache (default location).
-Pricing: saved gpt-6.1-sol and marked verified 2026-11-11 in this machine's pricing cache (default location).
-```
-
-`--set-model-price` dates that model's card today (UTC). Add `--mark-pricing-verified` only after checking the vendor pricing docs for the refresh; it dates the whole-table verification today. Setting a model alone never marks the table verified. If offline or the docs do not establish a rate, keep the bundled/family fallback, retain unpriced or extrapolated caveats, and do not pass `--mark-pricing-verified`.
-
-Overrides live only on this machine in `~/.config/mind-meld/pricing-cache.json` (override the location with `MM_PRICING_CACHE_PATH`); they never sync. The version-1 JSON cache holds a `models` map of four rates and a `verified_date` per model, plus the optional whole-table `verified_date`. Built-in verified IDs accept an override dated on or after their vendor's bundled date; other valid cached cards take precedence over family fallback and count as verified. Reads create no cache or lock. Explicit writes use a flock and retain at most 128 models, evicting oldest `(verified_date, model_id)` first. Model IDs must match `^[a-z0-9][a-z0-9._:-]{0,127}$`; each rate must be finite and between 0 and 1000 inclusive. Invalid input exits 2; cache write failures exit 1 with a fixing command.
-
-An override for `grok-4.7` also reaches `grok-4.7-build`, `grok-4.7-fast`
-reaches `grok-4.7-build-fast`, and `grok-4.6` reaches `grok-4.6-build`. It must
-pass the bundled-date gate for both the alias and its card ID, wherever those
-IDs are verified. An active exact-ID override wins. Other vendors' overrides
-remain exact-ID. `cached_model_ids` lists only cache IDs whose own card is
-active, not the aliases they reach.
-
-To reset local pricing, remove `~/.config/mind-meld/pricing-cache.json` (or the file selected by `MM_PRICING_CACHE_PATH`) while no pricing update is running, then rerun the retro. This restores bundled rates and clears the whole-table verification date.
-
-OpenAI `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna`, Google `gemini-4-carbon`, `gemini-4-argon`, `gemini-4-neon`, and `gemini-3.8-flash`, xAI `grok-4.7`, `grok-4.7-build`, `grok-4.7-build-fast`, and `grok-4.6-build`, Anthropic `claude-fable-5-2`, `claude-mythos-5-2`, and `claude-opus-5-5-high` (alongside the other listed Claude IDs), plus Muse `muse-wonder-1.0`, `muse-wonder-full-1.0`, and `muse-spark-1.3`, have verified cards. `codex-*` belongs to Codex; `codex-auto-review` counts token/day activity but is excluded from cost, top-model selection, and pricing-refresh requests.
-
-Other lowercase `gpt-`, `gemini-`, and `muse-` model IDs can use a bundled family rate when their dash-delimited segments identify exactly one distinct known tier for that vendor. `MM_HEALTH` lists each disclosed alias and rate-card mapping under `pricing_extrapolated`, such as `gemini-pro-orchestrator-neon → gemini-4-neon`. The CLI includes these unverified rates in `~` estimates and excludes them from `≥` floors. The `/retro-fleet` skill can report a separate `~` estimate for an unambiguous alias the CLI left unpriced if official rates and the alias's own token counts are available. That estimate preserves the CLI's published cost. To refresh the installed skill after upgrading, run `mm install-skills` and restart the agent.
-
-Sonnet 5 now uses the standard $2/$10 input/output rates; Sonnet 4.x
-stays at $3/$15. Fable/Mythos 5.1 cache reads are $0.25 per MTok; 5.0 stays
-at $1.00. Anthropic estimates assume 1h cache writes (2x input), while floors
-use 5m writes (1.25x); the wire does not distinguish TTLs. Verified model ids
-are recorded separately from the family fallback, which still prices new ids
-but names them as extrapolated in `MM_HEALTH`.
-
-Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates.
-The 2026-09-14 local census found 0 fast rows in 22,042 carrying `speed`, and
-4,297 rows lacking the field. Absence does not establish chronology. No detector,
-cache field or wire flag ships here; fleet exposure cannot be inferred.
-
-**Terminal recipe** (run each command separately):
-
-```bash
-mm pull
-mm push
-mm retro-fleet 7d
-```
-
-Pull refreshes peer snapshots; attended push refreshes this Mac's capture.
-Direct rendering reads available snapshots and skips the skill's refresh step.
-Host logs hold at most 90 active UTC days and can lose old records; observation
-dates are endpoints, not proof of continuous coverage. A stale snapshot
-contributes nothing to the window, even on its first UTC day.
-
-**Data health.** Degradations do not clutter the report. The body carries one
-line (`_Data health: N items worth knowing about — ask me to diagnose._`) and
-the detail — every issue, with its remedy — rides a machine-readable
-`MM_HEALTH` JSON block that the skill reads and summarizes with judgment.
-Machines are named by hostname there, not by device id.
-
-Upgrade roles are separate: upgrade the **producer** and republish for reader
-or counter fixes; upgrade the **renderer** for new rates and presentation (old
-snapshots are repriced locally); refresh the **decoder** with `mm install-skills`
-and restart the agent. `--dump-host-usage` inspects host inputs; inspect
-`~/.config/mind-meld/session-tokens.json` for local Claude token inputs.
-
-**Adding an alias or refreshing a rate.** Exact observed model id → `PRICING_FAMILY_BY_MODEL` (never a substring). Family → literal four-field card in `VENDOR_FAMILY_TIERS` (do not use `_tier`; those multipliers are Anthropic). Refresh the matching `PRICING_*_LAST_UPDATED` in the same commit. `resolve_prices` is the only "is this priced" predicate; a test fails the build if an alias points at a missing tier.
-
-Session jsonls only ever grow, so from v0.12.15 each push re-reads only the bytes appended since the last one rather than the whole file. That's what stopped `mm push` periodically printing `mm: notice: events tail budget exceeded` on machines with a lot of large sessions. If your token cache has gone stale from long-deleted workspaces, `mm gc` reaps those entries and shrinks what every push has to read.
-
-**Where the skill lives (v0.12.38).** `mm` copies `SKILL.md` into a store it owns at `~/.local/share/mind-meld/agent-skills/retro-fleet/`, then points every supported agent's `retro-fleet` link at that one constant path (Claude Code's is `~/.claude/skills/retro-fleet`; `mm diag` lists them all). The store is machine-local and never synced. Before v0.12.38 each link pointed straight into whichever Python installation ran `mm`, so deleting a Conductor workspace or bumping a Homebrew Python took the skill offline with a dangling link and no way to repair it. The link target no longer moves. The store refreshes on a version-then-hash compare, so a new `SKILL.md` lands on the next `mm init`, `mm push`, or `mm install-skills` after a `pipx upgrade` — not in place during the upgrade itself. Restart the agent afterwards so it reloads SKILL.md.
-
-The link is created on `mm init` and re-checked by each push **for agents authorized by `[skills]`**: derived from enabled sources when `agents` is omitted, or from that explicit allowlist when it is present. The check is 24h-TTL gated, a handful of syscalls per available consented agent in steady state. Each agent is tracked separately, so a problem on one never suppresses checks for another. Mind Meld repairs its own links without being asked: a link that points at the store but dangles, and a leftover link into an old package or checkout that no longer resolves, are both re-pointed. A link that is simply **gone** is left gone wherever `mm` has resolved that target before: since v0.12.44 push reads an absent link as your decision, not as damage (see [Removing a skill link](#removing-a-skill-link)). `mm init` and `mm install-skills` still put it back, and an agent `mm` has never installed for still gets its link on the next push. A *live* checkout link — the development dogfood case — is left alone by push, and re-pointed by `mm init` or `mm install-skills`. A file of your own, or a symlink to somewhere Mind Meld does not recognize, is never touched: `mm diag` shows it with the `readlink` output and `mm install-skills` names the cause and the fix. A declined row whose mm-owned link still **resolves** is `status: ok` with `maintain_links: disabled` — `mm status` does not nag about a deliberate decline. Background `mm autopush` classifies and warns but never rewrites agent config — run an interactive `mm push` or `mm install-skills` to actually repair a link, then restart the agent so it reloads SKILL.md.
-
-**Caveats the output is honest about:**
-
-- Asking for a window longer than 90 days surfaces a tail breadcrumb — `mm gc` reaps event files older than `EVENTS_RETENTION_DAYS` (90), so that's the data ceiling.
-- Retained v=1 sessions snapshots have pre-v0.11.0 delta semantics. The aggregator omits their session counts rather than overcounting and reports `sessions_incomplete` in `MM_HEALTH`. Run `mm push` on those machines to refresh; upgrade advice appears only when the registry records a last push below the attended-capture floor, not merely because a snapshot is old.
-- Devices that haven't pushed during the window are flagged as fleet-incomplete instead of silently dropped.
-
-To filter to your own commits only, every machine publishes the identities it commits under (the global `git config user.email`, each captured repository's own `user.email`, your GitHub noreply address and any `[retro].author_emails` entries), and the retro counts commits by the union across the fleet, so a peer needs no entry of its own for an identity another machine publishes. Every push that captures activity, including autopush, publishes the current configured identities without waiting for the seven-day identity-cache refresh. When activity is captured, an attended `mm push` also refreshes that cache early after a change to `[retro].author_emails`, the global `user.email` or the set of discovered repositories; autopush keeps the TTL-only refresh policy. `mm refresh-identity` refreshes the cache on demand. `[retro].author_emails` stays additive: use it for an identity no Git configuration names, such as an ID a hosted service writes as the author email. Commits by `checkpointer@noreply`, or whose subject starts with `checkpoint:`, are never captured or counted, including under `--no-author-filter`, which otherwise renders every fleet commit. To override the events directory (custom `mm-events` path), set `MM_EVENTS_DIR=/path/to/events` before invoking.
-
-**Pin repositories this machine should capture** with `[retro] repo_roots` in `~/.config/mind-meld/config.toml`. Paths must be absolute (or start with `~`). The setting is per-machine and is not synced. Manual roots are classified before automatic discovery, which reads the logs of every enabled provider (Claude Code, Codex, Muse and Antigravity) and, when installed, Paseo's project list and the mmm factory's items; `repo_roots` remains for repositories none of those names. Verify with `mm diag`, which labels each root with the source that found it:
-
-```toml
-[retro]
-repo_roots = [
-  "/Users/you/src/mind-meld",
-  "/Users/you/src/bolt",
-]
-```
-
-A repository discovery finds for the first time is captured from this Mac's capture cursor forward, so its commits from before that point are not collected on the next `mm push`: run `mm recapture 30d` (or the window you need) once to bring them in.
-
-Historical capture gaps can be repaired on the Mac that owns the repositories: `mm recapture 7d`. Recapture scans local Git history and syncs new snapshot rows. It does not change commit dates: a commit from June appears only in a retro window containing June. Verify a recovery by rendering the same window — `mm recapture 90d` then `mm retro-fleet 90d`. Repeat on each Mac that owns missing repositories. `_coverage_floor_from_files` still uses the event filename date, so `## Trends vs prior Nd` can stay "unavailable" on a young machine even after a successful recovery — that is correct by design.
-
-Discovery is local. Track 29A's live gap was one repo (8 commits, 15%), not "10 repositories, the gap is structural": five of those ten Conductor workspace entries were symlinks that `discover_git_roots` already dedups via `candidate.resolve()`. Do not add machine-specific paths to repo defaults; pin them in `[retro] repo_roots` on that Mac.
+**Git capture and `[retro] repo_roots`:** `mm push` discovers local git repositories automatically; add extra roots under `[retro] repo_roots = ["~/code"]` in `config.toml` if needed. Run `mm recapture 30d` to re-capture missed git commit history for a window (commits deduplicate fleet-wide on `(remote, sha)`).
 
 ## Handling conflicts
 
-A conflict means **both machines changed the file** since they last synced it. If only the peer changed it, `mm pull` normally fast-forwards to the peer's bytes, without a recovery copy, so a bad edit on one Mac can spread to the others. See the older-mtime case below. If only you changed a publishable file, pull leaves yours and your next push shares it. For a both-changed file that cannot auto-merge, the default `mm pull --conflict-mode keep-both` leaves your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it, whichever file is newer. Auto-merge unions lines in eligible `.jsonl` and `MEMORY.md` files. Mind Meld only keeps the last-synced hash, so **a line one Mac deleted comes back when both Macs changed the file** (delete it again; in `MEMORY.md`, pointers to missing files not left waiting or failed, and duplicate pointers for the same file, are dropped). If this machine has no base for the peer and the peer publishes no ancestry, pull falls back to a line merge for eligible `.jsonl` and `MEMORY.md` files. For other files, it leaves the local file alone if its mtime is newer and otherwise writes a conflict copy.
+- **Fast-forward:** a peer's edit to a file you have not changed since your last sync applies directly.
+- **Auto-merge:** `.jsonl` files (set-union sorted by string `ts`) and `MEMORY.md` (3-way line merge) merge automatically.
+- **Keep-both (default):** when two machines edit the same non-mergeable file, `mm pull` preserves your local canonical bytes and writes the peer's version to `<file>.sync-conflict-<timestamp>-<device>`.
+- **Resolve:** inspect with `mm conflicts`, resolve interactively with `mm resolve` (keep local, keep remote, merge, or promote an orphan sidecar), then `mm push`. Use `mm gc --conflicts` to clean up redundant conflict copies older than 30 days.
 
-A peer edit built on your version with an **older mtime** is line-merged for eligible `.jsonl` and `MEMORY.md` files. A union can retain lines the peer deleted and keep your wording when both `MEMORY.md` entries link to the same file. If the union leaves your file unchanged, `mm pull --verbose` shows a merge no-op. Pull reports held edits as `N older peer edits not applied`. Use `mm pull --verbose` to list the held paths, compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
+## Upgrading
 
-A clean [Codex memory copy](#codex-integration) takes its publisher's update even when the update has an older mtime. When a local edit conflicts with the publisher's update, the default mode keeps the local copy and saves the publisher's version beside it as a conflict file.
+```bash
+mm update
+```
 
-**Conflict copies that exist when you upgrade do not clear by themselves.** A pull on the new release no longer counts or reports a copy it already holds, but `mm conflicts` keeps listing it until you run `mm resolve` on each one; it needs a terminal. After `(l)ocal`, `(r)emote` or `(m)erge` the file stops conflicting.
+`mm update` runs `pipx upgrade mind-meld` against the moving `@latest` branch (and re-pins any tag-pinned install back onto `@latest`). It needs no config or passphrase. Current attended git-root discovery gets a `1,500 ms` base budget (and `attended_capture_cap_ms` defaults to 30,000 ms).
 
-Managed sidecars are latest-per-peer, not an archive. Unchanged peer content reuses the existing sidecar without cleaning up extras. Changed content publishes a new sidecar first, then removes prior same-peer copies for that file whose contents it could read and verify as different. Unreadable copies remain. If publication fails, local and prior copies remain. If only cleanup fails, the new copy is already saved and extras remain — `mm conflicts` / `mm resolve` can inspect them. Edits made inside a managed sidecar are subject to that replacement; promote or copy the sidecar out of managed naming to keep a durable document.
+For historical v0.x and v1.x per-release upgrade checklists, see [docs/archive/upgrading-1x.md](docs/archive/upgrading-1x.md).
 
-Sidecars stay local-only. A canonical or promoted file syncs only when the source's include rules cover it. Deleting a sidecar on this Mac does not delete anything on other machines. If a sidecar has no recoverable original filename, `mm resolve` cannot promote it automatically; copy or rename it manually to a name you choose.
+### Automatic updates
 
-Managing conflicts:
+Once per 24 hours, `mm pull`, `mm push`, `mm autopull`, and `mm autopush` check GitHub for a newer release after syncing. A `pipx` install tracking `@latest` upgrades itself automatically (foreground with spinner on attended `push`/`pull`; background to `~/.config/mind-meld/auto-update.log` on `autopush`/`autopull`). A failed update never changes the sync's exit code and surfaces in `mm status`.
 
-- `mm conflicts` — list every `.sync-conflict-*` file across your sources, with conflict age (when mm wrote the copy), peer-edit age (when the other Mac last saved the file), and canonical sibling.
-- `mm resolve` — walk each conflict interactively. Shows color LOCAL/REMOTE banners (with peer-name attribution when the conflict file's device prefix matches a registered peer), created/modified timestamps for each side plus a `-> SIDE is newer by N` recency verdict, a 3-number divergence summary, the unified diff, and prompts: `(m)erge` (accept LCS-merged result) / `(l)ocal` (keep your edits) / `(r)emote` (overwrite with peer's bytes) / `(n)ewer` (keep whichever was modified more recently) / `(p)romote` (keep BOTH — give the conflict file its own first-class filename) / `(s)kip` (leave both files) / `(a)bort` (stop the walk). The default key is always `(s)kip` — Enter never auto-accepts a merge or a recency guess. The merge uses LCS(local, remote) as a synthetic ancestor so additive edits on either side land cleanly; same-region edits show as `<<<<<<<` markers and (m) stays available. Binary content suppresses (m); `(n)ewer` is offered only when both sides' mtimes are readable and re-prompts on an exact tie (it never guesses). The remote side's "created" is shown as `pulled` — it is the local sync time, not the peer's real creation (the manifest carries only modified time). Acquires the mm lockfile so autopull can't race your decision. A conflict copy that is the same file as its original (a symlink or hard link between them) is refused before the prompt, names the manual repair and counts as a failure; nothing is deleted. `c` / `f` are rejected with exit 1; other unrecognized input, including `b` / `both` (alias removed in 1.0.0), skips silently.
-- `mm pull --conflict-mode prompt` — prompt per-conflict during the pull itself instead of auto keep-both. Shows the same per-side timestamps + recency verdict (display only — no `(n)ewer` shortcut here; the verdict line says which side is newer). An inline `(l)ocal` is remembered only if the pull is not aborted: `(a)bort` records nothing, so the next pull asks again.
-- `mm pull --conflict-mode fail` — preflight and exit 3 before applying any file if conflicts or local failures are predicted. For a write-free CI check use `mm pull --dry-run --conflict-mode fail`: 0 no conflicts predicted, 1 stopped, 3 conflicts/failures predicted (2 remains usage error). Two peers changing a mergeable file do not by themselves cause a conflict.
-- `mm gc --conflicts` — reap redundant conflict copies older than 30 days. A sidecar is only reapable once the conflict has converged (canonical exists and its bytes are identical); a live conflict, a missing canonical, a canonical that is the same file as the sidecar (a symlink or hard link between them), or a file mm cannot hash is preserved at any age.
-- `mm diff` — compares local files with this Mac’s last push, or `--from DEVICE`. Use `mm pull --dry-run` to preview incoming changes from all selected peers.
+To disable automatic updates or checks in `~/.config/mind-meld/config.toml`:
+
+```toml
+[upgrade]
+auto_install = false   # keep check + notice, never run pipx
+auto_check = false     # disable checks and updates completely
+```
+
+Pass `--no-check-version` to skip for one command. To roll back to a specific tag, force-reinstall that tag (`UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@vX.Y.Z`); tag-pinned installs are never auto-updated until you run `mm update`.
+
+## Versioning and compatibility
+
+Mind Meld has one user and makes no compatibility promise beyond storage-format gates: an older `mm` refuses storage written in a format it cannot read and tells you to upgrade. See [docs/SPEC.md](docs/SPEC.md#release-policy).
 
 ## Troubleshooting
 
 <a id="history-database"></a>
 ### History database (state.db)
 
-History is local and never synced: `~/.config/mind-meld/state.db`, mode 0600
-(a directory mm creates is 0700; an existing `~/.config/mind-meld` keeps its
-mode). It records pull/push outcomes and self-upgrades, keeping the newest
-20,000 rows per known (verb, action) class. The same file holds the pull ledger:
-which version of each file this Mac last synced from each peer, and the versions it
-has held, as well as the `cursors` table recording each peer's last applied push
-timestamp, last seen push timestamp, waiting file count, and matching manifest
-content identities. The ledger and cursors are rebuildable (see the remedy below). Excluded/uploaded traffic
-cannot evict conflicted rows. About ten full classes may use ~80 MB; this is a
-workload estimate, not a fixed ceiling. `mm log --limit 0` loads all matching
-rows in one snapshot, closes the connection, then prints; memory grows with
-retained history. An absent, empty or not-yet-imported database falls back to
-legacy JSONL without writing anything.
-
-The first history writer imports `.1` then live JSONL once, leaving both files
-in place. Invalid lines are skipped. An unreadable legacy file yields
-`mm: notice: legacy history ... is not imported yet`; new rows remain visible.
-Repair the file's access or I/O problem; a later writer retries the entire import
-without duplication. `mm log` never repairs or imports. A changed legacy file
-after import triggers the stale-binary notice; see [Upgrading](#upgrading) to
-inspect, preserve and move both files aside after fixing PATH.
-
-`mm: notice: history not recorded` means that command dropped its attempted
-history rows; sync is unaffected and those rows are not replayed. Attended
-push, pull and recapture print it once; auto commands stay silent. A busy database means wait
-for the other command, then retry. A newer incompatible schema means run
-`mm update`; if `mm --version` is already newer, check `which -a mm`. A Python
-without usable sqlite3 needs an mm reinstall from [Install](#install).
-
-An interrupted write can leave `state.db-journal`. `mm log` refuses it without
-writing; the next non-preview `mm pull` or `mm push` repairs it even if sync is
-unchanged. For repair without syncing, with no mm running:
-
-```bash
-sqlite3 'file:'"$HOME"'/.config/mind-meld/state.db?mode=rw' 'PRAGMA user_version;'
-```
-
-`mode=rw` refuses an absent file instead of creating a world-readable database.
-Do not delete the journal separately. History uses a rollback journal with
-synchronous=FULL, without macOS fullfsync; it makes no hard power-loss durability
-claim. A killed process can lose up to 999 buffered rows; power loss can also
-corrupt the database.
-
-For a damaged database, with no mm running, move the database and all its companion
-files aside together:
-
-```bash
-history_save="$HOME/mm-history-backup/state-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$history_save"
-for history_file in "$HOME/.config/mind-meld/state.db" "$HOME/.config/mind-meld/"state.db-*; do
-  if [ -e "$history_file" ]; then mv "$history_file" "$history_save/"; fi
-done
-```
-
-History recorded since import is lost from `mm log`; the next write re-imports
-the remaining legacy JSONL. Preserve the moved files for investigation.
-
-**Losing the ledger loses nothing you cannot rebuild.** The next `mm pull` records
-the last-synced version again for every file whose bytes match a peer's. Until then
-mm applies the older mtime and union rule for those files (a deleted line can return
-through the union) and **deletes no file**. Recovery copies of deleted files live
-outside `state.db` (`~/.config/mind-meld/deleted/`) and are untouched. One residual:
-the record that stops a Mac from publishing a second deletion for a file it deleted
-because a peer did lives in this database too, so after a loss one Mac can publish a
-second record for such a file. It names the same bytes, so it deletes only identical
-copies; "no file is deleted" holds for that Mac's own pulls only.
-
-`mm: notice: <reason>. Pull ledger unavailable; some sync history may not have been
-recorded. Completed file changes remain` means the ledger could not be read or written
-this time: wait for the other mm command (busy), run `mm update` (a newer schema), or move
-the database aside (damaged or interrupted). A read failure uses the fallback rule and
-deletes nothing; a later write failure does not undo changes already completed.
-`mm autopull` and `mm autopush` record it as `degraded` instead of printing it.
-
+`~/.config/mind-meld/state.db` stores pull/push/self-upgrade history (`mm log`), the pull ledger (`peer_base`, `seen_version`), and peer cursors. It is local and never synced. If `state.db` is unreadable or corrupt, `mm diag` reports the SQLite error; move the damaged file aside and `mm` recreates a fresh database on the next sync (existing files on disk are preserved; the next pull conservatively keeps both copies if two machines differ without a recorded base).
 
 ### Recovering a deleted file
 
-When a peer deletes a file and your copy is byte-identical to the version it deleted,
-`mm pull` moves your copy into a recovery folder instead of unlinking it, and its last
-line says where:
+When a peer deletes a file and your copy is byte-identical to the version it deleted, `mm pull` moves your copy to `~/.config/mind-meld/deleted/<UTC-stamp>-<rand>/<source>/<path>` for 30 days instead of unlinking it. Find past deletions with `mm log --action deleted`.
 
-```text
-Pull: 3 files deleted because Mac B deleted them; copies in ~/.config/mind-meld/deleted/20261101-181530-3fa9 for 30 days; see https://github.com/kbitz/mind-meld#recovering-a-deleted-file.
-```
-
-`mm autopull` prints the same line (one `mm:` line on stderr), `mm pull --verbose` lists
-each path, and `mm log --action deleted` finds them later (each row records the folder).
-The `.mind-meld-log.md` of an affected Claude project lists them too.
-
-**Where the copy is.** `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>`,
-one folder per pull; `<source>` is the sync source (`claude`, `gstack`, ...) and `<path>`
-the file's path inside that source's folder on the machine that followed the deletion.
-`mm sources` maps each source to its folder: the `Path` column is the source root on
-that machine. The copy is the plaintext file itself
-(moved, not re-encrypted), stored `0600`. It depends on nothing in the shared store, so
-`mm gc` blob collection and a lost `state.db` do not touch it.
-
-**Put it back where the deletion started, then push.** The file's deletion came from one
-machine (the one the pull line names). Restore it there; a copy put back only on a machine that
-followed the deletion stays local until the deletion record expires, because the record
-still suppresses that file from every other machine. First transfer the recovery folder to
-the origin, preserving the folders inside it. Then choose the copy's path and the origin's
-destination separately. They can differ: a Claude project under `/home/user/myapp` on Linux
-has a `projects/-home-user-myapp/` folder, while the same project under `/Users/user/myapp` on
-the origin Mac has `projects/-Users-user-myapp/`. A shared git project can also live at
-different checkout paths. Check the origin's existing project folder or its checkout
-path; do not create a second project folder using the follower's name. For sources such
-as `gstack`, both paths are usually the same.
-
-Run this on the origin, setting each path for your file. `cp -n` preserves a newer file
-already at the destination:
+Restore the file **on the machine that deleted it** (a copy restored only on a follower stays suppressed by the origin's deletion record). Transfer the recovery folder to the origin, set the paths for your file (`cp -n` never overwrites a newer file), and push:
 
 ```bash
 copies="$HOME/mm-recovery-20261101-181530-3fa9"  # the transferred recovery folder
@@ -2011,645 +436,58 @@ cp -n "$copies/$source_name/$copy_path" "$source_dir/$origin_path"
 mm push
 ```
 
-For a Grok memory topic (whose scope-relative path is copied unchanged), restore it into `~/.grok` on the machine that deleted it and push. This restores a local deletion recovery copy, not a remote revision through `mm recover`. Recovery copies are plaintext files in `0700` folders:
+### Syncthing stalled or needs a restart
+
+If Syncthing stops delivering files or appears stuck, restart it cleanly from the CLI and recheck fleet state:
 
 ```bash
-copies="$HOME/mm-recovery-20261101-181530-3fa9"
-source_name=grok
-rel_path="memory-v2/global/topics/conventions.md"  # or memory-v2/workspaces/<scope>/topics/<file>.md
-mkdir -p "$(dirname "$HOME/.grok/$rel_path")"
-cp -n "$copies/$source_name/$rel_path" "$HOME/.grok/$rel_path"
-mm push
-```
-
-**The copy is on a machine that followed the deletion.** The origin removed the file
-itself and holds no copy. Find the folder on any machine that printed the line
-(`mm log --action deleted`), transfer it to the origin by any means, then run the commands
-above there. After the push, each other machine gets the file back at its next `mm pull`, even if the restored file keeps
-its old mtime.
-
-**Copies are safe to delete.** Delete a folder you no longer need
-(`rm -rf ~/.config/mind-meld/deleted/<folder>`). Thirty days is a **minimum**: `mm gc`
-and every real `mm pull` remove whole folders older than 30 days by the date in the
-folder's name, using this Mac's clock. `mm gc --dry-run` lists them. If a pull cannot
-create the recovery folder, it leaves the local file and says so. A failure after a file
-has moved can leave its bytes in that folder; the warning names the recovery path.
-
-**Uninstalling.** `rm -rf ~/.config/mind-meld` removes these copies with the rest of mm's
-local state. The `.mind-meld-anchor` files stay in each scan root; they are harmless and
-can be deleted by hand.
-
-**Many files were deleted that should not have been (incident runbook).** There is no
-setting that stops a Mac from following deletions, so act in this order:
-
-1. On every Mac that has not pulled yet, stop the `mm autopull` hook (take the line out
-   of the agent's global instructions, or run `mm disable-source <name>` for the affected
-   source) and do not run `mm pull`.
-2. Preview on each of those Macs with `mm pull --dry-run`. Lines starting `delete` are
-   the files it would remove; add `--verbose` for `keep (<reason>)` lines that say why a
-   file with a deletion record is staying.
-3. On Macs that already followed it, collect the files from their recovery folders (above),
-   copy them to the origin Mac, restore them there with `cp -n`, and `mm push`.
-4. Only then put the hook back (and `mm enable-source <name>` for any source you disabled)
-   and pull.
-
-A removal below a live scan folder is a real deletion on every Mac holding identical
-bytes: one project folder, or `rm -rf ~/.claude/projects/*`, which leaves the marker file
-behind. mm cannot tell a deliberate cleanup from a mistake.
-
-### A gstack file doesn't reach my other Mac
-
-Check the [gstack default exclusions](#syncing-gstack) and run `mm sources`
-to inspect this Mac's selected sources and Excluded counts. Generated output
-is kept locally but omitted from sync. Project notes, copied source, fixtures
-and review receipts remain in scope when they match the gstack allowlist
-(document types inside the artifact directories). Browser profiles and the
-machine-local files named under [Syncing gstack](#syncing-gstack) stay on
-this Mac.
-
-### Grok memory doesn't reach my other machine
-
-Check these points:
-
-1. **Memory and sync enabled on both machines.** Grok's local `~/.grok/config.toml` needs `[memory]` `enabled = true`. Run `mm sources` and confirm `grok` is enabled; otherwise run `mm enable-source grok`. Check that `"memory-v2/*"` is not excluded.
-2. **The fact became a topic before push.** In the sender's Grok session run `/flush`, then `/dream`; wait for consolidation, then run `mm push` in its shell. Grok also Dreams automatically with enough observations, but pending captures do not sync. All `observations/`, `MEMORY.md`, SQLite files and `archive/` stay local.
-3. **Pull before starting the next Grok session.** Wait for shared-folder delivery, run `mm pull`, then start Grok in the corresponding repository. Check `mm status` for whether the peer's latest push was applied.
-4. **Workspace scope name matches.** Compare the opaque folder names under `memory-v2/workspaces/` on both machines. Grok Build 1.0.77 used `mind-meld-ac6e5bf3` for clones and linked worktrees with the same network `origin`, including HTTPS and SCP spellings. mm copies these names unchanged. No-origin repositories and non-repository folders can compute different names across homes; their received copies remain inert. Use global topics for notes that must be available independently of repository identity.
-5. **Conflicts, deletions and older versions.** Run `mm conflicts` and `mm resolve` for topic conflict copies before starting the next Grok session. A peer's topic deletion keeps a copy in `~/.config/mind-meld/deleted/`; restore it on the deleting machine as [the recovery runbook](#recovering-a-deleted-file) describes, then push there. `mm devices` identifies older machines that can receive topics but do not publish them; run `mm update` there.
-
-### Another mm operation is running
-
-Wait for the operation to finish, then run the command again. If it is waiting
-for input in another terminal, answer the prompt there. If its output says it
-is updating mm, let the update finish; it can take several minutes.
-
-Never delete the mm lockfile or signal the holder. The kernel releases the lock
-when the operation exits, and deleting the file can let two processes hold
-different locks at the same path. The PID is a diagnostic hint and can be stale
-or unknown; it does not decide whether the lock is held. When the error gives a
-known PID, use the printed command to inspect it, for example:
-
-```bash
-ps -p 12345 -o etime=,tty=,command=
-```
-
-An mm older than v1.5.2 printed advice to `remove <path>`. That advice is
-obsolete: keep the lockfile and wait for the operation to finish.
-
-### Auto commands skip: keyring locked or unavailable
-
-`mm autopull` / `mm autopush` read the passphrase without prompting. When the
-desktop keyring cannot answer without opening a prompt, the run skips with
-exit 0, one `mm: <verb> skipped - …` line on stderr, and a breadcrumb that
-`mm status` surfaces. Nothing is half-synced; rerun the auto command after
-fixing the keyring state. `mm diag` reports what the keyring side looks like
-(`keyring` in `--json`: module-qualified backend and member class paths such
-as `keyring.backends.SecretService.Keyring`, `secret_service`, `item`,
-`error`) without reading the secret or prompting — run it first. Diag
-reflects the shell it runs in; a hook runs in the agent's environment
-(session bus, `PYTHON_KEYRING_BACKEND`), so compare with the backend the
-`no-passphrase` breadcrumb recorded in `mm status`.
-
-The four passphrase outcomes in `mm status` / the breadcrumb:
-
-| Outcome | Meaning |
-|---|---|
-| `keyring-locked` (`locked`) | The Secret Service collection is locked. |
-| `keyring-locked` (`denied`) | The keyring refused access (macOS Keychain denial, or another backend reporting locked). |
-| `keyring-no-collection` | There is no default Secret Service collection to read from. |
-| `keyring-error` | The keyring read failed some other way; see `auto<verb>.log` next to the breadcrumb. |
-| `no-passphrase` | The keyring answered with nothing (or could not be read) and `MINDMELD_PASSPHRASE` is unset. The stderr line and the breadcrumb detail name the backend the hook saw. |
-
-**Linux.** Prerequisites: `mm` via pipx (Arch: `python-pipx`), plus
-`libsecret` and `gnome-keyring` (Arch package names; on Ubuntu the
-`secret-tool` command is in `libsecret-tools`). For `keyring-locked`, unlock
-the login keyring in the desktop session. Asking the keyring for an item
-makes it offer the unlock dialog:
-
-```bash
-secret-tool lookup service mind-meld username passphrase >/dev/null
-```
-
-(CI's live keyring test checks `secret-tool store` attribute parity and the
-locked-collection skip against a real `gnome-keyring-daemon`; the desktop
-unlock dialog that `secret-tool lookup` may open remains to be confirmed on each Linux
-machine when it joins ([Setting up another machine](#setting-up-another-machine)); an already-unlocked lookup does not test the dialog.) Durable fixes so hooks stop depending on
-a manual unlock: turn desktop autologin off so PAM unlocks the keyring at
-login (keeps the keyring encrypted), or use a blank-password login keyring,
-as Omarchy may install. A blank password stores **every** secret in the login
-keyring unencrypted on disk — browser, Wi-Fi and SSH passphrases, other
-apps' tokens, not only mm's passphrase — so it relies entirely on full-disk
-encryption.
-
-For `keyring-no-collection`, store the passphrase once, which also creates
-the default collection through the desktop prompt:
-
-```bash
-secret-tool store --label=mind-meld service mind-meld username passphrase application 'Python keyring library'
-```
-
-**macOS.** For `keyring-locked` with detail `denied`, run `mm pull` or
-`mm push` in a terminal in your desktop session and choose **Always Allow**
-on the Keychain access dialog; later auto runs then read without asking.
-
-**Fallbacks (any OS).** `MINDMELD_PASSPHRASE` is used only when the keyring
-cannot answer without prompting (or yields nothing). Export it where the
-agent process starts, not in an interactive shell the agent does not read.
-It is a plaintext secret in the process environment, inherited by every
-agent subprocess — prefer fixing the keyring. `PYTHON_KEYRING_BACKEND` can
-pin a different keyring backend if discovery picks the wrong one;
-`mm diag` shows which backend and member were actually selected. After any
-fix, confirm with `mm diag`, then rerun `mm autopull` / `mm autopush`.
-
-### `manifest for device X is corrupt - skipping` after a peer updated
-
-Not corruption. A peer updated and now publishes shared project names (manifest byte
-0x03), which an older mm cannot read, so it skips that whole manifest. **Delete nothing.**
-Update this machine (`mm update`; below v1.3.0 use the `UV_VENV_CLEAR=1 pipx install --force ...@latest`
-command above), then check `mm status`. See [Upgrading](#upgrading).
-
-### Retiring a dead machine
-
-Run `mm devices retire <name|id>` from any remaining fleet machine to retire a decommissioned machine or an old registration left behind after re-running `mm init`. Retirement writes an encrypted retirement record (`retired/<id>.enc`), removes `syncthing/<id>.enc` and `devices/<id>.json` under the mm lock, drops the machine's `mm status` and `retro-fleet` rows, and lets each fleet machine where `mm` manages Syncthing automatically remove the retired Syncthing device on its next `mm push`, `mm pull`, `mm autopush`, or `mm autopull` once the retired machine stops connecting.
-
-Once a machine receives the retirement record, its next pull with `codex` enabled moves the retired device's copies into the [30-day recovery folder](#recovering-a-deleted-file).
-
-1. Update any machine at 1.7.1 or older first (`mm update`): its GC deletes an unregistered machine's blobs, including the only copy of a file only that machine had.
-2. On a machine with the **same home folder** as the dead one, run `mm pull` first so its project memory is on disk.
-3. Shut down the retired machine or stop Syncthing there first (stopping `mm` alone does not stop Syncthing, and a machine that is still running re-registers on its next `mm push`).
-4. Retire the device by name (in an interactive terminal) or by its 8-character Mind Meld device ID from `mm devices`:
-
-   ```bash
-   mm devices
-   mm devices retire linux-a
-   # For scripts, use the exact Mind Meld ID from the list:
-   mm devices retire bbbb2222 --yes
-   ```
-
-A hook may need several passes on a slow Syncthing. Run an attended
-`mm pull` or `mm push` for a longer pass. Removal waits for fleet registrations
-to finish publishing and for the retired device to disconnect. If mm names a
-machine that still needs to publish its Syncthing ID, run `mm update` and
-`mm push` there. Remove the device in Syncthing's web UI on owner-managed peers
-that still list it.
-An owner-managed introducer can reintroduce it until it is removed there.
-For a machine with no published Syncthing ID, identify the correct device in
-Syncthing before removing it. Keep the device if a newer registration still
-uses that same Syncthing ID.
-
-If mm cannot identify a registration because its `devices/<id>.json` is
-unreadable, locate it by filename in `storage.path` and move it out of the
-shared folder. If mm reports an unreadable `retired/<id>.enc` that stays
-unreadable after sync, remove that retirement file by hand and finish removing
-the device in Syncthing where needed. Codex memory copies stay in place while
-the retirement record is unavailable.
-Keep `manifests/<id>/` and `data/<id>/` to preserve memory the fleet has
-yet to pull.
-
-To undo retirement while the device can still sync, run `mm push` on that
-machine to re-register it. If peers have removed it from Syncthing, use
-`mm devices approve <full-device-id>` on a fleet machine once the returning
-machine is pending, then run `mm push` on the returning machine to publish its
-registration and Syncthing ID.
-
-### Newer or damaged storage format
-
-If mm reports a newer format, leave every `mm-crypto-init` copy in place and
-upgrade this Mac with:
-
-```bash
-UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
-```
-
-`mm diag --json` reports the detected byte as `crypto_init.newer_version`;
-null means no newer version was observed. Any newer canonical or conflict copy
-blocks crypto sessions and repair. A newer blob that arrives first is skipped
-with an upgrade warning; an unreadable peer manifest is skipped by pull and
-left untouched by GC. GC refuses on this device's unreadable manifest, including
-newer-format conflict copies; the shared crypto-init gate still applies to every
-crypto session.
-
-If this Mac is already on the latest release and no newer mm exists, the file
-may be damaged. Wait for this folder to finish syncing and locate a known-valid
-crypto-init copy from another machine or backup. Back up every header outside
-the storage folder first. mm no longer moves or rewrites key-header copies:
-move the damaged canonical file into that backup, then copy the known-valid
-header to `<storage>/mm-crypto-init` without overwriting another file. If the
-valid header exists only under a conflict name, keep it in place until the
-canonical copy is restored. Run `mm pull` to verify the restored header. Keep the backup;
-never delete crypto-init or bootstrap a fresh salt over existing encrypted
-data. If no valid copy is available, stop and recover one before continuing.
-
-### Key header copies differ
-
-The key header is the file `mm-crypto-init` at the root of the storage folder.
-A second copy can appear next to it (a `.sync-conflict-` or numbered name from
-Syncthing, or a stray copy from an earlier version). mm never rewrites or moves
-a copy for you. After a successful passphrase check, a joining `mm init`, `push`,
-`pull`, `autopull` and `autopush` only remove conflict copies whose bytes equal
-the main file.
-Anything that differs stays in place, and `mm status` and `mm diag` count it
-(`pending_repair`) without printing names. A machine whose recorded
-fingerprint differs from the header it finds stops and says so; do not
-reinitialize or re-key.
-
-If the main file is missing or unreadable, the remaining copies may be the
-only usable key header. Keep them in place and follow the restoration steps
-above; a pending-copy count alone is not a reason to move a header.
-
-Only if a **fingerprint refusal** remains after syncing, work on a machine
-that previously worked. Back up every header outside the storage folder
-before changing anything, and keep at least one usable header in the folder:
-
-1. Let Syncthing finish, then move the extra copies out of the folder one at a
-   time into a backup directory **outside** it. Never delete one.
-2. After each move, run `mm status`. Stop moving files as soon as the
-   fingerprint refusal clears. If a move introduces a missing-header error,
-   restore that exact copy immediately.
-3. If no single copy clears it, restore the moved copies, stop and keep every copy.
-
-A device bound to the wrong header reruns `mm init` once the right header
-stands alone in the folder.
-
-If every copy is lost, the stored blobs cannot be decrypted. Machines keep
-their local files. The way forward is to retire that folder, run
-`mm init --new-fleet` on an empty one, and join the other machines to it.
-
-**On mm older than v0.14.5, `mm pull` died with `TypeError: '<' not supported between instances of 'str' and 'int'` (or `bool` / `list` / `dict`), or an unattended `mm autopull` reported an unexpected error and a later file never arrived.** A `.jsonl` file mixed a string `ts` with a non-string value. Current `mm` keeps every unique normalized line and continues the pull. On **each** Mac: confirm with `mm --version`, then `pipx upgrade mind-meld` and `mm pull`. If `pipx upgrade` leaves you on an old version, the install is pinned to a frozen tag — see [Upgrading](#upgrading). `mm devices` shows the version at last push, not a live probe of the installed binary; after a successful `mm push` it can corroborate the fleet. Numeric-only timestamps now sort as whole-line text rather than numbers; until every active Mac is upgraded, old and new clients can keep rewriting that order. `mm log --action merged --limit 20` can show repeated merges, but a merged outcome alone does not prove timestamp oscillation.
-
-### Waiting content is not a failure
-
-On a Syncthing folder a peer's manifest can arrive before the blobs it names,
-and a file can be replaced while mm reads it. `mm pull` reports blobs that are
-not there yet as **waiting**: those files are not applied, and other available
-files still apply. Waiting alone keeps the exit at 0 and `mm autopull` at
-`success` with a `N files waiting from <peer>` detail.
-A peer's manifest copies are kept while any of its files are waiting. A device
-entry or peer manifest that vanished mid-read is reported the same way. Run
-`mm pull` again once Syncthing finishes; `mm pull --verbose` lists the waiting
-paths. `mm status` shows each peer's waiting file count from the last full pull
-(`N file(s) waiting for sync`) and warns after more than 24 h: in the opening
-verdict when no higher-priority action applies, otherwise immediately after it.
-If a file stays waiting for a long time, check that Syncthing shows the
-folder as up to date on both Macs.
-If this Mac's own manifest is replaced while `mm status` reads it, status opens
-with `This device's manifest is still arriving from sync. Run: mm status` instead
-of the first-push line and shows
-`Remote manifest: still arriving from sync; check again shortly.`; run it again
-once Syncthing finishes.
-If this machine's own manifest vanishes while `mm pull` reads it, that is not
-waiting: its deletion records were not applied, so files deleted on this machine may
-come back from peers. Pull warns on stderr and `mm autopull` records `degraded`
-(its detail counts it as `1 corrupt peer manifest(s)`); check those files before
-the next `mm push`.
-
-### Pull incomplete / could not pull a file
-
-One blocked file no longer stops later files, sources, or peers. Each apply warning on stderr names the peer, source, path, cause, and remedy. Completed files stay on disk and in `mm log`; failed files are retried on the next pull. `mm autopull` exits 0 and records `degraded: N file(s) failed`. Attended `mm pull` exits 1 for any failed file, after recovery and cleanup. Read the per-file warnings and final `mm: error: Pull incomplete [result-degraded]: ...` + `Run: mm diag` outcome; repair the named problem before one retry. An unexpected failure or interruption also exits 1 with known completed effects. Unknown effects require read-only diagnosis before retrying.
-
-```bash
-mm log --verb pull --action failed --limit 10
-mm pull --verbose
-```
-
-| Warning cause | What to do |
-|---|---|
-| A peer published a folder where this machine has a file | Decide which layout you want. Keep your file and exclude that peer path, or move your file aside before retrying. The warning names the actual blocking ancestor, even for a deeply nested path. |
-| Permission denied | Check write permission on the named parent folder, then `mm pull`. |
-| Read-only filesystem | Restore writable access or choose a writable local source folder, then `mm pull`. |
-| Disk full | Free disk space, then `mm pull`. |
-
-For example, if the warning names `~/.claude/projects/-app/memory/bbb` as the blocking file, preserve it with a new name (choose an unused destination):
-
-```bash
-mv -n "$HOME/.claude/projects/-app/memory/bbb" "$HOME/.claude/projects/-app/memory/bbb.local"
-mm pull
-```
-
-Use the real path from your filesystem: displayed nonprintable characters are visible notation, not a shell argument. `mm disable-source <name>` stops a whole source; a precise `exclude_patterns` glob under the existing source configuration can omit just the unwanted path. Neither option deletes your local file.
-
-A final `mm: error: Pull interrupted [interrupted]: ...` or `mm: error: Pull failed [unexpected-error]: ...` line followed by `Run: mm diag` (exit 1) means an interrupt or unexpected error stopped the batch; the line says completed changes remain. Its `Run:` command is `mm diag`. Then run `mm pull` to continue. Choosing `(a)bort` also keeps and records completed changes; pending keep-local mtime decisions are not broadcast. A `mm: notice:` saying a file was written, merged, or a conflict copy saved means publication completed and the named follow-up step encountered an error.
-
-**Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm` and `mm --version`; upgrade to v0.14.17+ before running `mm diag` and `mm push`. If `mm status` shows Git repositories catching up, run `mm push` on that machine. It resumes pending Git capture even without file edits. Follow its `mm recapture` remedy for persistent failures or history beyond retention, then rerun the retro at a window that includes the recovered commit dates. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
-
-**Why is my host cost missing (`—` on the economics table)?** That Mac reported token counters in an older format (mm < v0.12.52), has not pushed per-model `tokens_by_day` yet (mm < v0.12.49), or its latest snapshot predates the requested window. On **that** Mac: `pipx upgrade mind-meld`, then `mm push`. Confirm capture and publication with `mm status`. Then re-run `mm retro-fleet 30d` here. An upgraded peer's retained 90 days generally **do** become priceable on repush. `—` is unavailable, not zero; do not add the other machines' figures to fill it in.
-
-**I enabled an agent (e.g. Antigravity), but no activity appears.** Check the standing blocker
-and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture).
-Use the [second-Mac publication check](#antigravity-agy); cache success alone does not prove that an agent reached the wire.
-
-**Why is my Grok machine always `>=`?** Grok's usage records cannot recover each request's context tier; no action resolves this. On xAI, a `grok-4.7` or `grok-4.6` request reaching 200k prompt tokens pays twice the base rates for all its tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded, the model has cache writes, or an active local override changes its bundled base rates. Overrides keep the floor and its cause; confirming the bundled base rates preserves the bound when the other conditions allow it. Never average the bound with the floor or present it as the machine's cost. Grok Build's own usage is read from `usage.json` once you run `mm enable-source grok` (see [Grok Build](#grok-build)).
-
-**Why grok-4.6 rates, not grok-build-0.1?** On 2026-09-10 xAI's Build overview identified grok-4.6 as the model powering Build. `grok-4.6-build` is the exact observed CLI id; `grok-build-0.1` is a different model and stays unpriced. Bare `grok-4.6` also stays unpriced until observed. `costUsdTicks` is never decoded.
-
-**An unknown model is unpriced.** Upgrading mm on the machine that renders this report may price it; republishing does not add a rate; do not estimate.
-
-**`mm` is not on PATH after install.** pipx puts console scripts in `~/.local/bin`. If a Homebrew-installed `mm` shadows it, `which -a mm` shows both — fix the PATH order rather than deleting either. Run directly, an older copy still uses the old GC that can delete other Macs' blobs; see [Upgrading](#upgrading).
-
-**`mm --version` reports an old version after `pipx upgrade`.** Your install is pinned to a frozen tag. See [Upgrading](#upgrading) for the one-line fix.
-
-**`mm enable-source opencode` says the source was retired.** The OpenCode sync source was retired in v0.12.55 and is rejected even with `--force`. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes leftover retired `[[sync.sources]]` blocks and records the name in `disabled_sources`. Push and pull already ignore retired sources without minting deletion tombstones, including before migration.
-
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`, `memory_index`, `capture_catchup`, and `push_timings`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before (`null` with no `claude` source, an invalid config or an unresolved home), `reason` is `projects_unlisted`, `home_unresolved`, `encoding_mismatch`, `config_invalid` or `null`, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
-
-**`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
-
-**An agent's link is no longer repaired, and you never changed anything.** Nothing is broken. `mm` created that agent's link before 0.12.42 gated link maintenance on `[skills]` policy, and your current policy does not authorize that agent — by default that means its sync source is not enabled. It applies only where the link at the target still `readlink`s to `~/.local/share/mind-meld/agent-skills/retro-fleet`, which is what proves `mm` created it under the old ungated policy.
-
-The link keeps working. Store publish is *not* consent-gated, so `SKILL.md` refreshes for every link still pointing at the store regardless of policy, and the agent keeps offering `/retro-fleet`. What stops is repair: if that link is deleted, clobbered, or left dangling by a future store change, `mm` will not recreate it and the agent loses the skill silently. To keep it maintained, run `mm install-skills --agent KEY` (repeatable) — it grants link maintenance without enabling source sync or usage reading. To accept the decline, do nothing; the link works until something breaks it.
-
-Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed that notice, because a machine that skips those releases never receives it and this entry is the durable explanation. A leftover `~/.config/mind-meld/.skill-link-policy-v0.12.42` marker is inert and safe to ignore. `mm diag` is the authoritative resolved view: a declined row whose link still resolves reads `status: ok` with `maintain_links: disabled`, and that pair is a deliberate decline, not a fault.
-
-**`mm status` says `stale — no autorun in Nh`.** Nothing has run `mm autopull` / `mm autopush` in 48 hours, so your agent's lifecycle hook is not firing. Check the `# Mind Meld` block is still in the global instructions file that agent actually reads.
-
-**`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means a file could not be applied (decrypt, write, permission) — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; a `corrupt peer manifest(s)` count can also mean this machine's own manifest vanished during the pull ([waiting content](#waiting-content-is-not-a-failure)). Fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that machine. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
-
-**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each machine. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. While the last push recorded discovery `partial`, `mm status` names `mm push` until it advises recovery (for example after three incomplete captures), then names `mm recapture <window>` as the way to finish discovery in one run. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo none of the discovery sources (Claude Code, Codex, Muse and Antigravity logs; Paseo; the mmm factory) names, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
-
-**`mm push --verbose` prints `events tail budget exceeded` (or `mm status` reports the events walk exceeded its budget).** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
-
-**A file came back after you deleted it.** Deletions are recorded as tombstones on the *next* successful push from the machine that deleted it, so push on the deleting Mac, then pull elsewhere. A tombstone suppresses restoration from peers that still advertise the file, and the peers whose copy is byte-identical to the deleted version, last synced from that Mac, delete it too (with a recovery copy; see [Recovering a deleted file](#recovering-a-deleted-file)). A peer whose copy differs keeps its file, and a push that found a recreated or restored scan folder (`N files left out because <folder> is new`) records no deletion and lets a pull bring the files back. After a lost `state.db` one Mac's pull may restore a file until the ledger rebuilds.
-
-**A deleted file did not go away on another Mac.** Run `mm pull --dry-run --verbose` there: a `keep (<reason>)` line names why (no content hash on the record because it came from an older release, the Mac never synced that version from the deleting Mac, the file's bytes differ, the peer lists the file again, a symlink on the path, ...). The file is not lost; it stays until the record expires after 30 days or you remove it by hand.
-
-**A push says `N files left out because <folder> is new` (or `missing`, or `cannot be read`).** The scan folder was recreated, restored from a backup, removed or cannot be read, so mm cannot tell "deleted" from "the folder is not what it was": that push publishes without those files and records **no** deletion for them. Run `mm pull` to bring them back from your other Macs (for `cannot be read`, restore read access first). Nothing was deleted anywhere. The first push after updating is silent about this by design. `mm: notice: deletions under <folder> will not propagate; restore write access, then mm push` means mm could not write the `.mind-meld-anchor` token there, so deletions under that folder will not propagate until it can.
-
-**A peer's edit shows `N older peer edits not applied`.** That peer's version was built on yours but its file has an older mtime than yours, as can happen after a backup restore. `.jsonl` files and `MEMORY.md` take the line-merge path. `mm pull --verbose` lists the held paths. Compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
-
-**Conflicts you didn't expect.** `mm conflicts` lists them, `mm pull --dry-run` predicts incoming changes; `mm diff` compares against a stored snapshot, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
-
-**A warning mentions a suspicious storage file.** Mind Meld left that entry in place. Rejection is not proof of malicious content — an older passphrase, a leftover iCloud, Dropbox or Syncthing conflict copy, or an unrelated file whose name happens to match can all produce it. Leaving the entry may repeat the warning on the next scan. `storage.path` in `~/.config/mind-meld/config.toml` identifies the folder. Inspect the original entry in Finder and preserve any uncertain data; do not delete it from a diagnostic path. The path shown in the warning is display text, not a shell argument, and may differ from the on-disk spelling (nonprintable characters become visible notation, so some joined emoji spellings appear split).
-
-### Dropped repositories and ignored git environment variables
-
-`git walk dropped N repositories this push` (or `git capture catching up (N left) — the next attended mm push continues it` when an attended push stopped on its walk budget with no repository errors) means some repository history
-was omitted on that run. Content sync still proceeds. When a walk error occurred or catch-up does not clear on the next `mm push`, on the Mac that owns those repos:
-
-```bash
-mm recapture --dry-run
-```
-
-The preview names skipped paths and reasons: `git_error` (Git could not read
-the repository), `timeout` (one repository ran past 30 s), `budget_abort` (the
-walk ran past 120 s), or `raised` (an unexpected walk exception). `no commits
-yet (benign)` is an empty repository and needs no fix.
-The preview is a fresh scan over the requested window (default 30d). `mm
-recapture` and its preview walk Git on their own budget, 30 s per repository
-and 120 s for the walk, and repository discovery gets 30 s, enough to finish a
-cold index in one run. A clean
-preview does not prove the earlier push was complete.
-
-For `git_error`, check for a broken checkout or ownership mismatch. If Git
-reports dubious ownership and you trust that specific repository, substitute
-its path in this command:
-
-```bash
-git config --global --add safe.directory /path/to/repo
-```
-
-Then rerun the preview and recover the omitted window:
-
-```bash
-mm recapture --dry-run
-mm recapture 30d
-mm refresh-identity
-```
-
-Use the same `Nd` window (1d–90d) for preview and recovery when changing it.
-Budget aborts may need a narrower window. Git failures need their underlying
-cause fixed; narrowing the window cannot repair a checkout. `refresh-identity`
-lists the locally resolved emails and `+`/`-` changes versus a readable prior
-cache. A missing cache means the previous set is unknown, not empty.
-
-**Ignored Git environment.** mm's Git reads select each discovered
-repository even when a parent hook or shell exports repository-local state.
-They ignore GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE,
-GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_IMPLICIT_WORK_TREE,
-GIT_GRAFT_FILE, GIT_NO_REPLACE_OBJECTS, GIT_REPLACE_REF_BASE, GIT_PREFIX,
-GIT_SHALLOW_FILE, GIT_CONFIG, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT, and all
-GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* entries: the list
-`git rev-parse --local-env-vars` prints, plus the numbered configuration entries.
-
-Repository and global configuration define attribution. Inherited `git -c`
-and repository-local GIT_CONFIG overrides do not. ~/.gitconfig,
-GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM, XDG_CONFIG_HOME,
-HOME, and `includeIf` still work, as do PATH, GIT_EXEC_PATH and GIT_SSH*.
-Put lasting overrides in the appropriate configuration file. LC_ALL and
-LANGUAGE are C for these subprocesses, so a localized no-commits message
-cannot be misclassified as `git_error`.
-
-**Recovery has three separate outcomes.** The local identity cache refreshes
-on the next identity read that completes discovery after upgrading. Future
-capture uses the correct repository and configured identities. Already
-published rows remain unchanged: recapture restores omissions but cannot
-retract a wrong remote or identity. Event files become eligible for `mm gc`
-after 90 days by their filename date; GC also runs after an interactive
-`mm push` that published user-content changes, never from autopush. Upgrading does not
-claim to repair historical attribution.
-
-<a id="host-usage-capture"></a>
-
-### Host usage capture (Codex, Grok Build, Muse and Antigravity)
-
-Every attended `mm push` refreshes and publishes consented host usage, including
-when user files are already in sync. This requires **mm v0.14.17+ on the producing
-Mac**. Older versions can report a successful `Nothing to push` without refreshing
-usage. Upgrade, confirm the version, push, then verify:
-
-```sh
-pipx upgrade mind-meld
-mm --version
-mm push
+syncthing cli operations restart
 mm status
 mm diag
 ```
 
-If `mm --version` is still below v0.14.17, a tag-pinned pipx install may not have
-moved. Use the [upgrade instructions](#upgrading), verify again, then run `mm push`.
-In status, check a recent **last recorded capture**, the expected reader coverage
-and `Publication: published`. **Exit 0 means content sync succeeded regardless of
-capture outcome**. On v0.14.18+, status also shows the **last recorded attended
-attempt**, independently of an earlier capture that remains visible after a failed
-refresh. Diag exposes the same evidence under `host_publication`, without token
-magnitudes or payloads. Local publication evidence proves acceptance by this Mac's
-storage backend; it does not prove delivery to another Mac.
+### Another mm operation is running
 
-Capture requires enabled, available `mm-events` and consented readers. Enable
-with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok` / `mm enable-source muse` / `mm enable-source agy`.
+`mm` holds an exclusive lock at `~/.config/mind-meld/mm.lock` while syncing. Wait for the other command or hook to finish and retry. Never delete a live lockfile.
 
-Restore an unavailable custom mm-events folder before retrying. Enabling Codex
-sync now authorizes reading its local rollouts on **every attended push**, including
-converged pushes; its session transcripts remain local. Codex usage includes
-archived threads (`~/.codex/archived_sessions/`), so archiving a thread in Codex,
-the Codex app or an orchestrator such as Paseo no longer drops its past usage.
-After upgrading, days with archived threads rise; that is the correction, not
-double counting.
+### Auto commands skip: keyring locked or unavailable
 
-Capture and source bootstrap run under the mm lock before the manifest scan.
-There is one bounded sweep and at most one warm read per cold reader; that warm
-read supplies the result. Multiple readers can be cold. Budgets are
-cooperative, not hard timeouts; content sync follows capture. Lowering
-`host_usage_interactive_budget_ms` does not cap the separate warm allowance. A
-partitioned attended push caps host sweep and inline warm together at three fifths
-of `attended_capture_cap_ms` (default 30,000 ms, or `capture_budget_ms` when larger).
-Only the legacy interactive key, with neither `capture_budget_ms` nor
-`attended_capture_cap_ms`, keeps about five seconds of warm
-scanning per cold reader. Autopush stays gated on substantive changes and never
-warms; it is not an attended substitute with the same failure reporting.
+On Linux, `autopull` and `autopush` never trigger a desktop keyring unlock prompt. Unlock your login keyring in the desktop session (or create a default collection in Secret Service and store the passphrase) so hooks can read the passphrase. On macOS, run `mm push` or `mm pull` in a terminal in your desktop session and choose **Always Allow** in the Keychain dialog.
 
-A successful append writes one host row. With no pending Git catch-up and no
-user-source byte, newer-mtime or selection change, the refresh skips Git/session
-capture, preserves the Git cursor and adds nothing to retro push counts. If that day file is held because
-it changed, vanished or grew while being read, the new row stays unpublished
-and the push counts it as held (`--verbose` names it as not yet synced;
-[Snapshot failures](#snapshot-failures)). Otherwise it still re-encrypts and
-uploads the growing day file, updates last-seen and rewrites the recovery
-sidecar, so `--verbose` shows an upload even on a converged Mac. The outcome
-line counts no user content change and reports `; usage published` only when
-published usage totals or queued catch-up data changed since this machine's last
-published snapshot (`Push: no content changes; usage published.`, or
-`Push: no content changes; usage published (Grok catching up).` when a host
-reader hit its deadline). An idle push with no verified new usage prints
-`Push: no content changes; no new usage.` and still names any readers catching up.
-Verified publication appears with `--verbose` as
-`Host usage published (manifest accepted).`. `mm status` and `mm diag` also show
-publication details.
-A content-changing push records activity once and runs auto-GC. Usage-only
-publication skips this device's blob GC; obsolete blobs wait for the next
-content-changing push or an explicit `mm gc`.
+### Retiring a dead machine
 
-Healthy capture adds no per-reader output unless `--verbose` is set. With
-`--verbose`, a usage-only refresh with no pending Git catch-up also explains its work with:
+Run `mm devices retire <name|id>` on an active machine (use the 8-character ID from `mm devices` for `--yes` or non-interactive runs). On owner-managed Syncthing machines, also remove the dead device in the Syncthing GUI.
 
-```text
-Refresh mode: usage-only; user content already up to date, Git cursor unchanged. Run mm recapture 30d for Git history.
-```
+### Newer or damaged storage format
 
-Pending Git capture resumes on later attended pushes, even when user files are unchanged. `mm recapture 30d` remains explicit Git-history recovery for persistent failures and older windows. There is no opt-out flag or config key
-for the automatic attended refresh. Previews never scan, warm or append
-host usage, fetch upgrade information or write nudge state.
+An older `mm` refuses envelopes or manifests written with a newer format version rather than corrupting them. Run `mm update` on this machine, verify `mm --version`, and retry.
 
-| Outcome | Content | Activity / Git cursor | Exit |
-|---|---|---|---|
-| Usage-only refresh published, Git capture complete | Already up to date | No activity capture; cursor unchanged | 0 |
-| Pending Git catch-up | Already up to date | Resumes activity capture and advances completed repository cursors | 0 if content sync succeeds |
-| Refresh carrying user-source changes published | Pushed (bytes, metadata or selection) | Ordinary activity tail; one push | 0 |
-| Prerequisites unavailable, capture fails, or append skipped | Ordinary content sync continues | Ordinary activity rules; capture is not retried in the tail | 0 if content sync succeeds |
-| Push stops without an acceptance receipt | Publication may be unconfirmed; diagnose before retry | Locally recorded rows may remain | 1 |
-| Row excluded, file absent from accepted manifest, or row absent from accepted bytes (`not-published`) | Pushed or already up to date | Depends on user-content changes | 0; verbose diagnostic and receipt |
-| Publication evidence changed or cannot be read (`unverified`) | Pushed or already up to date | Depends on user-content changes | 0; verbose diagnostic and receipt; check `mm status` read-only |
-| `mm push --dry-run` | Preview only | Nothing captured | 0 completed; 1 stopped |
+### Key header copies differ
 
-Capture problems appear as verbose stderr diagnostics and in the existing
-status/diag evidence. Explanatory phase labels include:
-`(prerequisites: <state>)`, `(readers)` (a row was still written, but a consented
-reader was partial, dropped or absent), `(no-row)`, `(capture-failed)`,
-`(append-failed)`, `(max-file-size)`, `(not-published: <cause>)` or
-`(unverified: <reason>)`. Only
-a content-sync failure changes the push exit to 1; its error line reports
-known accepted effects or explicitly unconfirmed publication, followed by a final
-`Run: <command>` line. Optional capture
-failure alone does not change that exit. `not-published` requires proof: `exclude-patterns`, `include-dirs`,
-`file-absent` (no day file in the accepted manifest), or `row-missing` (the accepted
-bytes contain no matching row). Fix exclude/include settings before retrying;
-preserve a copy outside mm-events before repairing damaged JSONL for `row-missing`.
-The old `unreadable-row` token is retired. `unverified` reasons are `missing`,
-`unreadable`, `oversized-line`, `changed`, `revision-mismatch`, and `evidence-error`.
-They describe gaps in evidence, not proof of non-publication: restore read access
-if needed and check `mm status`. A new push writes a new capture, so it cannot
-verify the previous attempt. A line over 16 MiB, which mm's writer cannot produce,
-leaves publication unverified even if those bytes were accepted.
+If Syncthing created a conflict copy of `mm-crypto-init`, `mm` refuses to sync until you inspect the copies and keep the single authoritative key header for the fleet (remove the stale conflict copy from the shared folder).
 
-All four event writers guard each whole batch against `sync.max_file_size`,
-including the host batch and the later activity batch. A skipped batch leaves
-existing bytes intact. If a day file is **already** over the limit and was
-advertised previously, the existing complete-snapshot refusal still applies:
-archive older rows outside mm-events to shrink it, increase the limit, or
-intentionally exclude that day file. The guard does not repair existing oversize
-files. Post-acceptance maintenance errors are reported separately; own-manifest GC
-refusals still stop push when host publication was skipped or failed. An unreadable
-peer manifest does not veto collection of this device's blobs. Exit 2 is
-an argument error; exit 4 is reserved for `mm recapture` partial Git recovery.
+### Waiting content is not a failure
 
-Status and diag share a read-only prerequisite check: enable an unselected
-mm-events source, restore an unavailable custom folder, or consent a reader
-before refreshing. An unreadable config produces an unknown verdict and no
-refresh/enable recommendation. An unsupported reader format calls for an upgrade,
-including in the publication block, unless this release is the newest the cached
-release check knows. Then the verdict reads `Usage not captured.` and status and
-plain-text diag say, for example, "Muse usage not captured: this mm can't read Muse's current
-record format, and no newer mm can yet. See `mm diag`, or run `mm disable-source
-muse` to stop retrying." On those surfaces a sibling non-permanent line, such as a
-deadline, and Codex's rebuilding, warming, and awaiting-re-walk hints, carry that
-no-release sentence instead of their own remedy. The `mm push --verbose`
-usage-capture warning, the automatic-push breadcrumb, and the `mm recapture` and
-`mm init` notices give the same no-release sentence for the unsupported reader
-itself, reading the same cached check. Neither status nor diag refreshes that
-cache; push's usage capture, the events tail (automatic push and `mm recapture`)
-and init read it without refreshing it, and push's and recapture's own update
-checks run after capture.
+If a peer's manifest arrived before some of its encrypted blobs finished syncing over Syncthing, `mm pull` applies everything that has arrived and reports what is still waiting. Run `mm pull` again once Syncthing finishes delivering.
 
-Upgrade **both producing and rendering Macs** for corrected init counts. Init
-now marks its Git rows as `origin: init`; older renderers still count that unknown
-origin as a push. Historical unmarked init/refresh rows remain indistinguishable
-from older pushes until they leave the queried window (retention is 90 days).
-`mm recapture` cannot relabel them. The usage-only guarantee is per invocation:
-after a failed upload, the next attended push that appends a host row remains
-usage-only if user content is unchanged; autopush recovery runs its ordinary
-activity tail and legitimately counts once.
+### Pull incomplete / could not pull a file
 
-“Last recorded capture” and “Last recorded attended attempt” are separate facts:
-a failed attempt may write no row. The local attempt record is
-`~/.config/mind-meld/last-attended-capture.json` (mode 0600, never synced).
-It records the capture start, appended row timestamp when present, class/cause
-and reader outcomes, including a push failure before manifest acceptance.
-`push-failed` causes are `interrupted` (Ctrl-C or abort), `storage-error`,
-`snapshot-refused`, and `error`. Storage failures also record `errno` as an OS
-name such as `ENOSPC`, when available, including through backend wrappers.
-No exception message or path is stored. Legacy failures with a null cause remain
-readable; older mm treats the new causes as an unknown/corrupt record without
-crashing, and its next attended push rewrites the local record.
-A later GC failure preserves a computed publication verdict. Dry-run and
-autopush leave the record alone. A failed durable record write prints a notice;
-status may show the previous or new record. A later capture is noted beside a
-failed attempt; healthy published attempts need no such note.
+When one or more files fail to apply (permissions, disk full, corrupt peer manifest), `mm pull` applies all healthy files, prints one `mm: warning:` line per failure, and exits 1. Fix the local filesystem or peer issue and re-run `mm pull`.
 
-Before the first attended push after upgrading, status says
-`unknown (no attended attempt recorded yet — run mm push)`. Unreadable and corrupt
-records have distinct remedies; a future timestamp says `in the future`.
-The `run mm push` suffix is omitted when prerequisites are unavailable or a
-consented reader has an unsupported record format, including when this mm is
-already the newest known release; the prerequisite or blocker remedy takes precedence.
-Status/diag read the record without locking or writing. Publication is proven
-only when the recorded file revision matches the local accepted-manifest sidecar;
-a known failed read of that revision says `unverified (<reason>)`, and other gaps
-say `unknown`. An absent retained row means “no capture in the last 90 days”, not
-“never published”. A failed day-file read makes capture selection uncertain only
-if that file could contain a winning row within the allowed clock skew.
+For full machine-readable triage (no passphrase or valid config required), run `mm diag --json`. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`, `fast_forward`, `syncthing`, `memory_index`, `capture_catchup`, `push_timings`. Each `skill_links` row includes `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`.
 
-Reader coverage is contributed, partial, degraded, or absent. A reader proven
-empty within the snapshot's retained days says `completed, no usage in snapshot`.
-Mixed-reader empty labels become available after this Mac captures with v0.14.18;
-legacy all-empty rows still prove every consulted reader empty. Legacy mixed
-rows make no per-reader empty claim. A capture at least one day old gets a
-refresh reminder in status.
+### Dropped repositories and ignored git environment variables
 
-`mm diag --json` keeps `readers` in its existing vocabulary and the row-level
-`empty` boolean (`hosts == {}`). Additive `empty_readers` is `null` when no
-per-reader claim is possible, otherwise a list (possibly `[]`). `publication`
-adds `unverified` and `publication_reason` names its cause. Attempt fields are
-`latest_attempt` (class or `unknown`), `latest_attempt_cause`, `latest_attempt_errno`
-(errno name or null), `latest_attempt_at`,
-`latest_attempt_readers`, `latest_attempt_reason` (`missing`, `unreadable`, or
-`corrupt` for an unknown record), and `latest_attempt_superseded`. Attempt reader
-values are `contributed`, `empty`, `partial`, `dropped:<reason>`, or `absent`.
+`mm` scrubs repository-local `GIT_*` environment variables when running git walks. During `mm recapture`, repository discovery gets 30 s, each repository gets 30 s, and the whole walk gets 120 s (larger than the normal attended push caps). If a repository still fails or times out, inspect `mm diag` under `discovery` and `git_capture`.
 
-#### Host usage looks wrong
+<a id="host-usage-capture"></a>
+### Host usage capture (Codex, Grok Build, Muse and Antigravity)
 
-Run `mm status` on the producing Mac, then `mm diag` for reader blockers.
-These example excerpts use both Codex and Antigravity, at a fixed UTC time.
+Every attended `mm push` refreshes and publishes consented host usage, even when there are no Git roots or content changes. **Exit 0 means content sync succeeded regardless of capture outcome** — verify recorded capture and `Publication: published` with `mm status` and `mm diag`.
 
-Healthy: the recorded capture and attended attempt both have publication evidence.
+Capture requires enabled `mm-events` and consented readers (`mm enable-source codex|grok|muse|agy`). Attended `mm push` shares `[retro] capture_budget_ms` (default 5,000 ms) and `[retro] attended_capture_cap_ms` (default 30,000 ms, up to 60,000 ms) across discovery, git walks, and host readers; unfinished work resumes on later pushes or via detached background catch-up (`autopush`).
+
+Healthy:
 
 <!-- usage-example:healthy -->
 ```text
@@ -2660,8 +498,7 @@ Host usage last recorded capture: 2026-09-21T12:00:00+00:00 (0d ago)
   Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — published
 ```
 
-Mixed with an empty reader: Antigravity completed successfully and found no usage in
-the retained snapshot. It does not need repair.
+Mixed with an empty reader:
 
 <!-- usage-example:mixed-empty -->
 ```text
@@ -2673,9 +510,7 @@ Host usage last recorded capture: 2026-09-21T12:00:00+00:00 (0d ago)
     codex contributed; agy completed, no usage in snapshot
 ```
 
-Failed refresh: the earlier published capture remains visible. The newer attempt
-records why no row was written. Inspect the named readers in `mm diag`; follow
-the blocker remedies below before refreshing.
+Failed refresh (earlier capture remains visible; inspect named readers in `mm diag`):
 
 <!-- usage-example:failed-refresh -->
 ```text
@@ -2687,9 +522,7 @@ Host usage last recorded capture: 2026-09-21T11:00:00+00:00 (0d ago)
     codex dropped (unsupported); agy dropped (deadline)
 ```
 
-Unverified: a line larger than 16 MiB prevents proof from this file, including
-certainty about the winning capture. This does not establish non-publication;
-check evidence read-only with `mm status`. An attended push creates a new attempt.
+Unverified (a line over 16 MiB prevents proof from that file; check `mm status` read-only):
 
 <!-- usage-example:unverified -->
 ```text
@@ -2703,407 +536,62 @@ Host usage last recorded capture: unknown (~/.local/share/mind-meld/events/local
 
 #### Reader blockers
 
-Diag separates `<reader> cache inventory:` from `<reader> usage read blocker:`.
-A readable cache with no known blocker says `none`; a blocker can appear beside
-a ready inventory. `last_reason` is the standing read blocker, retained until
-a read completes inside its budget, with `unsupported` surviving later
-incomplete transient failures. A complete read that exceeds its budget
-replaces even `unsupported` with `deadline`: its records were readable, but
-the read was too slow. `(first observed 2026-09-04 UTC)` dates
-this version's first observation of that reason, not the start of an outage.
-Older undated blockers gain a date when this version first observes them.
-
-| Reason | Meaning | Remedy |
-|---|---|---|
-| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source grok` / `mm disable-source agy` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. When the cached release check says this mm is the newest known, `mm status`, plain-text `mm diag`, the `mm push --verbose` usage-capture warning, the automatic-push breadcrumb, and the `mm recapture` and `mm init` notices say instead that no newer mm can read the format yet, and give the stop step and `mm diag`. `mm diag --json` reads no cached check of its own; its `last_autorun` repeats the automatic-push detail as stored, which can carry that sentence. |
-| `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then `mm push`. If it persists, report the mm version and Host usage diag block. |
-| `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
-| `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |
-| `partial` | A final record is unfinished. | Let the host finish the record, then `mm push`; `mm diag` shows the reader's state. |
-| `deadline`, last complete read over the allotted budget | The read costs more than that pass allowed. | Run `mm push` to refresh usage and warm cold readers. If the last complete read is over what an attended push allows, raise `[retro] attended_capture_cap_ms`, keeping it at least `capture_budget_ms`; host capture and warm retries get three fifths of that cap. |
-| `deadline`, last complete read within budget or unknown | The latest attempt ran out of time; a cold or changing store may need more work. | Run `mm push` again. Host sweep and inline warm share at most three fifths of the attended scan cap (default 30,000 ms, or `capture_budget_ms` when larger). Only an explicit `host_usage_interactive_budget_ms`, with neither `capture_budget_ms` nor `attended_capture_cap_ms`, keeps about 5 s of warm scanning per cold reader. Then compare the last complete read and counts in `mm diag`. |
-
-Every attended push attempts a fresh capture. If every consented reader later
-fails, no host row is written and this snapshot ages. If another reader
-completes, the newer row supersedes the device's coverage and may omit the
-failed reader. Status shows the latest coverage. Each enabled host reader gets
-its own 1,000 ms deadline on autopush (running concurrently so an early-finishing
-reader does not hold unused time); attended `mm push` and `attended_capture_cap_ms`
-handle cold or outsized corpora.
-Fleet retros flag devices whose last snapshot predates the requested window.
-Days a `deadline` read missed come back on the reader's next complete read: readers
-aggregate the whole local corpus, each row carries the device's last 90 UTC days, and
-the retro keeps each device's latest accepted row whole. `mm recapture` redoes Git
-capture only and cannot recover them. They do not come back when the retro window ended
-more than 24 hours before that read, when they are older than 90 days, or when the host
-deleted its files; `mm status` names `[retro] attended_capture_cap_ms` as the attended fix.
-
-Set budgets in this machine's `~/.config/mind-meld/config.toml`:
-
-```toml
-[sync]
-pull_syncthing_wait_ms = 15000
-
-[retro]
-capture_budget_ms = 5000
-attended_capture_cap_ms = 30000
-host_usage_autopush_budget_ms = 1000
-host_usage_interactive_budget_ms = 3000
-```
-
-`[sync] pull_syncthing_wait_ms` is an integer in milliseconds (range **0–60,000**,
-default **15,000**). It bounds the wait after the initial Syncthing probe in
-an attended terminal `mm pull`. Set it to `0` to keep the one-shot probe and
-still-delivering notice without waiting.
-
-`capture_budget_ms` (range **250–60,000**, default **5,000**) is the initial
-budget for an attended push's usage and activity capture, and
-`attended_capture_cap_ms` (range **`capture_budget_ms`–60,000**, default
-**30,000**, or `capture_budget_ms` when larger) is the scan cap an attended
-push can spend to finish remaining work before stopping: host reads plus
-inline warming get at most three fifths of the attended scan cap, and
-git/session capture keeps the rest plus whatever the host phase leaves unused
-(extending attended root discovery, Git walk and per-repository timeout sub-ceilings
-by the effective scan cap minus `capture_budget_ms`, within the shared tail deadline, while
-keeping the initial host sweep capped by `host_usage_interactive_budget_ms`).
-Setting `attended_capture_cap_ms = capture_budget_ms` restores
-the previous capture deadlines. These are cooperative scan deadlines, not a bound
-on the whole command: filesystem calls, cache writes and running Git workers can
-finish later. Sequential attended warm retries under the shared host phase keep a small
-reserve per later retry (up to 300 ms, at most half the sweep divided by the reader
-count), so one cold reader's retry cannot starve a sibling retry. Setting either capture key selects the partition;
-`host_usage_interactive_budget_ms` remains the sweep preference within its host share.
-`attended_capture_cap_ms` applies only to attended pushes.
-
-Autopush gives each enabled host reader its own cooperative wall-clock
-deadline from the start of its read (default **1,000 ms**, range **100–5,000**).
-The reads overlap and can compete for CPU and disk bandwidth. A filesystem
-call or cache write already underway can finish after the deadline.
-Interactive push and init default to **3,000 ms**
-(range **250–5,000**).
-All must be integers. An explicit `host_usage_autopush_budget_ms` must not exceed `capture_budget_ms`
-when that key is set, and must not exceed an explicitly set interactive budget.
-When neither is set, it must not exceed the 3,000 ms interactive default. When
-both ceilings apply, it must not exceed the smaller one. When `host_usage_autopush_budget_ms` is unset,
-mm clamps the 1,000 ms default to the active attended ceiling (`capture_budget_ms` and/or `host_usage_interactive_budget_ms`, else 3,000 ms).
-Invalid values stop sync like any other `[retro]` error. Raising
-a budget trades more autopush latency for read headroom. This is per machine and
-per mm version: remeasure after corpus or interpreter changes; do not copy a
-fleet-wide number. `mm diag` shows the effective per-provider autopush budget, interactive and base capture
-budgets with their `default` or `config` source, each reader's **last complete read**, the concurrent per-provider sweep
-estimate (slowest reader and each provider's `<ms>/<budget> ms` against the per-provider autopush allowance), and the latest recorded `Push timings` for `attended` and `autopush` runs. The estimate excludes cache writes and is
-not a publication check. Missing measurements say `unknown`; future dates
-say `in the future`. Lowering `host_usage_interactive_budget_ms` does not cap
-the separate warm allowance. Outside legacy-only configurations, host sweep and
-inline warm share three fifths of the effective attended scan cap; init backfill
-keeps three fifths of `capture_budget_ms`.
-
-An attended `mm push` re-reads usage even when nothing else needs uploading. A
-no-op `mm autopush` still does not: autopush stays change-gated and never warms,
-and previews never capture. Orchestration failures (`unavailable`, or expiry
-before a reader was invoked) stay on `mm push --verbose` stderr and the autorun breadcrumb;
-they cannot be recorded by a reader that never ran. A no-op autopush may
-replace that breadcrumb with `success` while the standing reader blocker
-remains. A completed read clears the blocker only if it finishes inside its
-read budget; a complete-but-late read records `deadline` and its timing. Inventory plus `none` is not proof of publication.
-
-`mm disable-source codex` also stops syncing Codex customizations and skill-link
-maintenance under the default source-derived policy; an explicit `[skills]
-agents` grant is the exception for maintenance. There is no independent Codex
-usage opt-out yet. Content sync and other readers' captures survive one reader's
-failure.
-
-If `mm --version` does not change after `pipx upgrade`, see [Upgrading](#upgrading).
-No cache migration is needed for 0.14.16. To roll back this change:
-
-```bash
-UV_VENV_CLEAR=1 pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.14.15
-```
-
-That pins an older release; use the `@latest` reinstall in Upgrading to resume
-updates. Older mm ignores the additive root keys.
-
-`mm diag --json` exposes `host_usage.codex` keys `cache_state`, `state`,
-`files_cached`, `files_migrated`, `files_pre_track`, `files_on_disk`, `pending`,
-`model_count`, `models`, `last_reason`, and `last_reason_since`.
-`host_usage.agy` keys are `consented`, `complete_once`, `usage_less_skipped`,
-`cache_state`, `model_count`, `models`, `last_reason`, `last_reason_since`,
-`last_error_detail`, `error_db_count`, `files_cached`, and `files_on_disk`.
-The text line is `agy conversation DBs cached: N of M`;
-missing, malformed, version-mismatched or locked caches show `unknown`, not 0.
-Both reader dictionaries also expose `last_complete_ms`, `last_complete_at`,
-and `last_deadline_allotted_ms`. The top-level `host_read_budgets` contains
-`autopush_ms` (preserved for JSON readers), `autopush_source`, `interactive_ms`, `interactive_source`,
-`capture_ms`, `capture_source`, `warm_ms` (always 5000, the legacy warm constant), and `mode` (`"per_provider_concurrent"`). `capture_ms` is the base
-capture budget; this map does not expose the attended scan cap. `warm_ms` is
-not the effective host-phase limit: attended sweep and inline warm share three
-fifths of the scan cap unless only the legacy interactive key is set.
-`push_timings` exposes `{latest, by_kind}` for the latest recorded `attended`,
-`autopush`, and `catchup` runs. Recording is best-effort and a failed push or catch-up can record
-the phases it reached. Each run includes `kind`, `recorded_at`, `total_ms`,
-and `phases`. Each phase has `phase`, `label`, `elapsed_ms`, a nullable
-`budget_ms`, and `status`. Counts appear as `completed` and `total` when
-recorded. Host phase elapsed times include time spent in the reader's cache
-write path. The reader cache's separate `last_complete_ms` measures the scan
-before cache serialization. Reader cache dates are normalized
-UTC ISO text or null; missing old fields become null,
-and an invalid date never erases a valid blocker. Diag reads caches without
-opening host logs or needing a passphrase; Codex counts rollout paths under both
-its live and archived roots and Antigravity
-counts conversation `.db` paths under its conversations root.
-`cache_state: missing` or `unreadable` leaves the blocker unknown.
-
-**Background capture catch-up.** When `mm autopush` stops at a cooperative
-capture deadline (a host reader deadline, Git discovery budget, Git walk budget,
-or session scan budget), it finishes publishing user content, releases
-`mind-meld.lock`, and spawns one detached single-flight background worker
-guarded by `~/.config/mind-meld/capture-catchup.lock` (state recorded in
-`~/.config/mind-meld/capture-catchup.json`). The worker is capture-only and
-silent: it warms cold or deadline-stopped private host and Claude token caches
-outside `mind-meld.lock` with attended budgets and consent rechecks, then
-takes `mind-meld.lock` for the attended capture pass, appends local
-`git-snapshot` (`origin="catchup"`, excluded from push counts),
-`sessions-snapshot`, and `host-usage-snapshot` rows to `mm-events`, confirms the
-written Git snapshot before advancing per-repo cursors, and records `catchup`
-timings in `push-timings.json`. Encrypted publication to the fleet waits for the
-next `mm autopush` or `mm push`. Previews (`--dry-run`) never trigger catch-up.
-`mm status` suppresses manual `mm push` advice while catch-up is running or has
-just covered a deadline-only backlog (without hiding any other degradation or
-user edits). While a part (host reader or Git capture) still has a live backlog,
-that part's backlog line appends the last catch-up fact for that part (running,
-or failed/interrupted with `Run: mm diag`); when a part has no backlog, nothing
-about catch-up is shown for it. `mm diag` (plain text and `--json`) exposes
-read-only `capture_catchup` state without creating state files.
-
-A `mm: notice: host token cache write failed: <ErrnoName>` means the read's
-result still stands but its cache could not be saved. The write may leave an
-empty or unreadable cache, losing the old blocker. A subsequent failing read
-can record it again; this notice does not itself become a stored blocker.
+`mm diag` separates `<reader> cache inventory:` from `<reader> usage read blocker:`. If a host updates its session format to one this `mm` cannot parse, that reader alone fails closed while other readers keep publishing: run `mm update` (or `mm disable-source <name>` to stop retrying).
 
 ### Snapshot failures
 
-A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file or directory, a directory that vanishes while it is being listed, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, a symlink, hard link or non-regular file where a regular file was, or a missing user-source root that was previously published, **refuses the whole push** and keeps the previous snapshot; run `mm push` again after the cause is fixed.
-
-**A file that changes while mm reads it does not stop the push.** mm re-reads it once during the scan. If a file later changes before or during upload verification, mm re-reads it once after the rest of that source has uploaded. If either retry finds it still changing, it is **held**: the previously published version stays published, a file that was never published is left out, nothing is deleted, and the rest of the push goes out. A scan-held file is not read again during upload. The push exits 0 and counts the held files; they go with a later push. The attended outcome prints a line for the held count (`Push: 2 files held.`) and `--verbose` lists every path as *not yet synced*. Held files also appear in `mm push --dry-run` (which applies the scan-time hold), and in `mm autopush`'s `mm status` line (autopush prints nothing). A file that keeps changing is held on every push: `exclude_patterns` under that source ends it. A push that is recovering a corrupt, conflict-copy-only or vanished manifest has no accepted version to hold at, so there a still-changing file refuses and names itself.
-
-```text
-$ mm push
-Push: 1 content change published; usage published.
-Push: 2 files held.
-
-$ mm push --verbose
-...
-  2 files not yet synced (still changing):
-    gstack:projects/x/log.jsonl
-    claude:projects/y/memory/MEMORY.md
-  Their previous versions (if any) stay published; they go with a later push.
-Push: 1 content change published; usage published.
-Push: 2 files held.
-
-$ mm status          # after an autopush that held a file
-  Last auto-push: 2026-10-19T15:03:32+00:00 (degraded: 1 file held, not yet synced (still changing): claude:projects/y/memory/MEMORY.md)
-
-$ mm push            # a recovered manifest and a file that will not settle
-mm: error: Push refused [snapshot-refused]: Cannot publish: source claude, projects/y/memory/MEMORY.md changed while being read. Previous snapshot kept. Wait for the writer to finish; no content published.
-Run: mm push
-```
-
-| State | You see | Do |
-|---|---|---|
-| Held (still changing, vanished or grew) | `Push: N file(s) held.` in the outcome; *not yet synced* paths with `--verbose` | Nothing; the prior version stays published. Exclude it if it is always being written. |
-| Frozen (inside a nested git checkout) | `skipped: nested git repository` with `--verbose` or `--dry-run`; published entries kept | See [Nested git repositories](#nested-git-repositories) for resuming sync or excluding the subtree |
-| Skipped or excluded | `skipped:` lines with `--verbose` | Raise `sync.max_file_size` or adjust the glob |
-| Tombstoned | the deletion is published with the deleted version's hash | Nothing. Other Macs holding exactly those bytes move their copy to a 30-day recovery folder ([Recovering a deleted file](#recovering-a-deleted-file)) |
-| Refused | `mm: error: Push refused [snapshot-refused]: Cannot publish: …` followed by `Run: <command>`, previous snapshot kept | The fix in the message. Blobs uploaded before the stop remain as orphans until GC. |
-
-`mm push --dry-run` previews this scan and deletion proof (files a recreated scan folder hides are not counted as deletions) and **changes nothing except the local lock file**; it does not write the `.mind-meld-anchor` token a real push renews. It reports pending directory creation and shared crypto-init reconciliation without performing them. It uses your current config without prompting for migration; run `mm migrate-config` to review recommended updates. It does not preview host-usage capture, the activity row a real push appends, post-push GC of orphaned blobs, or upload re-reads.
-
-Preview exit codes: **0** completed; **1** stopped (snapshot refusal, crypto/config error, or lock held—the message explains which); **2** usage error. Every successful preview, including “Nothing to push,” ends with the lock-qualified completion message.
-
-See [Previews](#previews) for every command’s write allowance, omitted work and exit codes.
-
-`mm autopush` still exits 0 so an agent hook can continue. Inspect `mm status` (the `last_autorun.detail` field) or run interactive `mm push` if you need an exit status.
-
-| What happened | What to do |
-|---|---|
-| File or directory could not be read | Restore read access, then `mm push`. `mm disable-source <name>` is a coarse escape hatch if that source should stop syncing. |
-| File changed, vanished or grew while being read, and a hold is not possible (the push is recovering a corrupt, conflict-copy-only or vanished manifest) | Wait for the editor/writer to finish, then `mm push`. With an accepted manifest the file is held instead: see above. |
-| Directory vanished while being listed, or `.extend-root` or `Local State` marker discovery lost an entry | Wait for the writer to finish, then `mm push`. |
-| Previously published file is still present but over `max_file_size` | Raise `sync.max_file_size` in `config.toml` or add a precise glob to the source's `exclude_patterns`. For a Codex memory file, use `sync.codex_memory_exclude_patterns` instead. Creating a new `[[sync.sources]]` list replaces default auto-detection — keep your other sources. |
-| Default mm-events root, `events/`, or event files are missing | Missing files mean deletion: `mm push --dry-run` previews it and `mm push` publishes it (apart from the new activity row omitted by preview). To keep the previously published files, run `mm pull --from <this Mac's device id> --source mm-events` **before the next push**, then verify the files. Other Macs keep existing copies. |
-| Custom mm-events folder is missing | Push warns, skips mm-events for that push without new tombstones, and publishes the other sources; autopush records a degraded breadcrumb. Plug in the drive, create the folder, or run `mm disable-source mm-events`. The next push includes it again when it returns. |
-| Source folder is missing after it was previously published | Restore the folder, or `mm disable-source <name>` if it should stop syncing. |
-| Push says `N files left out because <folder> is new` (or `missing`, or `cannot be read`) | The scan folder was recreated, restored or cannot be read, so that push records no deletion for the files it cannot see. Run `mm pull` to restore them (restore read access first for `cannot be read`). Nothing was deleted anywhere. |
-| `mm: notice: deletions under <folder> will not propagate` | mm could not write the `.mind-meld-anchor` token there. Restore write access, then `mm push`. |
-| Pull says a file does not match the sending snapshot | Local bytes are kept. Run `mm pull --verbose` for peer/source/path, then `mm log --verb pull --action failed --limit 10`. A metadata-only `touch` or unchanged re-push does not rewrite a blob the diff considers unchanged. |
-
-Do not edit meaningful file contents just to force a new hash. Mixed-version fleets stay compatible, but older writers can still publish inconsistent blobs and older receivers lack this content check.
-
-```bash
-mm status
-mm log --verb pull --action failed --limit 10
-mm pull --verbose
-mm push
-```
-
-### Previews
-
-Previews use your current config without migration prompts, upgrade checks or
-version bookkeeping. They leave shared crypto-init copies and missing
-fingerprints untouched. Pending setup is reported for a following real command.
-The lock allowance includes creating its parent if absent.
-
-| Command | May touch | Not previewed | Exit codes |
-|---|---|---|---|
-| `mm push --dry-run` | Local lock only | Host scanning/warming/capture, activity row, post-push GC, upload re-reads (a scan-time hold is applied and its count shown) | 0 completed, including held files; 1 stopped |
-| `mm pull --dry-run` | Local lock only | Pre-v0.9.2 conflict renames, pull history, project sync logs, manifest conflict-copy cleanup, blob download/decrypt failures, blobs not delivered yet (waiting), writing the pull ledger, creating recovery copies and removing old ones (it lists `delete` and `older` predictions without doing either) | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
-| `mm gc --dry-run` | Local lock only | No cleanup is applied (it lists recovery copies older than 30 days that `mm gc` would remove); conflict deletion requires `--conflicts` | 0 completed; 1 stopped |
-| `mm recapture --dry-run [WINDOW]` | Local lock only | Writing git-snapshot rows and the full push publishing them with other pending changes | 0 completed, including partial scans; 1 stopped or no repositories |
-| `mm migrate-config --dry-run` | Nothing, including no lock | Applying the displayed config changes | 0 completed; 1 config error |
-| `mm diff [--from DEVICE]` | Nothing, including no lock | Snapshot comparison, not a forecast of all incoming peers; use `mm pull --dry-run` for that | 0 completed; 1 stopped |
-
-All commands use exit 2 for invalid usage. Pull and recapture print **Preview
-incomplete:** when a corrupt peer or incomplete repository scan limits their
-preview, while keeping their existing exit codes. Unknown pull sources remain
-warnings. Pull totals count writes (fast-forwards included), merges (an upper bound), conflicts, skips,
-and possible local failures across peers, and name deletions (`N would be deleted`) and peer
-edits held back as `older` only when there are some; conflicts leave canonical bytes alone.
-Files can change between preview and apply.
-
-For a write-free CI gate, run `mm pull --dry-run --conflict-mode fail`: exit 0
-means no conflicts or local failures predicted, 1 means stopped, and 3 means
-conflicts or failures predicted. Without `--dry-run`, fail mode exits 3 before
-applying any file but can still perform setup writes. `--dry-run --conflict-mode
-prompt` only predicts; it never prompts.
-
-Inspection commands leave sync data alone. `status` may seed or recover only
-`~/.config/mind-meld/seen-sources.json`; steady-state reads write nothing.
-Author-filtered `retro-fleet` may write its identity cache on every run,
-including a warm hit; `--no-author-filter` avoids it. Identity discovery's
-`gh`/`git` subprocesses may manage their own host
-state. Status reads only the cached upgrade result, showing its age when stale.
-
-**Upgrading to v0.14.15:** preview exit codes are unchanged. Pull preview's
-“Pull complete.” becomes outcome totals and “Dry run complete. Nothing was
-changed except the local lock file.” Migration preview's “Dry run — no changes
-written.” becomes “Dry run complete. Nothing was changed.” Fail-mode wording
-changes from “(no writes)” to “before applying any file”; add `--dry-run` for
-the write-free CI gate above. Mergeable files changed by two peers no longer
-cause a false fail-mode exit 3.
+If a file changes, vanishes, or grows while `mm push` scans or uploads it, `mm` holds that file (keeping its previously published version) and continues publishing the rest of the snapshot. Unreadable files, missing source roots, or files exceeding `sync.max_file_size` refuse the push so a broken scan never publishes false deletions.
 
 ### Shell completion
 
 ```bash
-mm --install-completion      # writes the completion script and sources it
-mm --show-completion         # prints it instead, if you would rather install it yourself
+mm --install-completion
 ```
-
-`--install-completion` edits your shell's startup file — `~/.zshrc` plus
-`~/.zfunc/_mm` on zsh, `~/.bashrc` on bash — and on zsh it also enables
-`compinit`. Use `--show-completion` if you would rather place the script
-yourself.
 
 ## Uninstalling
 
-Only want `/retro-fleet` gone from one agent, and keeping `mm`? That is not this section — see [Removing a skill link](#removing-a-skill-link). Everything below is for removing `mm` itself.
+Only want `/retro-fleet` removed from one agent? See [Removing a skill link](#removing-a-skill-link).
 
-`pipx uninstall mind-meld` removes the `mm` command and nothing else. Everything below is deliberate — an uninstall should not delete your data or your synced fleet history — but the agent skill links and the skill store are worth knowing about.
-
-If you remove `~/.local/share/mind-meld` while keeping `~/.config/mind-meld` and continue using or reinstall `mm`, the next push publishes the missing default mm-events files as deletions. Status and other inspection commands do not recreate that data. The skill store shares this root; reinstalling skills does not restore event history.
-
-The link loop below is written to survive the state you are actually in: it needs no `mm` on `PATH`, no config, and no valid config, so it works whether you run it before or after `pipx uninstall`.
-
-If an earlier release enabled Cursor usage capture on this machine, delete the `stop` hook entry whose command is `mm capture-cursor-usage` from `~/.cursor/hooks.json`.
+`pipx uninstall mind-meld` removes only the `mm` binary. To remove links, local data, config, and keyring entries as well (your shared Syncthing storage folder is untouched unless you delete it separately):
 
 ```bash
 pipx uninstall mind-meld
 
-# Agent skill links. These survive the uninstall by design (they point at the
-# store below, not at the deleted pipx venv), so each agent keeps offering
-# /retro-fleet even though the `mm` it shells out to is gone. This removes
-# only links that actually point at Mind Meld's store — an entry of your own
-# at that path is left alone. Installation now also requires source consent
-# (or `mm install-skills --agent`); cleanup still matches on readlink.
-# Covers every agent mm has ever created a store-backed skill link for,
-# including Antigravity and the retired OpenCode path. Current mm no longer
-# removes old OpenCode links automatically; this loop handles leftovers too.
-# `mm diag` prints the authoritative live list if you still have `mm`; this
-# loop does not need it.
+# Remove only store-backed Mind Meld skill links (leaves your own files untouched):
 for l in ~/.claude/skills/retro-fleet ~/.codex/skills/retro-fleet ~/.gemini/config/skills/retro-fleet ~/.config/opencode/skills/retro-fleet; do
   [ "$(readlink "$l")" = "$HOME/.local/share/mind-meld/agent-skills/retro-fleet" ] && rm -f "$l"
 done
 
-# Local data: the skill store and the mm-events log.
-# If you ever hand-authored your own skill under agent-skills/retro-fleet/,
-# Mind Meld refused to publish over it — move it out before running this.
+# Local skill store and mm-events log:
 rm -rf ~/.local/share/mind-meld
 
-# Config, device identity, caches, TTL markers, the pull ledger (state.db) and the
-# 30-day recovery copies of files a peer's deletion removed here. Take anything you
-# still want out of ~/.config/mind-meld/deleted/ first. The `.mind-meld-anchor` files
-# mm keeps in each scan folder (for example ~/.claude/projects) stay; they are harmless.
+# Config, device identity, caches, pull ledger (state.db), and 30-day deleted-file copies:
 rm -rf ~/.config/mind-meld
 
-# Keychain entry (macOS; service `mind-meld`, account `passphrase`).
+# Keychain entry (macOS):
 command -v security >/dev/null && security delete-generic-password -s mind-meld -a passphrase
 
-# Secret Service entry (Linux).
+# Secret Service entry (Linux):
 command -v secret-tool >/dev/null && secret-tool clear service mind-meld username passphrase
 ```
 
-Your storage folder is untouched by all of the above. That path is `storage.path` in `~/.config/mind-meld/config.toml` (`~/Sync/mind-meld` on a new install, or an existing folder such as one on iCloud Drive). Delete it only when you are retiring the whole fleet — every other machine pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
-
 ## Development
 
-CI skips all three jobs on draft pull requests. Mark a pull request ready for
-review to start them; later pushes to that ready PR and pushes to `main` also
-run them. A skipped draft check is not validation.
+CI skips draft PRs and runs three jobs on ready PRs and `main`:
+- `ci` (`macos-latest`, Python 3.13): `./bin/check --no-bootstrap`, real Keychain assertion, isolated wheel smoke.
+- `portable-linux` (`ubuntu-latest`, Python 3.14): `./bin/check --no-bootstrap`, wheel smoke.
+- `secret-service-live` (`archlinux:latest`): live `gnome-keyring` test as an unprivileged user.
 
-CI uses three jobs. `ci` runs on `macos-latest` with Python 3.13: the
-portable checks (`./bin/check --no-bootstrap`), a real-Keychain backend
-assertion, and a wheel smoke in a disposable venv. `portable-linux` runs the
-same portable checks plus a wheel smoke on `ubuntu-latest` with Python 3.14,
-so macOS-only code fails before it lands. `secret-service-live` runs the
-opt-in live keyring test against a real gnome-keyring in an Arch container.
-The Pythons differ on purpose: 3.13 is the macOS fleet's interpreter, 3.14 is
-the newest portable target, and `./bin/check` accepts either (it notices when
-you run a third one). The pip cache is keyed on `pyproject.toml`.
+Run portable checks locally from any clone (bootstraps `.venv` if needed, runs `ruff check .`, `ruff format --check .`, and pytest):
 
-The live keyring test also runs locally on a Linux box with `dbus`,
-`gnome-keyring` and `libsecret` installed:
-
-```
-MM_LIVE_SECRET_SERVICE=1 ./bin/check --tests tests/test_secret_service_live.py
-```
-
-Each scenario runs under its own `dbus-run-session` with a throwaway HOME —
-it never touches your desktop keyring — and with the flag set a missing tool
-fails the test rather than skipping it, so the flag fails by design on macOS.
-Without the flag the live scenarios skip and only the portable
-process-teardown tests run. Run it as a non-root user: gnome-keyring-daemon
-aborts as root in a container ("error dropping process capabilities").
-
-From a clone (no environment required):
-
-```
+```bash
 ./bin/check
+./bin/check --affected            # coverage-selected tests for your branch
+./bin/check tests/test_config.py  # scoped pytest (still lints whole repo)
 ```
 
-That command bootstraps `.venv` if needed, then runs `ruff check .`, `ruff format --check .`, and pytest. Cards describe verification *scope*; they do not know where Python lives:
-
-```
-./bin/check tests/test_config.py
-```
-
-A scoped pytest still lints the whole repo (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. Use `--serial` to disable pytest-xdist. `MM_PYTHON` selects the bootstrap interpreter; `MM_VENV` validates and uses an existing environment without mutating it; `VIRTUAL_ENV` and `--no-bootstrap` use the current environment. `MM_PYTEST_WORKERS` sets the xdist worker count. `MM_LIVE_SECRET_SERVICE=1` enables the live keyring test above. See `./bin/check --help`.
-
-Manual fallback (separate lines; quote `'.[dev]'` — macOS zsh globs it):
-
-```
-python3.13 -m venv .venv
-./.venv/bin/python -m pip install -e '.[dev]'
-```
+Flags: `--tests` (skip lint), `--lint` (skip pytest), `--serial` (disable xdist), `MM_PYTEST_WORKERS=N`, `MM_LIVE_SECRET_SERVICE=1 ./bin/check --tests tests/test_secret_service_live.py` (Linux live keyring). See `./bin/check --help`.
 
 ## Architecture
 
-See [SPEC.md](SPEC.md) for full documentation.
+See [SPEC.md](SPEC.md) for the data model and wire architecture, and [docs/SPEC.md](docs/SPEC.md) for product scope and release policy.

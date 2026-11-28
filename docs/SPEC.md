@@ -674,19 +674,19 @@ index. mm never copies a memory into another agent's store. Design:
   - [Invariants](invariants/README.md): module map and mandatory per-topic
     rules. Their "Compatibility (1.x)" section is retired by this spec except
     its storage-format gates.
-  - [Host parity](designs/host-parity.md): usage-family rationale and the
-    Grok Build parity notes of 2026-11-05. This spec's table owns host
-    scope; the design's Cursor material is historical as of 2026-11-07.
-  - [Multi-source sync](designs/sync-gstack-context.md): shipped design still
-    cited by invariants.
   - [Cross-model memory](designs/cross-model-memory.md): O9's design
     (2026-11-21, local qmd index over every provider's memory) and its
     qualification record.
-  - [Memory continuity](designs/memory-continuity.md) and the
-    [Codex memory contract](designs/codex-memory-contract.md): Track 68A
-    evidence. Their cross-agent design is superseded by cross-model memory
-    as of 2026-10-29.
 - Superseded history:
+  - [Host parity](archive/host-parity.md): usage-family rationale and the
+    Grok Build parity notes of 2026-11-05 (historical; this spec's table owns
+    host scope, and the design's Cursor material is historical as of
+    2026-11-07).
+  - [Multi-source sync](archive/sync-gstack-context.md): historical shipped
+    multi-source sync design.
+  - [Memory continuity](archive/memory-continuity.md) and the
+    [Codex memory contract](archive/codex-memory-contract.md): Track 68A
+    evidence; superseded by cross-model memory as of 2026-10-29.
   - [Grok usage reader](archive/grok-build-usage-reader.md): design of the
     Grok Build reader retired on 2026-10-22. The restored reader qualifies
     against the installed Grok Build and records its own contract; consult
