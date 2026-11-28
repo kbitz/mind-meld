@@ -94,25 +94,36 @@ holds. Existing content_files/content_changed evidence and GC semantics stay
 unchanged; invocation-only published_content_files, usage_published,
 catching_up_readers, and metadata/selection/repair facts distinguish accepted
 bytes, usage publication, metadata, selection and repair. Usage publication
-(`PushResult.usage_published`) compares the accepted `mm-events` files after
-upload holds with the prior file list, including recovered sidecar entries.
-An accepted path qualifies if it is new to that list or its hash differs
-from a valid prior SHA-256. The day file written by attended capture counts
-after the existing row-revision check verifies publication.
+(`PushResult.usage_published`, Track 171A) compares newly published own-device
+`mm-events` rows (host usage totals, Claude session totals, Git commits, and
+queued `origin="catchup"` rows) in accepted files after upload holds against
+this machine's last published snapshot from the prior accepted manifest
+(including recovered sidecar entries), via `cli._read_published_usage_baseline`,
+`cli._changed_own_event_files`, and `cli._published_usage_changed`. The day file
+written by attended capture still requires verified publication proof from the
+existing row-revision check before its rows count. Pulled peer event files,
+timestamp-only re-appends, `mm-push`, empty non-catchup `git-snapshot`,
+unchanged `sessions-snapshot` (order-insensitive across project rotation),
+coverage/metadata-only changes, and reader dropouts without increased totals are
+ignored.
 
 Usage publication and deadline-stopped attended host readers
 (`PushResult.catching_up_readers`, in canonical `HOST_USAGE_TOKEN_SOURCES` order)
 render on the lead `Push:`
-outcome line: `; usage published` when usage published (e.g.
+outcome line: `; usage published` only when published usage totals or queued
+catch-up data changed (e.g.
 `Push: 10 content changes published; usage published.`,
 `Push: no content changes; usage published.`), `; no new usage` when the lead
 is `no content changes` or readers are catching up without new usage
-(`Push: no content changes; no new usage.`), and `(<readers> catching up)` in
+(`Push: no content changes; no new usage.`,
+`Push: no content changes; no new usage (Grok catching up).`), and
+`(<readers> catching up)` in
 parentheses when `catching_up_readers` is non-empty (e.g.
 `Push: no content changes; usage published (Grok catching up).`). Non-empty
-leads without usage publication or catching-up readers (e.g. `mm-events`
-disabled) omit the usage clause, and `Push: no enabled sources.` stays
-unchanged. `--verbose` still prints `Host usage published (manifest accepted).`,
+leads without changed usage or catching-up readers (including content, metadata,
+selection, or repair pushes whose usage totals did not change, or when
+`mm-events` is disabled) omit the usage clause, and `Push: no enabled sources.`
+stays unchanged. `--verbose` still prints `Host usage published (manifest accepted).`,
 and `mm status`/`mm diag` still report full publication proof; usage rows are
 never counted as user files. Held counts print on their own outcome line
 (`Push: 1 file held.` / `Push: N files held.`); paths/reasons are verbose. Pull

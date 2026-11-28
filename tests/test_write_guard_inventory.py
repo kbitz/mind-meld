@@ -482,6 +482,12 @@ REVIEWED = {
             "open(path, 'rb')",
         ],
     ),
+    "events.py:read_verified_event_bytes": (
+        *_READ_ONLY,
+        [
+            "open(path, 'rb')",
+        ],
+    ),
     "events.py:recorded_commit_keys": (
         *_READ_ONLY,
         [

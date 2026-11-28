@@ -67,8 +67,14 @@ remain unchanged: a walk error does not introduce a new cursor-HOLD rule.
 
 Capture prerequisites, reader loss, no-row, append failure and unverified
 publication remain in the existing capture receipt/status projection while
-content's exit stays independent. The final `Push:` line can report accepted usage
-and name deadline-stopped host readers. See
+content's exit stays independent. Attended push still refreshes and publishes a
+fresh `host-usage-snapshot` (preserving `as_of`, `host_usage_published`,
+`attemptlog`, `--verbose`, and `mm status`/`mm diag` receipts), while
+`PushResult.usage_published` gates `; usage published` on changed published
+usage totals or queued catch-up data (Track 171A). The final `Push:` line
+reports `; usage published` only when usage changed, `; no new usage` on idle
+pushes or catching-up readers without new usage, and names deadline-stopped host
+readers. See
 [Attended terminal outcome](sync.md#attended-terminal-outcome-track-78a).
 Verbose output shows the optional phase. When a non-verbose attended `mm push` records
 `outcome == "degraded"`, `cli._sync_outcome` inspects `record["degradations"]`
@@ -2166,7 +2172,12 @@ or unexpected capture error is recorded, shown with --verbose and continues cont
 activity tail cannot retry that failed reader. A successful append retains its
 exact day path and row. At `backend.put(manifest_key, ...)`, `PushResult.content_accepted`
 is recorded before any later observation/maintenance. `_report_usage_publication`
-sets `host_usage_published` only if that row belongs to the accepted file revision.
+sets `host_usage_published` only if that row belongs to the accepted file revision,
+preserving `as_of` freshness, `attemptlog`, `--verbose`
+(`Host usage published (manifest accepted).`), and `mm status`/`mm diag`
+receipts even when totals are unchanged; separately, `PushResult.usage_published`
+gates `; usage published` on changed published usage totals or queued catch-up
+data compared against the prior accepted manifest baseline (Track 171A).
 The capture-specific former `on_manifest_accepted` callback is gone; 78A
 uses a facts-only result observer at this boundary.
 

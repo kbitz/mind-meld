@@ -468,16 +468,21 @@ reports the number of ignored files as `ignored storage files`. See
 
 **Host usage snapshot compatibility:** an un-upgraded peer drops incoming `host-usage-snapshot` records carrying `"muse"` or `"agy"` until it updates. Content sync is unaffected; upgrade the peer with `mm update` or `pipx upgrade mind-meld` to include its usage in `retro-fleet`.
 
-**Push and pull output (Tracks 78A / 129B / 167A):** attended `mm push` and `mm pull` end
+**Push and pull output (Tracks 78A / 129B / 167A / 171A):** attended `mm push` and `mm pull` end
 with one `<Verb>: <what happened>.` outcome line per thing that happened, and
 errors print `mm: error: <what broke>` on stderr followed by `Run: <command>` on
 its own last line (including CLI usage errors, which exit 2 with
-`Run: <command path> --help`). Attended `mm push` reports usage publication
-alongside content changes (`Push: 10 content changes published; usage published.`,
-`Push: no content changes; usage published.`, `Push: no content changes; no new usage.`,
-or `Push: no content changes; usage published (Grok catching up).` when a host reader
-hit its deadline). Routine capture, cache, budget, nested-repository, scan, and
-pull `skipped` details live under `--verbose` (and in `mm status` / `mm diag`);
+`Run: <command path> --help`). Attended `mm push` appends `; usage published`
+only when published usage totals or queued catch-up data changed since this
+machine's last published snapshot (`Push: 10 content changes published; usage published.`,
+`Push: no content changes; usage published.`, or
+`Push: no content changes; usage published (Grok catching up).` when a host reader
+hit its deadline). When usage totals did not change, idle pushes print
+`Push: no content changes; no new usage.` (or
+`Push: no content changes; no new usage (Grok catching up).`), and non-empty
+content, metadata, selection, or repair pushes omit the usage clause. Routine
+capture, cache, budget, nested-repository, scan, and pull `skipped` details live
+under `--verbose` (and in `mm status` / `mm diag`);
 a pull that only skips newer local files ends with `Pull: no changes.`. Capture
 failure does not make content sync fail. Actionable and data-at-risk warnings
 still print before the outcome. Successful automatic commands stay silent,
@@ -1250,16 +1255,19 @@ because `~/.claude/projects` cannot be listed says
 A held file keeps its previous
 published version, if any, and adds its own outcome line (`Push: 1 file held.` /
 `Push: N files held.`); its paths/reasons appear with `--verbose`.
-When an attended push publishes new or changed `mm-events` data (host usage,
-session, or commit rows), the lead `Push:` line appends `; usage published`
+When an attended push publishes changed usage totals (host usage, Claude
+session totals, or Git commits) or queued catch-up data compared against this
+machine's last published snapshot, the lead `Push:` line appends `; usage published`
 (for example, `Push: 10 content changes published; usage published.` or
 `Push: no content changes; usage published.`). The receipt uses the accepted
 manifest after file holds and requires publication proof for the captured host
-day file. A `no content changes` lead with no verified new usage prints
-`Push: no content changes; no new usage.`.
+day file. When usage totals did not change, a `no content changes` lead prints
+`Push: no content changes; no new usage.` and non-empty content, metadata,
+selection, or repair leads omit the usage clause.
 If any attended host usage reader stopped at its deadline, the usage clause names
 the readers still catching up in parentheses (for example,
-`Push: no content changes; usage published (Grok catching up).`). `mm push --verbose`
+`Push: no content changes; usage published (Grok catching up).` or
+`Push: no content changes; no new usage (Grok catching up).`). `mm push --verbose`
 keeps `Host usage published (manifest accepted).`, and `mm status` / `mm diag`
 show full publication details. Existing clauses (held files, metadata, source
 selection, manifest repair, failures and `Run:` fix lines) and quiet `mm autopush`
@@ -2496,11 +2504,15 @@ and the push counts it as held (`--verbose` names it as not yet synced;
 [Snapshot failures](#snapshot-failures)). Otherwise it still re-encrypts and
 uploads the growing day file, updates last-seen and rewrites the recovery
 sidecar, so `--verbose` shows an upload even on a converged Mac. The outcome
-line counts no user content change and reports the usage publication:
-`Push: no content changes; usage published.` (or
+line counts no user content change and reports `; usage published` only when
+published usage totals or queued catch-up data changed since this machine's last
+published snapshot (`Push: no content changes; usage published.`, or
 `Push: no content changes; usage published (Grok catching up).` when a host
-reader hit its deadline). Verified publication also appears with `--verbose` as
-`Host usage published (manifest accepted).`, and in `mm status` / `mm diag`.
+reader hit its deadline); when totals are unchanged it prints
+`Push: no content changes; no new usage.` (or omits the usage clause beside
+content, metadata, selection, or repair updates). Verified publication still
+appears with `--verbose` as `Host usage published (manifest accepted).`, and in
+`mm status` / `mm diag`.
 A content-changing push records activity once and runs auto-GC. Usage-only
 publication skips this device's blob GC; obsolete blobs wait for the next
 content-changing push or an explicit `mm gc`.

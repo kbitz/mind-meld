@@ -580,3 +580,63 @@ def test_winner_in_a_failing_file_before_the_margin_is_uncertain(tmp_path, monke
     )
     assert "host-usage-snapshot" in scan.uncertain_types
     assert events.project_host_publication(scan, ["codex"], None, now=NOW)["state"] == "unknown"
+
+
+def test_unchanged_reappended_host_row_still_verifies_publication_171a(tmp_path, monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    from mind_meld import attemptlog
+
+    first_row = {
+        **host_row(),
+        "ts": NOW.isoformat(),
+        "hosts": {
+            "codex": {
+                "2026-09-01": {"input": 100, "cache_create": 0, "cache_read": 0, "output": 50}
+            }
+        },
+        "counter_semantics": events.COUNTER_SEMANTICS_DISJOINT_V1,
+    }
+    second_row = {
+        **first_row,
+        "ts": (NOW + timedelta(minutes=5)).isoformat(),
+    }
+    assert events.host_usage_changed(second_row, first_row) is False
+
+    path = tmp_path / "local-2026-09-01.jsonl"
+    payload = (
+        json.dumps(first_row, sort_keys=True) + "\n" + json.dumps(second_row, sort_keys=True) + "\n"
+    ).encode()
+    path.write_bytes(payload)
+    rel = f"events/{path.name}"
+    manifest = {
+        "sources": {"mm-events": {"files": {rel: {"sha256": hashlib.sha256(payload).hexdigest()}}}}
+    }
+    out = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=out, width=1000, height=40, color_system=None))
+    attempt = attemptlog.Attempt(outcome=attemptlog.CaptureOutcome())
+    published = cli._report_usage_publication(
+        [{"name": "mm-events", "include_dirs": ["events"]}],
+        (path, second_row),
+        manifest,
+        cli.PushResult(),
+        verbose=True,
+        attempt=attempt,
+    )
+    assert published is True
+    assert "Host usage published (manifest accepted)." in out.getvalue()
+    assert (attempt.outcome.kind, attempt.outcome.cause) == ("published", None)
+
+    scan = events.latest_event_rows(
+        tmp_path,
+        "local",
+        {"host-usage-snapshot"},
+        now=NOW + timedelta(minutes=5),
+        selectors={"host-usage-snapshot": lambda item: ((item["ts"],), item)},
+        day_margins={"host-usage-snapshot": timedelta(hours=24)},
+    )
+    pub = events.project_host_publication(scan, ["codex"], manifest, now=NOW + timedelta(minutes=5))
+    assert pub["state"] == "recorded"
+    assert pub["publication"] == "published"

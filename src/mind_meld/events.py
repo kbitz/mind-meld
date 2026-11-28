@@ -47,6 +47,7 @@ import copy
 import functools
 import hashlib
 import inspect
+import io
 import json
 import os
 import re
@@ -63,8 +64,8 @@ from concurrent.futures import (
 )
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Callable, Mapping, Sequence, TypedDict
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Iterator, Mapping, Sequence, TypedDict
 
 from mind_meld import config as mm_config
 from mind_meld import fsutil, gitenv, identity, lockedjson, projectid, rootprobes, token_usage
@@ -4181,6 +4182,249 @@ def _safe_device_filename(device_id: str) -> str:
     user-controlled."""
     out = _DEVICE_FILENAME_SAFE.sub("_", device_id)
     return out or "unknown"
+
+
+def is_device_event_file(rel: str, device_id: str) -> bool:
+    """Return True iff ``rel`` is a daily JSONL file owned by ``device_id``."""
+    if not isinstance(rel, str) or not rel:
+        return False
+    name = PurePosixPath(rel).name
+    prefix = f"{_safe_device_filename(device_id)}-"
+    return name.startswith(prefix) and name.endswith(".jsonl")
+
+
+def _usage_bucket_grew(cur: Mapping[str, Any], prior: Mapping[str, Any]) -> bool:
+    for field_name in token_usage.TOKEN_FIELDS:
+        c_val = cur.get(field_name, 0)
+        p_val = prior.get(field_name, 0)
+        c_int = c_val if isinstance(c_val, int) and not isinstance(c_val, bool) else 0
+        p_int = p_val if isinstance(p_val, int) and not isinstance(p_val, bool) else 0
+        if c_int > p_int:
+            return True
+    return False
+
+
+def _host_usage_grew(
+    cur_hosts: Mapping[str, Any],
+    prior_hosts: Mapping[str, Any],
+    cur_by_day: Mapping[str, Any],
+    prior_by_day: Mapping[str, Any],
+) -> bool:
+    for family, days in cur_hosts.items():
+        if not isinstance(days, Mapping):
+            continue
+        p_days = prior_hosts.get(family)
+        if not isinstance(p_days, Mapping):
+            if days:
+                return True
+            continue
+        for day, bucket in days.items():
+            if day not in p_days:
+                return True
+            p_bucket = p_days.get(day)
+            if isinstance(bucket, Mapping) and isinstance(p_bucket, Mapping):
+                if _usage_bucket_grew(bucket, p_bucket):
+                    return True
+    for day, cur_bucket in cur_by_day.items():
+        if not isinstance(cur_bucket, Mapping):
+            continue
+        prior_bucket = prior_by_day.get(day)
+        if not isinstance(prior_bucket, Mapping):
+            if cur_bucket:
+                return True
+            continue
+        if _usage_bucket_grew(cur_bucket, prior_bucket):
+            return True
+        cur_models = cur_bucket.get("by_model")
+        if isinstance(cur_models, Mapping):
+            prior_models = prior_bucket.get("by_model")
+            prior_models_map = prior_models if isinstance(prior_models, Mapping) else {}
+            for model, m_bucket in cur_models.items():
+                if not isinstance(m_bucket, Mapping):
+                    continue
+                p_model_bucket = prior_models_map.get(model)
+                if not isinstance(p_model_bucket, Mapping):
+                    return True
+                if _usage_bucket_grew(m_bucket, p_model_bucket):
+                    return True
+    return False
+
+
+def host_usage_changed(
+    current: Mapping[str, Any],
+    prior: Mapping[str, Any] | None,
+) -> bool:
+    """Return True iff published host usage totals changed vs ``prior``.
+
+    Ignores timestamp, device_name, and coverage/degradation metadata changes
+    when totals are unchanged. When a previously contributing reader drops out
+    (e.g. hits deadline), requires a strict bucket or counter increase so a
+    reader dropout on an idle machine does not report false usage publication.
+    """
+    cur_hosts = current.get("hosts") if isinstance(current.get("hosts"), Mapping) else {}
+    cur_non_empty = any(isinstance(days, Mapping) and bool(days) for days in cur_hosts.values())
+    if prior is None:
+        return cur_non_empty
+    cur_by_day = (
+        current.get("tokens_by_day") if isinstance(current.get("tokens_by_day"), Mapping) else {}
+    )
+    raw_cur_sources = current.get("token_sources")
+    cur_sources = (
+        {s for s in raw_cur_sources if isinstance(s, str)}
+        if isinstance(raw_cur_sources, (list, tuple, set, frozenset))
+        else set()
+    )
+    cur_sem = (
+        current.get("counter_semantics")
+        if isinstance(current.get("counter_semantics"), str)
+        else None
+    )
+
+    prior_hosts = prior.get("hosts") if isinstance(prior.get("hosts"), Mapping) else {}
+    prior_by_day = (
+        prior.get("tokens_by_day") if isinstance(prior.get("tokens_by_day"), Mapping) else {}
+    )
+    raw_prior_sources = prior.get("token_sources")
+    prior_sources = (
+        {s for s in raw_prior_sources if isinstance(s, str)}
+        if isinstance(raw_prior_sources, (list, tuple, set, frozenset))
+        else set()
+    )
+    prior_sem = (
+        prior.get("counter_semantics") if isinstance(prior.get("counter_semantics"), str) else None
+    )
+
+    lost_reader = bool(prior_sources - cur_sources)
+    if lost_reader:
+        if cur_sem != prior_sem and cur_non_empty:
+            return True
+        return _host_usage_grew(cur_hosts, prior_hosts, cur_by_day, prior_by_day)
+    return (
+        cur_hosts != prior_hosts
+        or cur_by_day != prior_by_day
+        or (cur_sem != prior_sem and cur_non_empty)
+    )
+
+
+def _canonical_sessions_map(
+    row: Mapping[str, Any],
+) -> dict[tuple[str, str], tuple[int, Mapping[str, Any] | None, Mapping[str, Any] | None]]:
+    out: dict[tuple[str, str], tuple[int, Mapping[str, Any] | None, Mapping[str, Any] | None]] = {}
+    projects = row.get("projects")
+    if not isinstance(projects, list):
+        return out
+    for proj in projects:
+        if not isinstance(proj, Mapping):
+            continue
+        proj_id = (str(proj.get("source_root", "")), str(proj.get("claude_dir", "")))
+        raw_sessions = proj.get("sessions", 0)
+        sessions = (
+            raw_sessions
+            if isinstance(raw_sessions, int) and not isinstance(raw_sessions, bool)
+            else 0
+        )
+        raw_by_day = proj.get("tokens_by_day")
+        by_day = raw_by_day if isinstance(raw_by_day, Mapping) else None
+        raw_skills = proj.get("skills_by_day")
+        skills = raw_skills if isinstance(raw_skills, Mapping) else None
+        out[proj_id] = (sessions, by_day, skills)
+    return out
+
+
+def sessions_usage_changed(
+    current: Mapping[str, Any],
+    prior: Mapping[str, Any] | None,
+) -> bool:
+    """Return True iff Claude session usage totals changed vs ``prior``.
+
+    Canonicalizes projects by ``(source_root, claude_dir)`` so list rotation
+    from ``session_resume_after`` never causes false positives, and ignores
+    dropped ``tokens_by_day``/``skills_by_day`` when a walk skipped token
+    aggregation.
+    """
+    cur_map = _canonical_sessions_map(current)
+    if prior is None:
+        return bool(cur_map)
+    prior_map = _canonical_sessions_map(prior)
+    same_projects = set(cur_map) == set(prior_map)
+    for proj_id, (cur_sessions, cur_by_day, cur_skills) in cur_map.items():
+        if proj_id not in prior_map:
+            return True
+        prior_sessions, prior_by_day, prior_skills = prior_map[proj_id]
+        if cur_sessions > prior_sessions or (same_projects and cur_sessions != prior_sessions):
+            return True
+        if cur_by_day is not None:
+            if prior_by_day is None:
+                if cur_by_day:
+                    return True
+            elif cur_by_day != prior_by_day:
+                return True
+        if cur_skills is not None:
+            if prior_skills is None:
+                if cur_skills:
+                    return True
+            elif cur_skills != prior_skills:
+                return True
+    return False
+
+
+def git_snapshot_counts_as_usage(row: Mapping[str, Any]) -> bool:
+    """Return True iff a git-snapshot row carries commits or catch-up origin."""
+    if row.get("type") != "git-snapshot":
+        return False
+    return bool(git_row_commit_records(row)) or row.get("origin") == GIT_SNAPSHOT_ORIGIN_CATCHUP
+
+
+def iter_jsonl_bytes(raw: bytes, row_types: set[str]) -> Iterator[dict]:
+    """Yield parsed JSONL dicts of ``row_types`` from bounded in-memory bytes."""
+    buf = io.BytesIO(raw)
+    for line, _end in token_usage.iter_bounded_lines(
+        buf, "<bytes>", 0, label="events byte reader", yield_final_partial=True
+    ):
+        try:
+            obj = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("type"), str):
+            if obj["type"] in row_types:
+                yield obj
+
+
+def read_verified_event_bytes(
+    path: Path,
+    expected_sha: str,
+    *,
+    max_bytes: int,
+) -> bytes | None:
+    """Read an event day file in one open and verify identity, bounds, and SHA-256."""
+    if max_bytes < 0:
+        return None
+    try:
+        with open(path, "rb") as f:
+            before = os.fstat(f.fileno())
+            if before.st_size > max_bytes:
+                return None
+            digest = hashlib.sha256()
+            buf = bytearray()
+            for raw, _end in token_usage.iter_bounded_lines(
+                f, str(path), 0, label="events verifier", yield_final_partial=True
+            ):
+                if len(buf) + len(raw) > max_bytes:
+                    return None
+                digest.update(raw)
+                buf.extend(raw)
+            after = path.stat()
+            if (
+                _event_file_identity(before) != _event_file_identity(after)
+                or len(buf) != before.st_size
+                or before.st_size != after.st_size
+            ):
+                return None
+            if digest.hexdigest() != expected_sha:
+                return None
+            return bytes(buf)
+    except OSError:
+        return None
 
 
 def make_mm_push_event(
