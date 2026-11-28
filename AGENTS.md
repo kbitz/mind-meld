@@ -45,7 +45,7 @@ Admission gates: [docs/ROADMAP.md](docs/ROADMAP.md); rationale: [constraint hist
 - Investigate unwanted automatic behavior before adding its inverse; removal controls need demonstrated demand.
 - Name a reader for every persisted field or name the delivering Track. Trace normalization, retained cache fields, and migration gates when changing readers.
 - Prove inclusive/disjoint counter semantics before pricing, summing, or trending ([events/retro invariants](docs/invariants/events-retro.md)).
-- Read effective SIZE limits from installed gstack-extend (`bin/config get roadmap_max_files_per_track` / `roadmap_max_session_weight`) on the current machine, including environment overrides.
+- Check this machine's roadmap SIZE limits. Valid `ROADMAP_MAX_FILES_PER_TRACK` and `ROADMAP_MAX_SESSION_WEIGHT` environment values take precedence. For the machine-local settings, use installed gstack-extend's `bin/config get roadmap_max_files_per_track` and `bin/config get roadmap_max_session_weight`.
 
 ## Before editing code
 
