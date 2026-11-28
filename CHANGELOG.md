@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.94] - 2026-11-27
+
+Version 1.12.94 reports `usage published` from an attended `mm push` only when this device publishes changed usage totals or queued catch-up data.
+
+### Changed
+
+- Attended `mm push` reports `usage published` only when this device publishes changed usage totals or queued catch-up data, and the status line shows `; usage published` for that publish and `; no new usage` when there is nothing new to publish.
+
 ## [1.12.93] - 2026-11-27
 
 Version 1.12.93 stops managed Syncthing from marking fleet peers as introducers and clears flags that earlier releases set, so mutual-introducer warnings can stop once every managed machine has upgraded and synced.
